@@ -1,8 +1,10 @@
 //! Typed video-accelerator capability, requirement, and assignment vocabulary.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 /// Per-process deadline for one `VideoToolbox` preflight stage.
 pub const VIDEOTOOLBOX_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -31,6 +33,14 @@ pub const VAAPI_PREFLIGHT_COORDINATION_SECONDS: u64 = 30;
 /// which names the stage that did not prove — could never be observed.
 pub const VAAPI_PREFLIGHT_BUDGET: Duration =
     Duration::from_secs(VAAPI_READINESS_DEADLINE.as_secs() + VAAPI_PREFLIGHT_COORDINATION_SECONDS);
+
+/// Maximum UTF-8 byte length of one public accelerator descriptor string.
+pub const MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES: usize = 256;
+/// Maximum entries in any one accelerator descriptor collection.
+pub const MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS: usize = 64;
+/// Maximum JSON-encoded size of one accelerator descriptor. The 3 KiB cap leaves
+/// headroom for the address and framing inside the supervisor's 4 KiB readiness line.
+pub const MAX_ACCELERATOR_DESCRIPTOR_ENCODED_BYTES: usize = 3 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +143,203 @@ impl VideoAcceleratorDescriptor {
             Self::VideoToolbox(value) => value.max_sessions,
         }
     }
+
+    /// Validate invariants required before a descriptor crosses a worker
+    /// declaration or readiness boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable message when device identity or session capacity
+    /// cannot participate in scheduling.
+    pub fn validate_declaration(&self) -> Result<(), String> {
+        match self {
+            Self::Nvidia(nvidia) => validate_nvidia_descriptor(nvidia)?,
+            Self::Vaapi(vaapi) => validate_vaapi_descriptor(vaapi)?,
+            Self::VideoToolbox(videotoolbox) => {
+                validate_videotoolbox_descriptor(videotoolbox)?;
+            }
+        }
+        let encoded = serde_json::to_vec(self)
+            .map_err(|error| format!("accelerator descriptor encode failed: {error}"))?;
+        if encoded.len() > MAX_ACCELERATOR_DESCRIPTOR_ENCODED_BYTES {
+            return Err(format!(
+                "accelerator descriptor encoded size is {} bytes, above the \
+                 {MAX_ACCELERATOR_DESCRIPTOR_ENCODED_BYTES}-byte bound",
+                encoded.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_nvidia_descriptor(nvidia: &NvidiaVideoAcceleratorDescriptor) -> Result<(), String> {
+    for (field, value) in [
+        ("NVIDIA hardware_token", nvidia.hardware_token.as_str()),
+        ("NVIDIA device_uuid", nvidia.device_uuid.as_str()),
+        ("NVIDIA device_name", nvidia.device_name.as_str()),
+        ("NVIDIA driver_version", nvidia.driver_version.as_str()),
+    ] {
+        validate_descriptor_string(field, value)?;
+    }
+    validate_string_collection("NVIDIA encoders", &nvidia.encoders)?;
+    validate_string_collection("NVIDIA decoders", &nvidia.decoders)?;
+    if !is_full_nvidia_uuid(&nvidia.device_uuid) {
+        return Err("NVIDIA device_uuid must be a full GPU- UUID".to_owned());
+    }
+    if nvidia.hardware_token.strip_prefix("nvidia:") != Some(nvidia.device_uuid.as_str()) {
+        return Err("NVIDIA hardware_token must equal `nvidia:<device_uuid>`".to_owned());
+    }
+    validate_session_capacity("NVIDIA", nvidia.max_sessions)
+}
+
+fn validate_vaapi_descriptor(vaapi: &VaapiVideoAcceleratorDescriptor) -> Result<(), String> {
+    for (field, value) in [
+        ("VAAPI pci_address", vaapi.pci_address.as_str()),
+        ("VAAPI device_name", vaapi.device_name.as_str()),
+        ("VAAPI driver_version", vaapi.driver_version.as_str()),
+    ] {
+        validate_descriptor_string(field, value)?;
+    }
+    validate_string_collection("VAAPI encoders", &vaapi.encoders)?;
+    validate_string_collection("VAAPI decoders", &vaapi.decoders)?;
+    if !is_pci_address(&vaapi.pci_address) {
+        return Err(
+            "VAAPI pci_address must be lowercase `dddd:bb:dd.f`, not a render-node path or ordinal"
+                .to_owned(),
+        );
+    }
+    validate_session_capacity("VAAPI", vaapi.max_sessions)
+}
+
+fn validate_videotoolbox_descriptor(
+    videotoolbox: &VideoToolboxVideoAcceleratorDescriptor,
+) -> Result<(), String> {
+    for (field, value) in [
+        (
+            "VideoToolbox hardware_token",
+            videotoolbox.hardware_token.as_str(),
+        ),
+        (
+            "VideoToolbox resource_id",
+            videotoolbox.resource_id.as_str(),
+        ),
+        (
+            "VideoToolbox model_identifier",
+            videotoolbox.model_identifier.as_str(),
+        ),
+        ("VideoToolbox chip_name", videotoolbox.chip_name.as_str()),
+        (
+            "VideoToolbox macos_version",
+            videotoolbox.macos_version.as_str(),
+        ),
+        (
+            "VideoToolbox macos_build",
+            videotoolbox.macos_build.as_str(),
+        ),
+    ] {
+        validate_descriptor_string(field, value)?;
+    }
+    validate_string_collection("VideoToolbox encoders", &videotoolbox.encoders)?;
+    validate_collection_bound("VideoToolbox decoders", videotoolbox.decoders.len())?;
+    let mut decoder_codecs = HashSet::with_capacity(videotoolbox.decoders.len());
+    for decoder in &videotoolbox.decoders {
+        validate_descriptor_string("VideoToolbox decoder codec", &decoder.codec)?;
+        if !decoder_codecs.insert(decoder.codec.as_str()) {
+            return Err("VideoToolbox decoders contain a duplicate decoder codec".to_owned());
+        }
+        validate_string_collection("VideoToolbox decoder pixel_formats", &decoder.pixel_formats)?;
+    }
+    if videotoolbox.hardware_token.strip_prefix("videotoolbox:")
+        != Some(videotoolbox.resource_id.as_str())
+    {
+        return Err(
+            "VideoToolbox hardware_token must equal `videotoolbox:<resource_id>`".to_owned(),
+        );
+    }
+    validate_session_capacity("VideoToolbox", videotoolbox.max_sessions)
+}
+
+fn validate_descriptor_string(field: &str, value: &str) -> Result<(), String> {
+    if invalid_descriptor_string(value) {
+        return Err(format!(
+            "{field} must be 1..={MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES} non-blank UTF-8 bytes \
+             without control characters; got {} bytes",
+            value.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_string_collection(field: &str, values: &[String]) -> Result<(), String> {
+    validate_collection_bound(field, values.len())?;
+    let mut unique = HashSet::with_capacity(values.len());
+    for value in values {
+        if invalid_descriptor_string(value) {
+            return Err(format!(
+                "{field} entries must each be 1..={MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES} \
+                 non-blank UTF-8 bytes without control characters; got {} bytes",
+                value.len()
+            ));
+        }
+        if !unique.insert(value.as_str()) {
+            return Err(format!("{field} contains a duplicate entry"));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_descriptor_string(value: &str) -> bool {
+    value.trim().is_empty()
+        || value.len() > MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES
+        || value.chars().any(char::is_control)
+}
+
+fn validate_collection_bound(field: &str, length: usize) -> Result<(), String> {
+    if length > MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS {
+        return Err(format!(
+            "{field} contains {length} entries, above the \
+             {MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS}-entry bound"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session_capacity(backend: &str, max_sessions: u32) -> Result<(), String> {
+    if !(1..=16).contains(&max_sessions) {
+        return Err(format!("{backend} max_sessions must be in 1..=16"));
+    }
+    Ok(())
+}
+
+fn is_pci_address(pci_address: &str) -> bool {
+    let Some((domain, rest)) = pci_address.split_once(':') else {
+        return false;
+    };
+    let Some((bus, device_function)) = rest.split_once(':') else {
+        return false;
+    };
+    let Some((device, function)) = device_function.split_once('.') else {
+        return false;
+    };
+    let hex = |text: &str, width: usize| {
+        text.len() == width && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    hex(domain, 4)
+        && hex(bus, 2)
+        && hex(device, 2)
+        && hex(function, 1)
+        && !pci_address.bytes().any(|byte| byte.is_ascii_uppercase())
+}
+
+fn is_full_nvidia_uuid(device_uuid: &str) -> bool {
+    let Some(uuid) = device_uuid.strip_prefix("GPU-") else {
+        return false;
+    };
+    uuid.len() == 36
+        && uuid.char_indices().all(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

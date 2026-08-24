@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason,
     NodeIncarnationId, NodeIncarnationStatus, OperationKind, ScanSessionId, TicketId, VoomError,
-    WorkerId, owner_access_evidence::OwnerAccessEvidence,
+    WorkerId, WorkerReadiness, owner_access_evidence::OwnerAccessEvidence,
 };
 use voom_events::payload::ScanSessionLifecyclePayload;
 use voom_events::{Event, SubjectType};
@@ -15,6 +15,7 @@ use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 use voom_store::repo::scan::sessions::ScanSession;
 
 use crate::ControlPlane;
+use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use super::{append_event, commit_tx};
 
@@ -31,8 +32,7 @@ use acquire::{
 };
 
 pub(super) const ROUTE_ACQUIRE: &str = "POST /v1/execution/lease/acquire";
-
-pub(crate) use recover::validate_remote_node_live;
+pub(crate) use recover::{validate_remote_node_freshness, validate_remote_node_live};
 
 #[derive(Debug, Clone)]
 pub struct RemoteActivateInput {
@@ -50,6 +50,7 @@ pub struct RemoteWorkerDeclaration {
     pub logical_name: String,
     pub operations: Vec<OperationKind>,
     pub artifact_access: Vec<ArtifactAccessMode>,
+    pub accelerator: Option<VideoAcceleratorDescriptor>,
     pub max_parallel: u32,
 }
 
@@ -69,6 +70,24 @@ pub struct RemoteActivateOutcome {
     pub incarnation_id: NodeIncarnationId,
     pub heartbeat_ttl_seconds: u32,
     pub workers: Vec<ActivatedWorker>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteWorkerReadinessInput {
+    pub node_id: NodeId,
+    pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
+    pub worker_id: WorkerId,
+    pub readiness: WorkerReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteWorkerReadinessOutcome {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+    pub worker_id: WorkerId,
+    pub readiness: WorkerReadiness,
 }
 
 #[derive(Debug, Clone)]

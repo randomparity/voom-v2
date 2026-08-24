@@ -239,6 +239,15 @@ impl ControlPlaneApi for UnusedControlPlane {
         never_called!()
     }
 
+    async fn worker_readiness(
+        &self,
+        _: NodeId,
+        _: WorkerId,
+        _: &RetryRequest<crate::client::WorkerReadinessRequest>,
+    ) -> Result<crate::client::WorkerReadinessOutcome, VoomError> {
+        never_called!()
+    }
+
     async fn deactivate(
         &self,
         _: NodeId,
@@ -338,6 +347,8 @@ fn media_worker_config(name: &str, operations: Vec<OperationKind>) -> WorkerConf
         args: Vec::new(),
         operations,
         artifact_access: vec![ArtifactAccessMode::SharedMount],
+        dependencies: crate::config::WorkerDependencyPaths::default(),
+        accelerator: None,
         max_parallel: 2,
     }
 }

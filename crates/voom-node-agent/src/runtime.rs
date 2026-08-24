@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use voom_core::{
     FailureClass, LeaseId, NodeIncarnationEndReason, NodeIncarnationId, OperationKind, VoomError,
-    WorkerId,
+    WorkerId, WorkerReadiness,
 };
 use voom_worker_protocol::{
     ClientHandle, NdjsonOutcome, OperationRequest, ProgressFrame, WorkerCredentials,
@@ -28,7 +28,8 @@ use crate::client::{
     CommitOutcomeRequest, CommitReceiptOutcome, CompleteOutcome, CompleteRequest,
     ControlPlaneClient, DeactivateOutcome, DeactivateRequest, FailOutcome, FailRequest,
     LeaseDispatch, LeaseHeartbeatOutcome, LeaseHeartbeatRequest, NodeHeartbeatOutcome,
-    NodeHeartbeatRequest, RetryRequest, WorkerDeclaration,
+    NodeHeartbeatRequest, RetryRequest, WorkerDeclaration, WorkerReadinessOutcome,
+    WorkerReadinessRequest,
 };
 use crate::commit::{CommitCoordinatorContext, run_commit_coordinator};
 use crate::config::{AgentConfig, LoadedAgentConfig, WorkerConfig};
@@ -238,6 +239,29 @@ impl AgentRuntime {
                 )));
             }
         };
+        if let Err(error) = self
+            .mark_started_children_ready(incarnation_id, &children)
+            .await
+        {
+            node_heartbeat.stop();
+            let shutdown = startup_supervisor.shutdown_all(children).await;
+            let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
+            self.deactivate_or_second_signal(
+                incarnation_id,
+                NodeIncarnationEndReason::ChildStartupFailed,
+                &mut signals,
+                &mut signal_phase,
+            )
+            .await?;
+            if let Err(shutdown_error) = shutdown {
+                return Err(VoomError::ExternalSystemUnavailable(format!(
+                    "mark node-agent children ready: {error}; shut down children: {shutdown_error}"
+                )));
+            }
+            return Err(VoomError::ExternalSystemUnavailable(format!(
+                "mark node-agent children ready: {error}"
+            )));
+        }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
         let mut coordinators = self.spawn_coordinators(
@@ -316,6 +340,7 @@ impl AgentRuntime {
                 logical_name: worker.name.clone(),
                 operations: worker.operations.clone(),
                 artifact_access: worker.artifact_access.clone(),
+                accelerator: worker.accelerator.clone(),
                 max_parallel: worker.max_parallel,
             })
             .collect();
@@ -338,6 +363,24 @@ impl AgentRuntime {
         }
         validate_activated_workers(&self.config.config.workers, &outcome.workers)?;
         Ok(outcome)
+    }
+
+    async fn mark_started_children_ready(
+        &self,
+        incarnation_id: NodeIncarnationId,
+        children: &[RunningChild],
+    ) -> Result<(), VoomError> {
+        for child in children {
+            set_worker_readiness(
+                self.client.as_ref(),
+                self.config.config.node_id,
+                incarnation_id,
+                child.spec().credentials().worker_id,
+                WorkerReadiness::Ready,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn start_node_heartbeat(
@@ -704,28 +747,18 @@ async fn run_coordinator(
                 return CoordinatorExit::Shutdown(settlement);
             }
             CoordinatorEvent::ChildExit(Ok(())) => {
-                context.endpoints.unpublish(&context.worker.name);
-                // Settling here consumes any shutdown notification, so this arm must act on
-                // it. Falling through to a restart would leave the top-of-loop `changed()`
-                // waiting for a value that has already been sent.
-                if let Some(settlement) =
-                    settle_leases_after_child_crash(&cancel_tx, &mut leases, &mut shutdown).await
+                match restart_after_child_exit(
+                    child,
+                    &context,
+                    &cancel_tx,
+                    &mut leases,
+                    &mut shutdown,
+                    &mut crashes,
+                )
+                .await
                 {
-                    let supervisor = ChildSupervisor::new(context.shutdown_grace);
-                    let _ = supervisor.shutdown_all(vec![child]).await;
-                    return CoordinatorExit::Shutdown(settlement);
-                }
-                if crashes.record_and_exhausted() {
-                    return CoordinatorExit::RestartExhausted;
-                }
-                tokio::time::sleep(RESTART_DELAY).await;
-                match restart_child(&context, child.spec().clone()).await {
-                    Ok(restarted) => {
-                        child = restarted;
-                        publish_child_endpoint(&context, &child);
-                        let _ = cancel_tx.send(LeaseCancellation::Running);
-                    }
-                    Err(_) => return CoordinatorExit::RestartExhausted,
+                    Ok(restarted) => child = restarted,
+                    Err(exit) => return exit,
                 }
             }
             CoordinatorEvent::ChildExit(Err(error)) => {
@@ -734,6 +767,55 @@ async fn run_coordinator(
             CoordinatorEvent::PollElapsed => {}
         }
     }
+}
+
+async fn restart_after_child_exit(
+    child: RunningChild,
+    context: &CoordinatorContext,
+    cancel_tx: &watch::Sender<LeaseCancellation>,
+    leases: &mut JoinSet<()>,
+    shutdown: &mut watch::Receiver<ShutdownKind>,
+    crashes: &mut CrashBudget,
+) -> Result<RunningChild, CoordinatorExit> {
+    context.endpoints.unpublish(&context.worker.name);
+    if let Err(error) = set_worker_readiness(
+        context.client.as_ref(),
+        context.node_id,
+        context.incarnation_id,
+        context.worker_id,
+        WorkerReadiness::NotReady,
+    )
+    .await
+    {
+        return Err(CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)));
+    }
+    // Settling consumes any shutdown notification, so it must be returned
+    // instead of falling through to a restart waiting on an observed change.
+    if let Some(settlement) = settle_leases_after_child_crash(cancel_tx, leases, shutdown).await {
+        let supervisor = ChildSupervisor::new(context.shutdown_grace);
+        let _ = supervisor.shutdown_all(vec![child]).await;
+        return Err(CoordinatorExit::Shutdown(settlement));
+    }
+    if crashes.record_and_exhausted() {
+        return Err(CoordinatorExit::RestartExhausted);
+    }
+    tokio::time::sleep(RESTART_DELAY).await;
+    let spec = child.spec().clone();
+    let restarted = restart_child(context, spec)
+        .await
+        .map_err(|_| CoordinatorExit::RestartExhausted)?;
+    set_worker_readiness(
+        context.client.as_ref(),
+        context.node_id,
+        context.incarnation_id,
+        context.worker_id,
+        WorkerReadiness::Ready,
+    )
+    .await
+    .map_err(|error| CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)))?;
+    publish_child_endpoint(context, &restarted);
+    let _ = cancel_tx.send(LeaseCancellation::Running);
+    Ok(restarted)
 }
 
 /// Bounds children that start cleanly and then crash. [`ChildSupervisor`] only counts
@@ -1359,6 +1441,35 @@ async fn send_node_heartbeat(
     Ok(())
 }
 
+async fn set_worker_readiness(
+    client: &dyn ControlPlaneApi,
+    node_id: voom_core::NodeId,
+    incarnation_id: NodeIncarnationId,
+    worker_id: WorkerId,
+    readiness: WorkerReadiness,
+) -> Result<(), VoomError> {
+    let request = RetryRequest::new(
+        new_key("worker-readiness"),
+        &WorkerReadinessRequest {
+            incarnation_id,
+            readiness,
+        },
+    )?;
+    let outcome = client
+        .worker_readiness(node_id, worker_id, &request)
+        .await?;
+    if outcome.node_id != node_id
+        || outcome.incarnation_id != incarnation_id
+        || outcome.worker_id != worker_id
+        || outcome.readiness != readiness
+    {
+        return Err(VoomError::ExternalSystemUnavailable(
+            "worker readiness response identity does not match the request".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub(crate) trait ControlPlaneApi: std::fmt::Debug + Send + Sync {
     async fn activate(
@@ -1366,6 +1477,13 @@ pub(crate) trait ControlPlaneApi: std::fmt::Debug + Send + Sync {
         node_id: voom_core::NodeId,
         request: &RetryRequest<ActivateRequest>,
     ) -> Result<ActivateOutcome, VoomError>;
+
+    async fn worker_readiness(
+        &self,
+        node_id: voom_core::NodeId,
+        worker_id: WorkerId,
+        request: &RetryRequest<WorkerReadinessRequest>,
+    ) -> Result<WorkerReadinessOutcome, VoomError>;
 
     async fn deactivate(
         &self,
@@ -1440,6 +1558,15 @@ impl ControlPlaneApi for ControlPlaneClient {
         request: &RetryRequest<ActivateRequest>,
     ) -> Result<ActivateOutcome, VoomError> {
         Self::activate(self, node_id, request).await
+    }
+
+    async fn worker_readiness(
+        &self,
+        node_id: voom_core::NodeId,
+        worker_id: WorkerId,
+        request: &RetryRequest<WorkerReadinessRequest>,
+    ) -> Result<WorkerReadinessOutcome, VoomError> {
+        Self::worker_readiness(self, node_id, worker_id, request).await
     }
 
     async fn deactivate(

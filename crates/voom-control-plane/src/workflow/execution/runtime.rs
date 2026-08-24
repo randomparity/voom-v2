@@ -61,11 +61,6 @@ impl WorkerRuntimeRegistry {
     }
 
     #[must_use]
-    pub(crate) fn get_optional(&self, worker_id: WorkerId) -> Option<WorkerRuntime> {
-        self.runtimes.get(&worker_id).cloned()
-    }
-
-    #[must_use]
     pub(crate) fn contains(&self, worker_id: WorkerId) -> bool {
         self.runtimes.contains_key(&worker_id)
     }

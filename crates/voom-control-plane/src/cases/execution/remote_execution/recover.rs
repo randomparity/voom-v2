@@ -103,19 +103,36 @@ pub(crate) fn validate_remote_node_live(
     now: time::OffsetDateTime,
     require_fresh_for_acquire: bool,
 ) -> Result<(), VoomError> {
-    if auth.status == NodeStatus::Retired {
+    validate_remote_node_freshness(
+        auth.status,
+        auth.last_seen_at,
+        auth.heartbeat_ttl_seconds,
+        node_id,
+        now,
+        require_fresh_for_acquire,
+    )
+}
+
+pub(crate) fn validate_remote_node_freshness(
+    status: NodeStatus,
+    last_seen_at: time::OffsetDateTime,
+    heartbeat_ttl_seconds: u32,
+    node_id: NodeId,
+    now: time::OffsetDateTime,
+    require_fresh_for_acquire: bool,
+) -> Result<(), VoomError> {
+    if status == NodeStatus::Retired {
         return Err(VoomError::Conflict(format!(
             "remote node {node_id} is retired"
         )));
     }
     if require_fresh_for_acquire {
-        if auth.status == NodeStatus::Stale {
+        if status == NodeStatus::Stale {
             return Err(VoomError::Conflict(format!(
                 "remote node {node_id} is stale"
             )));
         }
-        let expires_at =
-            auth.last_seen_at + Duration::seconds(i64::from(auth.heartbeat_ttl_seconds));
+        let expires_at = last_seen_at + Duration::seconds(i64::from(heartbeat_ttl_seconds));
         if expires_at <= now {
             return Err(VoomError::Conflict(format!(
                 "remote node {node_id} heartbeat expired"

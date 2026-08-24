@@ -152,7 +152,8 @@ pub use storage::{
     ProviderLocator, ProviderRelativeLocator, StorageProviderKind, StorageRootState,
 };
 pub use taxonomy::execution_vocab::{
-    NodeIncarnationEndReason, NodeIncarnationStatus, NodeKind, NodeStatus, WorkerKind, WorkerStatus,
+    NodeIncarnationEndReason, NodeIncarnationStatus, NodeKind, NodeStatus, WorkerKind,
+    WorkerReadiness, WorkerStatus,
 };
 pub use taxonomy::scan::{ScanSessionStatus, ScanTerminalReason};
 pub use taxonomy::scan_evidence::{

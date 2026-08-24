@@ -6,8 +6,8 @@ use serde_json::json;
 use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::{
-    NodeIncarnationEndReason, NodeIncarnationStatus, ScanTerminalReason, TicketOperation,
-    VoomError, WorkerId, WorkerKind,
+    NodeIncarnationEndReason, NodeIncarnationStatus, OperationKind, ScanTerminalReason,
+    TicketOperation, VoomError, WorkerId, WorkerKind,
 };
 use voom_events::payload::{
     NodeIncarnationActivatedPayload, NodeIncarnationEndedPayload, WorkerCapabilityRecordedPayload,
@@ -380,6 +380,24 @@ impl ControlPlane {
         operation: voom_core::OperationKind,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
+        let accelerator = if operation == OperationKind::TranscodeVideo {
+            declaration.accelerator.as_ref()
+        } else {
+            None
+        };
+        let (hardware, extra) = match accelerator {
+            Some(accelerator) => (
+                vec![accelerator.hardware_token()],
+                json!({
+                    "accelerator": serde_json::to_value(accelerator).map_err(|error| {
+                        VoomError::Internal(format!(
+                            "serialize remote accelerator descriptor: {error}"
+                        ))
+                    })?
+                }),
+            ),
+            None => (Vec::new(), json!({})),
+        };
         let capability = self
             .workers
             .record_capability_in_tx(
@@ -388,13 +406,13 @@ impl ControlPlane {
                     worker_id,
                     operation: operation.into(),
                     codecs: Vec::new(),
-                    hardware: Vec::new(),
+                    hardware,
                     artifact_access: declaration
                         .artifact_access
                         .iter()
                         .map(|mode| mode.as_str().to_owned())
                         .collect(),
-                    extra: json!({}),
+                    extra,
                 },
             )
             .await?;
@@ -612,6 +630,20 @@ fn validate_declaration(worker: &RemoteWorkerDeclaration) -> Result<(), VoomErro
             "activation worker {:?} max_parallel must be 1..={MAX_PARALLEL}",
             worker.logical_name
         )));
+    }
+    if worker.accelerator.is_some() && !worker.operations.contains(&OperationKind::TranscodeVideo) {
+        return Err(VoomError::Config(format!(
+            "activation worker {:?} has an accelerator descriptor but does not declare transcode_video",
+            worker.logical_name
+        )));
+    }
+    if let Some(accelerator) = worker.accelerator.as_ref() {
+        accelerator.validate_declaration().map_err(|message| {
+            VoomError::Config(format!(
+                "activation worker {:?} {message}",
+                worker.logical_name
+            ))
+        })?;
     }
     Ok(())
 }

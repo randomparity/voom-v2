@@ -4,7 +4,9 @@
 //! for the storage-owner node to drive it through the authorize / receipt /
 //! complete case functions. These helpers stand in for that node:
 //! [`SimulatedOwnerNode::install`] flips the seeded test root-owner node into
-//! a remote-authenticated principal with an active incarnation, and
+//! a remote-authenticated principal with an active incarnation;
+//! [`SimulatedOwnerNode::install_principal`] installs only its credentials so a
+//! production activation can establish that same incarnation with workers; and
 //! [`SimulatedOwnerNode::drive_pending_commit`] performs exactly what a real
 //! node agent does — authorize, journal, promote the bytes no-replace, report
 //! typed evidence, and complete with the fence.
@@ -63,9 +65,7 @@ impl SimulatedOwnerNode {
         })
     }
 
-    /// Flip the seeded root-owner node into a remote node carrying this
-    /// principal's token hash and point its active-incarnation fence at the
-    /// inserted active incarnation row.
+    /// Install this principal and its active incarnation on the seeded owner.
     ///
     /// # Errors
     ///
@@ -74,18 +74,35 @@ impl SimulatedOwnerNode {
         self.install_for(pool, self.node_id).await
     }
 
+    /// Install this principal's credentials on the seeded owner without
+    /// activating an incarnation.
+    ///
+    /// This supports tests that must activate the principal's own incarnation
+    /// through the production manifest route before using it for authenticated
+    /// agent operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns database errors from the raw fixture writes.
+    pub async fn install_principal(&self, pool: &SqlitePool) -> Result<(), VoomError> {
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| VoomError::database_context("simulated node install begin", error))?;
+        self.install_principal_in_tx(&mut tx, self.node_id).await?;
+        tx.commit()
+            .await
+            .map_err(|error| VoomError::database_context("simulated node install commit", error))
+    }
+
     /// Install this principal on an existing node row (any seeded owner).
     ///
     /// # Errors
     ///
     /// Returns database errors from the raw fixture writes.
     pub async fn install_for(&self, pool: &SqlitePool, node_id: NodeId) -> Result<(), VoomError> {
-        let token_hash = voom_control_plane::workers::hash_node_token(self.token.expose_secret());
-        let hint = format!("sim-{}", self.node_id.0);
-        let node_id_i64 = i64::try_from(node_id.0)
-            .map_err(|error| VoomError::database(format!("node id out of range: {error}")))?;
-        // One BEGIN IMMEDIATE transaction: the three raw fixture writes must
-        // not interleave with concurrent test writers (CLI child processes,
+        // One BEGIN IMMEDIATE transaction: the fixture writes must not
+        // interleave with concurrent test writers (CLI child processes,
         // worker providers, the driver thread). A deferred transaction would
         // upgrade read-to-write and can surface SQLITE_BUSY under contention
         // (the same class fixed on the audio sidecar commit path).
@@ -93,16 +110,7 @@ impl SimulatedOwnerNode {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| VoomError::database_context("simulated node install begin", error))?;
-        sqlx::query(
-            "UPDATE nodes SET kind = 'remote', auth_token_hash = ?, auth_token_hint = ? \
-                     WHERE id = ?",
-        )
-        .bind(&token_hash)
-        .bind(&hint)
-        .bind(node_id_i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| VoomError::database_context("simulated node install", error))?;
+        let node_id_i64 = self.install_principal_in_tx(&mut tx, node_id).await?;
         let incarnation_hex = self.incarnation_id.to_string();
         sqlx::query(
             "INSERT INTO node_incarnations \
@@ -126,6 +134,28 @@ impl SimulatedOwnerNode {
             .await
             .map_err(|error| VoomError::database_context("simulated node install commit", error))?;
         Ok(())
+    }
+
+    async fn install_principal_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        node_id: NodeId,
+    ) -> Result<i64, VoomError> {
+        let token_hash = voom_control_plane::workers::hash_node_token(self.token.expose_secret());
+        let hint = format!("sim-{}", self.node_id.0);
+        let node_id_i64 = i64::try_from(node_id.0)
+            .map_err(|error| VoomError::database(format!("node id out of range: {error}")))?;
+        sqlx::query(
+            "UPDATE nodes SET kind = 'remote', auth_token_hash = ?, auth_token_hint = ? \
+             WHERE id = ?",
+        )
+        .bind(&token_hash)
+        .bind(&hint)
+        .bind(node_id_i64)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("simulated node install", error))?;
+        Ok(node_id_i64)
     }
 
     /// Authorize the pending intent (spec step 2).

@@ -711,6 +711,43 @@ async fn policy_runtime_registry_loads_extract_audio_workers() {
 }
 
 #[tokio::test]
+async fn policy_runtime_registry_skips_agent_supervised_capabilities() {
+    let (cp, _tmp) = cp().await;
+    let worker_id = register_policy_worker_with_extra(
+        &cp,
+        OperationKind::TranscodeVideo,
+        "policy-test-agent-envelope",
+        serde_json::json!({}),
+    )
+    .await;
+
+    let registry = cp.policy_runtime_registry().await.unwrap();
+
+    assert!(registry.get(worker_id).is_err());
+}
+
+#[tokio::test]
+async fn policy_runtime_registry_rejects_partial_direct_endpoint_metadata() {
+    let (cp, _tmp) = cp().await;
+    register_policy_worker_with_extra(
+        &cp,
+        OperationKind::TranscodeVideo,
+        "policy-test-missing-secret",
+        serde_json::json!({"endpoint": "127.0.0.1:9"}),
+    )
+    .await;
+
+    let error = cp.policy_runtime_registry().await.unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("worker runtime secret is missing"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn live_policy_runtime_registry_drops_unreachable_endpoint() {
     let (cp, _tmp) = cp().await;
     // 127.0.0.1:1 is a closed privileged port: a connection is refused fast,

@@ -5,7 +5,7 @@ use sqlx::{QueryBuilder, Row, SqlitePool, error::ErrorKind};
 use time::OffsetDateTime;
 use voom_core::{
     NodeId, NodeIncarnationId, NodeIncarnationStatus, NormalizedTicketOperation, OperationKind,
-    TicketOperation, VoomError, WORKFLOW_OPERATION_NAMESPACE, WorkerId,
+    TicketOperation, VoomError, WORKFLOW_OPERATION_NAMESPACE, WorkerId, WorkerReadiness,
 };
 pub use voom_core::{WorkerKind, WorkerStatus};
 
@@ -37,6 +37,32 @@ pub struct Worker {
     pub epoch: u64,
 }
 
+const fn worker_accepts_new_work(kind: WorkerKind, status: WorkerStatus) -> bool {
+    match (kind, status) {
+        (WorkerKind::Remote, WorkerStatus::Active)
+        | (
+            WorkerKind::Local | WorkerKind::Synthetic,
+            WorkerStatus::Registered | WorkerStatus::Active,
+        ) => true,
+        (
+            WorkerKind::Remote,
+            WorkerStatus::Registered | WorkerStatus::Stale | WorkerStatus::Retired,
+        )
+        | (
+            WorkerKind::Local | WorkerKind::Synthetic,
+            WorkerStatus::Stale | WorkerStatus::Retired,
+        ) => false,
+    }
+}
+
+impl Worker {
+    /// Whether this durable row represents a process that may receive new work.
+    #[must_use]
+    pub const fn accepts_new_work(&self) -> bool {
+        worker_accepts_new_work(self.kind, self.status)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerNodeContext {
     pub id: NodeId,
@@ -55,6 +81,7 @@ pub struct WorkerInspection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerOperationEligibility {
     pub worker_status: Option<WorkerStatus>,
+    pub worker_kind: Option<WorkerKind>,
     pub has_capability: bool,
     pub has_grant: bool,
     pub is_denied: bool,
@@ -65,11 +92,11 @@ impl WorkerOperationEligibility {
     /// Return whether the worker may execute the operation now.
     #[must_use]
     pub const fn is_eligible(&self) -> bool {
-        let is_live = match self.worker_status {
-            Some(WorkerStatus::Registered | WorkerStatus::Active) => true,
-            Some(WorkerStatus::Stale | WorkerStatus::Retired) | None => false,
+        let (Some(kind), Some(status)) = (self.worker_kind, self.worker_status) else {
+            return false;
         };
-        is_live && self.has_capability && self.has_grant && !self.is_denied
+        let is_ready = worker_accepts_new_work(kind, status);
+        is_ready && self.has_capability && self.has_grant && !self.is_denied
     }
 }
 
@@ -155,11 +182,11 @@ impl SqliteWorkerRepo {
         Self { pool }
     }
 
-    /// Return runtime metadata for live workers declaring one of the operations.
+    /// Return runtime metadata for ready workers declaring one of the operations.
     ///
-    /// A worker is live when its durable status is `registered` or `active`.
+    /// Remote workers are ready only in durable `active` status. Local and
+    /// synthetic workers retain their existing `registered` or `active` contract.
     /// Results are ordered by worker id and then capability id.
-    ///
     /// # Errors
     ///
     /// Returns [`VoomError::Database`] if the rows, stored operation, or JSON
@@ -175,11 +202,11 @@ impl SqliteWorkerRepo {
         let mut query = QueryBuilder::new(
             "SELECT w.id AS worker_id, w.epoch AS worker_epoch, w.node_id, \
              w.node_incarnation_id, ni.node_id AS incarnation_node_id, \
-             wc.operation, wc.extra \
+             w.kind AS worker_kind, w.status AS worker_status, wc.operation, wc.extra \
              FROM workers w \
              JOIN worker_capabilities wc ON wc.worker_id = w.id \
              LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
-             WHERE w.status IN ('registered', 'active') AND wc.operation IN (",
+             WHERE wc.operation IN (",
         );
         let mut separated = query.separated(", ");
         for operation in operations {
@@ -215,6 +242,18 @@ impl SqliteWorkerRepo {
                 row.try_get("incarnation_node_id").map_err(|error| {
                     map_row_err("runtime worker capability incarnation owner", error)
                 })?;
+            let worker_kind: String = row
+                .try_get("worker_kind")
+                .map_err(|error| map_row_err("runtime worker capability worker kind", error))?;
+            let worker_status: String = row
+                .try_get("worker_status")
+                .map_err(|error| map_row_err("runtime worker capability worker status", error))?;
+            let worker_kind =
+                WorkerKind::parse_database("runtime worker capability worker kind", &worker_kind)?;
+            let worker_status = WorkerStatus::parse_database(
+                "runtime worker capability worker status",
+                &worker_status,
+            )?;
             worker_incarnation_projection(node_id, incarnation_id, incarnation_node_id)?;
             let worker_id = u64::try_from(worker_id).map_err(|_| {
                 VoomError::database(format!(
@@ -226,16 +265,19 @@ impl SqliteWorkerRepo {
                     "runtime worker capability worker epoch was negative: {worker_epoch}"
                 ))
             })?;
+            let operation =
+                TicketOperation::from_stored(operation, "runtime worker capability operation")?;
+            let extra = serde_json::from_str(&extra).map_err(|error| {
+                VoomError::database_context("parse runtime worker capability extra", error)
+            })?;
+            if !worker_accepts_new_work(worker_kind, worker_status) {
+                continue;
+            }
             capabilities.push(RuntimeWorkerCapability {
                 worker_id: WorkerId(worker_id),
                 worker_epoch,
-                operation: TicketOperation::from_stored(
-                    operation,
-                    "runtime worker capability operation",
-                )?,
-                extra: serde_json::from_str(&extra).map_err(|error| {
-                    VoomError::database_context("parse runtime worker capability extra", error)
-                })?,
+                operation,
+                extra,
             });
         }
         Ok(capabilities)
@@ -418,6 +460,70 @@ impl SqliteWorkerRepo {
         }
         get_in_tx(tx, worker_id).await?.ok_or_else(|| {
             VoomError::Internal(format!("worker {worker_id} missing after incarnation bind"))
+        })
+    }
+
+    /// Persist one authenticated remote worker's child-readiness transition.
+    ///
+    /// The caller owns node-token authentication and opens the write
+    /// transaction before calling this method. This method rechecks the worker's
+    /// node/incarnation fence and remote kind before changing lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] for an ownership, incarnation, kind, or
+    /// terminal-worker mismatch, and [`VoomError::Database`] for persistence or
+    /// stored-data failures.
+    pub async fn set_remote_readiness_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        node_id: NodeId,
+        incarnation_id: NodeIncarnationId,
+        readiness: WorkerReadiness,
+    ) -> Result<Worker, VoomError> {
+        let worker = self
+            .incarnation_owned_worker_in_tx(tx, worker_id, node_id, incarnation_id)
+            .await?;
+        if worker.kind != WorkerKind::Remote {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} is not a remote worker"
+            )));
+        }
+        match worker.status {
+            WorkerStatus::Registered | WorkerStatus::Active => {}
+            WorkerStatus::Stale | WorkerStatus::Retired => {
+                return Err(VoomError::Conflict(format!(
+                    "worker {worker_id} is {:?} and cannot change readiness",
+                    worker.status
+                )));
+            }
+        }
+        let status = match readiness {
+            WorkerReadiness::Ready => WorkerStatus::Active,
+            WorkerReadiness::NotReady => WorkerStatus::Registered,
+        };
+        let result = sqlx::query(
+            "UPDATE workers SET status = ?1 \
+             WHERE id = ?2 AND node_id = ?3 AND node_incarnation_id = ?4 \
+             AND status IN ('registered', 'active')",
+        )
+        .bind(status.as_str())
+        .bind(i64_from_u64(worker_id.0, "workers.id")?)
+        .bind(i64_from_u64(node_id.0, "workers.node_id")?)
+        .bind(incarnation_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("worker readiness transition", error))?;
+        if result.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} changed during readiness transition"
+            )));
+        }
+        get_in_tx(tx, worker_id).await?.ok_or_else(|| {
+            VoomError::Internal(format!(
+                "worker {worker_id} missing after readiness transition"
+            ))
         })
     }
 
@@ -933,6 +1039,35 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
+    /// List every worker owned by one node, in any status.
+    ///
+    /// Owner-scoped tool readiness classifies these rows against the node's
+    /// active incarnation itself, so the query deliberately does not filter by
+    /// status or bound incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
+    pub async fn list_by_node(&self, node_id: NodeId) -> Result<Vec<Worker>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id \
+             FROM workers w \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+             WHERE w.node_id = ? \
+             ORDER BY w.registered_at ASC, w.id ASC",
+        )
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id)),
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("workers list by node", e))?;
+        rows.iter().map(row_to_worker).collect()
+    }
+
     /// List workers and their optional node context.
     ///
     /// # Errors
@@ -978,7 +1113,9 @@ impl SqliteWorkerRepo {
         worker_id: WorkerId,
         operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError> {
-        let worker_status = get_in_tx(tx, worker_id).await?.map(|worker| worker.status);
+        let worker = get_in_tx(tx, worker_id).await?;
+        let worker_status = worker.as_ref().map(|worker| worker.status);
+        let worker_kind = worker.as_ref().map(|worker| worker.kind);
         let capability_rows = sqlx::query(
             "SELECT artifact_access FROM worker_capabilities \
              WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
@@ -1030,6 +1167,7 @@ impl SqliteWorkerRepo {
 
         Ok(WorkerOperationEligibility {
             worker_status,
+            worker_kind,
             has_capability: !capability_rows.is_empty(),
             has_grant,
             is_denied,
@@ -1112,12 +1250,13 @@ impl SqliteWorkerRepo {
         Ok(operations)
     }
 
-    /// Return a worker only if its lifecycle state permits new work.
+    /// Return a worker only if its kind-specific lifecycle state permits new work.
     ///
     /// # Errors
     ///
     /// Returns [`VoomError::NotFound`] for a missing worker, [`VoomError::Conflict`]
-    /// for stale or retired workers, and [`VoomError::Database`] if it cannot be read.
+    /// for a not-ready, stale, or retired worker, and [`VoomError::Database`] if it
+    /// cannot be read.
     pub async fn require_live_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -1126,13 +1265,13 @@ impl SqliteWorkerRepo {
         let worker = get_in_tx(tx, worker_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("worker {worker_id}")))?;
-        match worker.status {
-            WorkerStatus::Registered | WorkerStatus::Active => Ok(worker),
-            WorkerStatus::Stale | WorkerStatus::Retired => Err(VoomError::Conflict(format!(
-                "worker {worker_id} is {:?}, not live",
-                worker.status
-            ))),
+        if worker.accepts_new_work() {
+            return Ok(worker);
         }
+        Err(VoomError::Conflict(format!(
+            "worker {worker_id} is {:?} {:?}, not ready for new work",
+            worker.kind, worker.status
+        )))
     }
 
     /// Read the effective held-lease count and grant limit for one worker

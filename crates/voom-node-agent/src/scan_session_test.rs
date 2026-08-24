@@ -12,11 +12,13 @@ use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
 use tokio::io::AsyncWriteExt;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
+use voom_control_plane::execution::{
+    RemoteActivateInput, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
+};
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationId, NodeKind,
-    OperationKind, WorkerId,
+    OperationKind, WorkerId, WorkerReadiness,
 };
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
@@ -67,35 +69,50 @@ async fn seed_owner_node(cp: &ControlPlane) -> (NodeId, NodeIncarnationId, Secre
         })
         .await
         .unwrap();
-    cp.remote_activate(RemoteActivateInput {
-        node_id: registered.node.id,
-        token: registered.token.clone(),
-        idempotency_key: "activate-pump-owner".to_owned(),
-        request_hash: "activate-pump-owner-body".to_owned(),
-        incarnation_id,
-        workers: vec![
-            RemoteWorkerDeclaration {
-                logical_name: "scan".to_owned(),
-                operations: vec![OperationKind::ScanLibrary],
-                artifact_access: vec![ArtifactAccessMode::SharedMount],
-                max_parallel: 1,
-            },
-            RemoteWorkerDeclaration {
-                logical_name: "hash".to_owned(),
-                operations: vec![OperationKind::HashFile],
-                artifact_access: vec![ArtifactAccessMode::SharedMount],
-                max_parallel: 2,
-            },
-            RemoteWorkerDeclaration {
-                logical_name: "probe".to_owned(),
-                operations: vec![OperationKind::ProbeFile],
-                artifact_access: vec![ArtifactAccessMode::SharedMount],
-                max_parallel: 2,
-            },
-        ],
-    })
-    .await
-    .unwrap();
+    let activation = cp
+        .remote_activate(RemoteActivateInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            idempotency_key: "activate-pump-owner".to_owned(),
+            request_hash: "activate-pump-owner-body".to_owned(),
+            incarnation_id,
+            workers: vec![
+                RemoteWorkerDeclaration {
+                    logical_name: "scan".to_owned(),
+                    operations: vec![OperationKind::ScanLibrary],
+                    artifact_access: vec![ArtifactAccessMode::SharedMount],
+                    accelerator: None,
+                    max_parallel: 1,
+                },
+                RemoteWorkerDeclaration {
+                    logical_name: "hash".to_owned(),
+                    operations: vec![OperationKind::HashFile],
+                    artifact_access: vec![ArtifactAccessMode::SharedMount],
+                    accelerator: None,
+                    max_parallel: 2,
+                },
+                RemoteWorkerDeclaration {
+                    logical_name: "probe".to_owned(),
+                    operations: vec![OperationKind::ProbeFile],
+                    artifact_access: vec![ArtifactAccessMode::SharedMount],
+                    accelerator: None,
+                    max_parallel: 2,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    for worker in activation.workers {
+        cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            incarnation_id,
+            worker_id: worker.worker_id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap();
+    }
     (
         registered.node.id,
         incarnation_id,
@@ -588,6 +605,8 @@ fn registry_with(
         args: Vec::new(),
         operations: vec![operation],
         artifact_access: vec![voom_core::ArtifactAccessMode::SharedMount],
+        dependencies: crate::config::WorkerDependencyPaths::default(),
+        accelerator: None,
         max_parallel: 1,
     };
     let registry = ChildEndpointRegistry::new(&[

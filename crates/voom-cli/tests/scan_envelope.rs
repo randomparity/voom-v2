@@ -103,6 +103,7 @@ async fn scan_wait_reports_terminal_outcome() {
             logical_name: "scan-envelope-driver".to_owned(),
             operations: vec![OperationKind::ScanLibrary],
             artifact_access: vec![ArtifactAccessMode::SharedMount],
+            accelerator: None,
             max_parallel: 1,
         }],
     })

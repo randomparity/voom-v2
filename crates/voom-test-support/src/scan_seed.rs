@@ -11,7 +11,9 @@ use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use voom_control_plane::ControlPlane;
-use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
+use voom_control_plane::execution::{
+    RemoteActivateInput, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
+};
 use voom_control_plane::scan::{
     RemoteScanBatchInput, RemoteScanCompleteInput, RemoteScanStartInput,
 };
@@ -19,6 +21,7 @@ use voom_control_plane::workers::RegisterNodeInput;
 use voom_core::{
     ArtifactAccessMode, FileKeyFacts, MediaSnapshotId, NodeId, NodeIncarnationId, NodeKind,
     OperationKind, ProviderRelativeLocator, ScanObservationEvidence, ScanSessionId, StorageRootId,
+    WorkerReadiness,
 };
 use voom_store::repo::scan::sessions::ScanObservation;
 
@@ -71,18 +74,28 @@ pub async fn seed_scanned_files(
         })
         .await?;
     let node_id = registered.node.id;
-    cp.remote_activate(RemoteActivateInput {
+    let activation = cp
+        .remote_activate(RemoteActivateInput {
+            node_id,
+            token: registered.token.clone(),
+            idempotency_key: format!("activate-flow-seeder-{root}-{call}"),
+            request_hash: request_hash(&format!("activate-flow-seeder-{root}-{call}")),
+            incarnation_id: incarnation,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "flow-seeder".to_owned(),
+                operations: vec![OperationKind::ScanLibrary],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: None,
+                max_parallel: 1,
+            }],
+        })
+        .await?;
+    cp.remote_worker_readiness(RemoteWorkerReadinessInput {
         node_id,
         token: registered.token.clone(),
-        idempotency_key: format!("activate-flow-seeder-{root}-{call}"),
-        request_hash: request_hash(&format!("activate-flow-seeder-{root}-{call}")),
         incarnation_id: incarnation,
-        workers: vec![RemoteWorkerDeclaration {
-            logical_name: "flow-seeder".to_owned(),
-            operations: vec![OperationKind::ScanLibrary],
-            artifact_access: vec![ArtifactAccessMode::SharedMount],
-            max_parallel: 1,
-        }],
+        worker_id: activation.workers[0].worker_id,
+        readiness: WorkerReadiness::Ready,
     })
     .await?;
 

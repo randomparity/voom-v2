@@ -6,9 +6,9 @@
 use std::time::Duration;
 
 use super::{
-    LocalVideoAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig,
+    LocalVideoAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig, READINESS_LIMIT_BYTES,
     ResolvedLocalVideoAcceleratorConfig, VAAPI_STARTUP_TIMEOUT, VIDEOTOOLBOX_STARTUP_TIMEOUT,
-    VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig, is_full_nvidia_uuid,
+    VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig, is_full_nvidia_uuid, parse_bound_line,
     parse_ioreg_platform_uuid, platform_resource_id, validate_bound_accelerator,
     validate_local_worker_config,
 };
@@ -16,7 +16,8 @@ use super::{
 use super::{kill_and_wait, process_group_has_members};
 use voom_core::{OperationKind, TicketOperation};
 use voom_worker_protocol::{
-    NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor, VideoAcceleratorDescriptor,
+    LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor,
+    VideoAcceleratorDescriptor,
 };
 
 #[test]
@@ -272,6 +273,28 @@ fn bound_accelerator_must_match_the_configured_device() {
     assert!(validate_bound_accelerator(Some(&vaapi), Some(&wrong_capacity)).is_err());
 }
 
+#[test]
+fn local_readiness_rejects_oversized_lines_and_invalid_descriptors() {
+    let oversized = vec![b'x'; READINESS_LIMIT_BYTES + 1];
+    let error = parse_bound_line(&oversized).unwrap_err();
+    assert!(error.to_string().contains("exceeds"), "{error}");
+
+    let mut descriptor = nvidia_descriptor();
+    descriptor.device_name = "x".repeat(257);
+    let bound = LocalWorkerBound {
+        addr: "127.0.0.1:9000".parse().unwrap(),
+        accelerator: Some(VideoAcceleratorDescriptor::Nvidia(descriptor)),
+    };
+    let line = format!("BOUND {}", serde_json::to_string(&bound).unwrap());
+    let error = parse_bound_line(line.as_bytes()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid accelerator readiness metadata"),
+        "{error}"
+    );
+}
+
 /// Retyping `LocalWorkerBound.accelerator` must not disturb what the NVIDIA path
 /// writes durably: the capability's `extra.accelerator` stays the NVIDIA descriptor
 /// that `video_hardware::historical_accelerator_descriptor` reads, the
@@ -327,6 +350,19 @@ async fn nvidia_capability_records_the_tagged_descriptor_token_and_capacity() {
         Some(VideoAcceleratorDescriptor::Nvidia(descriptor)),
         "a stored NVIDIA descriptor reads back as the NVIDIA variant"
     );
+    for operation in ["transcode_audio", "extract_audio"] {
+        let capabilities = cp
+            .workers
+            .operation_capability_history(&TicketOperation::new(operation).unwrap())
+            .await
+            .unwrap();
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability.worker_id == worker.id)
+            .unwrap();
+        assert!(capability.hardware.is_empty(), "{operation}");
+        assert!(capability.extra.get("accelerator").is_none(), "{operation}");
+    }
 
     let granted: String =
         sqlx::query_scalar("SELECT max_parallel FROM worker_grants WHERE worker_id = ?")

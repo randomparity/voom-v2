@@ -14,7 +14,7 @@ use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::tickets::SqliteTicketRepo;
-use super::workers::{SqliteWorkerRepo, WorkerOperationEligibility, WorkerStatus};
+use super::workers::{SqliteWorkerRepo, WorkerKind, WorkerOperationEligibility, WorkerStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -156,6 +156,8 @@ impl WorkerCapacitySaturation {
 pub enum LeaseIneligibilityReason {
     /// The worker row does not exist.
     WorkerMissing,
+    /// A remote worker is declared but its supervised child is not ready.
+    WorkerNotReady,
     /// The worker is alive but stale.
     WorkerStale,
     /// The worker has been retired.
@@ -231,6 +233,9 @@ fn ineligibility_error(
         LeaseIneligibilityReason::WorkerMissing => {
             VoomError::NotFound(format!("worker {worker_id}"))
         }
+        LeaseIneligibilityReason::WorkerNotReady => VoomError::Conflict(format!(
+            "acquire rejected: remote worker {worker_id} not ready"
+        )),
         LeaseIneligibilityReason::WorkerStale => {
             VoomError::Conflict(format!("acquire rejected: worker {worker_id} stale"))
         }
@@ -1532,11 +1537,26 @@ fn ineligibility_reason(
     if eligibility.is_eligible() {
         return None;
     }
-    match eligibility.worker_status {
-        None => return Some(LeaseIneligibilityReason::WorkerMissing),
-        Some(WorkerStatus::Stale) => return Some(LeaseIneligibilityReason::WorkerStale),
-        Some(WorkerStatus::Retired) => return Some(LeaseIneligibilityReason::WorkerRetired),
-        Some(WorkerStatus::Registered | WorkerStatus::Active) => {}
+    let (Some(worker_kind), Some(worker_status)) =
+        (eligibility.worker_kind, eligibility.worker_status)
+    else {
+        return Some(LeaseIneligibilityReason::WorkerMissing);
+    };
+    match (worker_kind, worker_status) {
+        (WorkerKind::Remote, WorkerStatus::Registered) => {
+            return Some(LeaseIneligibilityReason::WorkerNotReady);
+        }
+        (WorkerKind::Local | WorkerKind::Remote | WorkerKind::Synthetic, WorkerStatus::Stale) => {
+            return Some(LeaseIneligibilityReason::WorkerStale);
+        }
+        (WorkerKind::Local | WorkerKind::Remote | WorkerKind::Synthetic, WorkerStatus::Retired) => {
+            return Some(LeaseIneligibilityReason::WorkerRetired);
+        }
+        (
+            WorkerKind::Local | WorkerKind::Synthetic,
+            WorkerStatus::Registered | WorkerStatus::Active,
+        )
+        | (WorkerKind::Remote, WorkerStatus::Active) => {}
     }
     if eligibility.is_denied {
         return Some(LeaseIneligibilityReason::OperationDenied);

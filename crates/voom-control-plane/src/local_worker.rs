@@ -15,7 +15,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
 use voom_core::{OperationKind, TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
@@ -32,6 +32,7 @@ use crate::ControlPlane;
 use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_hex_128};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const READINESS_LIMIT_BYTES: usize = 4 * 1024;
 pub(crate) const NVIDIA_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
 /// ADR 0049 §9's readiness bound, plus the allowance that lets the worker's own
 /// stage-naming expiry be reached before this one (ADR 0052 §7).
@@ -563,6 +564,11 @@ impl ControlPlane {
         let mut max_parallel = serde_json::Map::new();
         for op in kind.operations().iter().copied() {
             let operation = TicketOperation::from(op);
+            let accelerator = if op == OperationKind::TranscodeVideo {
+                accelerator
+            } else {
+                None
+            };
             let mut extra = serde_json::json!({
                 "endpoint": endpoint.to_string(),
                 "secret": secret,
@@ -670,17 +676,14 @@ async fn read_bound(child: &mut Child, deadline: Duration) -> Result<LocalWorker
         .stdout
         .take()
         .ok_or_else(|| VoomError::WorkerCrash("local worker missing stdout pipe".to_owned()))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let line = match timeout(deadline, lines.next_line()).await {
-        Ok(Ok(Some(line))) => line,
-        Ok(Ok(None)) => {
-            return Err(VoomError::WorkerCrash(
-                "local worker exited before printing bound address".to_owned(),
-            ));
-        }
-        Ok(Err(err)) => {
+    let limited = stdout.take((READINESS_LIMIT_BYTES + 1) as u64);
+    let mut reader = BufReader::new(limited);
+    let mut bytes = Vec::new();
+    let count = match timeout(deadline, reader.read_until(b'\n', &mut bytes)).await {
+        Ok(Ok(count)) => count,
+        Ok(Err(error)) => {
             return Err(VoomError::WorkerCrash(format!(
-                "reading local worker bound address: {err}"
+                "reading local worker bound address: {error}"
             )));
         }
         Err(_) => {
@@ -689,26 +692,60 @@ async fn read_bound(child: &mut Child, deadline: Duration) -> Result<LocalWorker
             )));
         }
     };
-    let payload = line.strip_prefix("BOUND ").ok_or_else(|| {
-        VoomError::WorkerCrash(format!("unexpected local worker stdout line: {line}"))
-    })?;
-    if let Some(addr) = payload.strip_prefix("addr=") {
-        return addr
-            .trim()
-            .parse::<SocketAddr>()
-            .map(|addr| LocalWorkerBound {
-                addr,
-                accelerator: None,
-            })
-            .map_err(|err| {
-                VoomError::WorkerCrash(format!("local worker printed invalid bound address: {err}"))
-            });
+    if count == 0 {
+        return Err(VoomError::WorkerCrash(
+            "local worker exited before printing bound address".to_owned(),
+        ));
     }
-    serde_json::from_str(payload).map_err(|error| {
-        VoomError::WorkerCrash(format!(
-            "local worker printed invalid bound metadata: {error}"
-        ))
-    })
+    if bytes.len() > READINESS_LIMIT_BYTES {
+        return Err(VoomError::WorkerCrash(format!(
+            "local worker readiness line exceeds {READINESS_LIMIT_BYTES} bytes"
+        )));
+    }
+    if bytes.last() != Some(&b'\n') {
+        return Err(VoomError::WorkerCrash(
+            "local worker readiness output ended without a newline".to_owned(),
+        ));
+    }
+    bytes.pop();
+    parse_bound_line(&bytes)
+}
+
+fn parse_bound_line(bytes: &[u8]) -> Result<LocalWorkerBound, VoomError> {
+    if bytes.len() > READINESS_LIMIT_BYTES {
+        return Err(VoomError::WorkerCrash(format!(
+            "local worker readiness line exceeds {READINESS_LIMIT_BYTES} bytes"
+        )));
+    }
+    let line = std::str::from_utf8(bytes).map_err(|error| {
+        VoomError::WorkerCrash(format!("local worker readiness line is not UTF-8: {error}"))
+    })?;
+    let payload = line.strip_prefix("BOUND ").ok_or_else(|| {
+        VoomError::WorkerCrash("unexpected local worker stdout readiness prefix".to_owned())
+    })?;
+    let bound = if let Some(addr) = payload.strip_prefix("addr=") {
+        let addr = addr.trim().parse::<SocketAddr>().map_err(|error| {
+            VoomError::WorkerCrash(format!(
+                "local worker printed invalid bound address: {error}"
+            ))
+        })?;
+        LocalWorkerBound {
+            addr,
+            accelerator: None,
+        }
+    } else {
+        serde_json::from_str(payload).map_err(|error| {
+            VoomError::WorkerCrash(format!(
+                "local worker printed invalid bound metadata: {error}"
+            ))
+        })?
+    };
+    if let Some(accelerator) = bound.accelerator.as_ref() {
+        accelerator.validate_declaration().map_err(|message| {
+            VoomError::WorkerCrash(format!("invalid accelerator readiness metadata: {message}"))
+        })?;
+    }
+    Ok(bound)
 }
 
 fn validate_local_worker_config(

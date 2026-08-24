@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use voom_core::{
     FailureClass, LeaseId, NodeId, NodeIncarnationId, OperationKind as ControlPlaneOperationKind,
-    WorkerId,
+    WorkerId, WorkerReadiness,
 };
 use voom_fake_support::{dispatch_provider, provider_definition_for_operation};
 use voom_worker_protocol::http::OperationBody;
@@ -93,6 +93,7 @@ impl RemoteSyntheticRunner {
         let incarnation_id = NodeIncarnationId::generate()
             .map_err(|error| RemoteRunnerError::Protocol(error.to_string()))?;
         let active_worker = self.activate(incarnation_id, keys.next()).await?;
+        self.worker_readiness(&active_worker, keys.next()).await?;
         let mut summary = RemoteRunnerSummary::default();
         let started = std::time::Instant::now();
 
@@ -154,6 +155,7 @@ impl RemoteSyntheticRunner {
                         "logical_name": self.config.worker_logical_name,
                         "operations": self.config.operations,
                         "artifact_access": self.config.artifact_access,
+                        "accelerator": null,
                         "max_parallel": self.config.max_parallel,
                     }],
                 }),
@@ -183,6 +185,36 @@ impl RemoteSyntheticRunner {
             worker_id: worker.worker_id,
             _worker_epoch: worker.worker_epoch,
         })
+    }
+
+    async fn worker_readiness(
+        &self,
+        active_worker: &ActiveWorker,
+        idempotency_key: String,
+    ) -> Result<(), RemoteRunnerError> {
+        let outcome: RemoteWorkerReadinessData = self
+            .post(
+                &format!(
+                    "/v1/execution/node/{}/worker/{}/readiness",
+                    self.config.node_id.0, active_worker.worker_id.0
+                ),
+                &idempotency_key,
+                serde_json::json!({
+                    "incarnation_id": active_worker.incarnation_id,
+                    "readiness": WorkerReadiness::Ready,
+                }),
+            )
+            .await?;
+        if outcome.node_id != self.config.node_id
+            || outcome.incarnation_id != active_worker.incarnation_id
+            || outcome.worker_id != active_worker.worker_id
+            || outcome.readiness != WorkerReadiness::Ready
+        {
+            return Err(RemoteRunnerError::MalformedResponse(
+                "worker readiness response identity does not match the request".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn node_heartbeat(
@@ -415,6 +447,13 @@ struct ActivatedWorkerData {
     worker_epoch: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoteWorkerReadinessData {
+    node_id: NodeId,
+    incarnation_id: NodeIncarnationId,
+    worker_id: WorkerId,
+    readiness: WorkerReadiness,
+}
 #[derive(Debug, Deserialize)]
 struct RemoteLeaseHeartbeatData {}
 

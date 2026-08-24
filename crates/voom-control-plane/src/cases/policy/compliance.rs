@@ -1005,7 +1005,7 @@ impl ControlPlane {
         let registered = self.policy_runtime_registry().await.map_err(no_partial)?;
         let live = self.probe_live_runtimes(registered.clone()).await;
         let (initial_plan, prepared) = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &live)
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id)
             .await
             .map_err(no_partial)?;
         let report_data = self
@@ -1049,7 +1049,7 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let (initial_plan, prepared) = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id)
             .await
             .map_err(no_partial)?;
         let report_data = self
@@ -1498,17 +1498,28 @@ fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &
     }
 }
 
+/// Extract the direct-dispatch endpoint a worker's capability metadata
+/// carries. Agent-supervised workers are envelope-dispatched (ADR 0075) and
+/// carry no endpoint: they contribute no runtime and are skipped, not errors.
 fn runtime_metadata(
     extra: &serde_json::Value,
 ) -> Result<Option<(SocketAddr, SecretString)>, VoomError> {
-    let endpoint = extra
-        .get("endpoint")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| VoomError::Config("worker runtime endpoint is missing".to_owned()))?;
-    let secret = extra
-        .get("secret")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| VoomError::Config("worker runtime secret is missing".to_owned()))?;
+    let endpoint = extra.get("endpoint").and_then(serde_json::Value::as_str);
+    let secret = extra.get("secret").and_then(serde_json::Value::as_str);
+    let (endpoint, secret) = match (endpoint, secret) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => {
+            return Err(VoomError::Config(
+                "worker runtime secret is missing".to_owned(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(VoomError::Config(
+                "worker runtime endpoint is missing".to_owned(),
+            ));
+        }
+        (Some(endpoint), Some(secret)) => (endpoint, secret),
+    };
     let endpoint = endpoint
         .parse::<SocketAddr>()
         .map_err(|e| VoomError::Config(format!("worker endpoint {endpoint:?}: {e}")))?;

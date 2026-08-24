@@ -825,9 +825,8 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
         .create_policy_input_set(file_draft("fresh-active", &[selected_snapshot]))
         .await
         .unwrap();
-    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
     let (initial_plan, prepared) = cp
-        .prepare_phase_barrier_run_inputs(created.version.id, input.id, &runtimes)
+        .prepare_phase_barrier_run_inputs(created.version.id, input.id)
         .await
         .unwrap();
     assert_eq!(prepared.files[0].version_id, active);
@@ -842,6 +841,7 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
         id == active
     }));
 
+    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
     let outcome = Box::pin(cp.run_prepared_phase_barrier(
         prepared,
         ComplianceExecutionOptions::default(),
@@ -1851,9 +1851,8 @@ async fn admission_failure_drains_the_already_admitted_pipeline() {
         .create_policy_input_set(file_draft("admission-drain", &snapshots))
         .await
         .unwrap();
-    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
     let (_, prepared) = cp
-        .prepare_phase_barrier_run_inputs(policy.version.id, input.id, &runtimes)
+        .prepare_phase_barrier_run_inputs(policy.version.id, input.id)
         .await
         .unwrap();
     let starts = super::run_starts_for_files(&prepared.files);
@@ -1874,6 +1873,7 @@ async fn admission_failure_drains_the_already_admitted_pipeline() {
     .await
     .unwrap();
 
+    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
     let result = cp
         .run_sliding_file_window(super::PhaseLoopInputs {
             job_id: job.id,
@@ -2176,9 +2176,8 @@ async fn cancelled_sliding_job_admits_no_pending_files() {
         ))
         .await
         .unwrap();
-    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
     let (_, prepared) = cp
-        .prepare_phase_barrier_run_inputs(policy.version.id, input.id, &runtimes)
+        .prepare_phase_barrier_run_inputs(policy.version.id, input.id)
         .await
         .unwrap();
     let starts = super::run_starts_for_files(&prepared.files);
@@ -2191,6 +2190,7 @@ async fn cancelled_sliding_job_admits_no_pending_files() {
         .await
         .unwrap();
 
+    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
     let result = cp
         .run_sliding_file_window(super::PhaseLoopInputs {
             job_id: job.id,

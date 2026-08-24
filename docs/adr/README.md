@@ -79,4 +79,5 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0073](0073-terminal-safe-owner-local-acquisition-replay.md) | Terminal-safe owner-local acquisition replay |
 | [0074](0074-fenced-node-local-commit-intents.md) | Fenced node-local verification and commit intents |
 | [0075](0075-node-local-location-handle-media-dispatch.md) | Node-local location-handle media dispatch |
+| [0076](0076-owner-node-policy-tool-readiness.md) | Owner-node policy tool readiness |
 | [0077](0077-owner-node-scan-execution.md) | Owner-node scan execution |

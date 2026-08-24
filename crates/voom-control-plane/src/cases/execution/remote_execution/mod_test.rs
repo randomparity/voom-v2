@@ -5,7 +5,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{
     ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, LibraryId, NodeId, OperationKind,
     ProviderLocator, ProviderRelativeLocator, ScanSessionStatus, StorageProviderKind,
-    StorageRootId, TicketId, TicketOperation, clock_test_support::FrozenClock,
+    StorageRootId, TicketId, TicketOperation, WorkerReadiness, clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
 use voom_scheduler::{
@@ -404,6 +404,7 @@ async fn node_incarnations_may_reuse_external_idempotency_keys() {
                 logical_name: "replacement-worker".to_owned(),
                 operations: vec![voom_core::OperationKind::TranscodeVideo],
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: None,
                 max_parallel: 1,
             }],
         })
@@ -2161,6 +2162,17 @@ async fn fixture_with_options(
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    if node_kind == NodeKind::Remote && worker_kind == WorkerKind::Remote {
+        cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            incarnation_id,
+            worker_id: worker.id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap();
+    }
 
     RemoteFixture {
         cp,

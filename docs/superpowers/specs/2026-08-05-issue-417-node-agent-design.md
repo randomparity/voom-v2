@@ -252,14 +252,20 @@ args = []
 operations = ["probe_file"]
 artifact_access = ["control_plane_placeholder"]
 max_parallel = 1
+
+[workers.dependencies]
+ffprobe_bin = "/usr/bin/ffprobe"
 ```
 
 The URL must contain only scheme/authority with no credentials, query, or fragment. HTTPS
 is required unless the URL host is loopback and the operator explicitly uses `http`.
-Worker programs must be absolute paths. Polling is 50 milliseconds through 60 seconds,
-lease TTL and progress-idle timeout are each 5 through 3600 seconds, shutdown grace is 1
-through 60 seconds, worker count is 1 through 64, and worker declaration constraints match
-activation.
+Worker programs and media dependency binaries must be absolute paths. Dependency binaries
+must exist as regular executable files. `ffprobe_bin` is required for `probe_file` and
+every FFmpeg operation; `ffmpeg_bin` is required for `transcode_video`, `transcode_audio`,
+and `extract_audio`; and `nvidia_smi_bin` is valid only for an NVIDIA accelerator worker.
+Polling is 50 milliseconds through 5 seconds, lease TTL and progress-idle timeout are each
+5 through 3600 seconds, shutdown grace is 1 through 60 seconds, worker count is 1 through
+64, and worker declaration constraints match activation.
 
 The token source is exactly one environment-variable name or file path. Empty tokens and
 tokens containing line breaks after one trailing newline is removed are rejected. Secret

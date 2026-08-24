@@ -19,8 +19,8 @@ use voom_core::{
 };
 use voom_worker_protocol::{
     DispatchStream, HandshakeResponse, HttpServer, NdjsonReader, OperationFuture, OperationHandler,
-    OperationResponse, ProtocolError, ServerHandle, ServerRunning, WorkerCredentials,
-    WorkerIdentityResponse,
+    OperationResponse, ProtocolError, ServerHandle, ServerRunning, VaapiVideoAcceleratorDescriptor,
+    VideoAcceleratorDescriptor, WorkerCredentials, WorkerIdentityResponse,
 };
 
 use super::*;
@@ -202,6 +202,35 @@ async fn acquisition_poll_entropy_failure_precedes_activation() {
 
     assert!(error.to_string().contains("seed node-agent schedule RNG"));
     assert_eq!(control.activate_started_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn activation_forwards_the_configured_accelerator_descriptor() {
+    let control = Arc::new(FakeControlPlane::default());
+    let mut configured_worker = worker();
+    configured_worker.accelerator = Some(VideoAcceleratorDescriptor::Vaapi(
+        VaapiVideoAcceleratorDescriptor {
+            pci_address: "0000:f4:00.0".to_owned(),
+            device_name: "Radeon Pro".to_owned(),
+            driver_version: "Mesa 26.1".to_owned(),
+            encoders: vec!["hevc_vaapi".to_owned()],
+            decoders: vec!["hevc".to_owned()],
+            max_sessions: 2,
+        },
+    ));
+    let runtime = AgentRuntime::with_client(
+        loaded_config_with_worker(configured_worker),
+        control.clone(),
+    );
+
+    runtime.activate(incarnation()).await.unwrap();
+
+    let bodies = control.activation_bodies.lock().await;
+    assert_eq!(bodies[0]["workers"][0]["accelerator"]["backend"], "vaapi");
+    assert_eq!(
+        bodies[0]["workers"][0]["accelerator"]["pci_address"],
+        "0000:f4:00.0"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -591,7 +620,6 @@ async fn max_parallel_reserves_before_acquire_and_never_over_acquires() {
         let permits = Arc::clone(&permits);
         acquisitions.spawn(async move { acquire_one(&context, permits).await });
     }
-
     wait_for_count(&control.acquire_notify, &control.acquire_started, 2).await;
     tokio::task::yield_now().await;
     assert_eq!(control.acquire_started.load(Ordering::SeqCst), 2);
@@ -621,8 +649,24 @@ async fn child_crash_restarts_only_after_every_held_lease_settles() {
 
     let server = fixture.start_pending_server().await;
     wait_for_count_bounded(&server.dispatched, &server.dispatches, 2).await;
+    assert_eq!(
+        control.events.lock().await.first().map(String::as_str),
+        Some("readiness:ready"),
+        "the child accepted work before durable readiness"
+    );
     fixture.crash();
     wait_for_count_bounded(&control.fail_started, &control.fail_started_count, 2).await;
+    assert_eq!(
+        control
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|event| event.as_str() == "readiness:not_ready")
+            .count(),
+        1,
+        "the crashed child remained durably ready"
+    );
     assert_eq!(fixture.start_count(), 1);
     assert!(
         tokio::time::timeout(RESTART_DELAY + Duration::from_millis(100), async {
@@ -640,6 +684,18 @@ async fn child_crash_restarts_only_after_every_held_lease_settles() {
     assert_eq!(fixture.start_count(), 1);
     fail_gate.notify_one();
     wait_for_process_starts(&fixture, 2).await;
+    wait_for_event_count(control.as_ref(), "readiness:ready", 2).await;
+    assert_eq!(
+        control.events.lock().await.as_slice(),
+        [
+            "readiness:ready",
+            "readiness:not_ready",
+            "fail-ack",
+            "fail-ack",
+            "readiness:ready",
+        ],
+        "restart lifecycle must bracket lease settlement and child startup with durable readiness"
+    );
 
     assert_eq!(
         control.failures.lock().await.as_slice(),
@@ -1415,6 +1471,7 @@ struct FakeControlPlane {
     activate_gate: Mutex<Option<Arc<Notify>>>,
     activate_started: Notify,
     activate_started_count: AtomicUsize,
+    activation_bodies: Mutex<Vec<JsonValue>>,
     deactivate_gate: Mutex<Option<Arc<Notify>>>,
     deactivate_started: Notify,
     deactivate_started_count: AtomicUsize,
@@ -1445,6 +1502,7 @@ impl Default for FakeControlPlane {
             activate_gate: Mutex::new(None),
             activate_started: Notify::new(),
             activate_started_count: AtomicUsize::new(0),
+            activation_bodies: Mutex::new(Vec::new()),
             deactivate_gate: Mutex::new(None),
             deactivate_started: Notify::new(),
             deactivate_started_count: AtomicUsize::new(0),
@@ -1469,6 +1527,7 @@ impl ControlPlaneApi for FakeControlPlane {
         }
         let body: JsonValue = serde_json::from_slice(request.body()).unwrap();
         let incarnation_id = body["incarnation_id"].as_str().unwrap().parse().unwrap();
+        self.activation_bodies.lock().await.push(body.clone());
         Ok(ActivateOutcome {
             node_id,
             node_epoch: 1,
@@ -1479,6 +1538,30 @@ impl ControlPlaneApi for FakeControlPlane {
                 worker_id: WorkerId(14),
                 worker_epoch: 1,
             }],
+        })
+    }
+
+    async fn worker_readiness(
+        &self,
+        node_id: NodeId,
+        worker_id: WorkerId,
+        request: &RetryRequest<WorkerReadinessRequest>,
+    ) -> Result<WorkerReadinessOutcome, VoomError> {
+        let body: JsonValue = serde_json::from_slice(request.body()).unwrap();
+        let incarnation_id = body["incarnation_id"].as_str().unwrap().parse().unwrap();
+        let readiness: WorkerReadiness = serde_json::from_value(body["readiness"].clone()).unwrap();
+        self.events.lock().await.push(format!(
+            "readiness:{}",
+            match readiness {
+                WorkerReadiness::Ready => "ready",
+                WorkerReadiness::NotReady => "not_ready",
+            }
+        ));
+        Ok(WorkerReadinessOutcome {
+            node_id,
+            incarnation_id,
+            worker_id,
+            readiness,
         })
     }
 
@@ -1810,6 +1893,8 @@ printf 'exited\n' > "$4"
             ],
             operations: vec![OperationKind::ProbeFile],
             artifact_access: vec![ArtifactAccessMode::SharedMount],
+            dependencies: crate::config::WorkerDependencyPaths::default(),
+            accelerator: None,
             max_parallel,
         }
     }
@@ -2025,6 +2110,8 @@ fn worker() -> WorkerConfig {
         args: Vec::new(),
         operations: vec![OperationKind::ProbeFile],
         artifact_access: vec![ArtifactAccessMode::SharedMount],
+        dependencies: crate::config::WorkerDependencyPaths::default(),
+        accelerator: None,
         max_parallel: 2,
     }
 }

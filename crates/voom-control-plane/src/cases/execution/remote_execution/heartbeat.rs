@@ -8,7 +8,8 @@ use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, Remote
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::{
     RemoteLeaseHeartbeatInput, RemoteLeaseHeartbeatOutcome, RemoteNodeHeartbeatInput,
-    RemoteNodeHeartbeatOutcome, ReplayRoute, decode_replay, is_remote_replayable_error,
+    RemoteNodeHeartbeatOutcome, RemoteWorkerReadinessInput, RemoteWorkerReadinessOutcome,
+    ReplayRoute, decode_replay, is_remote_replayable_error,
 };
 use crate::cases::{begin_immediate_tx, commit_tx};
 
@@ -95,6 +96,53 @@ impl ControlPlane {
             &outcome,
         )
         .await?;
+        commit_tx(tx).await?;
+        Ok(outcome)
+    }
+
+    /// Persist one remote worker's supervised-child readiness.
+    ///
+    /// Authentication and the node/worker incarnation fences are checked
+    /// before lifecycle mutation. Repeating the same state is naturally
+    /// idempotent and creates no replay row whose worker foreign key would
+    /// retain terminal incarnation history.
+    ///
+    /// # Errors
+    ///
+    /// Returns authentication, incarnation, worker-ownership, or persistence
+    /// errors.
+    pub async fn remote_worker_readiness(
+        &self,
+        input: RemoteWorkerReadinessInput,
+    ) -> Result<RemoteWorkerReadinessOutcome, VoomError> {
+        let now = self.clock().now();
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let auth = self
+            .require_remote_incarnation_fence_in_tx(
+                &mut tx,
+                input.node_id,
+                &input.token,
+                input.incarnation_id,
+                Some(input.worker_id),
+            )
+            .await?;
+        super::recover::validate_remote_node_live(&auth, input.node_id, now, true)?;
+        let worker = self
+            .workers
+            .set_remote_readiness_in_tx(
+                &mut tx,
+                input.worker_id,
+                input.node_id,
+                input.incarnation_id,
+                input.readiness,
+            )
+            .await?;
+        let outcome = RemoteWorkerReadinessOutcome {
+            node_id: input.node_id,
+            incarnation_id: input.incarnation_id,
+            worker_id: worker.id,
+            readiness: input.readiness,
+        };
         commit_tx(tx).await?;
         Ok(outcome)
     }

@@ -65,9 +65,12 @@ are owned by #479 and excluded.
 `Acquired`, `CapacityFull`, plus new `TicketNotReady { ticket_id }` (the
 conditional readiness `UPDATE` matched zero rows) and `WorkerIneligible {
 worker_id, operation, reason: LeaseIneligibilityReason }` with the closed set
-`WorkerMissing | WorkerStale | WorkerRetired | OperationDenied |
-MissingCapability | MissingGrant`. Every non-acquired outcome rolls back the
-acquire savepoint, so a changed gate mutates nothing. An unknown-namespaced
+`WorkerMissing | WorkerNotReady | WorkerStale | WorkerRetired |
+OperationDenied | MissingCapability | MissingGrant`. `WorkerNotReady` is the
+remote-only `registered` state: activation declared the worker, but its node
+agent has not yet persisted post-handshake child readiness.
+Every non-acquired outcome rolls back the acquire savepoint, so a changed gate mutates
+nothing. An unknown-namespaced
 ticket kind stays a database error — corruption is never an eligibility
 result (ADR 0069). `into_lease_result` preserves today's exact errors for the
 standalone and local callers, whose observable behavior is unchanged.

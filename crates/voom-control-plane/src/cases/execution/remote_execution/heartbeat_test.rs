@@ -121,6 +121,7 @@ async fn activate(
             logical_name: "probe".to_owned(),
             operations: vec![OperationKind::ProbeFile],
             artifact_access: vec![ArtifactAccessMode::SharedMount],
+            accelerator: None,
             max_parallel: 1,
         }],
     })

@@ -280,6 +280,7 @@ async fn valid_bearer_commits_heartbeat_through_real_tls() -> TestResult {
                 logical_name: "tls-worker".to_owned(),
                 operations: vec![OperationKind::ProbeFile],
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: None,
                 max_parallel: 1,
             }],
         })

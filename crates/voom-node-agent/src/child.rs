@@ -11,12 +11,16 @@ use secrecy::ExposeSecret;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::task::JoinSet;
-use voom_worker_protocol::{ClientHandle, HttpClient, WorkerCredentials};
+use voom_worker_protocol::{
+    ClientHandle, HttpClient, LocalWorkerBound, VAAPI_PREFLIGHT_BUDGET,
+    VIDEOTOOLBOX_PREFLIGHT_BUDGET, VideoAcceleratorDescriptor, WorkerCredentials,
+};
 
-use crate::config::WorkerConfig;
+use crate::config::{WorkerConfig, WorkerDependencyPaths};
 
 const READINESS_LIMIT_BYTES: usize = 4 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const NVIDIA_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
 const RESTART_LIMIT: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +87,8 @@ pub struct ChildSpec {
     program: PathBuf,
     args: Vec<OsString>,
     credentials: WorkerCredentials,
+    dependencies: WorkerDependencyPaths,
+    accelerator: Option<VideoAcceleratorDescriptor>,
 }
 
 impl std::fmt::Debug for ChildSpec {
@@ -93,7 +99,8 @@ impl std::fmt::Debug for ChildSpec {
             .field("program", &self.program)
             .field("args", &self.args)
             .field("credentials", &self.credentials)
-            .finish()
+            .field("accelerator", &self.accelerator)
+            .finish_non_exhaustive()
     }
 }
 
@@ -104,6 +111,8 @@ impl ChildSpec {
             logical_name: config.name.clone(),
             program: config.program.clone(),
             args: config.args.iter().map(OsString::from).collect(),
+            dependencies: config.dependencies.clone(),
+            accelerator: config.accelerator.clone(),
             credentials,
         }
     }
@@ -222,9 +231,31 @@ impl Drop for RunningChild {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum StartupDeadline {
+    BackendSpecific,
+    #[cfg(all(test, target_os = "linux"))]
+    Fixed(Duration),
+}
+
+impl StartupDeadline {
+    fn timeout(self, accelerator: Option<&VideoAcceleratorDescriptor>) -> Duration {
+        match self {
+            #[cfg(all(test, target_os = "linux"))]
+            Self::Fixed(timeout) => timeout,
+            Self::BackendSpecific => match accelerator {
+                Some(VideoAcceleratorDescriptor::Nvidia(_)) => NVIDIA_STARTUP_TIMEOUT,
+                Some(VideoAcceleratorDescriptor::Vaapi(_)) => VAAPI_PREFLIGHT_BUDGET,
+                Some(VideoAcceleratorDescriptor::VideoToolbox(_)) => VIDEOTOOLBOX_PREFLIGHT_BUDGET,
+                None => STARTUP_TIMEOUT,
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ChildSupervisor {
-    startup_timeout: Duration,
+    startup_deadline: StartupDeadline,
     shutdown_grace: Duration,
     restart_failures: HashMap<String, u8>,
 }
@@ -233,7 +264,7 @@ impl ChildSupervisor {
     #[must_use]
     pub fn new(shutdown_grace: Duration) -> Self {
         Self {
-            startup_timeout: STARTUP_TIMEOUT,
+            startup_deadline: StartupDeadline::BackendSpecific,
             shutdown_grace,
             restart_failures: HashMap::new(),
         }
@@ -244,7 +275,7 @@ impl ChildSupervisor {
     #[cfg(all(test, target_os = "linux"))]
     fn with_timeouts(startup_timeout: Duration, shutdown_grace: Duration) -> Self {
         Self {
-            startup_timeout,
+            startup_deadline: StartupDeadline::Fixed(startup_timeout),
             shutdown_grace,
             restart_failures: HashMap::new(),
         }
@@ -259,7 +290,7 @@ impl ChildSupervisor {
         let child_count = specs.len();
         let mut launches = JoinSet::new();
         for (index, spec) in specs.into_iter().enumerate() {
-            let timeout = self.startup_timeout;
+            let timeout = self.startup_deadline.timeout(spec.accelerator.as_ref());
             launches.spawn(async move { (index, launch(spec, timeout).await) });
         }
 
@@ -293,7 +324,8 @@ impl ChildSupervisor {
     ///
     /// Returns [`ChildErrorKind::RestartExhausted`] on the third consecutive failed startup.
     pub async fn restart(&mut self, spec: &ChildSpec) -> Result<RunningChild, ChildError> {
-        match launch(spec.clone(), self.startup_timeout).await {
+        let startup_timeout = self.startup_deadline.timeout(spec.accelerator.as_ref());
+        match launch(spec.clone(), startup_timeout).await {
             Ok(child) => {
                 self.restart_failures.insert(spec.logical_name.clone(), 0);
                 Ok(child)
@@ -370,6 +402,8 @@ async fn launch(spec: ChildSpec, startup_timeout: Duration) -> Result<RunningChi
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
+    apply_dependency_environment(&mut command, &spec.dependencies);
+    apply_accelerator_environment(&mut command, spec.accelerator.as_ref());
     let mut child = command.spawn().map_err(|error| {
         ChildError::startup(
             &spec.logical_name,
@@ -390,13 +424,7 @@ async fn launch(spec: ChildSpec, startup_timeout: Duration) -> Result<RunningChi
             "spawned child has no stdout readiness pipe",
         ));
     };
-    let endpoint = match read_bound_address(stdout, startup_timeout).await {
-        Ok(endpoint) => endpoint,
-        Err(message) => {
-            kill_and_wait(&mut child).await;
-            return Err(ChildError::startup(&spec.logical_name, message));
-        }
-    };
+    let endpoint = read_verified_endpoint(&mut child, stdout, startup_timeout, &spec).await?;
     let client = Arc::new(HttpClient::new(SocketAddr::V4(endpoint)));
     if let Err(error) = client.handshake(voom_core::PROTOCOL_VERSION).await {
         kill_and_wait(&mut child).await;
@@ -438,10 +466,81 @@ async fn launch(spec: ChildSpec, startup_timeout: Duration) -> Result<RunningChi
     })
 }
 
-async fn read_bound_address(
+async fn read_verified_endpoint(
+    child: &mut Child,
     stdout: ChildStdout,
     startup_timeout: Duration,
-) -> Result<SocketAddrV4, String> {
+    spec: &ChildSpec,
+) -> Result<SocketAddrV4, ChildError> {
+    let readiness = match read_bound(stdout, startup_timeout).await {
+        Ok(readiness) => readiness,
+        Err(message) => {
+            kill_and_wait(child).await;
+            return Err(ChildError::startup(&spec.logical_name, message));
+        }
+    };
+    if let Err(message) =
+        validate_bound_accelerator(readiness.accelerator.as_ref(), spec.accelerator.as_ref())
+    {
+        kill_and_wait(child).await;
+        return Err(ChildError::startup(&spec.logical_name, message));
+    }
+    let SocketAddr::V4(endpoint) = readiness.addr else {
+        kill_and_wait(child).await;
+        return Err(ChildError::startup(
+            &spec.logical_name,
+            "readiness address must be IPv4 loopback",
+        ));
+    };
+    Ok(endpoint)
+}
+
+fn apply_dependency_environment(command: &mut Command, dependencies: &WorkerDependencyPaths) {
+    for (name, path) in [
+        ("VOOM_FFMPEG_BIN", dependencies.ffmpeg_bin.as_ref()),
+        ("VOOM_FFPROBE_BIN", dependencies.ffprobe_bin.as_ref()),
+        ("VOOM_NVIDIA_SMI_BIN", dependencies.nvidia_smi_bin.as_ref()),
+    ] {
+        if let Some(path) = path {
+            command.env(name, path.as_os_str());
+        }
+    }
+}
+
+fn apply_accelerator_environment(
+    command: &mut Command,
+    accelerator: Option<&VideoAcceleratorDescriptor>,
+) {
+    let Some(accelerator) = accelerator else {
+        return;
+    };
+    match accelerator {
+        VideoAcceleratorDescriptor::Nvidia(nvidia) => {
+            command
+                .env("VOOM_NVIDIA_DEVICE", &nvidia.device_uuid)
+                .env("VOOM_NVIDIA_MAX_SESSIONS", nvidia.max_sessions.to_string())
+                .env("CUDA_VISIBLE_DEVICES", &nvidia.device_uuid);
+        }
+        VideoAcceleratorDescriptor::Vaapi(vaapi) => {
+            command
+                .env("VOOM_VAAPI_DEVICE", &vaapi.pci_address)
+                .env("VOOM_VAAPI_MAX_SESSIONS", vaapi.max_sessions.to_string());
+        }
+        VideoAcceleratorDescriptor::VideoToolbox(videotoolbox) => {
+            command
+                .env("VOOM_VIDEOTOOLBOX_RESOURCE_ID", &videotoolbox.resource_id)
+                .env(
+                    "VOOM_VIDEOTOOLBOX_MAX_SESSIONS",
+                    videotoolbox.max_sessions.to_string(),
+                );
+        }
+    }
+}
+
+async fn read_bound(
+    stdout: ChildStdout,
+    startup_timeout: Duration,
+) -> Result<LocalWorkerBound, String> {
     tokio::time::timeout(startup_timeout, async move {
         let limited = stdout.take((READINESS_LIMIT_BYTES + 1) as u64);
         let mut reader = BufReader::new(limited);
@@ -474,18 +573,28 @@ async fn read_bound_address(
 ///
 /// # Errors
 ///
-/// Rejects malformed, IPv6, non-loopback, and zero-port addresses.
-pub fn parse_bound_line(line: &str) -> Result<SocketAddrV4, ChildError> {
-    let address = line
-        .strip_prefix("BOUND addr=")
-        .ok_or_else(|| {
-            ChildError::startup("unknown", "readiness line must start with BOUND addr=")
+/// Rejects malformed metadata, unknown fields, invalid accelerator declarations,
+/// IPv6, non-loopback, and zero-port addresses.
+pub fn parse_bound_line(line: &str) -> Result<LocalWorkerBound, ChildError> {
+    let payload = line
+        .strip_prefix("BOUND ")
+        .ok_or_else(|| ChildError::startup("unknown", "readiness line must start with BOUND "))?;
+    let bound = if let Some(address) = payload.strip_prefix("addr=") {
+        LocalWorkerBound {
+            addr: address.parse::<SocketAddr>().map_err(|error| {
+                ChildError::startup("unknown", format!("invalid readiness address: {error}"))
+            })?,
+            accelerator: None,
+        }
+    } else {
+        serde_json::from_str::<LocalWorkerBound>(payload).map_err(|error| {
+            ChildError::startup(
+                "unknown",
+                format!("invalid structured readiness metadata: {error}"),
+            )
         })?
-        .parse::<SocketAddr>()
-        .map_err(|error| {
-            ChildError::startup("unknown", format!("invalid readiness address: {error}"))
-        })?;
-    let SocketAddr::V4(address) = address else {
+    };
+    let SocketAddr::V4(address) = bound.addr else {
         return Err(ChildError::startup(
             "unknown",
             "readiness address must be IPv4 loopback",
@@ -497,7 +606,28 @@ pub fn parse_bound_line(line: &str) -> Result<SocketAddrV4, ChildError> {
             "readiness address must be IPv4 loopback with a nonzero port",
         ));
     }
-    Ok(address)
+    if let Some(accelerator) = bound.accelerator.as_ref() {
+        accelerator.validate_declaration().map_err(|message| {
+            ChildError::startup(
+                "unknown",
+                format!("invalid accelerator readiness metadata: {message}"),
+            )
+        })?;
+    }
+    Ok(bound)
+}
+
+fn validate_bound_accelerator(
+    actual: Option<&VideoAcceleratorDescriptor>,
+    declared: Option<&VideoAcceleratorDescriptor>,
+) -> Result<(), String> {
+    if actual == declared {
+        return Ok(());
+    }
+    Err(format!(
+        "accelerator readiness metadata did not match activation declaration: \
+         declared {declared:?}, child reported {actual:?}"
+    ))
 }
 
 async fn kill_and_wait(child: &mut Child) {

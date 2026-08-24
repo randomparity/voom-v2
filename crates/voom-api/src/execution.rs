@@ -14,9 +14,11 @@ use voom_control_plane::ControlPlane;
 use voom_control_plane::execution::{
     RemoteAcquireInput, RemoteActivateInput, RemoteCompleteInput, RemoteDeactivateInput,
     RemoteFailInput, RemoteLeaseHeartbeatInput, RemoteNodeHeartbeatInput, RemoteWorkerDeclaration,
+    RemoteWorkerReadinessInput,
 };
 use voom_core::{
-    ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason, NodeIncarnationId, WorkerId,
+    ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason, NodeIncarnationId,
+    WorkerId, WorkerReadiness,
 };
 
 use crate::{
@@ -26,6 +28,7 @@ use crate::{
 const ACQUIRE_COMMAND: &str = "execution.acquire";
 const ACTIVATE_COMMAND: &str = "execution.activate";
 const DEACTIVATE_COMMAND: &str = "execution.deactivate";
+const WORKER_READINESS_COMMAND: &str = "execution.worker_readiness";
 const NODE_HEARTBEAT_COMMAND: &str = "execution.node_heartbeat";
 const LEASE_HEARTBEAT_COMMAND: &str = "execution.lease_heartbeat";
 const COMPLETE_COMMAND: &str = "execution.complete";
@@ -52,6 +55,13 @@ struct NodeHeartbeatRequest {
 struct ActivateRequest {
     incarnation_id: NodeIncarnationId,
     workers: Vec<RemoteWorkerDeclaration>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerReadinessRequest {
+    incarnation_id: NodeIncarnationId,
+    readiness: WorkerReadiness,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -99,6 +109,10 @@ pub(crate) fn routes() -> axum::Router<AppState> {
         .route(
             "/v1/execution/node/{node_id}/heartbeat",
             post(node_heartbeat),
+        )
+        .route(
+            "/v1/execution/node/{node_id}/worker/{worker_id}/readiness",
+            post(worker_readiness),
         )
         .route("/v1/execution/lease/acquire", post(acquire))
         .route(
@@ -153,6 +167,52 @@ async fn activate(
     {
         Ok(outcome) => ok_response(ACTIVATE_COMMAND, outcome),
         Err(err) => voom_route_error_response(ACTIVATE_COMMAND, &err),
+    }
+}
+
+async fn worker_readiness(
+    State(state): State<AppState>,
+    path: Result<Path<(u64, u64)>, PathRejection>,
+    headers: HeaderMap,
+    body: Result<Json<JsonValue>, JsonRejection>,
+) -> axum::response::Response {
+    let (token, _idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
+        Err(error) => return credentials_error_response(WORKER_READINESS_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(WORKER_READINESS_COMMAND);
+    };
+    let (node_id, worker_id) = match path {
+        Ok(Path(ids)) => ids,
+        Err(error) => {
+            return bad_args_response(
+                WORKER_READINESS_COMMAND,
+                format!("invalid route identifier: {error}"),
+            );
+        }
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
+        Err(error) => return json_body_error_response(WORKER_READINESS_COMMAND, error),
+    };
+    let request: WorkerReadinessRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(WORKER_READINESS_COMMAND, message),
+    };
+
+    match control_plane
+        .remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: NodeId(node_id),
+            token,
+            incarnation_id: request.incarnation_id,
+            worker_id: WorkerId(worker_id),
+            readiness: request.readiness,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(WORKER_READINESS_COMMAND, outcome),
+        Err(error) => voom_route_error_response(WORKER_READINESS_COMMAND, &error),
     }
 }
 

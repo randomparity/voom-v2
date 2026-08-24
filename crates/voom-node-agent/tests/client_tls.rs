@@ -169,6 +169,8 @@ fn loaded_config(url: &str, ca_cert: Option<PathBuf>) -> LoadedAgentConfig {
                 args: Vec::new(),
                 operations: vec![OperationKind::ProbeFile],
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
+                dependencies: voom_node_agent::config::WorkerDependencyPaths::default(),
+                accelerator: None,
                 max_parallel: 1,
             }],
         },

@@ -194,6 +194,14 @@ async fn execution_routes_reject_former_incarnation_less_bodies() {
             json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
         ),
         (
+            format!(
+                "/v1/execution/node/{}/worker/{}/readiness",
+                fixture.node_id.0, fixture.worker_id.0
+            ),
+            "execution.worker_readiness",
+            json!({"readiness": "ready"}),
+        ),
+        (
             format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
             "execution.node_heartbeat",
             json!({}),
@@ -251,6 +259,15 @@ async fn activation_and_deactivation_routes_own_the_node_lifecycle() {
                     "logical_name": "transcode",
                     "operations": ["transcode_video"],
                     "artifact_access": ["shared_mount"],
+                    "accelerator": {
+                        "backend": "vaapi",
+                        "pci_address": "0000:f4:00.0",
+                        "device_name": "Radeon Pro",
+                        "driver_version": "Mesa 26.1",
+                        "encoders": ["hevc_vaapi"],
+                        "decoders": ["hevc"],
+                        "max_sessions": 2
+                    },
                     "max_parallel": 2
                 }]
             }),
@@ -263,6 +280,39 @@ async fn activation_and_deactivation_routes_own_the_node_lifecycle() {
         incarnation_id.to_string()
     );
     assert_eq!(activated["data"]["workers"].as_array().unwrap().len(), 1);
+    let worker_id = activated["data"]["workers"][0]["worker_id"]
+        .as_u64()
+        .unwrap();
+    let readiness = fixture
+        .post_json(
+            &format!(
+                "/v1/execution/node/{}/worker/{worker_id}/readiness",
+                fixture.node_id.0
+            ),
+            "worker-ready-route",
+            json!({
+                "incarnation_id": incarnation_id,
+                "readiness": "ready"
+            }),
+        )
+        .await;
+    assert_eq!(readiness.status(), StatusCode::OK);
+    let readiness = response_json(readiness).await;
+    assert_eq!(readiness["data"]["worker_id"], worker_id);
+    assert_eq!(readiness["data"]["readiness"], "ready");
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    let (hardware, extra): (String, String) = sqlx::query_as(
+        "SELECT hardware, extra FROM worker_capabilities \
+         WHERE worker_id = ? AND operation = 'transcode_video'",
+    )
+    .bind(i64::try_from(worker_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let hardware: Value = serde_json::from_str(&hardware).unwrap();
+    let extra: Value = serde_json::from_str(&extra).unwrap();
+    assert_eq!(hardware, json!(["vaapi:pci-0000:f4:00.0"]));
+    assert_eq!(extra["accelerator"]["backend"], "vaapi");
 
     let deactivate = fixture
         .post_json(
@@ -291,6 +341,17 @@ async fn execution_routes_use_one_unauthorized_bearer_response() {
                 "node_id": fixture.node_id.0,
                 "incarnation_id": fixture.incarnation_id,
                 "worker_id": fixture.worker_id.0
+            }),
+        ),
+        (
+            format!(
+                "/v1/execution/node/{}/worker/{}/readiness",
+                fixture.node_id.0, fixture.worker_id.0
+            ),
+            "execution.worker_readiness",
+            json!({
+                "incarnation_id": fixture.incarnation_id,
+                "readiness": "ready"
             }),
         ),
         (
@@ -369,6 +430,11 @@ async fn unconfigured_execution_routes_reject_invalid_bearer_syntax() {
             "/v1/execution/lease/acquire",
             "execution.acquire",
             json!({"node_id": 1, "worker_id": 1}),
+        ),
+        (
+            "/v1/execution/node/1/worker/1/readiness",
+            "execution.worker_readiness",
+            json!({"readiness": "ready"}),
         ),
         (
             "/v1/execution/node/1/heartbeat",
@@ -544,6 +610,19 @@ async fn execution_routes_reject_unknown_body_fields() {
             }),
         ),
         (
+            format!(
+                "/v1/execution/node/{}/worker/{}/readiness",
+                fixture.node_id.0, fixture.worker_id.0
+            ),
+            "worker-readiness-unknown-body",
+            "execution.worker_readiness",
+            json!({
+                "incarnation_id": fixture.incarnation_id,
+                "readiness": "ready",
+                "unknown": true
+            }),
+        ),
+        (
             format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
             "node-heartbeat-unknown-body",
             "execution.node_heartbeat",
@@ -711,6 +790,18 @@ async fn malformed_json_returns_api_error_envelope() {
         .await;
     assert_bad_args_envelope(node_heartbeat, "execution.node_heartbeat").await;
 
+    let worker_readiness = fixture
+        .post_raw(
+            &format!(
+                "/v1/execution/node/{}/worker/{}/readiness",
+                fixture.node_id.0, fixture.worker_id.0
+            ),
+            "bad-worker-readiness-json",
+            "{",
+        )
+        .await;
+    assert_bad_args_envelope(worker_readiness, "execution.worker_readiness").await;
+
     let lease_heartbeat = fixture
         .post_raw(
             "/v1/execution/lease/1/heartbeat",
@@ -743,6 +834,15 @@ async fn malformed_path_ids_return_api_error_envelope() {
         )
         .await;
     assert_bad_args_envelope(node_heartbeat, "execution.node_heartbeat").await;
+
+    let worker_readiness = fixture
+        .post_raw(
+            "/v1/execution/node/not-a-node/worker/not-a-worker/readiness",
+            "bad-worker-readiness-path",
+            "{}",
+        )
+        .await;
+    assert_bad_args_envelope(worker_readiness, "execution.worker_readiness").await;
 
     let lease_heartbeat = fixture
         .post_raw(
@@ -867,7 +967,7 @@ async fn api_fixture_with_capabilities(
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE workers SET node_incarnation_id = ? WHERE id = ?")
+    sqlx::query("UPDATE workers SET node_incarnation_id = ?, status = 'active' WHERE id = ?")
         .bind(incarnation_id.to_string())
         .bind(i64::try_from(worker.id.0).unwrap())
         .execute(&pool)

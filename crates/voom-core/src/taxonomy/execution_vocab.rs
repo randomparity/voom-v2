@@ -197,6 +197,24 @@ impl WorkerKind {
     }
 }
 
+/// Node-agent proof state for one declared remote worker.
+///
+/// Activation creates the durable worker identity in [`Self::NotReady`]. The
+/// supervising agent transitions it to [`Self::Ready`] only after the child has
+/// bound, returned matching accelerator metadata when configured, completed the
+/// version handshake, proved its worker identity, and finished dependency
+/// preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerReadiness {
+    Ready,
+    NotReady,
+}
+
+/// Durable worker lifecycle state.
+///
+/// `Registered` remains executable for local and synthetic workers. For remote
+/// workers it means declared but not ready; only `Active` may receive new work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerStatus {

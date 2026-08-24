@@ -22,6 +22,223 @@ fn nvidia_descriptor_round_trips_and_rejects_unknown_fields() {
 }
 
 #[test]
+fn declaration_validation_requires_stable_identity_and_bounded_capacity() {
+    assert!(
+        VideoAcceleratorDescriptor::Nvidia(nvidia_descriptor())
+            .validate_declaration()
+            .is_ok()
+    );
+    let mut nvidia = nvidia_descriptor();
+    nvidia.hardware_token = "nvidia:GPU-other".to_owned();
+    assert!(
+        VideoAcceleratorDescriptor::Nvidia(nvidia)
+            .validate_declaration()
+            .is_err()
+    );
+    let mut nvidia = nvidia_descriptor();
+    nvidia.max_sessions = 17;
+    assert!(
+        VideoAcceleratorDescriptor::Nvidia(nvidia)
+            .validate_declaration()
+            .is_err()
+    );
+
+    let mut vaapi = vaapi_descriptor();
+    vaapi.pci_address = "/dev/dri/renderD128".to_owned();
+    assert!(
+        VideoAcceleratorDescriptor::Vaapi(vaapi)
+            .validate_declaration()
+            .is_err()
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.hardware_token = "videotoolbox:another-host".to_owned();
+    assert!(
+        VideoAcceleratorDescriptor::VideoToolbox(videotoolbox)
+            .validate_declaration()
+            .is_err()
+    );
+}
+
+#[test]
+fn descriptor_validation_bounds_device_and_platform_strings() {
+    let mut nvidia = nvidia_descriptor();
+    nvidia.device_name = "n".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES + 1);
+    assert_validation_error(&VideoAcceleratorDescriptor::Nvidia(nvidia), "device_name");
+
+    let mut vaapi = vaapi_descriptor();
+    vaapi.driver_version = "d".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES + 1);
+    assert_validation_error(&VideoAcceleratorDescriptor::Vaapi(vaapi), "driver_version");
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.model_identifier = "m".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES + 1);
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "model_identifier",
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.chip_name = "c".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES + 1);
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "chip_name",
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.macos_version = "v".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES + 1);
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "macos_version",
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.macos_build = "b".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES + 1);
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "macos_build",
+    );
+}
+
+#[test]
+fn descriptor_validation_bounds_codec_and_pixel_format_strings() {
+    let oversized = "x".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES + 1);
+
+    let mut nvidia = nvidia_descriptor();
+    nvidia.encoders[0] = oversized.clone();
+    assert_validation_error(&VideoAcceleratorDescriptor::Nvidia(nvidia), "encoders");
+
+    let mut vaapi = vaapi_descriptor();
+    vaapi.decoders[0] = oversized.clone();
+    assert_validation_error(&VideoAcceleratorDescriptor::Vaapi(vaapi), "decoders");
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.decoders[0].codec = oversized.clone();
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "decoder codec",
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.decoders[0].pixel_formats[0] = oversized;
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "pixel_formats",
+    );
+}
+
+#[test]
+fn descriptor_validation_rejects_blank_and_control_strings() {
+    let mut nvidia = nvidia_descriptor();
+    nvidia.device_name = " \t ".to_owned();
+    assert_validation_error(&VideoAcceleratorDescriptor::Nvidia(nvidia), "device_name");
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.encoders[0] = "hevc\u{1b}[31m".to_owned();
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "encoders",
+    );
+}
+
+#[test]
+fn descriptor_validation_bounds_every_collection_and_rejects_duplicates() {
+    let over_bound = (0..=MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS)
+        .map(|index| format!("codec-{index}"))
+        .collect::<Vec<_>>();
+
+    let mut nvidia = nvidia_descriptor();
+    nvidia.encoders = over_bound.clone();
+    assert_validation_error(&VideoAcceleratorDescriptor::Nvidia(nvidia), "encoders");
+
+    let mut vaapi = vaapi_descriptor();
+    vaapi.decoders = over_bound.clone();
+    assert_validation_error(&VideoAcceleratorDescriptor::Vaapi(vaapi), "decoders");
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.decoders = over_bound
+        .iter()
+        .map(|codec| VideoToolboxDecodeCapability {
+            codec: codec.clone(),
+            pixel_formats: vec!["yuv420p".to_owned()],
+        })
+        .collect();
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "decoders",
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.decoders[0].pixel_formats = over_bound;
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "pixel_formats",
+    );
+
+    let mut nvidia = nvidia_descriptor();
+    nvidia.encoders.push(nvidia.encoders[0].clone());
+    assert_validation_error(&VideoAcceleratorDescriptor::Nvidia(nvidia), "duplicate");
+
+    let mut vaapi = vaapi_descriptor();
+    vaapi.decoders.push(vaapi.decoders[0].clone());
+    assert_validation_error(&VideoAcceleratorDescriptor::Vaapi(vaapi), "duplicate");
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.encoders.push(videotoolbox.encoders[0].clone());
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "duplicate",
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.decoders.push(VideoToolboxDecodeCapability {
+        codec: videotoolbox.decoders[0].codec.clone(),
+        pixel_formats: vec!["nv12".to_owned()],
+    });
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "duplicate decoder codec",
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    let duplicate = videotoolbox.decoders[0].pixel_formats[0].clone();
+    videotoolbox.decoders[0].pixel_formats.push(duplicate);
+    assert_validation_error(
+        &VideoAcceleratorDescriptor::VideoToolbox(videotoolbox),
+        "duplicate",
+    );
+}
+
+#[test]
+fn descriptor_validation_enforces_aggregate_encoded_size_after_field_bounds() {
+    let mut nvidia = nvidia_descriptor();
+    nvidia.encoders = (0..MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS)
+        .map(|index| format!("encoder-{index:02}-{}", "x".repeat(72)))
+        .collect();
+    nvidia.decoders = (0..MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS)
+        .map(|index| format!("decoder-{index:02}-{}", "x".repeat(72)))
+        .collect();
+    let descriptor = VideoAcceleratorDescriptor::Nvidia(nvidia);
+    assert!(
+        serde_json::to_vec(&descriptor).unwrap().len() > MAX_ACCELERATOR_DESCRIPTOR_ENCODED_BYTES
+    );
+    assert_validation_error(&descriptor, "encoded");
+}
+
+#[test]
+fn descriptor_validation_accepts_exact_string_and_collection_bounds() {
+    let mut nvidia = nvidia_descriptor();
+    nvidia.device_name = "n".repeat(MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES);
+    nvidia.encoders = (0..MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS)
+        .map(|index| format!("encoder-{index}"))
+        .collect();
+    assert!(
+        VideoAcceleratorDescriptor::Nvidia(nvidia)
+            .validate_declaration()
+            .is_ok()
+    );
+}
+
+#[test]
 fn requirements_are_tagged_and_strict() {
     let requirement = VideoHardwareRequirement::nvidia("hevc_nvenc", Some("h264_cuvid".to_owned()));
     let mut value = serde_json::to_value(&requirement).unwrap();
@@ -52,6 +269,31 @@ fn nvidia_descriptor() -> NvidiaVideoAcceleratorDescriptor {
         decoders: vec!["h264_cuvid".to_owned(), "hevc_cuvid".to_owned()],
         max_sessions: 4,
     }
+}
+
+fn videotoolbox_descriptor() -> VideoToolboxVideoAcceleratorDescriptor {
+    VideoToolboxVideoAcceleratorDescriptor {
+        hardware_token: "videotoolbox:abc123".to_owned(),
+        resource_id: "abc123".to_owned(),
+        model_identifier: "Mac17,6".to_owned(),
+        chip_name: "Apple M5 Max".to_owned(),
+        macos_version: "26.5.2".to_owned(),
+        macos_build: "25F84".to_owned(),
+        encoders: vec!["hevc_videotoolbox".to_owned()],
+        decoders: vec![VideoToolboxDecodeCapability {
+            codec: "hevc".to_owned(),
+            pixel_formats: vec!["yuv420p".to_owned()],
+        }],
+        max_sessions: 16,
+    }
+}
+
+fn assert_validation_error(descriptor: &VideoAcceleratorDescriptor, expected: &str) {
+    let error = descriptor.validate_declaration().unwrap_err();
+    assert!(
+        error.contains(expected),
+        "expected {error:?} to name {expected:?}"
+    );
 }
 
 /// A VAAPI descriptor is identified by PCI address, never by render-node

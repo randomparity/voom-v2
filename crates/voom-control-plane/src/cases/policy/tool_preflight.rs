@@ -1,30 +1,35 @@
-use std::collections::BTreeSet;
-use std::future::Future;
+use std::collections::{BTreeMap, BTreeSet};
 
 use voom_core::{
-    OperationKind, PROTOCOL_VERSION, TicketOperation, VideoDecodeMode, VideoEncoderBackend,
-    VoomError,
+    FileVersionId, NodeId, OperationKind, TicketOperation, VideoDecodeMode, VideoEncoderBackend,
+    VoomError, WorkerId,
 };
 use voom_policy::compiled::CompiledTranscodeVideoOperation;
 use voom_policy::{CompiledOperation, CompiledPolicy, PolicyTool, VideoProfileRef};
-use voom_store::repo::execution::workers::{Worker, WorkerKind, WorkerStatus};
+use voom_store::repo::execution::artifact_access_resolution::{
+    AccessResolutionError, resolve_file_location,
+};
+use voom_store::repo::execution::nodes::NodeStatus;
+use voom_store::repo::execution::workers::{Worker, WorkerOperationCandidate};
 use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use crate::ControlPlane;
-use crate::cases::{begin_immediate_tx, commit_tx};
-use crate::scan::worker::ScanWorkerError;
+use crate::operation_source::select_location;
 use crate::video_hardware::candidate_accelerator_descriptor;
-use crate::workflow::WorkerRuntimeRegistry;
 
-const FFMPEG_NAME: &str = "local-ffmpeg";
-const FFMPEG_PREFIX: &str = "local-ffmpeg-";
-const MKVTOOLNIX_NAME: &str = "local-mkvtoolnix";
-const MKVTOOLNIX_PREFIX: &str = "local-mkvtoolnix-";
 const LEGACY_REQUIRES_TOOLS_WARNING: &str = "metadata_requires_tools_deferred";
 
+/// One stored policy target whose storage owner must satisfy the tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PolicyToolTarget {
+    pub(crate) ordinal: u32,
+    pub(crate) file_version_id: FileVersionId,
+}
+
 struct UnavailableTool {
-    tool: PolicyTool,
+    subject: String,
     reason: String,
+    guidance: &'static str,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,65 +40,92 @@ enum EligibilityFinding {
     Effective,
 }
 
+/// Where one stored target's storage lives, or why it cannot dispatch.
+enum TargetOwner {
+    Owned(NodeId),
+    Unavailable(UnavailableTool),
+}
+
+struct OwnerWorkerSet {
+    node_name: String,
+    live_worker_ids: BTreeSet<WorkerId>,
+}
+
+/// Why the node itself cannot vouch for any worker right now.
+fn node_readiness_problem(
+    node: &voom_store::repo::execution::nodes::Node,
+    now: time::OffsetDateTime,
+) -> Option<String> {
+    if node.status == NodeStatus::Stale || node.status == NodeStatus::Retired {
+        return crate::cases::execution::remote_execution::validate_remote_node_freshness(
+            node.status,
+            node.last_seen_at,
+            node.heartbeat_ttl_seconds,
+            node.id,
+            now,
+            true,
+        )
+        .err()
+        .map(|error| error.to_string());
+    }
+    if node.active_incarnation_id.is_none() {
+        return Some("owner node has no active agent incarnation".to_owned());
+    }
+    crate::cases::execution::remote_execution::validate_remote_node_freshness(
+        node.status,
+        node.last_seen_at,
+        node.heartbeat_ttl_seconds,
+        node.id,
+        now,
+        true,
+    )
+    .err()
+    .map(|error| error.to_string())
+}
+
+fn push_all_unavailable(
+    unavailable: &mut Vec<UnavailableTool>,
+    tools: &[PolicyTool],
+    node_name: &str,
+    reason: &str,
+) {
+    for tool in tools {
+        unavailable.push(UnavailableTool {
+            subject: format!("{} on node \"{node_name}\"", tool.as_str()),
+            reason: reason.to_owned(),
+            guidance: guidance(*tool),
+        });
+    }
+}
+
 impl ControlPlane {
     pub(crate) async fn preflight_policy_tools(
         &self,
         policy: &mut CompiledPolicy,
-        runtimes: &WorkerRuntimeRegistry,
+        targets: &[PolicyToolTarget],
     ) -> Result<(), VoomError> {
-        self.preflight_policy_tools_with_ffprobe_readiness(
-            policy,
-            runtimes,
-            crate::scan::worker::verify_bundled_ffprobe_readiness,
-        )
-        .await
-    }
-
-    async fn preflight_policy_tools_with_ffprobe_readiness<F, Fut>(
-        &self,
-        policy: &mut CompiledPolicy,
-        runtimes: &WorkerRuntimeRegistry,
-        ffprobe_readiness: F,
-    ) -> Result<(), VoomError>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<(), ScanWorkerError>>,
-    {
         let tools = normalize_policy_tool_requirements(policy)?;
+        let video_requirements = policy_video_backend_requirements(policy)?;
+        if tools.is_empty() && !video_requirements.any() {
+            return Ok(());
+        }
 
         let mut unavailable = Vec::new();
-        for tool in tools {
-            let reason = match tool {
-                PolicyTool::Ffmpeg => {
-                    self.observe_endpoint_tool(
-                        FFMPEG_NAME,
-                        FFMPEG_PREFIX,
-                        &[
-                            OperationKind::TranscodeVideo,
-                            OperationKind::TranscodeAudio,
-                            OperationKind::ExtractAudio,
-                        ],
-                        runtimes,
-                    )
-                    .await?
+        let mut owners: BTreeSet<NodeId> = BTreeSet::new();
+        for target in targets {
+            match self.resolve_target_owner(target).await? {
+                TargetOwner::Owned(node_id) => {
+                    owners.insert(node_id);
                 }
-                PolicyTool::Mkvtoolnix => {
-                    self.observe_endpoint_tool(
-                        MKVTOOLNIX_NAME,
-                        MKVTOOLNIX_PREFIX,
-                        &[OperationKind::Remux],
-                        runtimes,
-                    )
-                    .await?
-                }
-                PolicyTool::Ffprobe => {
-                    self.observe_bundled_ffprobe(ffprobe_readiness().await)
-                        .await?
-                }
-            };
-            if let Some(reason) = reason {
-                unavailable.push(UnavailableTool { tool, reason });
+                TargetOwner::Unavailable(item) => unavailable.push(item),
             }
+        }
+        let mut owner_workers = BTreeMap::new();
+        for node_id in &owners {
+            let workers = self
+                .observe_node_tools(*node_id, &tools, &mut unavailable)
+                .await?;
+            owner_workers.insert(*node_id, workers);
         }
         if !unavailable.is_empty() {
             return Err(VoomError::PolicyExecution(format_unavailable_tools(
@@ -101,178 +133,174 @@ impl ControlPlane {
                 &unavailable,
             )));
         }
-        self.preflight_video_hardware(policy, runtimes).await
+        self.preflight_video_hardware(&policy.slug, &video_requirements, &owner_workers)
+            .await
+    }
+
+    /// Resolve one stored target to the node that owns its storage.
+    ///
+    /// A target that can never dispatch — no live rooted location, or a root
+    /// nobody owns — is an unavailable observation rather than a host guess
+    /// (ADR 0076 §1). Database failures propagate and abort observation.
+    async fn resolve_target_owner(
+        &self,
+        target: &PolicyToolTarget,
+    ) -> Result<TargetOwner, VoomError> {
+        let subject = format!("target {}", target.ordinal);
+        let location = match select_location(self, target.file_version_id, None).await {
+            Ok(location) => location,
+            Err(error @ VoomError::Config(_)) => {
+                return Ok(TargetOwner::Unavailable(UnavailableTool {
+                    subject,
+                    reason: error.to_string(),
+                    guidance: "re-scan or re-ingest the file onto an owned storage root",
+                }));
+            }
+            Err(error) => return Err(error),
+        };
+        let (storage_root_id, _) = location.rooted_address()?;
+        let resolved = match resolve_file_location(&self.pool, location.id, storage_root_id).await {
+            Ok(resolved) => resolved,
+            Err(
+                error @ (AccessResolutionError::InvalidRootState { .. }
+                | AccessResolutionError::InvalidLocationState { .. }),
+            ) => {
+                return Ok(TargetOwner::Unavailable(UnavailableTool {
+                    subject: format!("{subject} (storage root {})", storage_root_id.0),
+                    reason: error.to_string(),
+                    guidance: "restore the storage root before executing",
+                }));
+            }
+            Err(
+                error @ (AccessResolutionError::InvalidRootEpoch { .. }
+                | AccessResolutionError::DatabaseError(_)
+                | AccessResolutionError::StorageRootNotFound { .. }
+                | AccessResolutionError::FileLocationNotFound { .. }
+                | AccessResolutionError::LocationRootInvalid { .. }
+                | AccessResolutionError::MixedOwner { .. }
+                | AccessResolutionError::NoActiveIncarnation { .. }),
+            ) => {
+                return Err(VoomError::database(format!(
+                    "resolve policy target storage owner: {error}"
+                )));
+            }
+        };
+        let owner_node_id = u64::try_from(resolved.owner_node_id).map_err(|_| {
+            VoomError::database(format!(
+                "storage root {} owner node id was negative: {}",
+                storage_root_id.0, resolved.owner_node_id
+            ))
+        })?;
+        Ok(TargetOwner::Owned(NodeId(owner_node_id)))
+    }
+
+    /// Observe every required tool against one owner node (ADR 0076 §2).
+    ///
+    /// Every unavailable finding is appended; database errors propagate and
+    /// abort observation immediately with their specific context.
+    async fn observe_node_tools(
+        &self,
+        node_id: NodeId,
+        tools: &[PolicyTool],
+        unavailable: &mut Vec<UnavailableTool>,
+    ) -> Result<OwnerWorkerSet, VoomError> {
+        let node = self.nodes.get(node_id).await?.ok_or_else(|| {
+            VoomError::database(format!("owner node {node_id} disappeared during preflight"))
+        })?;
+        if let Some(reason) = node_readiness_problem(&node, self.clock().now()) {
+            push_all_unavailable(unavailable, tools, &node.name, &reason);
+            return Ok(OwnerWorkerSet {
+                node_name: node.name,
+                live_worker_ids: BTreeSet::new(),
+            });
+        }
+        let Some(active_incarnation) = node.active_incarnation_id.as_ref() else {
+            return Ok(OwnerWorkerSet {
+                node_name: node.name,
+                live_worker_ids: BTreeSet::new(),
+            });
+        };
+        let workers = self.workers.list_by_node(node_id).await?;
+        let bound: Vec<&Worker> = workers
+            .iter()
+            .filter(|worker| worker.node_incarnation_id.as_ref() == Some(active_incarnation))
+            .collect();
+        let live: Vec<&Worker> = bound
+            .iter()
+            .copied()
+            .filter(|worker| is_live(worker))
+            .collect();
+        if bound.is_empty() || live.is_empty() {
+            let reason = if workers.is_empty() {
+                "no agent-supervised workers are registered".to_owned()
+            } else if bound.is_empty() {
+                format!(
+                    "none of the node's {} registered worker(s) is bound to its \
+                     active incarnation",
+                    workers.len()
+                )
+            } else {
+                "every worker bound to the active incarnation is declared but not ready, stale, or retired"
+                    .to_owned()
+            };
+            push_all_unavailable(unavailable, tools, &node.name, &reason);
+            return Ok(OwnerWorkerSet {
+                node_name: node.name,
+                live_worker_ids: BTreeSet::new(),
+            });
+        }
+        for tool in tools {
+            let mut findings = Vec::new();
+            for worker in &live {
+                findings.extend(
+                    self.worker_eligibility_findings(worker, tool_operations(*tool))
+                        .await?,
+                );
+            }
+            if !findings.contains(&EligibilityFinding::Effective) {
+                unavailable.push(UnavailableTool {
+                    subject: format!("{} on node \"{}\"", tool.as_str(), node.name),
+                    reason: unavailable_eligibility_reason(&findings),
+                    guidance: guidance(*tool),
+                });
+            }
+        }
+        Ok(OwnerWorkerSet {
+            node_name: node.name,
+            live_worker_ids: live.iter().map(|worker| worker.id).collect(),
+        })
     }
 
     async fn preflight_video_hardware(
         &self,
-        policy: &CompiledPolicy,
-        runtimes: &WorkerRuntimeRegistry,
+        policy_slug: &str,
+        requirements: &VideoBackendRequirements,
+        owner_workers: &BTreeMap<NodeId, OwnerWorkerSet>,
     ) -> Result<(), VoomError> {
-        let requirements = policy_video_backend_requirements(policy)?;
-        if !requirements.software
-            && !requirements.nvidia.required
-            && !requirements.vaapi.required
-            && !requirements.videotoolbox.required
-        {
+        if !requirements.any() {
             return Ok(());
         }
         let candidates = self
             .workers
             .operation_candidates(&TicketOperation::from(OperationKind::TranscodeVideo))
             .await?;
-        let mut availability = BackendAvailability::new();
-        for candidate in candidates {
-            if runtimes.get_optional(candidate.worker_id).is_none() {
-                continue;
-            }
-            // ADR 0049 §6: a problem with one worker never escapes candidate
-            // projection as a job-fatal error. A descriptor this build cannot
-            // parse — a newer worker's backend tag, or a field added since —
-            // makes that one worker contribute no availability, which fails
-            // closed: dispatch still refuses it, and the operator gets
-            // "no worker advertises <backend>" instead of a repository error
-            // that blocks every policy on the fleet.
-            let descriptor = match candidate_accelerator_descriptor(&candidate) {
-                Ok(descriptor) => descriptor,
-                Err(error) => {
-                    tracing::warn!(
-                        worker_id = candidate.worker_id.0,
-                        %error,
-                        "skipping worker with an unreadable accelerator descriptor \
-                         during video hardware preflight"
-                    );
-                    continue;
-                }
-            };
-            match descriptor {
-                Some(VideoAcceleratorDescriptor::Nvidia(device)) => {
-                    let has_encoder = device
-                        .encoders
-                        .iter()
-                        .any(|encoder| encoder == "hevc_nvenc");
-                    let has_decoder =
-                        !requirements.nvidia.hardware_decode || !device.decoders.is_empty();
-                    if has_encoder && has_decoder {
-                        availability.insert(VideoEncoderBackend::Nvidia);
-                    }
-                }
-                Some(VideoAcceleratorDescriptor::Vaapi(device)) => {
-                    let has_encoder = device
-                        .encoders
-                        .iter()
-                        .any(|encoder| encoder == "hevc_vaapi");
-                    let has_decoder =
-                        !requirements.vaapi.hardware_decode || !device.decoders.is_empty();
-                    if has_encoder && has_decoder {
-                        availability.insert(VideoEncoderBackend::Vaapi);
-                    }
-                }
-                Some(VideoAcceleratorDescriptor::VideoToolbox(device)) => {
-                    let has_encoders = requirements
-                        .videotoolbox_encoders
-                        .iter()
-                        .all(|required| device.encoders.iter().any(|item| item == required));
-                    let has_decoder =
-                        !requirements.videotoolbox.hardware_decode || !device.decoders.is_empty();
-                    if has_encoders && has_decoder {
-                        availability.insert(VideoEncoderBackend::VideoToolbox);
-                    }
-                }
-                None if candidate.hardware.is_empty() => {
-                    availability.insert(VideoEncoderBackend::Software);
-                }
-                None => {}
-            }
+        let mut missing = Vec::new();
+        for owner in owner_workers.values() {
+            let availability =
+                backend_availability(&candidates, &owner.live_worker_ids, requirements);
+            missing.extend(missing_backend_workers(
+                requirements,
+                &availability,
+                &owner.node_name,
+            ));
         }
-        let missing = missing_backend_workers(&requirements, &availability);
         if missing.is_empty() {
             return Ok(());
         }
         Err(VoomError::PolicyExecution(format!(
-            "video hardware preflight failed for policy `{}`:\n- {}",
-            policy.slug,
+            "video hardware preflight failed for policy `{policy_slug}`:\n- {}",
             missing.join("\n- ")
         )))
-    }
-
-    async fn observe_endpoint_tool(
-        &self,
-        legacy_name: &str,
-        prefix: &str,
-        operations: &[OperationKind],
-        runtimes: &WorkerRuntimeRegistry,
-    ) -> Result<Option<String>, VoomError> {
-        let workers = self
-            .workers
-            .list_by_name_namespace(legacy_name, prefix)
-            .await?;
-        validate_reserved_workers(&workers)?;
-        if workers.is_empty() {
-            return Ok(Some("no reserved local provider is registered".to_owned()));
-        }
-
-        let live: Vec<&Worker> = workers.iter().filter(|worker| is_live(worker)).collect();
-        if live.is_empty() {
-            return Ok(Some(
-                "every reserved provider is stale or retired".to_owned(),
-            ));
-        }
-
-        let mut effective = Vec::new();
-        let mut findings = Vec::new();
-        for worker in live {
-            let worker_findings = self.worker_eligibility_findings(worker, operations).await?;
-            if worker_findings.contains(&EligibilityFinding::Effective) {
-                effective.push(worker);
-            }
-            findings.extend(worker_findings);
-        }
-        if effective.is_empty() {
-            return Ok(Some(unavailable_eligibility_reason(&findings)));
-        }
-
-        let mut identity_failures = Vec::new();
-        for worker in effective {
-            let Some(runtime) = runtimes.get_optional(worker.id) else {
-                identity_failures.push(format!("{} has no live endpoint", worker.name));
-                continue;
-            };
-            match runtime.client.handshake(PROTOCOL_VERSION).await {
-                Ok(response) if response.agreed == PROTOCOL_VERSION => {}
-                Ok(response) => {
-                    identity_failures.push(format!(
-                        "{} handshake agreed to protocol {}",
-                        worker.name, response.agreed
-                    ));
-                    continue;
-                }
-                Err(error) => {
-                    identity_failures.push(format!("{} handshake failed: {error}", worker.name));
-                    continue;
-                }
-            }
-            match runtime.client.identity(&runtime.credentials).await {
-                Ok(identity)
-                    if identity.worker_id == worker.id
-                        && identity.worker_epoch == worker.epoch
-                        && identity.protocol_version == PROTOCOL_VERSION =>
-                {
-                    return Ok(None);
-                }
-                Ok(identity) => identity_failures.push(format!(
-                    "{} returned identity {}:{} at protocol {}",
-                    worker.name,
-                    identity.worker_id,
-                    identity.worker_epoch,
-                    identity.protocol_version
-                )),
-                Err(error) => {
-                    identity_failures.push(format!("{} identity failed: {error}", worker.name));
-                }
-            }
-        }
-        Ok(Some(identity_failures.join("; ")))
     }
 
     async fn worker_eligibility_findings(
@@ -300,66 +328,93 @@ impl ControlPlane {
         }
         Ok(findings)
     }
-
-    async fn observe_bundled_ffprobe(
-        &self,
-        readiness: Result<(), ScanWorkerError>,
-    ) -> Result<Option<String>, VoomError> {
-        if let Err(error) = readiness {
-            return Ok(Some(format!("bundled ffprobe readiness failed: {error}")));
-        }
-
-        let mut tx = begin_immediate_tx(&self.pool).await?;
-        let worker =
-            crate::scan::bootstrap::resolve_builtin_ffprobe_worker_in_tx(self, &mut tx).await?;
-        let operation = TicketOperation::from(OperationKind::ProbeFile);
-        let mut eligibility = self
-            .workers
-            .operation_eligibility_in_tx(&mut tx, worker.id, &operation)
-            .await?;
-        if eligibility.is_denied {
-            commit_tx(tx).await?;
-            return Ok(Some(format!(
-                "live built-in provider {} is denied {}",
-                worker.name,
-                operation.as_str()
-            )));
-        }
-        if !eligibility.has_capability || !eligibility.has_grant {
-            crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(self, &mut tx).await?;
-            eligibility = self
-                .workers
-                .operation_eligibility_in_tx(&mut tx, worker.id, &operation)
-                .await?;
-        }
-        if !eligibility.has_capability || !eligibility.has_grant || eligibility.is_denied {
-            return Err(VoomError::Conflict(format!(
-                "built-in ffprobe worker {} could not establish effective {} eligibility",
-                worker.name,
-                operation.as_str()
-            )));
-        }
-        commit_tx(tx).await?;
-        Ok(None)
-    }
 }
 
 /// The backends that currently have a live, capable worker. A set rather than one
 /// flag per backend so adding a backend needs no new field here.
 type BackendAvailability = BTreeSet<VideoEncoderBackend>;
 
+fn backend_availability(
+    candidates: &[WorkerOperationCandidate],
+    proven: &BTreeSet<WorkerId>,
+    requirements: &VideoBackendRequirements,
+) -> BackendAvailability {
+    let mut availability = BackendAvailability::new();
+    for candidate in candidates {
+        if !proven.contains(&candidate.worker_id) {
+            continue;
+        }
+        // ADR 0049 §6: one unreadable descriptor contributes no availability,
+        // but never turns the whole fleet observation into a repository error.
+        let descriptor = match candidate_accelerator_descriptor(candidate) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                tracing::warn!(
+                    worker_id = candidate.worker_id.0,
+                    %error,
+                    "skipping worker with an unreadable accelerator descriptor \
+                     during video hardware preflight"
+                );
+                continue;
+            }
+        };
+        match descriptor {
+            Some(VideoAcceleratorDescriptor::Nvidia(device)) => {
+                let has_encoder = device
+                    .encoders
+                    .iter()
+                    .any(|encoder| encoder == "hevc_nvenc");
+                let has_decoder =
+                    !requirements.nvidia.hardware_decode || !device.decoders.is_empty();
+                if has_encoder && has_decoder {
+                    availability.insert(VideoEncoderBackend::Nvidia);
+                }
+            }
+            Some(VideoAcceleratorDescriptor::Vaapi(device)) => {
+                let has_encoder = device
+                    .encoders
+                    .iter()
+                    .any(|encoder| encoder == "hevc_vaapi");
+                let has_decoder =
+                    !requirements.vaapi.hardware_decode || !device.decoders.is_empty();
+                if has_encoder && has_decoder {
+                    availability.insert(VideoEncoderBackend::Vaapi);
+                }
+            }
+            Some(VideoAcceleratorDescriptor::VideoToolbox(device)) => {
+                let has_encoders = requirements
+                    .videotoolbox_encoders
+                    .iter()
+                    .all(|required| device.encoders.iter().any(|item| item == required));
+                let has_decoder =
+                    !requirements.videotoolbox.hardware_decode || !device.decoders.is_empty();
+                if has_encoders && has_decoder {
+                    availability.insert(VideoEncoderBackend::VideoToolbox);
+                }
+            }
+            None if candidate.hardware.is_empty() => {
+                availability.insert(VideoEncoderBackend::Software);
+            }
+            None => {}
+        }
+    }
+    availability
+}
+
 /// One operator-actionable line per required backend that has no live worker.
 fn missing_backend_workers(
     requirements: &VideoBackendRequirements,
     availability: &BackendAvailability,
+    owner_node: &str,
 ) -> Vec<String> {
+    let guidance =
+        |worker: &str| format!("run a node agent with {worker} on owner node \"{owner_node}\"");
     let mut missing = Vec::new();
     if requirements.software && !availability.contains(&VideoEncoderBackend::Software) {
-        missing.push(
-            "software transcode profiles require an unbound ffmpeg worker; \
-             start one with: voom worker run-local --kind ffmpeg"
-                .to_owned(),
-        );
+        missing.push(format!(
+            "software transcode profiles require an unbound ffmpeg worker; {}",
+            guidance("an unbound ffmpeg worker")
+        ));
     }
     if requirements.nvidia.required && !availability.contains(&VideoEncoderBackend::Nvidia) {
         let decoder = if requirements.nvidia.hardware_decode {
@@ -368,9 +423,9 @@ fn missing_backend_workers(
             ""
         };
         missing.push(format!(
-            "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; \
-             start one with: voom worker run-local --kind ffmpeg \
-             --nvidia-device GPU-<uuid>"
+            "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder} on owner \
+             node \"{owner_node}\"; configure the owner node's ffmpeg worker with its \
+             probe-verified NVIDIA accelerator descriptor"
         ));
     }
     if requirements.vaapi.required && !availability.contains(&VideoEncoderBackend::Vaapi) {
@@ -380,9 +435,9 @@ fn missing_backend_workers(
             ""
         };
         missing.push(format!(
-            "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder}; \
-             start one with: voom worker run-local --kind ffmpeg \
-             --vaapi-device <pci-address>"
+            "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder} on owner \
+             node \"{owner_node}\"; configure the owner node's ffmpeg worker with its \
+             probe-verified VAAPI accelerator descriptor"
         ));
     }
     if requirements.videotoolbox.required
@@ -401,8 +456,8 @@ fn missing_backend_workers(
         };
         missing.push(format!(
             "VideoToolbox profiles require a live host-bound ffmpeg worker advertising \
-             [{encoders}]{decoder}; start one with: voom worker run-local --kind ffmpeg \
-             --videotoolbox"
+             [{encoders}]{decoder} on owner node \"{owner_node}\"; configure the owner node's \
+             ffmpeg worker with its probe-verified VideoToolbox accelerator descriptor"
         ));
     }
     missing
@@ -429,6 +484,12 @@ struct VideoBackendRequirements {
     /// must check the device advertises the specific encoders the policy names
     /// rather than only that some `VideoToolbox` device is bound.
     videotoolbox_encoders: BTreeSet<String>,
+}
+
+impl VideoBackendRequirements {
+    fn any(&self) -> bool {
+        self.software || self.nvidia.required || self.vaapi.required || self.videotoolbox.required
+    }
 }
 
 fn policy_video_backend_requirements(
@@ -517,13 +578,13 @@ fn transcode_video_encoder_and_decode(
 
 fn unavailable_eligibility_reason(findings: &[EligibilityFinding]) -> String {
     if findings.contains(&EligibilityFinding::Denied) {
-        return "at least one matching live reserved capability is denied and none is effective"
+        return "the node's live workers matching this tool are denied and none is effective"
             .to_owned();
     }
     if findings.contains(&EligibilityFinding::MissingGrant) {
-        return "live reserved providers have the capability but no execute grant".to_owned();
+        return "the node's live workers have the capability but no execute grant".to_owned();
     }
-    "live reserved providers do not advertise a matching capability".to_owned()
+    "the node's live workers do not advertise a matching capability".to_owned()
 }
 
 /// Type stored tool metadata and remove the superseded deferred warning in memory.
@@ -545,42 +606,49 @@ pub(crate) fn normalize_policy_tool_requirements(
     Ok(tools)
 }
 
-fn validate_reserved_workers(workers: &[Worker]) -> Result<(), VoomError> {
-    for worker in workers {
-        if worker.kind != WorkerKind::Local || worker.node_id.is_some() {
-            return Err(VoomError::Conflict(format!(
-                "reserved provider {} must be node-less and local",
-                worker.name
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn is_live(worker: &Worker) -> bool {
-    worker.status == WorkerStatus::Registered || worker.status == WorkerStatus::Active
+    worker.accepts_new_work()
 }
 
 fn format_unavailable_tools(policy_slug: &str, unavailable: &[UnavailableTool]) -> String {
     let mut message = format!("tool requirement preflight failed for policy `{policy_slug}`:");
     for item in unavailable {
         message.push_str("\n- ");
-        message.push_str(item.tool.as_str());
+        message.push_str(&item.subject);
         message.push_str(": ");
         message.push_str(&item.reason);
         message.push_str("; ");
-        message.push_str(guidance(item.tool));
+        message.push_str(item.guidance);
     }
     message
 }
 
+/// The operation set a published tool token requires (ADR 0034 §3).
+const fn tool_operations(tool: PolicyTool) -> &'static [OperationKind] {
+    match tool {
+        PolicyTool::Ffmpeg => &[
+            OperationKind::TranscodeVideo,
+            OperationKind::TranscodeAudio,
+            OperationKind::ExtractAudio,
+        ],
+        PolicyTool::Mkvtoolnix => &[OperationKind::Remux],
+        PolicyTool::Ffprobe => &[OperationKind::ProbeFile],
+    }
+}
+
 const fn guidance(tool: PolicyTool) -> &'static str {
     match tool {
-        PolicyTool::Ffmpeg => "start one with: voom worker run-local --kind ffmpeg",
-        PolicyTool::Mkvtoolnix => "start one with: voom worker run-local --kind mkvtoolnix",
+        PolicyTool::Ffmpeg => {
+            "run a node agent with an ffmpeg worker on this storage owner \
+             (voom agent documentation)"
+        }
+        PolicyTool::Mkvtoolnix => {
+            "run a node agent with an mkvtoolnix worker on this storage owner \
+             (voom agent documentation)"
+        }
         PolicyTool::Ffprobe => {
-            "verify the bundled ffprobe worker and dependency; remove a probe_file deny or retire \
-             the denied built-in incarnation"
+            "run a node agent with an ffprobe worker on this storage owner; remove any \
+             probe_file deny"
         }
     }
 }
