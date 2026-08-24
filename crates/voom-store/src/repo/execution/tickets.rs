@@ -783,6 +783,52 @@ impl SqliteTicketRepo {
         })
     }
 
+    /// List the node-local media tickets (ADR 0075) of one workflow that have
+    /// reached a terminal state, as `(ticket_id, state, operation)` triples.
+    ///
+    /// Settlement sweeps these durably: an owner-node agent can complete a
+    /// ticket between the executor's observation windows — before it was ever
+    /// observed `ready` — so durable rows, not dispatch bookkeeping alone,
+    /// are what guarantee each completion's expansion children run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query fails.
+    pub async fn terminal_workflow_media_tickets(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<Vec<(TicketId, String, String)>, VoomError> {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, state, json_extract(payload, '$.operation') \
+             FROM tickets \
+             WHERE job_id = ? \
+               AND json_extract(payload, '$.workflow_id') = ? \
+               AND state IN ('succeeded', 'failed') \
+               AND json_extract(payload, '$.operation') IN (\
+                 'probe_file', 'transcode_audio', 'extract_audio', 'transcode_video', \
+                 'remux', 'back_up_file', 'verify_artifact') \
+             ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(workflow_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("terminal media tickets", e))?;
+        let mut tickets = Vec::with_capacity(rows.len());
+        for (id, state, operation) in rows {
+            let id =
+                TicketId(u64::try_from(id).map_err(|error| {
+                    VoomError::database_context("terminal media ticket id", error)
+                })?);
+            tickets.push((id, state, operation));
+        }
+        Ok(tickets)
+    }
+
     /// Return the earliest-created failed ticket for one workflow.
     ///
     /// # Errors
