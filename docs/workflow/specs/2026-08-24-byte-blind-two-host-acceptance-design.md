@@ -51,20 +51,27 @@ architecture decision or an alternate orchestrator.
 
 ## Approaches considered
 
-### Chosen: Linux user and mount namespaces plus production processes
+### Chosen: a namespace supervisor with capability-isolated production roles
 
-A checked-in shell entrypoint launches one ignored acceptance test inside a new
-user and mount namespace. The test creates two backing trees, starts each
-production node agent in its own child mount namespace with a different backing
-tree bound at the same absolute provider paths, then covers the backing paths in
-the parent/control-plane namespace before byte work starts. The control-plane
-process can neither traverse the agent mount nor recover the covered backing
-path by spelling its host-side name.
+A checked-in shell entrypoint launches one ignored acceptance supervisor inside
+a disposable outer user/mount/PID namespace. The supervisor creates the generated
+fixtures, two owner mount namespaces, and a separate control-plane child
+user+mount namespace. Agent mounts are owned by the supervisor's user namespace;
+the control-plane child is nested beneath it and has no capability in that
+ancestor, so it cannot join an owner mount namespace through `/proc`, unmount the
+denial covers, or recover a backing alias. The two agents still see different
+backing trees at the same provider paths.
+
+The supervisor performs only fixture, namespace, signal, and cleanup mechanics.
+The isolated control-plane role runs the real SQLite/control-plane/API/CLI paths
+and exchanges bounded typed commands with the supervisor over a pre-opened local
+socket for fault timing. Before byte work, that role proves ordinary path denial
+and proves that `setns`/`nsenter` into each owner mount fails with `EPERM`.
 
 This is the smallest approach that provides a real OS/process boundary without
 privileged host mutation or a new runtime dependency. Linux `unshare`, `mount`,
 and `nsenter` are ordinary util-linux deployment tools and are preflighted by the
-entrypoint. User namespaces make the mounts hermetic and disposable for an
+entrypoint. User namespaces make the hierarchy hermetic and disposable for an
 unprivileged runner.
 
 ### Rejected: temp directories and permission bits only
@@ -117,13 +124,17 @@ A Linux-only ignored integration test owns the acceptance lifecycle. It uses
 proofs. Production crates are development-only dependencies; the crate's normal
 architecture edges remain unchanged.
 
-The harness has four focused helpers:
+The harness has five focused helpers:
 
-- `NamespaceFixture` creates generated media and the two private backing trees,
-  starts one long-lived namespace anchor per owner, and starts/restarts agent
-  processes inside those pinned mount namespaces. It covers every backing/provider
-  path in the control-plane namespace, proves denial, restores fault-renamed files
-  through the anchor, and only then tears down the anchors and covers.
+- `NamespaceSupervisor` creates generated media and two private backing trees,
+  starts one long-lived owner-mount anchor per agent, covers every backing/provider
+  alias outside those owner views, and starts/restarts agents. It never runs a
+  control-plane case or workflow.
+- `ControlPlaneRole` re-execs the exact integration-test binary inside a nested
+  user+mount namespace. It runs real SQLite, the production API router, and
+  installed CLI processes. A bounded framed local socket requests only named
+  supervisor mechanics (pause/resume/restart, owner-view rename/restore/probe).
+  The role must demonstrate `EPERM` when it attempts to join either owner mount.
 - `ProcessGuard` bounds startup and shutdown, captures bounded diagnostics, and
   kills/reaps every child on failure.
 - `ControlChannelAccounting` wraps the production API listener's accepted TCP
@@ -137,9 +148,9 @@ The harness has four focused helpers:
   requires exactly one JSON envelope, and returns the parsed envelope plus exit
   status. It does not reproduce orchestration logic.
 
-Every asynchronous wait has a named deadline. The test runs serially inside its
-private namespace and does not use global host ports, fixed temp paths, ambient
-configuration, or paused Tokio time with SQLite.
+Every asynchronous wait has a named deadline. The supervisor and isolated
+control-plane role run one serial scenario and do not use global host ports,
+fixed temp paths, ambient configuration, or paused Tokio time with SQLite.
 
 ### 3. Generated media and reference policy
 
@@ -216,11 +227,13 @@ both owner backing roots and every configured media, staging, output, backup, an
 recovery provider path. Before dispatch, the harness places a distinct sentinel
 beneath every provider root and every host-side backing alias. It then parses its
 own mount table and requires each configured path to resolve to the denial-cover
-mount identity, and requires every backing sentinel/alias open to fail. The cover
-itself may remain traversable; its emptiness and mount identity prove that the
-backing bytes are not in the control-plane view. Only then may scan or compliance
-work begin. A successful CLI workflow, output probe from inside the current owner
-namespace, and completed durable phase chain prove the workflow.
+mount identity, requires every backing sentinel/alias open to fail, and requires
+namespace entry into each owner anchor to fail with `EPERM`. The cover itself may
+remain traversable; its emptiness, mount identity, and the control-plane role's
+lack of capability in the owner namespaces prove the backing bytes are
+OS-inaccessible. Only then may scan or compliance work begin. A successful CLI
+workflow, supervisor-requested output probe inside the current owner namespace,
+and completed durable phase chain prove the workflow.
 
 ### C2 — equal paths remain distinct
 
@@ -329,9 +342,10 @@ owned paths. Cleanup is idempotent and refuses an empty or unexpected run root.
 3. **Node agent → child workers/filesystem.** Production closed-environment,
    exact-version handshake, root binding, locator containment, expected-fact,
    and no-overwrite controls remain authoritative.
-4. **Harness → mount namespace.** The local test process is trusted; the
-   acceptance claim is about accidental or compromised control-plane byte access,
-   not defense from a namespace root that intentionally unmounts its guard.
+4. **Supervisor → isolated roles.** The supervisor is the trusted test
+   orchestrator and retains namespace authority; it runs no control-plane logic.
+   The actual control-plane/API/CLI role is capability-isolated from owner mounts
+   and can request only the bounded mechanical commands on the local control socket.
 5. **Operator runbook → remote host.** The operator is trusted, but existing
    library data is not expendable. A unique run ID, path-prefix checks, quoted
    argv, manifest comparison, and explicit owned-path list bound cleanup.
