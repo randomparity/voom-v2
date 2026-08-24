@@ -317,6 +317,41 @@ async fn a_node_without_an_active_incarnation_reports_it() {
     );
 }
 
+#[tokio::test]
+async fn an_expired_owner_heartbeat_is_not_ready_before_the_stale_reaper_runs() {
+    let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "expired-heartbeat-node",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+    sqlx::query(
+        "UPDATE nodes SET last_seen_at = '1970-01-01T00:00:00Z', \
+         heartbeat_ttl_seconds = 1 WHERE id = ?1",
+    )
+    .bind(i64::try_from(owner.node_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = cp
+        .preflight_policy_tools(
+            &mut policy_requiring(&["ffmpeg"]),
+            &one_target(file_version_id),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("owner node heartbeat has expired"),
+        "{error}"
+    );
+}
+
 /// Wrong child identity, protocol-version mismatch, and executable-preflight
 /// failure all end initial agent startup through this same durable residue.
 #[tokio::test]
@@ -512,6 +547,53 @@ async fn an_unlocated_target_is_reported_before_tool_observation() {
     );
 }
 
+#[tokio::test]
+async fn a_policy_without_owner_scoped_requirements_does_not_resolve_targets() {
+    let (cp, _tmp) = cp().await;
+
+    cp.preflight_policy_tools(
+        &mut policy_requiring(&[]),
+        &one_target(FileVersionId(424_242)),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_unavailable_storage_root_is_not_ready_even_with_a_healthy_owner() {
+    let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "unavailable-root-owner",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+    let root_id: i64 =
+        sqlx::query_scalar("SELECT storage_root_id FROM file_locations WHERE file_version_id = ?1")
+            .bind(i64::try_from(file_version_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    sqlx::query("UPDATE library_roots SET state = 'unavailable' WHERE id = ?1")
+        .bind(root_id)
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let error = cp
+        .preflight_policy_tools(
+            &mut policy_requiring(&["ffmpeg"]),
+            &one_target(file_version_id),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("storage root is unavailable"),
+        "{error}"
+    );
+}
 #[tokio::test]
 async fn unavailable_requirements_are_aggregated_in_metadata_order() {
     let (cp, _tmp) = cp().await;
@@ -965,7 +1047,9 @@ async fn preflight_video_hardware_for_test(
             live_worker_ids,
         },
     )]);
-    cp.preflight_video_hardware(policy, &owners).await
+    let requirements = super::policy_video_backend_requirements(policy)?;
+    cp.preflight_video_hardware(&policy.slug, &requirements, &owners)
+        .await
 }
 
 /// The `backend`-tagged extras a VAAPI-bound worker stores, per ADR 0052 §1: the

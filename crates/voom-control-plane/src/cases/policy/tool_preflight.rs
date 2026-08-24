@@ -8,6 +8,7 @@ use voom_policy::compiled::CompiledTranscodeVideoOperation;
 use voom_policy::{CompiledOperation, CompiledPolicy, PolicyTool, VideoProfileRef};
 use voom_store::repo::execution::nodes::NodeStatus;
 use voom_store::repo::execution::workers::{Worker, WorkerOperationCandidate, WorkerStatus};
+use voom_store::repo::library::library_roots::RootAvailabilityReason;
 use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use crate::ControlPlane;
@@ -49,15 +50,23 @@ struct OwnerWorkerSet {
 }
 
 /// Why the node itself cannot vouch for any worker right now.
-fn node_readiness_problem(node: &voom_store::repo::execution::nodes::Node) -> Option<String> {
+fn node_readiness_problem(
+    node: &voom_store::repo::execution::nodes::Node,
+    now: time::OffsetDateTime,
+) -> Option<String> {
     match node.status {
         NodeStatus::Retired => Some("owner node is retired".to_owned()),
         NodeStatus::Stale => Some("owner node is stale; its agent must re-register".to_owned()),
         NodeStatus::Registered | NodeStatus::Active => {
-            if node.active_incarnation_id.is_some() {
-                None
+            if node.active_incarnation_id.is_none() {
+                return Some("owner node has no active agent incarnation".to_owned());
+            }
+            let expires_at =
+                node.last_seen_at + time::Duration::seconds(i64::from(node.heartbeat_ttl_seconds));
+            if expires_at <= now {
+                Some("owner node heartbeat has expired; its agent must reconnect".to_owned())
             } else {
-                Some("owner node has no active agent incarnation".to_owned())
+                None
             }
         }
     }
@@ -85,6 +94,10 @@ impl ControlPlane {
         targets: &[PolicyToolTarget],
     ) -> Result<(), VoomError> {
         let tools = normalize_policy_tool_requirements(policy)?;
+        let video_requirements = policy_video_backend_requirements(policy)?;
+        if tools.is_empty() && !video_requirements.any() {
+            return Ok(());
+        }
 
         let mut unavailable = Vec::new();
         let mut owners: BTreeSet<NodeId> = BTreeSet::new();
@@ -109,7 +122,8 @@ impl ControlPlane {
                 &unavailable,
             )));
         }
-        self.preflight_video_hardware(policy, &owner_workers).await
+        self.preflight_video_hardware(&policy.slug, &video_requirements, &owner_workers)
+            .await
     }
 
     /// Resolve one stored target to the node that owns its storage.
@@ -133,9 +147,9 @@ impl ControlPlane {
             }
         };
         let (storage_root_id, _) = location.rooted_address()?;
-        let root = self
+        let effective = self
             .libraries
-            .get_library_root(storage_root_id)
+            .effective_library_root(storage_root_id)
             .await?
             .ok_or_else(|| {
                 VoomError::database(format!(
@@ -143,7 +157,26 @@ impl ControlPlane {
                     storage_root_id.0, location.id.0
                 ))
             })?;
-        match root.owner_node_id {
+        match effective.reason {
+            RootAvailabilityReason::Available
+            | RootAvailabilityReason::OwnerRegistered
+            | RootAvailabilityReason::OwnerStale
+            | RootAvailabilityReason::OwnerRetired => {}
+            RootAvailabilityReason::LibraryDisabled
+            | RootAvailabilityReason::RootDisabled
+            | RootAvailabilityReason::RootUnassigned
+            | RootAvailabilityReason::RootNotActive => {
+                return Ok(TargetOwner::Unavailable(UnavailableTool {
+                    subject: format!("{subject} (storage root {})", storage_root_id.0),
+                    reason: format!(
+                        "the storage root is unavailable: {}",
+                        effective.reason.as_str()
+                    ),
+                    guidance: "restore the storage root before executing",
+                }));
+            }
+        }
+        match effective.root.owner_node_id {
             Some(owner) => Ok(TargetOwner::Owned(owner)),
             None => Ok(TargetOwner::Unavailable(UnavailableTool {
                 subject: format!("{subject} (storage root {})", storage_root_id.0),
@@ -166,7 +199,7 @@ impl ControlPlane {
         let node = self.nodes.get(node_id).await?.ok_or_else(|| {
             VoomError::database(format!("owner node {node_id} disappeared during preflight"))
         })?;
-        if let Some(reason) = node_readiness_problem(&node) {
+        if let Some(reason) = node_readiness_problem(&node, self.clock().now()) {
             push_all_unavailable(unavailable, tools, &node.name, &reason);
             return Ok(OwnerWorkerSet {
                 node_name: node.name,
@@ -231,15 +264,11 @@ impl ControlPlane {
 
     async fn preflight_video_hardware(
         &self,
-        policy: &CompiledPolicy,
+        policy_slug: &str,
+        requirements: &VideoBackendRequirements,
         owner_workers: &BTreeMap<NodeId, OwnerWorkerSet>,
     ) -> Result<(), VoomError> {
-        let requirements = policy_video_backend_requirements(policy)?;
-        if !requirements.software
-            && !requirements.nvidia.required
-            && !requirements.vaapi.required
-            && !requirements.videotoolbox.required
-        {
+        if !requirements.any() {
             return Ok(());
         }
         let candidates = self
@@ -249,9 +278,9 @@ impl ControlPlane {
         let mut missing = Vec::new();
         for owner in owner_workers.values() {
             let availability =
-                backend_availability(&candidates, &owner.live_worker_ids, &requirements);
+                backend_availability(&candidates, &owner.live_worker_ids, requirements);
             missing.extend(missing_backend_workers(
-                &requirements,
+                requirements,
                 &availability,
                 &owner.node_name,
             ));
@@ -260,8 +289,7 @@ impl ControlPlane {
             return Ok(());
         }
         Err(VoomError::PolicyExecution(format!(
-            "video hardware preflight failed for policy `{}`:\n- {}",
-            policy.slug,
+            "video hardware preflight failed for policy `{policy_slug}`:\n- {}",
             missing.join("\n- ")
         )))
     }
@@ -445,6 +473,12 @@ struct VideoBackendRequirements {
     /// must check the device advertises the specific encoders the policy names
     /// rather than only that some `VideoToolbox` device is bound.
     videotoolbox_encoders: BTreeSet<String>,
+}
+
+impl VideoBackendRequirements {
+    fn any(&self) -> bool {
+        self.software || self.nvidia.required || self.vaapi.required || self.videotoolbox.required
+    }
 }
 
 fn policy_video_backend_requirements(
