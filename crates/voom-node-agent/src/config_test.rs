@@ -43,8 +43,16 @@ max_sessions = 2
     );
 
     let transcode_document = fixture.document.replace(
-        "operations = [\"probe_file\"]",
+        "operations = [\"hash_file\"]",
         "operations = [\"transcode_video\"]",
+    );
+    let ffmpeg = fixture.write_dependency("ffmpeg", true);
+    let ffprobe = fixture.write_dependency("ffprobe", true);
+    let transcode_document = with_dependencies(
+        &transcode_document,
+        Some(ffmpeg.as_path()),
+        Some(ffprobe.as_path()),
+        None,
     );
     fixture.rewrite(&format!("{transcode_document}{descriptor}"));
     let loaded = AgentConfig::load(&fixture.config_path).unwrap();
@@ -59,6 +67,173 @@ max_sessions = 2
         "{transcode_document}{descriptor}unknown_descriptor_field = true\n",
     ));
     assert!(AgentConfig::load(&fixture.config_path).is_err());
+}
+
+#[test]
+fn config_accepts_absolute_dependency_paths_and_rejects_path_lookup() {
+    let fixture = ConfigFixture::new("token");
+    let ffprobe = fixture.write_dependency("ffprobe", true);
+    let probe_document = fixture.document.replace(
+        "operations = [\"hash_file\"]",
+        "operations = [\"probe_file\"]",
+    );
+    let document = with_dependencies(&probe_document, None, Some(ffprobe.as_path()), None);
+    fixture.rewrite(&document);
+    let loaded = AgentConfig::load(&fixture.config_path).unwrap();
+    assert_eq!(
+        loaded.config.workers[0].dependencies.ffprobe_bin.as_deref(),
+        Some(ffprobe.as_path())
+    );
+    let debug = format!("{loaded:?}");
+    assert!(!debug.contains(&ffprobe.display().to_string()));
+    assert!(debug.contains("[CONFIGURED]"));
+
+    fixture.rewrite(&with_dependencies(
+        &probe_document,
+        None,
+        Some(Path::new("ffprobe")),
+        None,
+    ));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(
+        error
+            .to_string()
+            .contains("dependencies.ffprobe_bin must be an absolute path"),
+        "{error}"
+    );
+}
+
+#[test]
+fn config_rejects_missing_non_file_and_non_executable_dependencies() {
+    let fixture = ConfigFixture::new("token");
+    let missing = fixture.path("missing-ffprobe");
+    let non_executable = fixture.write_dependency("non-executable-ffprobe", false);
+    let probe_document = fixture.document.replace(
+        "operations = [\"hash_file\"]",
+        "operations = [\"probe_file\"]",
+    );
+    for (path, diagnostic) in [
+        (missing.as_path(), "existing regular file"),
+        (fixture.temp_path(), "regular file"),
+        (non_executable.as_path(), "executable"),
+    ] {
+        fixture.rewrite(&with_dependencies(&probe_document, None, Some(path), None));
+        let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+        assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+        assert!(
+            error.to_string().contains("dependencies.ffprobe_bin")
+                && error.to_string().contains(diagnostic),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn config_scopes_dependency_paths_to_the_workers_that_need_them() {
+    let fixture = ConfigFixture::new("token");
+    let ffmpeg = fixture.write_dependency("ffmpeg", true);
+    let ffprobe = fixture.write_dependency("ffprobe", true);
+    let nvidia_smi = fixture.write_dependency("nvidia-smi", true);
+
+    fixture.rewrite(&with_dependencies(
+        &fixture.document,
+        Some(ffmpeg.as_path()),
+        Some(ffprobe.as_path()),
+        None,
+    ));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("dependencies.ffmpeg_bin is only valid for transcode_video"),
+        "{error}"
+    );
+
+    let transcode = fixture.document.replace(
+        "operations = [\"hash_file\"]",
+        "operations = [\"transcode_video\"]",
+    );
+    fixture.rewrite(&transcode);
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("dependencies.ffmpeg_bin is required for transcode_video"),
+        "{error}"
+    );
+    fixture.rewrite(&with_dependencies(
+        &transcode,
+        Some(ffmpeg.as_path()),
+        Some(ffprobe.as_path()),
+        Some(nvidia_smi.as_path()),
+    ));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("dependencies.nvidia_smi_bin is only valid for an NVIDIA accelerator"),
+        "{error}"
+    );
+
+    let nvidia = r#"
+
+[workers.accelerator]
+backend = "nvidia"
+hardware_token = "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+device_uuid = "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+device_name = "RTX A6000"
+driver_version = "595.80"
+encoders = ["hevc_nvenc"]
+decoders = ["hevc_cuvid"]
+max_sessions = 2
+"#;
+    let dependencies = with_dependencies(
+        &transcode,
+        Some(ffmpeg.as_path()),
+        Some(ffprobe.as_path()),
+        None,
+    );
+    fixture.rewrite(&format!("{dependencies}{nvidia}"));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("dependencies.nvidia_smi_bin is required for an NVIDIA accelerator"),
+        "{error}"
+    );
+}
+
+#[test]
+fn config_requires_ffmpeg_and_ffprobe_paths_for_every_ffmpeg_operation() {
+    let fixture = ConfigFixture::new("token");
+    let ffmpeg = fixture.write_dependency("ffmpeg", true);
+    let ffprobe = fixture.write_dependency("ffprobe", true);
+    for operation in ["transcode_audio", "extract_audio"] {
+        let document = fixture.document.replace(
+            "operations = [\"hash_file\"]",
+            &format!("operations = [\"{operation}\"]"),
+        );
+        fixture.rewrite(&document);
+        let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("dependencies.ffmpeg_bin is required"),
+            "{operation}: {error}"
+        );
+
+        fixture.rewrite(&with_dependencies(
+            &document,
+            Some(ffmpeg.as_path()),
+            Some(ffprobe.as_path()),
+            None,
+        ));
+        assert!(
+            AgentConfig::load(&fixture.config_path).is_ok(),
+            "{operation}"
+        );
+    }
 }
 
 #[test]
@@ -131,10 +306,10 @@ fn config_rejects_invalid_worker_manifests() {
             .replace("name = \"echo\"", &format!("name = \"{}\"", "a".repeat(65))),
         fixture
             .document
-            .replace("operations = [\"probe_file\"]", "operations = []"),
+            .replace("operations = [\"hash_file\"]", "operations = []"),
         fixture.document.replace(
-            "operations = [\"probe_file\"]",
-            "operations = [\"probe_file\", \"probe_file\"]",
+            "operations = [\"hash_file\"]",
+            "operations = [\"hash_file\", \"hash_file\"]",
         ),
         fixture.document.replace(
             "artifact_access = [\"shared_mount\"]",
@@ -221,7 +396,7 @@ fn config_accepts_https_and_explicit_loopback_http_only() {
 }
 
 struct ConfigFixture {
-    _temp: TempDir,
+    temp: TempDir,
     config_path: std::path::PathBuf,
     token_path: std::path::PathBuf,
     document: String,
@@ -236,7 +411,7 @@ impl ConfigFixture {
         let document = valid_document(&token_path);
         std::fs::write(&config_path, &document).unwrap();
         Self {
-            _temp: temp,
+            temp,
             config_path,
             token_path,
             document,
@@ -245,6 +420,24 @@ impl ConfigFixture {
 
     fn rewrite(&self, document: &str) {
         std::fs::write(&self.config_path, document).unwrap();
+    }
+
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        self.temp.path().join(name)
+    }
+
+    fn temp_path(&self) -> &Path {
+        self.temp.path()
+    }
+
+    fn write_dependency(&self, name: &str, executable: bool) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = self.path(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mode = if executable { 0o700 } else { 0o600 };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
     }
 }
 
@@ -265,7 +458,7 @@ path = "{}"
 name = "echo"
 program = "/bin/echo"
 args = []
-operations = ["probe_file"]
+operations = ["hash_file"]
 artifact_access = ["shared_mount"]
 max_parallel = 1
 "#,
@@ -280,11 +473,32 @@ fn worker_document(name: &str) -> String {
 name = "{name}"
 program = "/bin/echo"
 args = []
-operations = ["probe_file"]
+operations = ["hash_file"]
 artifact_access = ["shared_mount"]
 max_parallel = 1
 "#
     )
+}
+
+fn with_dependencies(
+    document: &str,
+    ffmpeg_bin: Option<&Path>,
+    ffprobe_bin: Option<&Path>,
+    nvidia_smi_bin: Option<&Path>,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut document = format!("{document}\n[workers.dependencies]\n");
+    for (name, path) in [
+        ("ffmpeg_bin", ffmpeg_bin),
+        ("ffprobe_bin", ffprobe_bin),
+        ("nvidia_smi_bin", nvidia_smi_bin),
+    ] {
+        if let Some(path) = path {
+            writeln!(document, "{name} = {:?}", path.display().to_string()).unwrap();
+        }
+    }
+    document
 }
 
 fn replace_assignment(document: &str, key: &str, value: &str) -> String {

@@ -1893,6 +1893,7 @@ printf 'exited\n' > "$4"
             ],
             operations: vec![OperationKind::ProbeFile],
             artifact_access: vec![ArtifactAccessMode::SharedMount],
+            dependencies: crate::config::WorkerDependencyPaths::default(),
             accelerator: None,
             max_parallel,
         }
@@ -2109,6 +2110,7 @@ fn worker() -> WorkerConfig {
         args: Vec::new(),
         operations: vec![OperationKind::ProbeFile],
         artifact_access: vec![ArtifactAccessMode::SharedMount],
+        dependencies: crate::config::WorkerDependencyPaths::default(),
         accelerator: None,
         max_parallel: 2,
     }

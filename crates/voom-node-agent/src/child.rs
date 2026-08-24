@@ -16,7 +16,7 @@ use voom_worker_protocol::{
     VIDEOTOOLBOX_PREFLIGHT_BUDGET, VideoAcceleratorDescriptor, WorkerCredentials,
 };
 
-use crate::config::WorkerConfig;
+use crate::config::{WorkerConfig, WorkerDependencyPaths};
 
 const READINESS_LIMIT_BYTES: usize = 4 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -87,6 +87,7 @@ pub struct ChildSpec {
     program: PathBuf,
     args: Vec<OsString>,
     credentials: WorkerCredentials,
+    dependencies: WorkerDependencyPaths,
     accelerator: Option<VideoAcceleratorDescriptor>,
 }
 
@@ -99,7 +100,7 @@ impl std::fmt::Debug for ChildSpec {
             .field("args", &self.args)
             .field("credentials", &self.credentials)
             .field("accelerator", &self.accelerator)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -110,6 +111,7 @@ impl ChildSpec {
             logical_name: config.name.clone(),
             program: config.program.clone(),
             args: config.args.iter().map(OsString::from).collect(),
+            dependencies: config.dependencies.clone(),
             accelerator: config.accelerator.clone(),
             credentials,
         }
@@ -400,6 +402,7 @@ async fn launch(spec: ChildSpec, startup_timeout: Duration) -> Result<RunningChi
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
+    apply_dependency_environment(&mut command, &spec.dependencies);
     apply_accelerator_environment(&mut command, spec.accelerator.as_ref());
     let mut child = command.spawn().map_err(|error| {
         ChildError::startup(
@@ -490,6 +493,18 @@ async fn read_verified_endpoint(
         ));
     };
     Ok(endpoint)
+}
+
+fn apply_dependency_environment(command: &mut Command, dependencies: &WorkerDependencyPaths) {
+    for (name, path) in [
+        ("VOOM_FFMPEG_BIN", dependencies.ffmpeg_bin.as_ref()),
+        ("VOOM_FFPROBE_BIN", dependencies.ffprobe_bin.as_ref()),
+        ("VOOM_NVIDIA_SMI_BIN", dependencies.nvidia_smi_bin.as_ref()),
+    ] {
+        if let Some(path) = path {
+            command.env(name, path.as_os_str());
+        }
+    }
 }
 
 fn apply_accelerator_environment(

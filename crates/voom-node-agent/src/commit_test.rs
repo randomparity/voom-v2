@@ -793,6 +793,7 @@ fn sample_agent_config() -> AgentConfig {
             args: vec![],
             operations: vec![OperationKind::HashFile],
             artifact_access: vec![ArtifactAccessMode::SharedMount],
+            dependencies: crate::config::WorkerDependencyPaths::default(),
             accelerator: None,
             max_parallel: 1,
         }],

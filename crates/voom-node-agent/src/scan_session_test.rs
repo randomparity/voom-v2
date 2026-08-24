@@ -605,6 +605,7 @@ fn registry_with(
         args: Vec::new(),
         operations: vec![operation],
         artifact_access: vec![voom_core::ArtifactAccessMode::SharedMount],
+        dependencies: crate::config::WorkerDependencyPaths::default(),
         accelerator: None,
         max_parallel: 1,
     };

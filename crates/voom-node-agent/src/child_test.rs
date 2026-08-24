@@ -12,6 +12,8 @@ use voom_worker_protocol::{
     VideoAcceleratorDescriptor, VideoToolboxVideoAcceleratorDescriptor, WorkerCredentials,
 };
 
+use crate::config::WorkerDependencyPaths;
+
 use super::*;
 
 #[test]
@@ -115,11 +117,45 @@ async fn child_receives_direct_argv_and_exact_environment_then_exits_on_eof() {
 }
 
 #[tokio::test]
-async fn accelerator_child_receives_selection_environment_and_proves_exact_metadata() {
+async fn probe_child_receives_only_its_explicit_ffprobe_dependency() {
+    let credentials = credentials(9, 4, "probe-secret");
+    let server = identity_server(credentials.clone()).await;
+    let fixture = NativeChildFixture::new(server.bound());
+    let ffprobe = fixture.write_dependency("ffprobe");
+    let spec = fixture.spec_for(
+        "probe",
+        credentials,
+        &[],
+        vec![OperationKind::ProbeFile],
+        WorkerDependencyPaths {
+            ffprobe_bin: Some(ffprobe.clone()),
+            ..WorkerDependencyPaths::default()
+        },
+    );
+    let supervisor =
+        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(200));
+
+    let children = supervisor.start_all(vec![spec]).await.unwrap();
+    let record = fixture.record();
+    assert_eq!(
+        record.env.get("VOOM_FFPROBE_BIN").map(String::as_str),
+        ffprobe.to_str()
+    );
+    assert!(!record.env.contains_key("VOOM_FFMPEG_BIN"));
+    assert!(!record.env.contains_key("VOOM_NVIDIA_SMI_BIN"));
+    assert!(!record.env.contains_key("PATH"));
+    assert_eq!(record.env.len(), 5, "unexpected child environment size");
+
+    supervisor.shutdown_all(children).await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn accelerator_child_reaches_ready_with_explicit_dependencies_and_cleared_environment() {
     let credentials = credentials(17, 5, "accelerator-secret");
     let server = identity_server(credentials.clone()).await;
     let fixture = ChildFixture::new();
-    let descriptor = vaapi_descriptor();
+    let descriptor = VideoAcceleratorDescriptor::Nvidia(nvidia_descriptor_data());
     let bound = LocalWorkerBound {
         addr: SocketAddr::V4(server.bound()),
         accelerator: Some(descriptor.clone()),
@@ -130,36 +166,63 @@ async fn accelerator_child_receives_selection_environment_and_proves_exact_metad
         true,
         false,
     );
+    let dependencies = WorkerDependencyPaths {
+        ffmpeg_bin: Some(fixture.write_dependency("ffmpeg")),
+        ffprobe_bin: Some(fixture.write_dependency("ffprobe")),
+        nvidia_smi_bin: Some(fixture.write_dependency("nvidia-smi")),
+    };
     let supervisor =
         ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(200));
     let children = supervisor
-        .start_all(vec![fixture.spec_with_accelerator(
+        .start_all(vec![fixture.spec_with_accelerator_and_dependencies(
             "ffmpeg",
             credentials.clone(),
             &[],
             Some(descriptor.clone()),
+            dependencies.clone(),
         )])
         .await
         .unwrap();
     let record = fixture.record();
-    assert_eq!(
-        record.env.get("VOOM_VAAPI_DEVICE").map(String::as_str),
-        Some("0000:f4:00.0")
-    );
-    assert_eq!(
-        record
-            .env
-            .get("VOOM_VAAPI_MAX_SESSIONS")
-            .map(String::as_str),
-        Some("2")
-    );
+    for (name, expected) in [
+        (
+            "VOOM_NVIDIA_DEVICE",
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+        ("VOOM_NVIDIA_MAX_SESSIONS", "2"),
+        (
+            "CUDA_VISIBLE_DEVICES",
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+    ] {
+        assert_eq!(record.env.get(name).map(String::as_str), Some(expected));
+    }
+    for (name, expected) in [
+        ("VOOM_FFMPEG_BIN", dependencies.ffmpeg_bin.as_ref().unwrap()),
+        (
+            "VOOM_FFPROBE_BIN",
+            dependencies.ffprobe_bin.as_ref().unwrap(),
+        ),
+        (
+            "VOOM_NVIDIA_SMI_BIN",
+            dependencies.nvidia_smi_bin.as_ref().unwrap(),
+        ),
+    ] {
+        assert_eq!(
+            record.env.get(name).map(String::as_str),
+            expected.to_str(),
+            "{name}"
+        );
+    }
+    assert!(!record.env.contains_key("PATH"));
+    assert_dependency_paths_redacted(&children[0], &dependencies);
     supervisor.shutdown_all(children).await.unwrap();
 
-    let mut mismatched = vaapi_descriptor_data();
+    let mut mismatched = nvidia_descriptor_data();
     mismatched.driver_version = "different driver".to_owned();
     let bound = LocalWorkerBound {
         addr: SocketAddr::V4(server.bound()),
-        accelerator: Some(VideoAcceleratorDescriptor::Vaapi(mismatched)),
+        accelerator: Some(VideoAcceleratorDescriptor::Nvidia(mismatched)),
     };
     fixture.write(
         &format!("BOUND {}", serde_json::to_string(&bound).unwrap()),
@@ -168,11 +231,12 @@ async fn accelerator_child_receives_selection_environment_and_proves_exact_metad
         false,
     );
     let error = supervisor
-        .start_all(vec![fixture.spec_with_accelerator(
+        .start_all(vec![fixture.spec_with_accelerator_and_dependencies(
             "ffmpeg",
             credentials,
             &[],
             Some(descriptor),
+            dependencies,
         )])
         .await
         .unwrap_err();
@@ -420,14 +484,14 @@ async fn wrong_protocol_server() -> WrongProtocolServer {
 }
 
 struct ChildFixture {
-    _temp: TempDir,
+    temp: TempDir,
     script: PathBuf,
     record_path: PathBuf,
     exited: PathBuf,
 }
 
 struct NativeChildFixture {
-    _temp: TempDir,
+    temp: TempDir,
     program: PathBuf,
     record_path: PathBuf,
     exited: PathBuf,
@@ -471,7 +535,7 @@ fn main() {
             .unwrap();
         assert!(status.success());
         Self {
-            _temp: temp,
+            temp,
             program,
             record_path,
             exited,
@@ -485,6 +549,23 @@ fn main() {
         credentials: WorkerCredentials,
         operator_args: &[&str],
     ) -> ChildSpec {
+        self.spec_for(
+            name,
+            credentials,
+            operator_args,
+            vec![OperationKind::HashFile],
+            WorkerDependencyPaths::default(),
+        )
+    }
+
+    fn spec_for(
+        &self,
+        name: &str,
+        credentials: WorkerCredentials,
+        operator_args: &[&str],
+        operations: Vec<OperationKind>,
+        dependencies: WorkerDependencyPaths,
+    ) -> ChildSpec {
         let mut args = vec![
             self.record_path.display().to_string(),
             self.exited.display().to_string(),
@@ -496,13 +577,21 @@ fn main() {
                 name: name.to_owned(),
                 program: self.program.clone(),
                 args,
-                operations: vec![OperationKind::ProbeFile],
+                operations,
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
+                dependencies,
                 accelerator: None,
                 max_parallel: 1,
             },
             credentials,
         )
+    }
+
+    fn write_dependency(&self, name: &str) -> PathBuf {
+        let path = self.temp.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&path);
+        path
     }
 
     fn record(&self) -> ChildRecord {
@@ -535,7 +624,7 @@ impl ChildFixture {
             script: temp.path().join("worker.py"),
             record_path: temp.path().join("record.json"),
             exited: temp.path().join("exited"),
-            _temp: temp,
+            temp,
         }
     }
 
@@ -577,15 +666,22 @@ sys.stdout.flush()
         credentials: WorkerCredentials,
         operator_args: &[&str],
     ) -> ChildSpec {
-        self.spec_with_accelerator(name, credentials, operator_args, None)
+        self.spec_with_accelerator_and_dependencies(
+            name,
+            credentials,
+            operator_args,
+            None,
+            WorkerDependencyPaths::default(),
+        )
     }
 
-    fn spec_with_accelerator(
+    fn spec_with_accelerator_and_dependencies(
         &self,
         name: &str,
         credentials: WorkerCredentials,
         operator_args: &[&str],
         accelerator: Option<VideoAcceleratorDescriptor>,
+        dependencies: WorkerDependencyPaths,
     ) -> ChildSpec {
         let mut args = vec![
             self.script.display().to_string(),
@@ -593,18 +689,31 @@ sys.stdout.flush()
             self.exited.display().to_string(),
         ];
         args.extend(operator_args.iter().map(ToString::to_string));
+        let operations = if accelerator.is_some() {
+            vec![OperationKind::TranscodeVideo]
+        } else {
+            vec![OperationKind::HashFile]
+        };
         ChildSpec::from_worker(
             &WorkerConfig {
                 name: name.to_owned(),
                 program: PathBuf::from("/usr/bin/python3"),
                 args,
-                operations: vec![OperationKind::ProbeFile],
+                operations,
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
+                dependencies,
                 accelerator,
                 max_parallel: 1,
             },
             credentials,
         )
+    }
+
+    fn write_dependency(&self, name: &str) -> PathBuf {
+        let path = self.temp.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&path);
+        path
     }
 
     /// Read the record the child writes on start, waiting briefly for it to appear.
@@ -627,6 +736,16 @@ sys.stdout.flush()
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+fn assert_dependency_paths_redacted(child: &RunningChild, dependencies: &WorkerDependencyPaths) {
+    let child_debug = format!("{child:?}");
+    for path in [
+        dependencies.ffmpeg_bin.as_ref().unwrap(),
+        dependencies.ffprobe_bin.as_ref().unwrap(),
+        dependencies.nvidia_smi_bin.as_ref().unwrap(),
+    ] {
+        assert!(!child_debug.contains(&path.display().to_string()));
     }
 }
 

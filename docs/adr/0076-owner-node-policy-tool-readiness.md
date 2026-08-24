@@ -57,13 +57,17 @@ up.
    - video-backend readiness uses only those same owner's effective
      `transcode_video` candidates. An activation declaration for such a worker
      may carry one tagged `VideoAcceleratorDescriptor`. The node-agent
-     configuration pins the expected probe result and supplies only its stable
-     identity and session limit to the child. After dependency preflight, the
-     child returns its actual structured `LocalWorkerBound` descriptor. The
-     supervisor requires an exact match before it reports ready. Activation
-     writes the verified-equal declaration's stable token to
+     configuration pins the expected probe result and absolute executable paths
+     for each media-tool dependency. Its closed child environment carries only
+     those dependency paths plus stable accelerator identity and session limit;
+     it does not carry ambient `PATH`. After dependency preflight, the child
+     returns its actual structured `LocalWorkerBound` descriptor. The supervisor
+     requires an exact match before it reports ready. Descriptor strings,
+     collections, duplicates, and encoded size are bounded before activation.
+     Activation writes the verified-equal declaration's stable token to
      `worker_capabilities.hardware` and the descriptor to
-     `worker_capabilities.extra.accelerator`, the existing scheduler contract.
+     `worker_capabilities.extra.accelerator` only on that worker's
+     `transcode_video` capability row; other operation rows remain empty.
 
    A healthy worker or matching accelerator on any other node contributes
    nothing to a target it does not own.
@@ -115,11 +119,11 @@ up.
   control-plane execution path made those providers unable to serve remote
   leases anyway.
 - There is no schema migration: existing worker status and capability columns
-  carry the facts. The activation payload and node-agent worker configuration
-  add the optional tagged accelerator descriptor, and the remote execution API
-  adds the authenticated worker-readiness transition. This is a coordinated
-  protocol/configuration contract change, not a read-only reinterpretation of
-  old rows.
+  carry the facts. The activation payload adds the optional bounded tagged
+  accelerator descriptor, node-agent worker configuration adds explicit
+  dependency paths, and the remote execution API adds the authenticated
+  worker-readiness transition. This is a coordinated protocol/configuration
+  contract change, not a read-only reinterpretation of old rows.
 
 ## Considered and rejected alternatives
 

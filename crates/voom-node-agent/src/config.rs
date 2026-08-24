@@ -50,8 +50,41 @@ pub struct WorkerConfig {
     pub operations: Vec<OperationKind>,
     pub artifact_access: Vec<ArtifactAccessMode>,
     #[serde(default)]
+    pub dependencies: WorkerDependencyPaths,
+    #[serde(default)]
     pub accelerator: Option<VideoAcceleratorDescriptor>,
     pub max_parallel: u32,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerDependencyPaths {
+    #[serde(default)]
+    pub ffmpeg_bin: Option<PathBuf>,
+    #[serde(default)]
+    pub ffprobe_bin: Option<PathBuf>,
+    #[serde(default)]
+    pub nvidia_smi_bin: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for WorkerDependencyPaths {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerDependencyPaths")
+            .field(
+                "ffmpeg_bin",
+                &self.ffmpeg_bin.as_ref().map(|_| "[CONFIGURED]"),
+            )
+            .field(
+                "ffprobe_bin",
+                &self.ffprobe_bin.as_ref().map(|_| "[CONFIGURED]"),
+            )
+            .field(
+                "nvidia_smi_bin",
+                &self.nvidia_smi_bin.as_ref().map(|_| "[CONFIGURED]"),
+            )
+            .finish()
+    }
 }
 
 /// One storage root this node owns byte work for: the control plane addresses
@@ -216,8 +249,101 @@ impl WorkerConfig {
                 .validate_declaration()
                 .map_err(|message| config_error(format!("worker {:?} {message}", self.name)))?;
         }
+        self.validate_dependencies()?;
         Ok(())
     }
+
+    fn validate_dependencies(&self) -> Result<(), VoomError> {
+        let uses_ffmpeg = self.operations.contains(&OperationKind::TranscodeVideo)
+            || self.operations.contains(&OperationKind::TranscodeAudio)
+            || self.operations.contains(&OperationKind::ExtractAudio);
+        let uses_ffprobe = uses_ffmpeg || self.operations.contains(&OperationKind::ProbeFile);
+        let uses_nvidia = match self.accelerator.as_ref() {
+            Some(VideoAcceleratorDescriptor::Nvidia(_)) => true,
+            Some(
+                VideoAcceleratorDescriptor::Vaapi(_) | VideoAcceleratorDescriptor::VideoToolbox(_),
+            )
+            | None => false,
+        };
+        validate_dependency_path(
+            &self.name,
+            "ffmpeg_bin",
+            self.dependencies.ffmpeg_bin.as_deref(),
+            uses_ffmpeg,
+            "transcode_video, transcode_audio, or extract_audio",
+        )?;
+        validate_dependency_path(
+            &self.name,
+            "ffprobe_bin",
+            self.dependencies.ffprobe_bin.as_deref(),
+            uses_ffprobe,
+            "probe_file or an FFmpeg operation",
+        )?;
+        validate_dependency_path(
+            &self.name,
+            "nvidia_smi_bin",
+            self.dependencies.nvidia_smi_bin.as_deref(),
+            uses_nvidia,
+            "an NVIDIA accelerator",
+        )
+    }
+}
+
+fn validate_dependency_path(
+    worker_name: &str,
+    field: &str,
+    path: Option<&Path>,
+    required: bool,
+    purpose: &str,
+) -> Result<(), VoomError> {
+    let Some(path) = path else {
+        if required {
+            return Err(config_error(format!(
+                "worker {worker_name:?} dependencies.{field} is required for {purpose} and must \
+                 name an absolute executable file"
+            )));
+        }
+        return Ok(());
+    };
+    if !required {
+        return Err(config_error(format!(
+            "worker {worker_name:?} dependencies.{field} is only valid for {purpose}"
+        )));
+    }
+    if !path.is_absolute() {
+        return Err(config_error(format!(
+            "worker {worker_name:?} dependencies.{field} must be an absolute path"
+        )));
+    }
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        config_error(format!(
+            "worker {worker_name:?} dependencies.{field} must name an existing regular file: \
+             {error}"
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(config_error(format!(
+            "worker {worker_name:?} dependencies.{field} must name a regular file"
+        )));
+    }
+    if !is_executable(&metadata) {
+        return Err(config_error(format!(
+            "worker {worker_name:?} dependencies.{field} must name an executable regular file"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
 }
 
 fn validate_url(raw: &str) -> Result<(), VoomError> {

@@ -25,8 +25,9 @@ sudo install -o voom -g voom -m 0600 node-token /etc/voom/node-token
 ## Configure the agent
 
 The configuration is strict TOML: unknown or duplicate fields, invalid bounds, relative
-worker programs, duplicate worker names/capabilities, and empty capability lists stop
-startup. This example reads the token from a file:
+worker programs, dependency paths that are relative, missing, non-files, or non-executable,
+duplicate worker names/capabilities, and empty capability lists stop startup. This example
+reads the token from a file:
 
 ```toml
 control_plane_url = "https://api.example.test:7443"
@@ -45,13 +46,16 @@ args = []
 operations = ["probe_file"]
 artifact_access = ["shared_mount"]
 max_parallel = 2
+
+[workers.dependencies]
+ffprobe_bin = "/usr/bin/ffprobe"
 ```
 
-An accelerator-bound `transcode_video` worker adds one tagged descriptor beneath
-that worker. The descriptor pins the exact startup-probe result that activation
-stores in `worker_capabilities.hardware` and `extra.accelerator`; identity is a
-full GPU UUID, lowercase PCI address, or host resource ID, never a device
-ordinal or render-node path:
+An accelerator-bound `transcode_video` worker adds explicit media-tool dependency paths and
+one tagged descriptor beneath that worker. The descriptor pins the exact startup-probe result
+that activation stores only on the `transcode_video` capability row in
+`worker_capabilities.hardware` and `extra.accelerator`; identity is a full GPU UUID, lowercase
+PCI address, or host resource ID, never a device ordinal or render-node path:
 
 ```toml
 [[workers]]
@@ -61,6 +65,10 @@ args = []
 operations = ["transcode_video"]
 artifact_access = ["shared_mount"]
 max_parallel = 2
+
+[workers.dependencies]
+ffmpeg_bin = "/usr/bin/ffmpeg"
+ffprobe_bin = "/usr/bin/ffprobe"
 
 [workers.accelerator]
 backend = "vaapi"
@@ -73,12 +81,22 @@ max_sessions = 2
 ```
 
 The same tagged contract accepts `nvidia` and `video_toolbox` descriptors with
-their backend-specific identity and probe results. The agent passes only the
-stable identity and `max_sessions` to the child. The child probes that device
-and returns structured readiness metadata; every descriptor field must match
-the configuration before the agent reports ready. Unknown fields, identity/token
-mismatches, unstable identities, and session capacity outside `1..=16` fail
-configuration, activation, or child startup.
+their backend-specific identity and probe results. Workers declaring any FFmpeg operation
+(`transcode_video`, `transcode_audio`, or `extract_audio`) require both `ffmpeg_bin` and
+`ffprobe_bin`; a standalone `probe_file` worker requires only `ffprobe_bin`. An NVIDIA
+worker also requires `nvidia_smi_bin = "/usr/bin/nvidia-smi"`. The agent clears the child
+environment, does not supply `PATH`, and injects only the absolute dependency paths needed
+by that worker as `VOOM_FFMPEG_BIN`, `VOOM_FFPROBE_BIN`, and `VOOM_NVIDIA_SMI_BIN`.
+
+The agent passes only stable accelerator identity and `max_sessions` selection values to
+the child. The child probes that device and returns structured readiness metadata; every
+descriptor field must match the configuration before the agent reports ready. Descriptor
+strings are public hardware facts, limited to 256 UTF-8 bytes without control characters;
+each collection is limited to 64 unique entries; and the encoded descriptor is limited to
+3072 bytes. Do not put credentials, filesystem paths, tokens, or operator-private labels in
+descriptor fields. Unknown fields, duplicate or oversized collections, identity/token
+mismatches, unstable identities, and session capacity outside `1..=16` fail configuration,
+activation, or child startup.
 
 An environment-backed secret is also supported:
 

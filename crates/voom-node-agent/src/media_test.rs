@@ -347,6 +347,7 @@ fn media_worker_config(name: &str, operations: Vec<OperationKind>) -> WorkerConf
         args: Vec::new(),
         operations,
         artifact_access: vec![ArtifactAccessMode::SharedMount],
+        dependencies: crate::config::WorkerDependencyPaths::default(),
         accelerator: None,
         max_parallel: 2,
     }

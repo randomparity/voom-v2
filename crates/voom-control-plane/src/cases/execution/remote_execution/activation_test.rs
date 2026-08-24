@@ -265,6 +265,85 @@ async fn activation_rejects_accelerators_without_transcode_or_stable_identity() 
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn activation_rejects_invalid_descriptor_collections_before_persistence() {
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    let mut input = activation_input(registered.node.id, registered.token);
+    input.workers = vec![RemoteWorkerDeclaration {
+        logical_name: "transcode".to_owned(),
+        operations: vec![OperationKind::TranscodeVideo],
+        artifact_access: vec![ArtifactAccessMode::SharedMount],
+        accelerator: Some(VideoAcceleratorDescriptor::Vaapi(
+            VaapiVideoAcceleratorDescriptor {
+                pci_address: "0000:f4:00.0".to_owned(),
+                device_name: "Radeon Pro".to_owned(),
+                driver_version: "Mesa 26.1".to_owned(),
+                encoders: vec!["hevc_vaapi".to_owned(), "hevc_vaapi".to_owned()],
+                decoders: vec!["hevc".to_owned()],
+                max_sessions: 2,
+            },
+        )),
+        max_parallel: 2,
+    }];
+    let counts_before = activation_row_counts(&cp).await;
+
+    let error = cp.remote_activate(input).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+    assert!(error.to_string().contains("duplicate"), "{error}");
+    assert_eq!(activation_row_counts(&cp).await, counts_before);
+}
+
+#[tokio::test]
+async fn activation_persists_accelerator_only_on_the_transcode_capability() {
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    let mut input = activation_input(registered.node.id, registered.token);
+    input.workers = vec![RemoteWorkerDeclaration {
+        logical_name: "media".to_owned(),
+        operations: vec![OperationKind::ProbeFile, OperationKind::TranscodeVideo],
+        artifact_access: vec![ArtifactAccessMode::SharedMount],
+        accelerator: Some(VideoAcceleratorDescriptor::Vaapi(
+            VaapiVideoAcceleratorDescriptor {
+                pci_address: "0000:f4:00.0".to_owned(),
+                device_name: "Radeon Pro".to_owned(),
+                driver_version: "Mesa 26.1".to_owned(),
+                encoders: vec!["hevc_vaapi".to_owned()],
+                decoders: vec!["hevc".to_owned()],
+                max_sessions: 2,
+            },
+        )),
+        max_parallel: 2,
+    }];
+
+    let outcome = cp.remote_activate(input).await.unwrap();
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT operation, hardware, extra FROM worker_capabilities \
+         WHERE worker_id = ? ORDER BY operation",
+    )
+    .bind(i64::try_from(outcome.workers[0].worker_id.0).unwrap())
+    .fetch_all(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "probe_file");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].1).unwrap(),
+        json!([])
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].2).unwrap(),
+        json!({})
+    );
+    assert_eq!(rows[1].0, "transcode_video");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[1].1).unwrap(),
+        json!(["vaapi:pci-0000:f4:00.0"])
+    );
+    let transcode_extra = serde_json::from_str::<serde_json::Value>(&rows[1].2).unwrap();
+    assert_eq!(transcode_extra["accelerator"]["backend"], "vaapi");
+}
 impl LogBuffer {
     fn text(&self) -> String {
         String::from_utf8(

@@ -380,7 +380,12 @@ impl ControlPlane {
         operation: voom_core::OperationKind,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let (hardware, extra) = match declaration.accelerator.as_ref() {
+        let accelerator = if operation == OperationKind::TranscodeVideo {
+            declaration.accelerator.as_ref()
+        } else {
+            None
+        };
+        let (hardware, extra) = match accelerator {
             Some(accelerator) => (
                 vec![accelerator.hardware_token()],
                 json!({

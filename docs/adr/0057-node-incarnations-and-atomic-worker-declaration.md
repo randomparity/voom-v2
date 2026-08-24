@@ -36,11 +36,13 @@ The response is the agent's sole source of worker IDs and epochs. A repeated req
 the same key and body replays it; the same incarnation under a different activation is a
 conflict. Worker declarations use a bounded logical name, exact `OperationKind` values,
 advertised artifact-access modes, a positive parallelism limit, and an optional tagged
-`VideoAcceleratorDescriptor` only for a `transcode_video` worker. Backend identity and
-session capacity are validated before activation. For an accelerator declaration,
+`VideoAcceleratorDescriptor` only for a worker declaring `transcode_video`. Backend
+identity, public descriptor strings, collection cardinality and uniqueness, encoded size,
+and session capacity are validated before activation. For an accelerator declaration,
 activation stores the descriptor's stable token in `worker_capabilities.hardware` and the
-complete descriptor in `worker_capabilities.extra.accelerator`. The control plane, not the
-request, derives worker kind, durable names, capabilities, and grants. Each durable worker
+complete descriptor in `worker_capabilities.extra.accelerator` only on the
+`transcode_video` capability row. The control plane, not the request, derives worker kind,
+durable names, capabilities, and grants. Each durable worker
 name includes the node ID, full incarnation ID, and bounded logical name, so a restart with
 the same manifest creates distinct historical and current worker rows despite the global
 uniqueness of `workers.name`.
@@ -82,14 +84,17 @@ stale. A stale incarnation cannot heartbeat itself back to life; a restarted pro
 activate a new incarnation.
 
 The agent forces child workers to bind `127.0.0.1:0`, generates per-worker credentials,
-passes a declared accelerator's stable identity and session limit through the worker's
-closed environment, and performs the exact-version handshake and identity challenge. An
-accelerator worker must return the structured `LocalWorkerBound` descriptor produced by
-its startup probes; every field must exactly match the activation declaration. The agent
-rejects a mismatch, omitted/unexpected accelerator, malformed metadata, or non-loopback
-endpoint and never marks that worker ready. A child crash marks the row not ready before
-lease settlement and restart; a successful, re-proved restart marks it ready before
-polling resumes. Worker operations remain authenticated by the existing worker protocol.
+and clears each child's environment. Strict worker configuration supplies absolute,
+regular, executable dependency paths; the agent injects only the paths required by that
+worker and never restores ambient `PATH`. A declared accelerator's stable identity and
+session limit use the same closed environment. The agent then performs the exact-version
+handshake and identity challenge. An accelerator worker must return the structured
+`LocalWorkerBound` descriptor produced by its startup probes; every field must exactly
+match the activation declaration. The agent rejects a mismatch, omitted/unexpected
+accelerator, malformed metadata, or non-loopback endpoint and never marks that worker
+ready. A child crash marks the row not ready before lease settlement and restart; a
+successful, re-proved restart marks it ready before polling resumes. Worker operations
+remain authenticated by the existing worker protocol.
 The node agent talks to the control plane over HTTPS, except that explicit cleartext is
 accepted only for a loopback control-plane URL.
 

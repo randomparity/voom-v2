@@ -79,7 +79,9 @@ pub use startup::{
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
 pub use video_acceleration::{
-    LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareAssignment,
+    LocalWorkerBound, MAX_ACCELERATOR_DESCRIPTOR_COLLECTION_ITEMS,
+    MAX_ACCELERATOR_DESCRIPTOR_ENCODED_BYTES, MAX_ACCELERATOR_DESCRIPTOR_STRING_BYTES,
+    NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareAssignment,
     NvidiaVideoHardwareRequirement, SoftwareVideoHardwareRequirement, VAAPI_PREFLIGHT_BUDGET,
     VAAPI_PREFLIGHT_COORDINATION_SECONDS, VAAPI_READINESS_DEADLINE, VIDEOTOOLBOX_PREFLIGHT_BUDGET,
     VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS, VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES,
