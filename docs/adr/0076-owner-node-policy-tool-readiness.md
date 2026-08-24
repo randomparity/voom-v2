@@ -59,11 +59,14 @@ up.
    proof, exact-version handshake, and executable preflight of a child are
    enforced where the child lives — by its supervising agent at startup, which
    kills any child failing the challenge or dependency probe and ends the
-   incarnation when restarts exhaust. The control plane reads the durable
-   residue of that enforcement: a live worker row bound to an active
-   incarnation of an active node is the recorded fact of a supervised,
-   identity-proven child; a failed or exhausted incarnation, a stale or
-   retired row, or missing capability/grant rows each render their own
+   incarnation when restarts exhaust. The control plane reads an observational
+   declaration from durable state: a live worker row bound to an active
+   incarnation of an active node records the worker the live agent declared,
+   not a separate post-start readiness acknowledgement. Child startup or a
+   restart may temporarily lag that declaration; failed startup eventually
+   ends the incarnation, and lease acquisition plus dispatch remain the hard
+   authorization and execution gates. A failed or exhausted incarnation, a
+   stale or retired row, or missing capability/grant rows each render their own
    diagnostic. This applies the ADR 0075 trust boundary, not a new one: the
    agent↔child boundary is trusted and node-local.
 
@@ -89,9 +92,11 @@ up.
 
 ## Consequences
 
-- A fully remote policy passes preflight when each target's owner has healthy
+- A fully remote policy using software and currently published tool
+  capabilities passes preflight when each target's owner has healthy
   agent-supervised workers, and fails with actionable per-node lines when it
-  does not.
+  does not. Remote accelerator descriptors are not present in the activation
+  contract, so accelerator-backed remote profiles remain deferred.
 - Single-host deployments are unchanged in behavior but unified in path: the
   node agent on the host owns the tools, and the same owner-scoped evaluation
   satisfies them.
