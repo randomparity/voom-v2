@@ -614,8 +614,16 @@ async fn source_fact_mismatch_fails_without_child_dispatch() {
 #[tokio::test]
 async fn happy_path_completes_with_agent_observed_evidence() {
     let root = TempDir::new().unwrap();
-    let source = write_source(&root);
-    let output = ensure_output_parent(&root);
+    // The resolver canonicalizes the storage root before joining the handle's
+    // locator (macOS hands back /var/... while the bytes live under
+    // /private/var/...), so expectations must be built from canonical paths
+    // too — same fixture rule as commit_test's rooted resolver tests.
+    let source = tokio::fs::canonicalize(write_source(&root)).await.unwrap();
+    let staged_parent = ensure_output_parent(&root);
+    let output = tokio::fs::canonicalize(staged_parent.parent().unwrap())
+        .await
+        .unwrap()
+        .join(staged_parent.file_name().unwrap());
     let probe = ScriptedMediaWorker::new(probe_script());
     let worker = ScriptedMediaWorker::new(transcode_script(output.clone()));
     let outcome = run(
