@@ -102,6 +102,15 @@ impl ControlPlaneApi for FakeCommitControlPlane {
         Err(VoomError::Internal("unused".to_owned()))
     }
 
+    async fn worker_readiness(
+        &self,
+        _node_id: NodeId,
+        _worker_id: voom_core::WorkerId,
+        _request: &RetryRequest<crate::client::WorkerReadinessRequest>,
+    ) -> Result<crate::client::WorkerReadinessOutcome, VoomError> {
+        Err(VoomError::Internal("unused".to_owned()))
+    }
+
     async fn deactivate(
         &self,
         _node_id: NodeId,
@@ -784,6 +793,7 @@ fn sample_agent_config() -> AgentConfig {
             args: vec![],
             operations: vec![OperationKind::HashFile],
             artifact_access: vec![ArtifactAccessMode::SharedMount],
+            accelerator: None,
             max_parallel: 1,
         }],
     }

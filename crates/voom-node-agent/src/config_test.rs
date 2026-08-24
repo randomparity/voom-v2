@@ -20,6 +20,48 @@ fn valid_file_token_config_loads_without_exposing_the_secret() {
 }
 
 #[test]
+fn worker_accelerator_config_is_structured_and_rejects_unknown_fields() {
+    let fixture = ConfigFixture::new("token");
+    let descriptor = r#"
+
+[workers.accelerator]
+backend = "vaapi"
+pci_address = "0000:f4:00.0"
+device_name = "Radeon Pro"
+driver_version = "Mesa 26.1"
+encoders = ["hevc_vaapi"]
+decoders = ["hevc"]
+max_sessions = 2
+"#;
+    fixture.rewrite(&format!("{}{descriptor}", fixture.document));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not declare transcode_video"),
+        "{error}"
+    );
+
+    let transcode_document = fixture.document.replace(
+        "operations = [\"probe_file\"]",
+        "operations = [\"transcode_video\"]",
+    );
+    fixture.rewrite(&format!("{transcode_document}{descriptor}"));
+    let loaded = AgentConfig::load(&fixture.config_path).unwrap();
+    let accelerator = loaded.config.workers[0].accelerator.as_ref();
+    assert!(accelerator.is_some());
+    let Some(accelerator) = accelerator else {
+        return;
+    };
+    assert_eq!(accelerator.hardware_token(), "vaapi:pci-0000:f4:00.0");
+
+    fixture.rewrite(&format!(
+        "{transcode_document}{descriptor}unknown_descriptor_field = true\n",
+    ));
+    assert!(AgentConfig::load(&fixture.config_path).is_err());
+}
+
+#[test]
 fn config_rejects_unknown_fields_and_invalid_numeric_bounds() {
     let fixture = ConfigFixture::new("token");
     for (field, value) in [

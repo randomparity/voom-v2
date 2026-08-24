@@ -28,23 +28,32 @@ activation request. In one SQLite transaction the control plane:
 2. reserves or replays the activation idempotency key;
 3. supersedes any current incarnation and retires its workers;
 4. records the new active incarnation and places its ID on the logical-node row;
-5. registers the declared workers, capabilities, and grants against that incarnation; and
+5. registers each declared worker in `registered` (not-ready) status, with capabilities
+   and grants against that incarnation; and
 6. stores the complete activation response for replay.
 
 The response is the agent's sole source of worker IDs and epochs. A repeated request with
 the same key and body replays it; the same incarnation under a different activation is a
 conflict. Worker declarations use a bounded logical name, exact `OperationKind` values,
-advertised artifact-access modes, and a positive parallelism limit. The control plane,
-not the request, derives worker kind, durable names, capabilities, and grants. Each durable
-worker name includes the node ID, full incarnation ID, and bounded logical name, so a
-restart with the same manifest creates distinct historical and current worker rows despite
-the global uniqueness of `workers.name`.
+advertised artifact-access modes, a positive parallelism limit, and an optional tagged
+`VideoAcceleratorDescriptor` only for a `transcode_video` worker. Backend identity and
+session capacity are validated before activation. For an accelerator declaration,
+activation stores the descriptor's stable token in `worker_capabilities.hardware` and the
+complete descriptor in `worker_capabilities.extra.accelerator`. The control plane, not the
+request, derives worker kind, durable names, capabilities, and grants. Each durable worker
+name includes the node ID, full incarnation ID, and bounded logical name, so a restart with
+the same manifest creates distinct historical and current worker rows despite the global
+uniqueness of `workers.name`.
 
 Every later remote mutation carries the incarnation ID. The control plane accepts it only
 when it equals the node's current active incarnation and the referenced worker belongs to
-that incarnation. The incarnation ID is included in the server-side idempotency namespace,
-so keys from different process lifetimes cannot collide. The existing `nodes.epoch` remains
-the optimistic row epoch and is never used as the incarnation fence.
+that incarnation. The agent posts a worker-readiness state assignment after child startup:
+`ready` maps the remote row to `active`, and `not_ready` maps it to `registered`.
+Authentication precedes incarnation/worker fencing, which precedes mutation. The assignment
+is naturally idempotent and deliberately creates no replay row whose worker foreign key
+would retain terminal history. Other remote mutations keep the incarnation ID in their
+server-side idempotency namespace. The existing `nodes.epoch` remains the optimistic row
+epoch and is never used as the incarnation fence.
 
 Supersession and worker retirement do not cancel leases already held by the prior
 incarnation. The fence rejects that incarnation's later lease heartbeats and terminal
@@ -73,10 +82,16 @@ stale. A stale incarnation cannot heartbeat itself back to life; a restarted pro
 activate a new incarnation.
 
 The agent forces child workers to bind `127.0.0.1:0`, generates per-worker credentials,
-performs the existing exact-version handshake and identity challenge, and rejects any
-reported non-loopback endpoint. Worker operations remain authenticated by the existing
-worker protocol. The node agent talks to the control plane over HTTPS, except that explicit
-cleartext is accepted only for a loopback control-plane URL.
+passes a declared accelerator's stable identity and session limit through the worker's
+closed environment, and performs the exact-version handshake and identity challenge. An
+accelerator worker must return the structured `LocalWorkerBound` descriptor produced by
+its startup probes; every field must exactly match the activation declaration. The agent
+rejects a mismatch, omitted/unexpected accelerator, malformed metadata, or non-loopback
+endpoint and never marks that worker ready. A child crash marks the row not ready before
+lease settlement and restart; a successful, re-proved restart marks it ready before
+polling resumes. Worker operations remain authenticated by the existing worker protocol.
+The node agent talks to the control plane over HTTPS, except that explicit cleartext is
+accepted only for a loopback control-plane URL.
 
 ## Consequences
 

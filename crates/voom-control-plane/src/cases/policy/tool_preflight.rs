@@ -6,17 +6,17 @@ use voom_core::{
 };
 use voom_policy::compiled::CompiledTranscodeVideoOperation;
 use voom_policy::{CompiledOperation, CompiledPolicy, PolicyTool, VideoProfileRef};
+use voom_store::repo::execution::artifact_access_resolution::{
+    AccessResolutionError, resolve_file_location,
+};
 use voom_store::repo::execution::nodes::NodeStatus;
-use voom_store::repo::execution::workers::{Worker, WorkerOperationCandidate, WorkerStatus};
-use voom_store::repo::library::library_roots::RootAvailabilityReason;
+use voom_store::repo::execution::workers::{Worker, WorkerOperationCandidate};
 use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use crate::ControlPlane;
 use crate::operation_source::select_location;
 use crate::video_hardware::candidate_accelerator_descriptor;
 
-const REMOTE_ACCELERATOR_DEFERRED_GUIDANCE: &str = "remote accelerator descriptors are not supported by the current node activation contract; \
-     accelerator-backed remote profiles are deferred";
 const LEGACY_REQUIRES_TOOLS_WARNING: &str = "metadata_requires_tools_deferred";
 
 /// One stored policy target whose storage owner must satisfy the tools.
@@ -56,22 +56,31 @@ fn node_readiness_problem(
     node: &voom_store::repo::execution::nodes::Node,
     now: time::OffsetDateTime,
 ) -> Option<String> {
-    match node.status {
-        NodeStatus::Retired => Some("owner node is retired".to_owned()),
-        NodeStatus::Stale => Some("owner node is stale; its agent must re-register".to_owned()),
-        NodeStatus::Registered | NodeStatus::Active => {
-            if node.active_incarnation_id.is_none() {
-                return Some("owner node has no active agent incarnation".to_owned());
-            }
-            let expires_at =
-                node.last_seen_at + time::Duration::seconds(i64::from(node.heartbeat_ttl_seconds));
-            if expires_at <= now {
-                Some("owner node heartbeat has expired; its agent must reconnect".to_owned())
-            } else {
-                None
-            }
-        }
+    if node.status == NodeStatus::Stale || node.status == NodeStatus::Retired {
+        return crate::cases::execution::remote_execution::validate_remote_node_freshness(
+            node.status,
+            node.last_seen_at,
+            node.heartbeat_ttl_seconds,
+            node.id,
+            now,
+            true,
+        )
+        .err()
+        .map(|error| error.to_string());
     }
+    if node.active_incarnation_id.is_none() {
+        return Some("owner node has no active agent incarnation".to_owned());
+    }
+    crate::cases::execution::remote_execution::validate_remote_node_freshness(
+        node.status,
+        node.last_seen_at,
+        node.heartbeat_ttl_seconds,
+        node.id,
+        now,
+        true,
+    )
+    .err()
+    .map(|error| error.to_string())
 }
 
 fn push_all_unavailable(
@@ -140,7 +149,7 @@ impl ControlPlane {
         let subject = format!("target {}", target.ordinal);
         let location = match select_location(self, target.file_version_id, None).await {
             Ok(location) => location,
-            Err(error @ (VoomError::Config(_) | VoomError::NotFound(_))) => {
+            Err(error @ VoomError::Config(_)) => {
                 return Ok(TargetOwner::Unavailable(UnavailableTool {
                     subject,
                     reason: error.to_string(),
@@ -150,43 +159,39 @@ impl ControlPlane {
             Err(error) => return Err(error),
         };
         let (storage_root_id, _) = location.rooted_address()?;
-        let effective = self
-            .libraries
-            .effective_library_root(storage_root_id)
-            .await?
-            .ok_or_else(|| {
-                VoomError::database(format!(
-                    "library root {} referenced by file_location {} is missing",
-                    storage_root_id.0, location.id.0
-                ))
-            })?;
-        match effective.reason {
-            RootAvailabilityReason::Available
-            | RootAvailabilityReason::OwnerRegistered
-            | RootAvailabilityReason::OwnerStale
-            | RootAvailabilityReason::OwnerRetired => {}
-            RootAvailabilityReason::LibraryDisabled
-            | RootAvailabilityReason::RootDisabled
-            | RootAvailabilityReason::RootUnassigned
-            | RootAvailabilityReason::RootNotActive => {
+        let resolved = match resolve_file_location(&self.pool, location.id, storage_root_id).await {
+            Ok(resolved) => resolved,
+            Err(
+                error @ (AccessResolutionError::InvalidRootState { .. }
+                | AccessResolutionError::InvalidLocationState { .. }),
+            ) => {
                 return Ok(TargetOwner::Unavailable(UnavailableTool {
                     subject: format!("{subject} (storage root {})", storage_root_id.0),
-                    reason: format!(
-                        "the storage root is unavailable: {}",
-                        effective.reason.as_str()
-                    ),
+                    reason: error.to_string(),
                     guidance: "restore the storage root before executing",
                 }));
             }
-        }
-        match effective.root.owner_node_id {
-            Some(owner) => Ok(TargetOwner::Owned(owner)),
-            None => Ok(TargetOwner::Unavailable(UnavailableTool {
-                subject: format!("{subject} (storage root {})", storage_root_id.0),
-                reason: "the storage root has no owner node".to_owned(),
-                guidance: "assign an owner node to the storage root before executing",
-            })),
-        }
+            Err(
+                error @ (AccessResolutionError::InvalidRootEpoch { .. }
+                | AccessResolutionError::DatabaseError(_)
+                | AccessResolutionError::StorageRootNotFound { .. }
+                | AccessResolutionError::FileLocationNotFound { .. }
+                | AccessResolutionError::LocationRootInvalid { .. }
+                | AccessResolutionError::MixedOwner { .. }
+                | AccessResolutionError::NoActiveIncarnation { .. }),
+            ) => {
+                return Err(VoomError::database(format!(
+                    "resolve policy target storage owner: {error}"
+                )));
+            }
+        };
+        let owner_node_id = u64::try_from(resolved.owner_node_id).map_err(|_| {
+            VoomError::database(format!(
+                "storage root {} owner node id was negative: {}",
+                storage_root_id.0, resolved.owner_node_id
+            ))
+        })?;
+        Ok(TargetOwner::Owned(NodeId(owner_node_id)))
     }
 
     /// Observe every required tool against one owner node (ADR 0076 §2).
@@ -235,7 +240,8 @@ impl ControlPlane {
                     workers.len()
                 )
             } else {
-                "every worker bound to the active incarnation is stale or retired".to_owned()
+                "every worker bound to the active incarnation is declared but not ready, stale, or retired"
+                    .to_owned()
             };
             push_all_unavailable(unavailable, tools, &node.name, &reason);
             return Ok(OwnerWorkerSet {
@@ -418,7 +424,8 @@ fn missing_backend_workers(
         };
         missing.push(format!(
             "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder} on owner \
-             node \"{owner_node}\"; {REMOTE_ACCELERATOR_DEFERRED_GUIDANCE}"
+             node \"{owner_node}\"; configure the owner node's ffmpeg worker with its \
+             probe-verified NVIDIA accelerator descriptor"
         ));
     }
     if requirements.vaapi.required && !availability.contains(&VideoEncoderBackend::Vaapi) {
@@ -429,7 +436,8 @@ fn missing_backend_workers(
         };
         missing.push(format!(
             "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder} on owner \
-             node \"{owner_node}\"; {REMOTE_ACCELERATOR_DEFERRED_GUIDANCE}"
+             node \"{owner_node}\"; configure the owner node's ffmpeg worker with its \
+             probe-verified VAAPI accelerator descriptor"
         ));
     }
     if requirements.videotoolbox.required
@@ -448,8 +456,8 @@ fn missing_backend_workers(
         };
         missing.push(format!(
             "VideoToolbox profiles require a live host-bound ffmpeg worker advertising \
-             [{encoders}]{decoder} on owner node \"{owner_node}\"; \
-             {REMOTE_ACCELERATOR_DEFERRED_GUIDANCE}"
+             [{encoders}]{decoder} on owner node \"{owner_node}\"; configure the owner node's \
+             ffmpeg worker with its probe-verified VideoToolbox accelerator descriptor"
         ));
     }
     missing
@@ -599,7 +607,7 @@ pub(crate) fn normalize_policy_tool_requirements(
 }
 
 fn is_live(worker: &Worker) -> bool {
-    worker.status == WorkerStatus::Registered || worker.status == WorkerStatus::Active
+    worker.accepts_new_work()
 }
 
 fn format_unavailable_tools(policy_slug: &str, unavailable: &[UnavailableTool]) -> String {

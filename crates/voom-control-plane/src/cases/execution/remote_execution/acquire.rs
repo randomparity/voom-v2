@@ -1368,7 +1368,9 @@ pub(super) fn outcome_reason_code(outcome: &LeaseAcquireOutcome) -> StoreSchedul
     match outcome {
         LeaseAcquireOutcome::TicketNotReady { .. } => StoreSchedulerReasonCode::NoReadyTicket,
         LeaseAcquireOutcome::WorkerIneligible { reason, .. } => match reason {
-            LeaseIneligibilityReason::WorkerStale | LeaseIneligibilityReason::WorkerRetired => {
+            LeaseIneligibilityReason::WorkerNotReady
+            | LeaseIneligibilityReason::WorkerStale
+            | LeaseIneligibilityReason::WorkerRetired => {
                 StoreSchedulerReasonCode::WorkerNotExecutable
             }
             LeaseIneligibilityReason::OperationDenied => StoreSchedulerReasonCode::OperationDenied,

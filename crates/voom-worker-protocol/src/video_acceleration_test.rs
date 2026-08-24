@@ -22,6 +22,45 @@ fn nvidia_descriptor_round_trips_and_rejects_unknown_fields() {
 }
 
 #[test]
+fn declaration_validation_requires_stable_identity_and_bounded_capacity() {
+    assert!(
+        VideoAcceleratorDescriptor::Nvidia(nvidia_descriptor())
+            .validate_declaration()
+            .is_ok()
+    );
+    let mut nvidia = nvidia_descriptor();
+    nvidia.hardware_token = "nvidia:GPU-other".to_owned();
+    assert!(
+        VideoAcceleratorDescriptor::Nvidia(nvidia)
+            .validate_declaration()
+            .is_err()
+    );
+    let mut nvidia = nvidia_descriptor();
+    nvidia.max_sessions = 17;
+    assert!(
+        VideoAcceleratorDescriptor::Nvidia(nvidia)
+            .validate_declaration()
+            .is_err()
+    );
+
+    let mut vaapi = vaapi_descriptor();
+    vaapi.pci_address = "/dev/dri/renderD128".to_owned();
+    assert!(
+        VideoAcceleratorDescriptor::Vaapi(vaapi)
+            .validate_declaration()
+            .is_err()
+    );
+
+    let mut videotoolbox = videotoolbox_descriptor();
+    videotoolbox.hardware_token = "videotoolbox:another-host".to_owned();
+    assert!(
+        VideoAcceleratorDescriptor::VideoToolbox(videotoolbox)
+            .validate_declaration()
+            .is_err()
+    );
+}
+
+#[test]
 fn requirements_are_tagged_and_strict() {
     let requirement = VideoHardwareRequirement::nvidia("hevc_nvenc", Some("h264_cuvid".to_owned()));
     let mut value = serde_json::to_value(&requirement).unwrap();
@@ -51,6 +90,23 @@ fn nvidia_descriptor() -> NvidiaVideoAcceleratorDescriptor {
         encoders: vec!["hevc_nvenc".to_owned()],
         decoders: vec!["h264_cuvid".to_owned(), "hevc_cuvid".to_owned()],
         max_sessions: 4,
+    }
+}
+
+fn videotoolbox_descriptor() -> VideoToolboxVideoAcceleratorDescriptor {
+    VideoToolboxVideoAcceleratorDescriptor {
+        hardware_token: "videotoolbox:abc123".to_owned(),
+        resource_id: "abc123".to_owned(),
+        model_identifier: "Mac17,6".to_owned(),
+        chip_name: "Apple M5 Max".to_owned(),
+        macos_version: "26.5.2".to_owned(),
+        macos_build: "25F84".to_owned(),
+        encoders: vec!["hevc_videotoolbox".to_owned()],
+        decoders: vec![VideoToolboxDecodeCapability {
+            codec: "hevc".to_owned(),
+            pixel_formats: vec!["yuv420p".to_owned()],
+        }],
+        max_sessions: 16,
     }
 }
 

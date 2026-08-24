@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use secrecy::SecretString;
 use serde::Deserialize;
 use voom_core::{ArtifactAccessMode, NodeId, OperationKind, VoomError};
+use voom_worker_protocol::VideoAcceleratorDescriptor;
 /// Upper bound for the agent's poll interval, kept at half of the control
 /// plane's `COMMIT_CONVERGENCE_TIMEOUT` (`Duration::from_secs(10)` in
 /// voom-control-plane `artifact/commit`). voom-node-agent only depends on
@@ -48,6 +49,8 @@ pub struct WorkerConfig {
     pub args: Vec<String>,
     pub operations: Vec<OperationKind>,
     pub artifact_access: Vec<ArtifactAccessMode>,
+    #[serde(default)]
+    pub accelerator: Option<VideoAcceleratorDescriptor>,
     pub max_parallel: u32,
 }
 
@@ -201,7 +204,19 @@ impl WorkerConfig {
             u64::from(self.max_parallel),
             1,
             256,
-        )
+        )?;
+        if self.accelerator.is_some() && !self.operations.contains(&OperationKind::TranscodeVideo) {
+            return Err(config_error(format!(
+                "worker {:?} has an accelerator descriptor but does not declare transcode_video",
+                self.name
+            )));
+        }
+        if let Some(accelerator) = self.accelerator.as_ref() {
+            accelerator
+                .validate_declaration()
+                .map_err(|message| config_error(format!("worker {:?} {message}", self.name)))?;
+        }
+        Ok(())
     }
 }
 

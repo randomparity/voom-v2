@@ -179,8 +179,10 @@ async fn activate_owner_media_workers(
     cp: &ControlPlane,
     node: &SimulatedOwnerNode,
 ) -> Result<(), VoomError> {
-    use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
-    use voom_core::{ArtifactAccessMode, OperationKind};
+    use voom_control_plane::execution::{
+        RemoteActivateInput, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
+    };
+    use voom_core::{ArtifactAccessMode, OperationKind, WorkerReadiness};
     let declarations = [
         (
             "ffmpeg",
@@ -198,6 +200,7 @@ async fn activate_owner_media_workers(
         logical_name: logical_name.to_owned(),
         operations,
         artifact_access: vec![ArtifactAccessMode::SharedMount],
+        accelerator: None,
         max_parallel: 2,
     })
     .collect();
@@ -205,16 +208,27 @@ async fn activate_owner_media_workers(
     // drives the commit-intent protocol below. Activating a second incarnation
     // would supersede the principal used by `drive_pending_commit`.
     let incarnation_id = node.incarnation_id;
-    cp.remote_activate(RemoteActivateInput {
-        node_id: node.node_id,
-        token: node.token.clone(),
-        idempotency_key: "activate-owner-media-workers".to_owned(),
-        request_hash: "activate-owner-media-workers-body".to_owned(),
-        incarnation_id,
-        workers: declarations,
-    })
-    .await
-    .map(|_| ())
+    let activation = cp
+        .remote_activate(RemoteActivateInput {
+            node_id: node.node_id,
+            token: node.token.clone(),
+            idempotency_key: "activate-owner-media-workers".to_owned(),
+            request_hash: "activate-owner-media-workers-body".to_owned(),
+            incarnation_id,
+            workers: declarations,
+        })
+        .await?;
+    for worker in activation.workers {
+        cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: node.node_id,
+            token: node.token.clone(),
+            incarnation_id,
+            worker_id: worker.worker_id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 /// Map a raw sqlx error into the crate error for `?` plumbing.

@@ -169,6 +169,7 @@ fn loaded_config(url: &str, ca_cert: Option<PathBuf>) -> LoadedAgentConfig {
                 args: Vec::new(),
                 operations: vec![OperationKind::ProbeFile],
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: None,
                 max_parallel: 1,
             }],
         },

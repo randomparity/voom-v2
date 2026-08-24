@@ -80,7 +80,8 @@ pub mod execution {
         RemoteCompleteOutcome, RemoteDeactivateInput, RemoteDeactivateOutcome, RemoteFailInput,
         RemoteFailOutcome, RemoteLeaseDispatch, RemoteLeaseHeartbeatInput,
         RemoteLeaseHeartbeatOutcome, RemoteNodeHeartbeatInput, RemoteNodeHeartbeatOutcome,
-        RemoteRecoverReport, RemoteWorkerDeclaration,
+        RemoteRecoverReport, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
+        RemoteWorkerReadinessOutcome,
     };
     pub use crate::cases::execution::tickets::PreLeaseFailureOutcome;
 }

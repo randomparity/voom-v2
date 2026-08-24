@@ -37,6 +37,11 @@ fn execution_request_dtos_reject_unknown_fields() {
         "reason": "graceful_shutdown",
         "unknown": true
     }));
+    assert_unknown_field_rejected::<WorkerReadinessRequest>(json!({
+        "incarnation_id": incarnation_id,
+        "readiness": "ready",
+        "unknown": true
+    }));
     assert_unknown_field_rejected::<AcquireRequest>(json!({
         "node_id": 1,
         "worker_id": 2,
@@ -68,6 +73,9 @@ fn execution_request_dtos_require_incarnation_fences() {
     assert_missing_incarnation_rejected::<ActivateRequest>(json!({"workers": []}));
     assert_missing_incarnation_rejected::<DeactivateRequest>(json!({
         "reason": "graceful_shutdown"
+    }));
+    assert_missing_incarnation_rejected::<WorkerReadinessRequest>(json!({
+        "readiness": "ready"
     }));
     assert_missing_incarnation_rejected::<AcquireRequest>(json!({
         "node_id": 1,

@@ -4,6 +4,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{
     ArtifactAccessMode, FileVersionId, NodeId, OperationKind, TicketOperation, VoomError, WorkerId,
+    WorkerReadiness,
 };
 use voom_policy::{
     CompiledPolicy, DiagnosticSeverity, DiagnosticStage, PolicyDiagnostic, PolicyTool,
@@ -16,10 +17,16 @@ use voom_store::repo::library::library_roots::{
     HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
 use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
+use voom_worker_protocol::{
+    NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor, VideoAcceleratorDescriptor,
+    VideoToolboxDecodeCapability, VideoToolboxVideoAcceleratorDescriptor,
+};
 
 use super::{PolicyToolTarget, UnavailableTool, format_unavailable_tools, guidance};
 use crate::cases::cp;
-use crate::cases::execution::remote_execution::{RemoteActivateInput, RemoteWorkerDeclaration};
+use crate::cases::execution::remote_execution::{
+    RemoteActivateInput, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
+};
 use crate::cases::workers::nodes::RegisterNodeInput;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -106,6 +113,67 @@ async fn a_healthy_remote_owner_satisfies_ffmpeg_ffprobe_and_mkvtoolnix() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn a_declared_remote_worker_is_not_ready_until_child_startup_is_persisted() {
+    let (cp, _tmp) = cp().await;
+    let registered = cp
+        .register_node(RegisterNodeInput {
+            name: "starting-media-node".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let incarnation_id = "00000000000000000000000000000424".parse().unwrap();
+    let activation = cp
+        .remote_activate(RemoteActivateInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            idempotency_key: "activate-starting-media-node".to_owned(),
+            request_hash: "activate-starting-media-node-body".to_owned(),
+            incarnation_id,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "ffmpeg".to_owned(),
+                operations: vec![OperationKind::TranscodeVideo],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: None,
+                max_parallel: 1,
+            }],
+        })
+        .await
+        .unwrap();
+    let file_version_id = owned_root_with_file(&cp, registered.node.id).await;
+
+    let error = cp
+        .preflight_policy_tools(
+            &mut policy_requiring(&["ffmpeg"]),
+            &one_target(file_version_id),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("declared but not ready"),
+        "{error}"
+    );
+
+    cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+        node_id: registered.node.id,
+        token: registered.token,
+        incarnation_id,
+        worker_id: activation.workers[0].worker_id,
+        readiness: WorkerReadiness::Ready,
+    })
+    .await
+    .unwrap();
+    cp.preflight_policy_tools(
+        &mut policy_requiring(&["ffmpeg"]),
+        &one_target(file_version_id),
+    )
+    .await
+    .unwrap();
+}
+
 /// Acceptance criterion 2: ownership decides. A fully healthy node contributes
 /// nothing to a target whose storage lives on another node.
 #[tokio::test]
@@ -186,9 +254,82 @@ async fn video_hardware_on_a_different_node_does_not_satisfy_the_target() {
     assert!(message.contains("software-target-node"), "{message}");
     assert!(!message.contains("voom worker run-local"), "{message}");
     assert!(
-        message.contains("remote accelerator descriptors are not supported"),
+        message.contains("probe-verified VAAPI accelerator descriptor"),
         "{message}"
     );
+}
+
+#[tokio::test]
+async fn activation_descriptors_satisfy_owner_preflight_for_every_video_backend() {
+    let (cp, _tmp) = cp().await;
+    let nvidia_token = "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let descriptors_and_policies = vec![
+        (
+            "nvidia-owner",
+            VideoAcceleratorDescriptor::Nvidia(NvidiaVideoAcceleratorDescriptor {
+                hardware_token: nvidia_token.to_owned(),
+                device_uuid: "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
+                device_name: "RTX A6000".to_owned(),
+                driver_version: "595.80".to_owned(),
+                encoders: vec!["hevc_nvenc".to_owned()],
+                decoders: vec!["hevc_cuvid".to_owned()],
+                max_sessions: 2,
+            }),
+            compile_policy(
+                "policy \"remote-nvidia\" { \
+                 metadata { requires_tools: [ffmpeg] } \
+                 phase encode { transcode video to hevc { \
+                 encoder: hevc_nvenc cq: 23 preset: p4 decode: nvidia } } }",
+            )
+            .unwrap()
+            .policy,
+        ),
+        (
+            "vaapi-owner",
+            VideoAcceleratorDescriptor::Vaapi(VaapiVideoAcceleratorDescriptor {
+                pci_address: "0000:f4:00.0".to_owned(),
+                device_name: "Radeon Pro".to_owned(),
+                driver_version: "Mesa 26.1".to_owned(),
+                encoders: vec!["hevc_vaapi".to_owned()],
+                decoders: vec!["hevc".to_owned()],
+                max_sessions: 2,
+            }),
+            vaapi_policy(" decode: vaapi"),
+        ),
+        (
+            "videotoolbox-owner",
+            VideoAcceleratorDescriptor::VideoToolbox(VideoToolboxVideoAcceleratorDescriptor {
+                hardware_token: "videotoolbox:abc123".to_owned(),
+                resource_id: "abc123".to_owned(),
+                model_identifier: "Mac17,6".to_owned(),
+                chip_name: "Apple M5 Max".to_owned(),
+                macos_version: "26.0".to_owned(),
+                macos_build: "25A123".to_owned(),
+                encoders: vec!["hevc_videotoolbox".to_owned()],
+                decoders: vec![VideoToolboxDecodeCapability {
+                    codec: "hevc".to_owned(),
+                    pixel_formats: vec!["yuv420p".to_owned()],
+                }],
+                max_sessions: 2,
+            }),
+            compile_policy(
+                "policy \"remote-videotoolbox\" { \
+                 metadata { requires_tools: [ffmpeg] } \
+                 phase encode { transcode video to hevc { \
+                 encoder: hevc_videotoolbox bitrate_kbps: 8000 preset: default \
+                 codec_profile: main pixel_format: yuv420p decode: video_toolbox } } }",
+            )
+            .unwrap()
+            .policy,
+        ),
+    ];
+
+    for (slug, descriptor, mut policy) in descriptors_and_policies {
+        let file_version_id = activate_accelerated_owner_with_file(&cp, slug, descriptor).await;
+        cp.preflight_policy_tools(&mut policy, &one_target(file_version_id))
+            .await
+            .unwrap();
+    }
 }
 
 /// The retired run-local providers keep perfect eligibility rows, yet they own
@@ -279,7 +420,9 @@ async fn stale_and_retired_workers_report_a_per_node_reason() {
 
     let message = error.to_string();
     assert!(
-        message.contains("every worker bound to the active incarnation is stale or retired"),
+        message.contains(
+            "every worker bound to the active incarnation is declared but not ready, stale, or retired"
+        ),
         "{message}"
     );
     assert_eq!(message.matches("- ffmpeg on node").count(), 1);
@@ -348,12 +491,7 @@ async fn an_expired_owner_heartbeat_is_not_ready_before_the_stale_reaper_runs() 
         .await
         .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("owner node heartbeat has expired"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("heartbeat expired"), "{error}");
 }
 
 /// Wrong child identity, protocol-version mismatch, and executable-preflight
@@ -397,7 +535,10 @@ async fn a_child_startup_failure_reports_the_owner_node_stale() {
         .unwrap_err();
 
     let message = error.to_string();
-    assert!(message.contains("owner node is stale"), "{message}");
+    assert!(
+        message.contains("remote node") && message.contains("is stale"),
+        "{message}"
+    );
 }
 
 /// Acceptance criterion 3, eligibility legs: deny wins over grant, a missing
@@ -568,12 +709,47 @@ async fn a_target_location_database_failure_propagates() {
 }
 
 #[tokio::test]
-async fn a_policy_without_owner_scoped_requirements_does_not_resolve_targets() {
+async fn a_policy_without_owner_scoped_requirements_ignores_historical_location_shape() {
     let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "historical-location-owner",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let multi_location_version = owned_root_with_file(&cp, owner.node_id).await;
+    let (root_id, observed_at): (i64, String) = sqlx::query_as(
+        "SELECT storage_root_id, observed_at FROM file_locations \
+         WHERE file_version_id = ?1 ORDER BY id ASC LIMIT 1",
+    )
+    .bind(i64::try_from(multi_location_version.0).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?1, 'rooted', ?2, 'historical-copy.mp4', ?3)",
+    )
+    .bind(i64::try_from(multi_location_version.0).unwrap())
+    .bind(root_id)
+    .bind(observed_at)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
 
     cp.preflight_policy_tools(
         &mut policy_requiring(&[]),
-        &one_target(FileVersionId(424_242)),
+        &[
+            PolicyToolTarget {
+                ordinal: 0,
+                file_version_id: FileVersionId(424_242),
+            },
+            PolicyToolTarget {
+                ordinal: 1,
+                file_version_id: multi_location_version,
+            },
+        ],
     )
     .await
     .unwrap();
@@ -610,9 +786,100 @@ async fn an_unavailable_storage_root_is_not_ready_even_with_a_healthy_owner() {
         .unwrap_err();
 
     assert!(
-        error.to_string().contains("storage root is unavailable"),
+        error.to_string().contains("invalid state: unavailable"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn configured_roots_are_ready_under_the_scheduler_root_predicate() {
+    let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "configured-root-owner",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+    let root_id = root_id_for_file(&cp, file_version_id).await;
+    sqlx::query(
+        "UPDATE library_roots SET state = 'configured', activation_identity = NULL WHERE id = ?1",
+    )
+    .bind(root_id)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    cp.preflight_policy_tools(
+        &mut policy_requiring(&["ffmpeg"]),
+        &one_target(file_version_id),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn retired_roots_are_unavailable_under_the_scheduler_root_predicate() {
+    let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "retired-root-owner",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+    let root_id = root_id_for_file(&cp, file_version_id).await;
+    sqlx::query("UPDATE library_roots SET state = 'retired' WHERE id = ?1")
+        .bind(root_id)
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let error = cp
+        .preflight_policy_tools(
+            &mut policy_requiring(&["ffmpeg"]),
+            &one_target(file_version_id),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("invalid state: retired"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_negative_root_epoch_is_database_corruption_not_unavailability() {
+    let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "corrupt-root-owner",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+    let root_id = root_id_for_file(&cp, file_version_id).await;
+    voom_store::test_support::with_check_constraints_disabled(cp.pool_for_test(), |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE library_roots SET root_epoch = -1 WHERE id = ?1")
+                .bind(root_id)
+                .execute(connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+
+    let error = cp
+        .preflight_policy_tools(
+            &mut policy_requiring(&["ffmpeg"]),
+            &one_target(file_version_id),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(error.to_string().contains("invalid epoch: -1"), "{error}");
 }
 #[tokio::test]
 async fn unavailable_requirements_are_aggregated_in_metadata_order() {
@@ -1117,15 +1384,17 @@ async fn activate_owner_node(
             logical_name: (*logical_name).to_owned(),
             operations: (*operations).to_vec(),
             artifact_access: vec![ArtifactAccessMode::SharedMount],
+            accelerator: None,
             max_parallel: 1,
         })
         .collect();
     let call = next_seq();
     let incarnation_id: voom_core::NodeIncarnationId = format!("{call:032x}").parse().unwrap();
+    let token = registered.token;
     let outcome = cp
         .remote_activate(RemoteActivateInput {
             node_id: registered.node.id,
-            token: registered.token,
+            token: token.clone(),
             idempotency_key: format!("activate-{slug}-{call}"),
             request_hash: format!("activation-body-{slug}-{call}"),
             incarnation_id,
@@ -1133,11 +1402,68 @@ async fn activate_owner_node(
         })
         .await
         .unwrap();
+    for worker in &outcome.workers {
+        cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: registered.node.id,
+            token: token.clone(),
+            incarnation_id,
+            worker_id: worker.worker_id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap();
+    }
     ActivatedOwner {
         node_id: registered.node.id,
         incarnation_id: outcome.incarnation_id,
         workers: outcome.workers,
     }
+}
+
+async fn activate_accelerated_owner_with_file(
+    cp: &crate::ControlPlane,
+    slug: &str,
+    accelerator: VideoAcceleratorDescriptor,
+) -> FileVersionId {
+    let registered = cp
+        .register_node(RegisterNodeInput {
+            name: slug.to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let call = next_seq();
+    let incarnation_id = format!("{call:032x}").parse().unwrap();
+    let token = registered.token;
+    let activation = cp
+        .remote_activate(RemoteActivateInput {
+            node_id: registered.node.id,
+            token: token.clone(),
+            idempotency_key: format!("activate-{slug}-{call}"),
+            request_hash: format!("activate-{slug}-{call}-body"),
+            incarnation_id,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "ffmpeg".to_owned(),
+                operations: vec![OperationKind::TranscodeVideo],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: Some(accelerator),
+                max_parallel: 2,
+            }],
+        })
+        .await
+        .unwrap();
+    cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+        node_id: registered.node.id,
+        token,
+        incarnation_id,
+        worker_id: activation.workers[0].worker_id,
+        readiness: WorkerReadiness::Ready,
+    })
+    .await
+    .unwrap();
+    owned_root_with_file(cp, registered.node.id).await
 }
 
 /// Create a library, an active root owned by `owner`, and one ingested file
@@ -1205,6 +1531,16 @@ async fn owned_root_with_file(cp: &crate::ControlPlane, owner: NodeId) -> FileVe
             panic!("expected new file asset, got {other:?}")
         }
     }
+}
+
+async fn root_id_for_file(cp: &crate::ControlPlane, file_version_id: FileVersionId) -> i64 {
+    sqlx::query_scalar(
+        "SELECT storage_root_id FROM file_locations WHERE file_version_id = ?1 ORDER BY id LIMIT 1",
+    )
+    .bind(i64::try_from(file_version_id.0).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap()
 }
 
 fn one_target(file_version_id: FileVersionId) -> Vec<PolicyToolTarget> {

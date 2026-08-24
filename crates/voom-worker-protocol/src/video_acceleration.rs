@@ -133,6 +133,97 @@ impl VideoAcceleratorDescriptor {
             Self::VideoToolbox(value) => value.max_sessions,
         }
     }
+
+    /// Validate invariants required before a descriptor crosses a worker
+    /// declaration or readiness boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable message when device identity or session capacity
+    /// cannot participate in scheduling.
+    pub fn validate_declaration(&self) -> Result<(), String> {
+        match self {
+            Self::Nvidia(nvidia) => {
+                if !is_full_nvidia_uuid(&nvidia.device_uuid) {
+                    return Err("NVIDIA device_uuid must be a full GPU- UUID".to_owned());
+                }
+                if nvidia.hardware_token.strip_prefix("nvidia:")
+                    != Some(nvidia.device_uuid.as_str())
+                {
+                    return Err(
+                        "NVIDIA hardware_token must equal `nvidia:<device_uuid>`".to_owned()
+                    );
+                }
+                validate_session_capacity("NVIDIA", nvidia.max_sessions)
+            }
+            Self::Vaapi(vaapi) => {
+                if !is_pci_address(&vaapi.pci_address) {
+                    return Err(
+                        "VAAPI pci_address must be lowercase `dddd:bb:dd.f`, not a render-node path or ordinal"
+                            .to_owned(),
+                    );
+                }
+                validate_session_capacity("VAAPI", vaapi.max_sessions)
+            }
+            Self::VideoToolbox(videotoolbox) => {
+                if videotoolbox.resource_id.is_empty()
+                    || videotoolbox.resource_id.len() > 256
+                    || videotoolbox.resource_id.chars().any(char::is_control)
+                {
+                    return Err(
+                        "VideoToolbox resource_id must be 1..=256 printable bytes".to_owned()
+                    );
+                }
+                if videotoolbox.hardware_token.strip_prefix("videotoolbox:")
+                    != Some(videotoolbox.resource_id.as_str())
+                {
+                    return Err(
+                        "VideoToolbox hardware_token must equal `videotoolbox:<resource_id>`"
+                            .to_owned(),
+                    );
+                }
+                validate_session_capacity("VideoToolbox", videotoolbox.max_sessions)
+            }
+        }
+    }
+}
+
+fn validate_session_capacity(backend: &str, max_sessions: u32) -> Result<(), String> {
+    if !(1..=16).contains(&max_sessions) {
+        return Err(format!("{backend} max_sessions must be in 1..=16"));
+    }
+    Ok(())
+}
+
+fn is_pci_address(pci_address: &str) -> bool {
+    let Some((domain, rest)) = pci_address.split_once(':') else {
+        return false;
+    };
+    let Some((bus, device_function)) = rest.split_once(':') else {
+        return false;
+    };
+    let Some((device, function)) = device_function.split_once('.') else {
+        return false;
+    };
+    let hex = |text: &str, width: usize| {
+        text.len() == width && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    hex(domain, 4)
+        && hex(bus, 2)
+        && hex(device, 2)
+        && hex(function, 1)
+        && !pci_address.bytes().any(|byte| byte.is_ascii_uppercase())
+}
+
+fn is_full_nvidia_uuid(device_uuid: &str) -> bool {
+    let Some(uuid) = device_uuid.strip_prefix("GPU-") else {
+        return false;
+    };
+    uuid.len() == 36
+        && uuid.char_indices().all(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

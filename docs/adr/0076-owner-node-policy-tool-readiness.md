@@ -40,35 +40,46 @@ up.
 
 2. **Per-(node, tool) observation replaces per-tool fleet observation.** Each
    required tool is observed independently for every owner node:
-   - candidates are live (`registered` or `active`) workers owned by that
-     node whose bound incarnation is the node's current active incarnation,
-     with the node itself non-retired and carrying an active incarnation;
+   - candidates are ready remote workers owned by that node whose bound
+     incarnation is the node's current active incarnation. Activation leaves a
+     declaration in `registered`; the node agent changes it to `active` only
+     after the child binds, completes the exact-version handshake, proves its
+     identity, and finishes dependency preflight. A crash changes it back to
+     `registered` before lease settlement and restart; a successful restart
+     changes it to `active` before polling resumes;
+   - the node must be non-retired, carry an active incarnation, and pass the
+     same heartbeat-expiry predicate lease acquisition uses at the control
+     plane's current clock time;
    - eligibility keeps ADR 0034 semantics: matching capability, effective
      grant with deny-wins, per the tool's operation set (`ffmpeg`:
      `transcode_video`/`transcode_audio`/`extract_audio`; `mkvtoolnix`:
-     `remux`; `ffprobe`: `probe_file`).
+     `remux`; `ffprobe`: `probe_file`);
    - video-backend readiness uses only those same owner's effective
-     `transcode_video` candidates, so a matching accelerator on another node
-     cannot satisfy the target.
+     `transcode_video` candidates. An activation declaration for such a worker
+     may carry one tagged `VideoAcceleratorDescriptor`. The node-agent
+     configuration pins the expected probe result and supplies only its stable
+     identity and session limit to the child. After dependency preflight, the
+     child returns its actual structured `LocalWorkerBound` descriptor. The
+     supervisor requires an exact match before it reports ready. Activation
+     writes the verified-equal declaration's stable token to
+     `worker_capabilities.hardware` and the descriptor to
+     `worker_capabilities.extra.accelerator`, the existing scheduler contract.
 
-   A healthy worker on any other node contributes nothing to a target it does
-   not own.
+   A healthy worker or matching accelerator on any other node contributes
+   nothing to a target it does not own.
 
-   The control plane no longer holds direct HTTP lines to node workers
-   (ADR 0075 routed every byte through the agent), so the protocol identity
-   proof, exact-version handshake, and executable preflight of a child are
-   enforced where the child lives — by its supervising agent at startup, which
-   kills any child failing the challenge or dependency probe and ends the
-   incarnation when restarts exhaust. The control plane reads an observational
-   declaration from durable state: a live worker row bound to an active
-   incarnation of an active node records the worker the live agent declared,
-   not a separate post-start readiness acknowledgement. Child startup or a
-   restart may temporarily lag that declaration; failed startup eventually
-   ends the incarnation, and lease acquisition plus dispatch remain the hard
-   authorization and execution gates. A failed or exhausted incarnation, a
-   stale or retired row, or missing capability/grant rows each render their own
-   diagnostic. This applies the ADR 0075 trust boundary, not a new one: the
-   agent↔child boundary is trusted and node-local.
+   The control plane does not open a direct child HTTP line. The node agent
+   owns the bind, accelerator-metadata, exact-version, identity, and dependency
+   proofs, then posts an authenticated node/incarnation/worker-fenced readiness
+   transition. The transition is a naturally idempotent state assignment and
+   creates no replay row that would retain terminal worker history.
+   Authorization remains ordered token first, then active-incarnation and
+   worker ownership, then heartbeat freshness, then mutation. Failed startup
+   deactivates the incarnation; crash and restart bracket lease settlement and
+   process downtime with not-ready/ready transitions. A failed or exhausted
+   incarnation, an expired heartbeat, a declared-but-not-ready, stale, or
+   retired row, or missing capability/grant rows each render their own
+   diagnostic.
 
 3. **ffprobe loses its control-plane-host shortcut.** The bundled ffprobe
    readiness probe and the built-in ffprobe bootstrap leave the policy tool
@@ -92,21 +103,23 @@ up.
 
 ## Consequences
 
-- A fully remote policy using software and currently published tool
-  capabilities passes preflight when each target's owner has healthy
-  agent-supervised workers, and fails with actionable per-node lines when it
-  does not. Remote accelerator descriptors are not present in the activation
-  contract, so accelerator-backed remote profiles remain deferred.
-- Single-host deployments are unchanged in behavior but unified in path: the
-  node agent on the host owns the tools, and the same owner-scoped evaluation
-  satisfies them.
+- A fully remote policy using software, NVIDIA NVENC, VAAPI, or
+  `VideoToolbox` passes preflight when each target's owner has a ready
+  agent-supervised worker whose child returned the exact configured accelerator
+  descriptor, and fails with actionable per-node lines when it does not.
+- Single-host deployments use the same owner-scoped path: the node agent on
+  the host owns the tools and verifies accelerator declarations against child
+  startup probes.
 - Run-local reserved providers no longer satisfy any tool token. Operators who
   relied on them must run a node agent on the storage owner; the deleted
   control-plane execution path made those providers unable to serve remote
   leases anyway.
-- No schema migration, no payload shape change, no protocol change: readiness
-  reads existing tables and reuses the durable identity chain activation
-  already records.
+- There is no schema migration: existing worker status and capability columns
+  carry the facts. The activation payload and node-agent worker configuration
+  add the optional tagged accelerator descriptor, and the remote execution API
+  adds the authenticated worker-readiness transition. This is a coordinated
+  protocol/configuration contract change, not a read-only reinterpretation of
+  old rows.
 
 ## Considered and rejected alternatives
 

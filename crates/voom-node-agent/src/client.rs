@@ -13,8 +13,9 @@ use voom_core::ids::{ArtifactCommitIntentId, ArtifactCommitRecordId};
 use voom_core::{
     ArtifactAccessMode, ArtifactHandleId, FailureClass, FileLocationId, FileVersionId, LeaseId,
     NodeId, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus, StorageRootId,
-    TicketId, VoomError, WorkerId,
+    TicketId, VoomError, WorkerId, WorkerReadiness,
 };
+use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use crate::config::LoadedAgentConfig;
 
@@ -283,6 +284,22 @@ impl ControlPlaneClient {
     ) -> Result<ActivateOutcome, VoomError> {
         self.send(
             &format!("/v1/execution/node/{}/activate", node_id.0),
+            request,
+        )
+        .await
+    }
+
+    pub async fn worker_readiness(
+        &self,
+        node_id: NodeId,
+        worker_id: WorkerId,
+        request: &RetryRequest<WorkerReadinessRequest>,
+    ) -> Result<WorkerReadinessOutcome, VoomError> {
+        self.send(
+            &format!(
+                "/v1/execution/node/{}/worker/{}/readiness",
+                node_id.0, worker_id.0
+            ),
             request,
         )
         .await
@@ -558,6 +575,7 @@ pub struct WorkerDeclaration {
     pub logical_name: String,
     pub operations: Vec<voom_core::OperationKind>,
     pub artifact_access: Vec<ArtifactAccessMode>,
+    pub accelerator: Option<VideoAcceleratorDescriptor>,
     pub max_parallel: u32,
 }
 
@@ -584,6 +602,22 @@ pub struct ActivateOutcome {
     pub incarnation_id: NodeIncarnationId,
     pub heartbeat_ttl_seconds: u32,
     pub workers: Vec<ActivatedWorker>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerReadinessRequest {
+    pub incarnation_id: NodeIncarnationId,
+    pub readiness: WorkerReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerReadinessOutcome {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+    pub worker_id: WorkerId,
+    pub readiness: WorkerReadiness,
 }
 
 #[derive(Debug, Clone, Serialize)]

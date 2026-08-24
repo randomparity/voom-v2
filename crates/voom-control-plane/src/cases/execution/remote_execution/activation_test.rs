@@ -1,6 +1,6 @@
 use super::super::{
     RemoteAcquireInput, RemoteAcquireOutcome, RemoteActivateInput, RemoteDeactivateInput,
-    RemoteNodeHeartbeatInput, RemoteWorkerDeclaration,
+    RemoteNodeHeartbeatInput, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
 };
 
 use secrecy::SecretString;
@@ -10,6 +10,7 @@ use tracing::instrument::WithSubscriber;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, LibraryId, NodeIncarnationEndReason, NodeIncarnationStatus,
     OperationKind, ProviderLocator, ScanSessionStatus, StorageProviderKind, StorageRootId,
+    WorkerId, WorkerReadiness,
     clock_test_support::{FrozenClock, ManualClock},
 };
 use voom_store::repo::execution::nodes::NodeKind;
@@ -18,6 +19,7 @@ use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
     HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
+use voom_worker_protocol::{VaapiVideoAcceleratorDescriptor, VideoAcceleratorDescriptor};
 
 use crate::cases::workers::nodes::RegisterNodeInput;
 use crate::scan::RemoteScanStartInput;
@@ -52,6 +54,217 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogBuffer {
     }
 }
 
+#[tokio::test]
+async fn worker_readiness_is_fenced_authenticated_and_reversible() {
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = cp
+        .register_node(RegisterNodeInput {
+            name: "readiness-owner".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let activation = cp
+        .remote_activate(activation_input(
+            registered.node.id,
+            registered.token.clone(),
+        ))
+        .await
+        .unwrap();
+    let worker_id = activation.workers[0].worker_id;
+    assert_eq!(
+        cp.workers
+            .get(worker_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .as_str(),
+        "registered"
+    );
+
+    let unauthorized = cp
+        .remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: registered.node.id,
+            token: SecretString::from("wrong-token"),
+            incarnation_id: activation.incarnation_id,
+            worker_id: WorkerId(u64::MAX),
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(unauthorized.error_code(), ErrorCode::Unauthorized);
+
+    for (readiness, expected_status) in [
+        (WorkerReadiness::Ready, "active"),
+        (WorkerReadiness::NotReady, "registered"),
+        (WorkerReadiness::Ready, "active"),
+    ] {
+        cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            incarnation_id: activation.incarnation_id,
+            worker_id,
+            readiness,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            cp.workers
+                .get(worker_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
+            expected_status
+        );
+    }
+}
+
+#[tokio::test]
+async fn worker_readiness_rejects_wrong_incarnation_node_and_expired_heartbeat() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    let first = register_remote_node(&cp).await;
+    let first_activation = cp
+        .remote_activate(activation_input_for(first.node.id, first.token.clone(), 20))
+        .await
+        .unwrap();
+    let second = cp
+        .register_node(RegisterNodeInput {
+            name: "second-readiness-node".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let second_activation = cp
+        .remote_activate(activation_input_for(
+            second.node.id,
+            second.token.clone(),
+            21,
+        ))
+        .await
+        .unwrap();
+    let worker_id = first_activation.workers[0].worker_id;
+
+    let wrong_incarnation = cp
+        .remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: first.node.id,
+            token: first.token.clone(),
+            incarnation_id: second_activation.incarnation_id,
+            worker_id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_incarnation.error_code(), ErrorCode::Conflict);
+
+    let wrong_node = cp
+        .remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: second.node.id,
+            token: second.token,
+            incarnation_id: second_activation.incarnation_id,
+            worker_id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_node.error_code(), ErrorCode::Conflict);
+
+    sqlx::query("UPDATE workers SET status = 'stale' WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let stale_worker = cp
+        .remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: first.node.id,
+            token: first.token.clone(),
+            incarnation_id: first_activation.incarnation_id,
+            worker_id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap_err();
+    assert!(stale_worker.to_string().contains("Stale"), "{stale_worker}");
+    sqlx::query("UPDATE workers SET status = 'registered' WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    clock.advance(time::Duration::seconds(61));
+    let expired = cp
+        .remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: first.node.id,
+            token: first.token,
+            incarnation_id: first_activation.incarnation_id,
+            worker_id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        expired.to_string().contains("heartbeat expired"),
+        "{expired}"
+    );
+    assert_eq!(
+        cp.workers
+            .get(worker_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .as_str(),
+        "registered"
+    );
+}
+
+#[tokio::test]
+async fn activation_rejects_accelerators_without_transcode_or_stable_identity() {
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    let mut input = activation_input(registered.node.id, registered.token);
+    input.workers[0].accelerator = Some(VideoAcceleratorDescriptor::Vaapi(
+        VaapiVideoAcceleratorDescriptor {
+            pci_address: "0000:f4:00.0".to_owned(),
+            device_name: "Radeon Pro".to_owned(),
+            driver_version: "Mesa 26.1".to_owned(),
+            encoders: vec!["hevc_vaapi".to_owned()],
+            decoders: vec!["hevc".to_owned()],
+            max_sessions: 2,
+        },
+    ));
+
+    let error = cp.remote_activate(input.clone()).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not declare transcode_video"),
+        "{error}"
+    );
+    input.workers[0].operations = vec![OperationKind::TranscodeVideo];
+    let Some(VideoAcceleratorDescriptor::Vaapi(accelerator)) =
+        input.workers[0].accelerator.as_mut()
+    else {
+        return;
+    };
+    accelerator.pci_address = "/dev/dri/renderD128".to_owned();
+    let error = cp.remote_activate(input).await.unwrap_err();
+    assert!(error.to_string().contains("pci_address"), "{error}");
+    assert!(
+        cp.get_node(registered.node.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active_incarnation_id
+            .is_none()
+    );
+}
 impl LogBuffer {
     fn text(&self) -> String {
         String::from_utf8(
@@ -1064,12 +1277,14 @@ fn activation_input(node_id: voom_core::NodeId, token: SecretString) -> RemoteAc
                 logical_name: "probe".to_owned(),
                 operations: vec![OperationKind::ProbeFile],
                 artifact_access: vec![ArtifactAccessMode::ControlPlanePlaceholder],
+                accelerator: None,
                 max_parallel: 2,
             },
             RemoteWorkerDeclaration {
                 logical_name: "hash".to_owned(),
                 operations: vec![OperationKind::HashFile],
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: None,
                 max_parallel: 1,
             },
         ],
@@ -1216,6 +1431,15 @@ async fn hold_hash_lease(
     registered: &crate::workers::RegisteredNode,
     activated: &super::super::RemoteActivateOutcome,
 ) -> voom_core::LeaseId {
+    cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+        node_id: registered.node.id,
+        token: registered.token.clone(),
+        incarnation_id: activated.incarnation_id,
+        worker_id: activated.workers[1].worker_id,
+        readiness: WorkerReadiness::Ready,
+    })
+    .await
+    .unwrap();
     let ticket = cp
         .create_ticket(NewTicket {
             job_id: None,
