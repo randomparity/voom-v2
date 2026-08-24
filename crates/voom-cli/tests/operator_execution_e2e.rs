@@ -1,17 +1,18 @@
-//! End-to-end operator acceptance test: drive the real-media compliance
-//! pipeline entirely through the shipped `voom` CLI, using the real
-//! multi-process topology rather than in-process test helpers.
+//! End-to-end operator acceptance test: drive the media compliance pipeline
+//! entirely through the shipped `voom` CLI, on the owner-node dispatch cutover
+//! (issue #423 T9; originally issue #166's multi-process topology).
 //!
-//! The topology under test is two `voom worker run-local` child processes
-//! (`--kind ffmpeg` and `--kind mkvtoolnix`), each a separately spawned `voom`
-//! process that registers a bundled mutation worker and supervises it in the
-//! foreground, plus a `voom compliance execute` process that dispatches the
-//! `[Remux]` then `[TranscodeVideo]` plan to those workers. Every process shares ONE
-//! on-disk `SQLite` database via `VOOM_DATABASE_URL`.
+//! Every phase runs through separate `voom` child processes sharing ONE on-disk
+//! `SQLite` database via `--database-url`: a `voom compliance execute` process
+//! dispatches the `[Remux]` -> `[TranscodeVideo]` plan while the main thread
+//! issues concurrent `voom worker list` reads against the same database.
+//! Envelope-bearing media tickets are settled by the owner-node emulator
+//! (`support/owner_node.rs`) standing in for the storage owner's agent, with
+//! fenced commit intents driven to convergence by a simulated node.
 //!
 //! Execution is the oracle: rather than asserting an assumed artifact shape, the
 //! test inspects what `execute` actually committed (the per-`(file, phase)` rows
-//! and the on-disk `--output-dir`) and asserts that.
+//! and the promoted terminal artifact in `--output-dir`) and asserts that.
 
 #![expect(
     clippy::unwrap_used,
@@ -20,139 +21,119 @@
 )]
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use voom_control_plane::ControlPlane;
+use voom_test_support::TempDatabase;
 use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
-use voom_test_support::worker::hide_stale_fake_ffprobe_sibling;
+use voom_test_support::worker::{
+    TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build, target_debug_binary,
+};
 
-#[path = "support/local_worker.rs"]
-mod local_worker;
-#[path = "support/process.rs"]
-mod process;
-
-use local_worker::LocalWorker;
-use process::{BoundedOutput, build_worker_package, run_bounded};
+#[path = "support/owner_node.rs"]
+mod owner_node;
 
 /// The sample policy remuxes to MKV, then transcodes video to HEVC in a dependent
-/// phase. For an h264/mp4 source this exercises both local mutation workers.
+/// phase: the proven dependent two-mutation shape.
 const POLICY: &str = "policy \"remux-hevc\" {\n  \
      phase remux {\n    container mkv\n  }\n  \
      phase transcode {\n    depends_on: [remux]\n    transcode video to hevc\n  }\n}\n";
 
-const READY_TIMEOUT: Duration = Duration::from_mins(1);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-const PROCESS_TIMEOUT: Duration = Duration::from_mins(2);
-const BUILD_TIMEOUT: Duration = Duration::from_mins(5);
-
 #[tokio::test(flavor = "multi_thread")]
-async fn operator_runs_real_media_pipeline_through_cli() {
-    prepare_worker_binaries();
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("operator-execution-e2e").unwrap();
-    let (_tmp, _root, library, url) = prepare_operator_fixture();
+async fn operator_runs_media_pipeline_through_cli() {
+    let _verify_worker =
+        cargo_bin_or_build("voom-verify-artifact-worker", "voom-verify-artifact-worker").unwrap();
+    voom_test_support::worker::cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let library = root.join("library");
+    std::fs::create_dir(&library).unwrap();
+    std::fs::write(library.join("Movie.mp4"), b"operator e2e source bytes").unwrap();
+    std::fs::write(library.join("notes.txt"), b"just some notes, not a video\n").unwrap();
+
+    let db = TempDatabase::new_in(&root).unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
     assert_ok(&run_voom(&url, &["init"]), "init");
     let pool = voom_store::connect(&url).await.unwrap();
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
-    // Background stand-in for the storage-owner agent (ADR 0074): drives the
-    // fenced commit intent so the operator pipeline's commit phase converges.
-    {
-        let driver_url = url.clone();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(async move {
-                let pool = voom_store::connect(&driver_url).await.unwrap();
-                let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
-                node.install(&pool).await.unwrap();
-                let cp = voom_control_plane::ControlPlane::open(&driver_url)
-                    .await
-                    .unwrap();
-                loop {
-                    let pending: Option<(i64, i64)> = sqlx::query_as(
-                        "SELECT id, artifact_handle_id FROM artifact_commit_intents \
-                         WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
-                    )
-                    .fetch_optional(&pool)
-                    .await
-                    .unwrap();
-                    if let Some((_, handle)) = pending {
-                        let _ = node
-                            .drive_pending_commit(
-                                &cp,
-                                &pool,
-                                voom_core::ArtifactHandleId(u64::try_from(handle).unwrap()),
-                            )
-                            .await;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            });
-        });
-    }
-    sqlx::query("UPDATE library_roots SET provider_locator = ?, display_locator = ? WHERE id = ?")
-        .bind(library.display().to_string())
-        .bind(library.display().to_string())
-        .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
-        .execute(&pool)
+    // Point the shared storage root at the library directory and make it its
+    // own staging/backup default, so envelope destinations resolve inside the
+    // operator-visible tree.
+    voom_store::test_support::set_test_storage_root_path(&pool, &library)
         .await
         .unwrap();
+    sqlx::query(
+        "UPDATE library_roots SET default_staging_root_id = id, \
+         default_backup_root_id = id WHERE id = ?",
+    )
+    .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let mut ffmpeg = LocalWorker::spawn(&url, "ffmpeg").unwrap();
-    let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix").unwrap();
-    ffmpeg.wait_for_ready(READY_TIMEOUT).unwrap();
-    mkvtoolnix.wait_for_ready(READY_TIMEOUT).unwrap();
-    let (policy_version_id, input_set_id) = create_library_policy(&url, &library).await;
+    // Storage-owner stand-ins: fenced commit-intent driver + media settlement.
+    let _emulator = owner_node::OwnerNodeEmulator::spawn(&url);
+
+    // Live capable workers satisfy the software-transcode preflight the same
+    // way a real deployment does; the media tickets themselves are node-local.
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+    let mut ffmpeg = TestWorkerLaunch::start(
+        &cp,
+        TestWorkerConfig::synthetic(
+            target_debug_binary("voom-ffmpeg-worker"),
+            "operator-e2e-ffmpeg",
+            "operator-e2e-ffmpeg-secret",
+            "transcode_video",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let (policy_version_id, input_set_id) = create_library_policy(&cp, &url, &library).await;
 
     let out_dir = library.join("out");
-    let staging_root = library.join("stage");
     let execute = run_execute_with_concurrent_reader(
         &url,
         policy_version_id,
         input_set_id,
-        &staging_root,
+        &library,
         &out_dir,
     );
     assert_execute_committed(&execute, &out_dir);
-
-    let ffmpeg_id = ffmpeg.worker_id();
-    let mkvtoolnix_id = mkvtoolnix.worker_id();
-    assert_retired_envelope(
-        &ffmpeg.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
-        ffmpeg_id,
-        "ffmpeg",
-    );
-    assert_retired_envelope(
-        &mkvtoolnix.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
-        mkvtoolnix_id,
-        "mkvtoolnix",
-    );
-
-    let final_list = run_voom(&url, &["worker", "list"]);
-    let final_json = assert_ok(&final_list, "worker list (post-shutdown)");
-    assert_no_live_worker(&final_json, ffmpeg_id);
-    assert_no_live_worker(&final_json, mkvtoolnix_id);
+    ffmpeg.shutdown().unwrap();
 }
 
-async fn create_library_policy(url: &str, library: &Path) -> (u64, u64) {
-    // Seed the one video's identity rows through the real scan-session chain;
+async fn create_library_policy(cp: &ControlPlane, url: &str, library: &Path) -> (u64, u64) {
+    // Seed the one video's identity rows through the scan seeding chain;
     // notes.txt never becomes a file-version because only media files are
     // seeded.
-    let cp = ControlPlane::open(url).await.unwrap();
     let source = library.join("Movie.mp4");
     let seeded = seed_scanned_files(
-        &cp,
+        cp,
         url,
         voom_store::test_support::TEST_STORAGE_ROOT_ID,
         &[SeedFile {
             locator: "Movie.mp4",
             path: &source,
-            probe_snapshot: basic_mp4_probe_snapshot(),
+            probe_snapshot: json!({
+                "format": "sprint10-v1",
+                "container": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2" },
+                "streams": [{
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264",
+                    "width": 32,
+                    "height": 32,
+                    "disposition": { "default": true, "forced": false, "commentary": false },
+                }],
+            }),
         }],
     )
     .await
@@ -160,7 +141,6 @@ async fn create_library_policy(url: &str, library: &Path) -> (u64, u64) {
     assert_eq!(seeded.len(), 1, "exactly the one video is ingested");
 
     let policy_file = library.join("remux-and-hevc.voom");
-
     std::fs::write(&policy_file, POLICY).unwrap();
     let policy = run_voom(
         url,
@@ -208,34 +188,6 @@ async fn create_library_policy(url: &str, library: &Path) -> (u64, u64) {
     (policy_version_id, input_set_id)
 }
 
-fn prepare_worker_binaries() {
-    for package in [
-        "voom-ffmpeg-worker",
-        "voom-mkvtoolnix-worker",
-        "voom-ffprobe-worker",
-        "voom-verify-artifact-worker",
-    ] {
-        build_worker_package(package, BUILD_TIMEOUT).unwrap();
-    }
-}
-
-fn prepare_operator_fixture() -> (
-    tempfile::TempDir,
-    std::path::PathBuf,
-    std::path::PathBuf,
-    String,
-) {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let library = root.join("library");
-    std::fs::create_dir(&library).unwrap();
-    generate_h264_fixture(&library.join("Movie.mp4"));
-    std::fs::write(library.join("notes.txt"), b"just some notes, not a video\n").unwrap();
-    let db = voom_test_support::TempDatabase::new_in(&root).unwrap();
-    let url = format!("sqlite://{}", db.path().display());
-    (tmp, root, library, url)
-}
-
 /// Run `compliance execute` on a worker thread while the main thread issues
 /// concurrent `voom worker list` reads against the same `SQLite` DB. Returns the
 /// execute process output. Panics if no concurrent read landed while execute was
@@ -245,11 +197,14 @@ fn run_execute_with_concurrent_reader(
     url: &str,
     policy_version_id: u64,
     input_set_id: u64,
-    staging_root: &Path,
+    library: &Path,
     out_dir: &Path,
-) -> BoundedOutput {
+) -> std::process::Output {
     let exec_url = url.to_owned();
-    let staging = staging_root.display().to_string();
+    // The staging flag mirrors the storage-root path (the library): the
+    // coordinator's promotion plan pairs `<staging>/.committed/<op>` working
+    // dirs with the operator output dir.
+    let staging = library.display().to_string();
     let output = out_dir.display().to_string();
     let exec = std::thread::spawn(move || {
         run_voom(
@@ -289,8 +244,8 @@ fn run_execute_with_concurrent_reader(
 
 /// Assert the execute run succeeded and inspect what it actually committed:
 /// two completed phases, one committed per-`(file, phase)` row for each phase, and
-/// a single final MKV in `--output-dir`.
-fn assert_execute_committed(execute: &BoundedOutput, out_dir: &Path) {
+/// the promoted terminal MKV in `--output-dir`.
+fn assert_execute_committed(execute: &std::process::Output, out_dir: &Path) {
     let execute_json = assert_ok(execute, "compliance execute");
     assert_eq!(execute_json["command"], "compliance");
 
@@ -362,60 +317,29 @@ fn assert_execute_committed(execute: &BoundedOutput, out_dir: &Path) {
     );
 }
 
-fn assert_retired_envelope(envelope: &Value, worker_id: u64, kind: &str) {
-    assert_eq!(envelope["command"], "worker", "{kind} shutdown envelope");
-    assert_eq!(
-        envelope["status"], "ok",
-        "{kind} must retire cleanly: {envelope}"
-    );
-    assert_eq!(
-        envelope["data"]["status"], "retired",
-        "{kind} run-local must report retirement: {envelope}"
-    );
-    assert_eq!(
-        envelope["data"]["worker_id"].as_u64().unwrap(),
-        worker_id,
-        "{kind} retirement must name the worker it started"
-    );
-}
-
-fn assert_no_live_worker(list_json: &Value, worker_id: u64) {
-    let workers = list_json["data"]["workers"].as_array().unwrap();
-    let live = workers.iter().find(|worker| {
-        worker["id"].as_u64() == Some(worker_id)
-            && matches!(worker["status"].as_str(), Some("registered" | "active"))
-    });
-    assert!(
-        live.is_none(),
-        "worker {worker_id} must not be live after shutdown: {list_json}"
-    );
-}
-
 /// Invoke the shipped `voom` binary against the shared DB. The database URL is
 /// passed via `VOOM_DATABASE_URL` so every process in the topology agrees.
-fn run_voom(url: &str, args: &[&str]) -> BoundedOutput {
-    run_bounded(
-        Command::new(env!("CARGO_BIN_EXE_voom"))
-            .env("VOOM_DATABASE_URL", url)
-            .env(
-                "VOOM_LOCAL_NODE_ID",
-                voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
-            )
-            .args(args),
-        PROCESS_TIMEOUT,
-    )
-    .unwrap()
+fn run_voom(url: &str, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_voom"))
+        .env("VOOM_DATABASE_URL", url)
+        .env(
+            "VOOM_LOCAL_NODE_ID",
+            voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        )
+        .args(args)
+        .output()
+        .unwrap()
 }
 
 /// Assert the command exited 0 with an `ok` envelope on stdout, returning it.
-fn assert_ok(output: &BoundedOutput, what: &str) -> Value {
+fn assert_ok(output: &std::process::Output, what: &str) -> Value {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "{}",
-        output.diagnostics(what)
+        "{what} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!output.timed_out, "{}", output.diagnostics(what));
     let value = envelope(&output.stdout);
     assert_eq!(value["status"], "ok", "{what} must be ok: {value}");
     value
@@ -437,56 +361,4 @@ fn list_dir(dir: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
-}
-
-fn generate_h264_fixture(path: &Path) {
-    let output = run_bounded(
-        Command::new("ffmpeg").args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=32x32:rate=1",
-            "-t",
-            "1",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            path.to_str().unwrap(),
-        ]),
-        PROCESS_TIMEOUT,
-    )
-    .unwrap();
-    assert!(
-        !output.timed_out && output.status.success(),
-        "{}",
-        output.diagnostics("ffmpeg fixture generation")
-    );
-}
-
-/// Canned normalized probe snapshot matching what the real ffprobe worker
-/// reports for the generated video-only h264 fixture.
-fn basic_mp4_probe_snapshot() -> Value {
-    serde_json::json!({
-        "format": "sprint10-v1",
-        "container": {
-            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
-            "format_long_name": "QuickTime / MOV",
-        },
-        "streams": [
-            {
-                "index": 0,
-                "kind": "video",
-                "codec_name": "h264",
-                "width": 320,
-                "height": 180,
-                "disposition": { "default": true, "forced": false, "commentary": false },
-            },
-        ],
-    })
 }

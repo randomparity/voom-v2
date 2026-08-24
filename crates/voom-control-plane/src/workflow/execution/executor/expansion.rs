@@ -199,6 +199,12 @@ impl WorkflowExecutor {
             .await?;
         if facts.unfinished == 0 {
             Ok(WorkflowIdleState::Finished)
+        } else if facts.ready > 0 && facts.ready_node_local_media == facts.ready {
+            // Every ready ticket is a node-local media dispatch (ADR 0075):
+            // the bundled executor never claims these, so the work is held by
+            // the owner nodes' agents and the run loop must wait for external
+            // progress exactly as it does for leased tickets.
+            Ok(WorkflowIdleState::Leased)
         } else if facts.ready > 0 {
             Ok(WorkflowIdleState::Ready)
         } else if facts.leased > 0 {

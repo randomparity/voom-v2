@@ -181,6 +181,12 @@ async fn drive_commit_intent(
         &authorized.staging_provider_relative_locator,
     )
     .await?;
+    let source_path = resolve_rooted_path(
+        context,
+        authorized.source_storage_root_id,
+        &authorized.source_provider_relative_locator,
+    )
+    .await?;
     let target_path = resolve_rooted_path(
         context,
         authorized.target_storage_root_id,
@@ -188,6 +194,23 @@ async fn drive_commit_intent(
     )
     .await?;
 
+    match materialize_staging_from_source(&staging_path, &source_path, &expected).await? {
+        Materialize::SourceMismatch { reason, observed } => {
+            // The pinned source cannot produce the pinned staged bytes: file
+            // the typed drift evidence instead of promoting anything.
+            report_outcome(
+                context,
+                intent_id,
+                CommitOutcomeEvidence::Mismatched(CommitMismatchedEvidence {
+                    reason,
+                    observed: Some(observed),
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+        Materialize::Present | Materialize::Materialized => {}
+    }
     let evidence = match promote_staged_bytes(&staging_path, &target_path, &expected).await? {
         Promotion::Applied(observed) => {
             CommitOutcomeEvidence::Applied(CommitAppliedEvidence { observed })
@@ -414,6 +437,77 @@ enum CopyOutcome {
     StagingDrifted(CommitObservedFacts),
 }
 
+/// Outcome of ensuring staged bytes exist before promotion.
+enum Materialize {
+    /// Staging already held bytes (a worker's output or an earlier attempt's
+    /// copy); they were left untouched and promotion decides their match.
+    Present,
+    /// Staging was absent and was materialized from the pinned source handle,
+    /// the copied facts matching the pinned expectations exactly.
+    Materialized,
+    /// Staging was absent and the source handle's bytes do not match the
+    /// pinned expected facts: typed drift evidence, nothing installed.
+    SourceMismatch {
+        reason: String,
+        observed: CommitObservedFacts,
+    },
+}
+
+/// Materialize missing staged bytes from the pinned source handle (ADR 0075
+/// "staging copy joins the fenced commit intent"): an absent staging file is
+/// copied from the source rooted address through a unique temp sibling and
+/// installed no-replace, rejecting any copy whose observed facts drift from
+/// the pinned expected facts. Existing staged bytes are never overwritten —
+/// mutation outputs staged by workers on this node must survive, and their
+/// match against the pins is promotion's decision.
+async fn materialize_staging_from_source(
+    staging_path: &Path,
+    source_path: &Path,
+    expected: &CommitObservedFacts,
+) -> Result<Materialize, VoomError> {
+    if try_observe_regular_file(staging_path).await?.is_some() {
+        return Ok(Materialize::Present);
+    }
+    let temp_path = unique_temp_sibling_path(staging_path)?;
+    if let Some(parent) = temp_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            VoomError::ArtifactUnavailable(format!(
+                "cannot prepare artifact directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    match stream_copy_with_hash(source_path, &temp_path).await {
+        Ok(copied) if copied == *expected => {
+            match install_temp_no_replace(&temp_path, staging_path).await {
+                Ok(()) => Ok(Materialize::Materialized),
+                Err(InstallError::TargetAppeared) => {
+                    // A concurrent attempt materialized staging first: leave
+                    // its bytes in place; promotion re-observes the pins.
+                    let _ = remove_file_if_exists(&temp_path).await;
+                    Ok(Materialize::Present)
+                }
+                Err(InstallError::Failed(error)) => Err(error),
+            }
+        }
+        Ok(copied) => {
+            let _ = remove_file_if_exists(&temp_path).await;
+            Ok(Materialize::SourceMismatch {
+                reason: format!(
+                    "staged bytes absent and source handle {} does not match the pinned \
+                     expected facts",
+                    source_path.display()
+                ),
+                observed: copied,
+            })
+        }
+        Err(error) => {
+            let _ = remove_file_if_exists(&temp_path).await;
+            Err(error)
+        }
+    }
+}
+
 /// Copy staging into a fresh temp sibling created no-replace, fsync the file,
 /// and reject the copy if the staged bytes drifted away from `expected`
 /// mid-copy. The temp sibling is removed on every failure path.
@@ -546,7 +640,9 @@ async fn observe_regular_file(path: &Path) -> Result<CommitObservedFacts, VoomEr
 }
 
 /// [`observe_regular_file`], with `Ok(None)` for an absent path.
-async fn try_observe_regular_file(path: &Path) -> Result<Option<CommitObservedFacts>, VoomError> {
+pub(crate) async fn try_observe_regular_file(
+    path: &Path,
+) -> Result<Option<CommitObservedFacts>, VoomError> {
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -697,8 +793,11 @@ fn unique_temp_sibling_path(final_path: &Path) -> Result<PathBuf, VoomError> {
     )))
 }
 
-async fn resolve_rooted_path(
-    context: &CommitCoordinatorContext,
+/// Shared rooted-path resolution for both commit intents and media dispatches:
+/// canonicalize the bound root, validate the relative locator textually, then
+/// reject symlinked directory components that could redirect outside the root.
+pub(crate) async fn rooted_path(
+    storage_roots: &HashMap<u64, PathBuf>,
     storage_root_id: StorageRootId,
     relative_locator: &str,
 ) -> Result<PathBuf, VoomError> {
@@ -715,20 +814,7 @@ async fn resolve_rooted_path(
              with no '..', backslash, or empty components"
         )));
     }
-    let locator = context
-        .storage_roots
-        .get(&storage_root_id.0)
-        .ok_or_else(|| {
-            VoomError::Config(format!(
-                "no provider locator configured for storage root {storage_root_id}"
-            ))
-        })?;
-    let root_path = tokio::fs::canonicalize(locator).await.map_err(|error| {
-        VoomError::ArtifactUnavailable(format!(
-            "cannot resolve storage root {storage_root_id} at {}: {error}",
-            locator.display()
-        ))
-    })?;
+    let root_path = canonical_root(storage_roots, storage_root_id).await?;
     let resolved = root_path.join(relative);
     if !resolved.starts_with(&root_path) {
         return Err(VoomError::Config(format!(
@@ -765,7 +851,33 @@ async fn resolve_rooted_path(
     Ok(resolved)
 }
 
-async fn remove_file_if_exists(path: &Path) -> Result<(), VoomError> {
+/// Canonicalized provider locator for one bound storage root.
+pub(crate) async fn canonical_root(
+    storage_roots: &HashMap<u64, PathBuf>,
+    storage_root_id: StorageRootId,
+) -> Result<PathBuf, VoomError> {
+    let locator = storage_roots.get(&storage_root_id.0).ok_or_else(|| {
+        VoomError::Config(format!(
+            "no provider locator configured for storage root {storage_root_id}"
+        ))
+    })?;
+    tokio::fs::canonicalize(locator).await.map_err(|error| {
+        VoomError::ArtifactUnavailable(format!(
+            "cannot resolve storage root {storage_root_id} at {}: {error}",
+            locator.display()
+        ))
+    })
+}
+
+async fn resolve_rooted_path(
+    context: &CommitCoordinatorContext,
+    storage_root_id: StorageRootId,
+    relative_locator: &str,
+) -> Result<PathBuf, VoomError> {
+    rooted_path(&context.storage_roots, storage_root_id, relative_locator).await
+}
+
+pub(crate) async fn remove_file_if_exists(path: &Path) -> Result<(), VoomError> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),

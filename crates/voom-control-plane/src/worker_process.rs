@@ -9,15 +9,13 @@ use std::time::Duration;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use secrecy::{ExposeSecret, SecretString};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
 use voom_core::{ErrorCode, FailureClass, LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
-    ClientHandle, DispatchStream, HttpClient, NdjsonOutcome, OperationKind, OperationRequest,
-    PercentBps, ProgressFrame, ProtocolError, WorkerCredentials,
+    DispatchStream, HttpClient, NdjsonOutcome, PercentBps, ProgressFrame, WorkerCredentials,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,35 +77,12 @@ impl WorkerCommand {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerStreamLabels {
-    pub(crate) payload_encode: &'static str,
-    pub(crate) dispatch_failed: &'static str,
     pub(crate) progress_idle_timeout: &'static str,
     pub(crate) stream_protocol: &'static str,
     pub(crate) terminal_frame_as_progress: &'static str,
     pub(crate) progress_terminal: &'static str,
     pub(crate) stream_ended: &'static str,
     pub(crate) result_decode: &'static str,
-}
-
-pub(crate) struct WorkerOperationDispatch<'a, Request> {
-    pub(crate) idempotency_key: &'a str,
-    pub(crate) operation: OperationKind,
-    pub(crate) lease_id: LeaseId,
-    pub(crate) payload: Request,
-    pub(crate) heartbeat_deadline_ms: u32,
-    pub(crate) progress_idle_deadline_ms: u32,
-    pub(crate) labels: WorkerStreamLabels,
-}
-
-#[derive(Debug)]
-pub(crate) enum WorkerDispatchError {
-    PayloadEncode {
-        message: String,
-    },
-    DispatchFailed {
-        source: ProtocolError,
-        message: String,
-    },
 }
 
 #[derive(Debug)]
@@ -134,7 +109,6 @@ pub(crate) enum WorkerStreamError {
         class: FailureClass,
         code: ErrorCode,
         message: String,
-        payload: Option<serde_json::Value>,
     },
     ProgressHandler {
         source: VoomError,
@@ -276,57 +250,6 @@ impl Drop for BundledWorkerProcess {
     }
 }
 
-pub(crate) async fn dispatch_operation_with_client<C, P, Request, Response>(
-    client: &C,
-    credentials: &WorkerCredentials,
-    operation_dispatch: WorkerOperationDispatch<'_, Request>,
-    progress: &mut P,
-) -> Result<Response, VoomError>
-where
-    C: ClientHandle + ?Sized,
-    P: WorkerProgressHandler + ?Sized,
-    Request: Serialize + Send,
-    Response: DeserializeOwned,
-{
-    let labels = operation_dispatch.labels;
-    let progress_idle_deadline_ms = operation_dispatch.progress_idle_deadline_ms;
-    let dispatch = dispatch_worker_operation_with_client(client, credentials, operation_dispatch)
-        .await
-        .map_err(worker_dispatch_error_to_voom_error)?;
-    consume_operation_stream(dispatch, progress_idle_deadline_ms, labels, progress).await
-}
-
-pub(crate) async fn dispatch_worker_operation_with_client<C, Request>(
-    client: &C,
-    credentials: &WorkerCredentials,
-    operation_dispatch: WorkerOperationDispatch<'_, Request>,
-) -> Result<DispatchStream, WorkerDispatchError>
-where
-    C: ClientHandle + ?Sized,
-    Request: Serialize + Send,
-{
-    let labels = operation_dispatch.labels;
-    let payload = serde_json::to_value(operation_dispatch.payload).map_err(|err| {
-        WorkerDispatchError::PayloadEncode {
-            message: format!("{}: {err}", labels.payload_encode),
-        }
-    })?;
-    let request = OperationRequest {
-        operation: operation_dispatch.operation,
-        lease_id: operation_dispatch.lease_id,
-        payload,
-        heartbeat_deadline_ms: operation_dispatch.heartbeat_deadline_ms,
-        progress_idle_deadline_ms: operation_dispatch.progress_idle_deadline_ms,
-    };
-    client
-        .dispatch(credentials, operation_dispatch.idempotency_key, request)
-        .await
-        .map_err(|source| WorkerDispatchError::DispatchFailed {
-            message: format!("{}: {source}", labels.dispatch_failed),
-            source,
-        })
-}
-
 pub(crate) fn bundled_worker_command_from<F>(
     configured_bin: Option<OsString>,
     current_exe: std::io::Result<PathBuf>,
@@ -398,26 +321,6 @@ async fn read_bound_address(
     parse_bound_line(&line)
 }
 
-async fn consume_operation_stream<Response, P>(
-    dispatch: DispatchStream,
-    progress_idle_deadline_ms: u32,
-    labels: WorkerStreamLabels,
-    progress: &mut P,
-) -> Result<Response, VoomError>
-where
-    Response: DeserializeOwned,
-    P: WorkerProgressHandler + ?Sized,
-{
-    consume_worker_stream(
-        dispatch,
-        Duration::from_millis(u64::from(progress_idle_deadline_ms)),
-        labels,
-        progress,
-    )
-    .await
-    .map_err(worker_stream_error_to_voom_error)
-}
-
 pub(crate) async fn consume_worker_stream<Response, P>(
     mut dispatch: DispatchStream,
     idle_timeout: Duration,
@@ -462,14 +365,12 @@ where
                 class,
                 code,
                 message,
-                payload,
                 ..
             }) => {
                 return Err(WorkerStreamError::Terminal {
                     class,
                     code,
                     message,
-                    payload,
                 });
             }
             NdjsonOutcome::Terminated(ProgressFrame::Progress { .. }) => {
@@ -486,31 +387,6 @@ where
     }
 }
 
-fn worker_stream_error_to_voom_error(err: WorkerStreamError) -> VoomError {
-    match err {
-        WorkerStreamError::ProgressIdleTimeout { message } => VoomError::WorkerTimeout(message),
-        WorkerStreamError::StreamProtocol { message }
-        | WorkerStreamError::TerminalFrameAsProgress { message }
-        | WorkerStreamError::ProgressFrameAsTerminal { message }
-        | WorkerStreamError::ResultDecode { message } => VoomError::MalformedWorkerResult(message),
-        WorkerStreamError::StreamEnded { message } => VoomError::WorkerCrash(message),
-        WorkerStreamError::Terminal {
-            class,
-            code,
-            message,
-            payload: _,
-        } => worker_terminal_error(class, code, message),
-        WorkerStreamError::ProgressHandler { source } => source,
-    }
-}
-
-fn worker_dispatch_error_to_voom_error(err: WorkerDispatchError) -> VoomError {
-    match err {
-        WorkerDispatchError::PayloadEncode { message } => VoomError::Internal(message),
-        WorkerDispatchError::DispatchFailed { message, .. } => VoomError::WorkerCrash(message),
-    }
-}
-
 fn worker_search_dirs(exe_dir: &Path) -> Vec<PathBuf> {
     if exe_dir.file_name().is_some_and(|name| name == "deps")
         && let Some(parent) = exe_dir.parent()
@@ -518,20 +394,6 @@ fn worker_search_dirs(exe_dir: &Path) -> Vec<PathBuf> {
         return vec![parent.to_path_buf(), exe_dir.to_path_buf()];
     }
     vec![exe_dir.to_path_buf()]
-}
-
-fn worker_terminal_error(class: FailureClass, code: ErrorCode, message: String) -> VoomError {
-    match code {
-        ErrorCode::ArtifactUnavailable => VoomError::ArtifactUnavailable(message),
-        ErrorCode::ArtifactChecksumMismatch => VoomError::ArtifactChecksumMismatch(message),
-        ErrorCode::MalformedWorkerResult => VoomError::MalformedWorkerResult(message),
-        ErrorCode::WorkerTimeout => VoomError::WorkerTimeout(message),
-        ErrorCode::WorkerCrash => VoomError::WorkerCrash(message),
-        _ if class == FailureClass::MalformedWorkerResult => {
-            VoomError::MalformedWorkerResult(message)
-        }
-        _ => VoomError::WorkerCrash(message),
-    }
 }
 
 fn spawn_worker(

@@ -21,9 +21,7 @@ use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::local_worker::NVIDIA_STARTUP_TIMEOUT;
 use crate::workflow::WorkerRuntimeRegistry;
-use crate::workflow::execution::executor::{
-    OperationArtifactRoots, WorkflowArtifactRoots, WorkflowExecutorOptions, WorkflowQueueOptions,
-};
+use crate::workflow::execution::executor::{WorkflowExecutorOptions, WorkflowQueueOptions};
 use crate::workflow::ticket_results::{OrderedTicketResult, ordered_ticket_result};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -605,17 +603,20 @@ pub struct ComplianceExecutionOptions {
 
 impl Default for ComplianceExecutionOptions {
     fn default() -> Self {
-        let defaults = WorkflowExecutorOptions::default();
         Self {
             max_in_flight_files: DEFAULT_MAX_IN_FLIGHT_FILES,
-            accelerator_unavailable_timeout: defaults.queue.accelerator_unavailable_timeout,
-            transcode_staging_root: defaults.artifact_roots.transcode.staging_root,
-            transcode_target_dir: defaults.artifact_roots.transcode.target_dir,
-            remux_staging_root: defaults.artifact_roots.remux.staging_root,
-            remux_target_dir: defaults.artifact_roots.remux.target_dir,
-            audio_staging_root: defaults.artifact_roots.audio.staging_root,
-            audio_target_dir: defaults.artifact_roots.audio.target_dir,
-            backup_root: defaults.artifact_roots.backup_root,
+            accelerator_unavailable_timeout: WorkflowQueueOptions::default()
+                .accelerator_unavailable_timeout,
+            transcode_staging_root: PathBuf::from("/tmp/voom/transcode/staging"),
+            transcode_target_dir: PathBuf::from("/tmp/voom/transcode/output"),
+            remux_staging_root: PathBuf::from("/tmp/voom/remux/staging"),
+            remux_target_dir: PathBuf::from("/tmp/voom/remux/output"),
+            audio_staging_root: PathBuf::from("/tmp/voom/audio/staging"),
+            audio_target_dir: PathBuf::from("/tmp/voom/audio/output"),
+            // Backup destinations resolve durably through library-root defaults
+            // (`LibraryRoot.default_backup_root_id`); the facade only tracks
+            // operator opt-in for the ADR 0025 safety gate.
+            backup_root: None,
             safety_policy_slug: None,
         }
     }
@@ -694,19 +695,6 @@ pub(crate) fn committed_working_dir(staging_root: &Path, operation: &str) -> Pat
     staging_root.join(COMMITTED_SUBDIR).join(operation)
 }
 
-/// The per-source commit directory under an operation's working dir. Two sources
-/// that share a basename across different subdirectories would otherwise commit
-/// to the same flat path in the shared working dir and collide (issue #197);
-/// namespacing the commit by the source file-version id keeps them distinct.
-/// Promotion still matches by working-dir prefix and later mirrors each terminal
-/// artifact's source subtree into `--output-dir`.
-pub(crate) fn committed_source_dir(
-    working_dir: &Path,
-    source_file_version_id: FileVersionId,
-) -> PathBuf {
-    working_dir.join(format!("v{}", source_file_version_id.0))
-}
-
 /// One operation family's commit working dir paired with the operator output
 /// dir its terminal artifacts promote into.
 #[derive(Debug, Clone)]
@@ -742,31 +730,22 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
         // (see `execute_compliance_policy_with_options`), not by the workflow
         // executor; drop it here.
         let _ = safety_policy_slug;
-        // Each operation commits into a per-family working dir under its staging
-        // root (the `OperationArtifactRoots::target_dir`), NOT the operator's
-        // `--output-dir` (the `*_target_dir` fields here). Post-run promotion
-        // moves each file's terminal artifact out to the output dir;
-        // intermediates stay in the working dir.
-        let _ = (&transcode_target_dir, &remux_target_dir, &audio_target_dir);
+        // Each operation's staging root/output dir still feeds the #528-excluded
+        // post-run promotion plan directly off these options; the workflow
+        // executor itself no longer carries byte-path configuration.
+        let _ = (
+            &transcode_staging_root,
+            &transcode_target_dir,
+            &remux_staging_root,
+            &remux_target_dir,
+            &audio_staging_root,
+            &audio_target_dir,
+        );
+        let _ = backup_root;
         Self {
             queue: WorkflowQueueOptions {
                 accelerator_unavailable_timeout,
                 ..WorkflowQueueOptions::default()
-            },
-            artifact_roots: WorkflowArtifactRoots {
-                transcode: OperationArtifactRoots::new(
-                    transcode_staging_root.clone(),
-                    committed_working_dir(&transcode_staging_root, "transcode"),
-                ),
-                remux: OperationArtifactRoots::new(
-                    remux_staging_root.clone(),
-                    committed_working_dir(&remux_staging_root, "remux"),
-                ),
-                audio: OperationArtifactRoots::new(
-                    audio_staging_root.clone(),
-                    committed_working_dir(&audio_staging_root, "audio"),
-                ),
-                backup_root,
             },
             ..WorkflowExecutorOptions::default()
         }

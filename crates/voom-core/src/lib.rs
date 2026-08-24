@@ -186,4 +186,4 @@ pub use version::VersionInfo;
 /// flag day: every worker and the control plane move together because they
 /// are the same release. See ADR-0016
 /// (`docs/adr/0016-worker-protocol-exact-version-match.md`).
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;

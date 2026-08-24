@@ -85,7 +85,6 @@ async fn dispatch_ticket_inner(
     apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
     if let Some(result) = dispatch_control_plane_ticket(TicketDispatchContext {
         control,
-        runtime,
         worker_id,
         ticket,
         operation: workflow_payload.operation,

@@ -99,6 +99,38 @@ impl OperationKind {
         }
     }
 
+    /// Whether this operation dispatches through the owner node's agent as a
+    /// handle-shaped `MediaDispatch` envelope (ADR 0075) rather than a
+    /// control-plane-side worker session.
+    /// Exactly the seven byte-touching operations whose payloads carry the
+    /// nested `media_dispatch` envelope and whose leases the node agent
+    /// executes; `ScanLibrary` keeps its dedicated scan-session pump and the
+    /// remaining byte-touching operations never touch media bytes.
+    ///
+    /// The match is exhaustive with no wildcard arm, so adding a variant
+    /// without classifying it is a compile error rather than a silently
+    /// misrouted ticket.
+    #[must_use]
+    pub const fn is_node_local_media_dispatch(self) -> bool {
+        match self {
+            Self::ProbeFile
+            | Self::BackUpFile
+            | Self::Remux
+            | Self::TranscodeVideo
+            | Self::TranscodeAudio
+            | Self::ExtractAudio
+            | Self::VerifyArtifact => true,
+            Self::ScanLibrary
+            | Self::HashFile
+            | Self::EditTracks
+            | Self::CommitArtifact
+            | Self::DeleteArtifact
+            | Self::IdentifyMedia
+            | Self::ScoreQuality
+            | Self::SyncExternalSystem => false,
+        }
+    }
+
     /// Parse a wire string (the `snake_case` token produced by [`Self::as_str`])
     /// back into a variant, or `None` for an unknown token. Symmetric with
     /// [`Self::as_str`]; callers that need to validate an externally supplied

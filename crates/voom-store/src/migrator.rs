@@ -29,6 +29,22 @@ const MIGRATION_0038_SQL: &str =
 const MIGRATION_0041_SQL: &str =
     include_str!("../../../migrations/0041_scan_observation_evidence.sql");
 
+/// Migration 0042 (physical version 5): node-local location-handle media
+/// dispatch preflight (issue #423, ADR 0075). Pure preflight guard aborting
+/// the migration when non-terminal byte-touching media workflow tickets
+/// carry payloads without the nested `media_dispatch` envelope; see the
+/// file header.
+const MIGRATION_0042_SQL: &str =
+    include_str!("../../../migrations/0042_node_local_media_dispatch_preflight.sql");
+
+/// Migration 0043 (physical version 6): fenced commit-intent source handle
+/// (issue #423 T7, ADR 0075). Recreates `artifact_commit_intents` behind a
+/// preflight guard on any existing rows, pinning the staged bytes' source
+/// rooted address so the node can materialize staging itself; see the file
+/// header.
+const MIGRATION_0043_SQL: &str =
+    include_str!("../../../migrations/0043_commit_intent_source_handle.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -72,8 +88,26 @@ pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed(MIGRATION_0041_SQL),
             false,
         ),
+        Migration::new(
+            5,
+            Cow::Borrowed("node_local_media_dispatch_preflight"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0042_SQL),
+            false,
+        ),
+        Migration::new(
+            6,
+            Cow::Borrowed("commit_intent_source_handle"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0043_SQL),
+            false,
+        ),
     ]),
     ignore_missing: false,
     locking: true,
     no_tx: false,
 });
+
+#[cfg(test)]
+#[path = "migrator_test.rs"]
+mod tests;

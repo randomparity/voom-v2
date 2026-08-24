@@ -28,18 +28,6 @@ pub(crate) struct PrimaryBundleResolution {
 }
 
 impl ControlPlane {
-    pub(crate) async fn find_primary_bundle_for_file_version(
-        &self,
-        file_version_id: FileVersionId,
-    ) -> Result<Option<BundleId>, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
-        let (_, bundle_id) = self
-            .primary_bundle_for_file_version_in_tx(&mut tx, file_version_id)
-            .await?;
-        commit_tx(tx).await?;
-        Ok(bundle_id)
-    }
-
     pub(crate) async fn resolve_or_create_primary_bundle_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

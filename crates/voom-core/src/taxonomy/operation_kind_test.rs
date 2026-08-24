@@ -122,6 +122,40 @@ fn scan_library_is_byte_touching_and_identify_media_is_not() {
 }
 
 #[test]
+fn node_local_media_dispatch_classification_is_the_envelope_family() {
+    // ADR 0075: exactly the seven byte-touching operations whose payloads
+    // carry a `media_dispatch` envelope and whose leases a node agent
+    // executes. ScanLibrary keeps its scan-session pump; hash/edit/commit/
+    // delete stay control-plane or non-media operations.
+    let envelope_operations: &[OperationKind] = &[
+        OperationKind::ProbeFile,
+        OperationKind::TranscodeAudio,
+        OperationKind::ExtractAudio,
+        OperationKind::TranscodeVideo,
+        OperationKind::Remux,
+        OperationKind::BackUpFile,
+        OperationKind::VerifyArtifact,
+    ];
+    for operation in OperationKind::ALL {
+        let expected = envelope_operations.contains(operation);
+        assert_eq!(
+            operation.is_node_local_media_dispatch(),
+            expected,
+            "node-local dispatch classification of {operation:?}"
+        );
+        // Every envelope operation is byte-touching: the classifier only ever
+        // narrows `is_byte_touching`, never widens it.
+        if expected {
+            assert!(
+                operation.is_byte_touching(),
+                "{operation:?} must be byte-touching"
+            );
+        }
+    }
+    assert_eq!(envelope_operations.len(), 7);
+}
+
+#[test]
 fn unknown_string_fails_to_deserialize() {
     let res: Result<OperationKind, _> = serde_json::from_str("\"unknown_op\"");
     assert!(res.is_err(), "unknown_op should not deserialize");

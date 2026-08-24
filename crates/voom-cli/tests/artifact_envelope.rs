@@ -34,24 +34,18 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     let media = seeded.media.clone();
     let staging = dir.path().join("staged.mp4");
     let target = dir.path().join("committed.mp4");
-    let file_version_id = seeded.source.file_version_id.0;
-    let file_location_id = seeded.source.file_location_id.0;
-
-    let stage = run(
-        artifact_command(&seeded)
-            .args([
-                "artifact",
-                "stage-copy",
-                "--file-version-id",
-                &file_version_id.to_string(),
-                "--source-location-id",
-                &file_location_id.to_string(),
-                "--staging-path",
-            ])
-            .arg(&staging),
-        Some(0),
-    );
-    let artifact_handle_id = id(&stage["data"]["artifact"]["artifact_handle_id"]);
+    // The control-plane staging byte copy is gone (ADR 0075): seed the
+    // staged rows directly, then drive verify/commit/show through the CLI.
+    std::fs::copy(&media, &staging).unwrap();
+    let pool = voom_store::connect(&seeded.url).await.unwrap();
+    let staged_artifact = voom_test_support::staging_seed::seed_staged_artifact(
+        &pool,
+        seeded.source.file_version_id,
+        &staging,
+    )
+    .await
+    .unwrap();
+    let artifact_handle_id = staged_artifact.artifact_handle_id.0;
     let verify = run(
         artifact_command(&seeded)
             .args([
@@ -87,14 +81,13 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     );
 
     assert_eq!(show["data"]["artifact"]["state"], "committed");
-    let mut json = Value::Array(vec![stage, verify, commit, show]);
+    let mut json = Value::Array(vec![verify, commit, show]);
     redact_artifact_snapshot(
         &mut json,
         &seeded.url,
         &[
             (media.as_path(), "[media]/tiny.source"),
             (dir.path(), "[artifact-dir]"),
-            (staging.as_path(), "[artifact-dir]/staged.mp4"),
             (target.as_path(), "[artifact-dir]/committed.mp4"),
         ],
     );
@@ -106,11 +99,11 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
 async fn artifact_list_and_show_cover_all_inspection_states() {
     let seeded = seed().await;
     let dir = artifact_tempdir(&seeded);
-    let staged = create_staged_artifact(&seeded, dir.path(), "staged");
-    let verified = create_verified_artifact(&seeded, dir.path(), "verified");
-    let committed = create_committed_artifact(&seeded, dir.path(), "committed");
-    let failed = create_failed_artifact(&seeded, dir.path(), "failed");
-    let recovery = create_verified_artifact(&seeded, dir.path(), "recovery");
+    let staged = create_staged_artifact(&seeded, dir.path(), "staged").await;
+    let verified = create_verified_artifact(&seeded, dir.path(), "verified").await;
+    let committed = create_committed_artifact(&seeded, dir.path(), "committed").await;
+    let failed = create_failed_artifact(&seeded, dir.path(), "failed").await;
+    let recovery = create_verified_artifact(&seeded, dir.path(), "recovery").await;
     inject_recovery_required(
         &seeded.url,
         recovery.artifact_handle_id,
@@ -184,13 +177,13 @@ async fn artifact_list_and_show_cover_all_inspection_states() {
 async fn artifact_failure_envelopes_are_actionable() {
     let seeded = seed().await;
     let dir = artifact_tempdir(&seeded);
-    let unverified = create_staged_artifact(&seeded, dir.path(), "unverified");
-    let drift = create_verified_artifact(&seeded, dir.path(), "drift");
+    let unverified = create_staged_artifact(&seeded, dir.path(), "unverified").await;
+    let drift = create_verified_artifact(&seeded, dir.path(), "drift").await;
     std::fs::write(&drift.staging_path, b"changed bytes").unwrap();
-    let existing_target = create_verified_artifact(&seeded, dir.path(), "existing");
+    let existing_target = create_verified_artifact(&seeded, dir.path(), "existing").await;
     let existing_target_path = dir.path().join("already-exists.mp4");
     std::fs::write(&existing_target_path, b"already here").unwrap();
-    let failed = create_failed_artifact(&seeded, dir.path(), "verify-failed");
+    let failed = create_failed_artifact(&seeded, dir.path(), "verify-failed").await;
     let missing = run(
         artifact_command(&seeded).args(["artifact", "show", "--artifact-handle-id", "999999"]),
         Some(2),
@@ -454,35 +447,30 @@ fn basic_mp4_probe_snapshot() -> Value {
     })
 }
 
-fn create_staged_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
-    let file_version_id = seeded.source.file_version_id.0;
-    let file_location_id = seeded.source.file_location_id.0;
+/// The control-plane staging byte copy is retired (ADR 0075): seed the
+/// staging bytes and their durable rows directly instead of shelling out.
+async fn create_staged_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
     let staging_path = dir.join(format!("{name}-staged.mp4"));
-    let stage = run(
-        artifact_command(seeded)
-            .args([
-                "artifact",
-                "stage-copy",
-                "--file-version-id",
-                &file_version_id.to_string(),
-                "--source-location-id",
-                &file_location_id.to_string(),
-                "--staging-path",
-            ])
-            .arg(&staging_path),
-        Some(0),
-    );
+    std::fs::copy(&seeded.media, &staging_path).unwrap();
+    let pool = voom_store::connect(&seeded.url).await.unwrap();
+    let staged = voom_test_support::staging_seed::seed_staged_artifact(
+        &pool,
+        seeded.source.file_version_id,
+        &staging_path,
+    )
+    .await
+    .unwrap();
 
     ArtifactFixture {
-        artifact_handle_id: id(&stage["data"]["artifact"]["artifact_handle_id"]),
+        artifact_handle_id: staged.artifact_handle_id.0,
         staging_path,
         target_path: None,
         verification_id: None,
     }
 }
 
-fn create_verified_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
-    let mut artifact = create_staged_artifact(seeded, dir, name);
+async fn create_verified_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
+    let mut artifact = create_staged_artifact(seeded, dir, name).await;
     let verify = run(
         artifact_command(seeded)
             .args([
@@ -500,8 +488,8 @@ fn create_verified_artifact(seeded: &Seeded, dir: &Path, name: &str) -> Artifact
     artifact
 }
 
-fn create_committed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
-    let mut artifact = create_verified_artifact(seeded, dir, name);
+async fn create_committed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
+    let mut artifact = create_verified_artifact(seeded, dir, name).await;
     let target_path = dir.join(format!("{name}-committed.mp4"));
     let commit = run(
         artifact_command(seeded)
@@ -520,8 +508,8 @@ fn create_committed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> Artifac
     artifact
 }
 
-fn create_failed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
-    let mut artifact = create_staged_artifact(seeded, dir, name);
+async fn create_failed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
+    let mut artifact = create_staged_artifact(seeded, dir, name).await;
     std::fs::write(&artifact.staging_path, b"changed bytes").unwrap();
     let verify = run(
         artifact_command(seeded)

@@ -446,7 +446,7 @@ fn merge_artifact_access_evidence(
 /// either seeds real rows for the fake flow — as
 /// `voom_store::test_support::seed_test_rooted_location` already does — or has it
 /// assert the failure.
-const FAKE_SCANNER_FIRST_LOCATION_ID: u64 = 9_100_001;
+pub const FAKE_SCANNER_FIRST_LOCATION_ID: u64 = 9_100_001;
 
 fn scanner_files(
     payload: &serde_json::Value,

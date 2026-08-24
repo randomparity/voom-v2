@@ -6,8 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, WorkerId,
-    rng_test_support::FrozenRng,
+    ArtifactHandleId, ErrorCode, FailureClass, FileVersionId, WorkerId, rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
@@ -18,7 +17,6 @@ use voom_worker_protocol::{
 };
 
 use crate::ControlPlane;
-use crate::artifact::stage::{StageCopyInput, StageCopyReport};
 
 #[tokio::test]
 async fn missing_artifact_handle_returns_not_found() {
@@ -52,7 +50,13 @@ async fn verify_requires_exactly_one_live_staging_location() {
         .unwrap();
     let zero_err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -81,7 +85,13 @@ async fn verify_requires_exactly_one_live_staging_location() {
 
     let multiple_err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -100,7 +110,13 @@ async fn missing_location_during_persist_returns_not_found() {
 
     let err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &DeleteLocationBeforePersist {
             location_id: staged.artifact_location_id,
@@ -123,7 +139,13 @@ async fn worker_success_persists_verification_with_bootstrapped_worker_id() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &dispatcher,
         &NoVerifyArtifactHooks,
     )
@@ -196,7 +218,7 @@ async fn verification_persistence_survives_a_concurrent_writer_attempt() {
         },
         ArtifactExpectedFacts {
             source_file_version_id: Some(staged.source_file_version_id),
-            source_file_location_id: Some(staged.source_location_id),
+            source_file_location_id: Some(staged.source_file_location_id),
             size_bytes: 12,
             checksum: blake3_checksum(b"source bytes"),
         },
@@ -235,7 +257,13 @@ async fn worker_terminal_failure_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::failure(
             FailureClass::ArtifactChecksumMismatch,
             ErrorCode::ArtifactChecksumMismatch,
@@ -282,7 +310,13 @@ async fn mismatched_worker_success_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"different bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -309,7 +343,13 @@ async fn malformed_worker_result_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::failure(
             FailureClass::MalformedWorkerResult,
             ErrorCode::MalformedWorkerResult,
@@ -335,7 +375,13 @@ async fn retired_staging_location_before_persist_records_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &RetireLocationBeforePersist {
             location_id: staged.artifact_location_id,
@@ -360,7 +406,13 @@ async fn second_staging_location_before_persist_records_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &RecordSecondStagingBeforePersist {
             path: second.display().to_string(),
@@ -384,7 +436,13 @@ async fn verification_events_use_same_transaction_as_persisted_verification_rows
 
     let err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &FailBeforeTerminalEvent,
     )
@@ -406,7 +464,6 @@ async fn verification_events_use_same_transaction_as_persisted_verification_rows
 #[derive(Debug, Clone)]
 struct SeededSource {
     file_version_id: FileVersionId,
-    file_location_id: FileLocationId,
 }
 
 async fn fixture() -> (
@@ -450,17 +507,12 @@ async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSour
         .await
         .unwrap();
     let IngestOutcome::NewFileAsset {
-        file_version_id,
-        file_location_id,
-        ..
+        file_version_id, ..
     } = outcome
     else {
         panic!("seed_source should create a new file asset");
     };
-    SeededSource {
-        file_version_id,
-        file_location_id,
-    }
+    SeededSource { file_version_id }
 }
 
 async fn stage_source(
@@ -468,13 +520,14 @@ async fn stage_source(
     source: &Path,
     staging: &Path,
     bytes: &[u8],
-) -> StageCopyReport {
+) -> voom_test_support::staging_seed::SeededStagedArtifact {
     let seeded = seed_source(cp, source, bytes).await;
-    cp.stage_copy(StageCopyInput {
-        file_version_id: seeded.file_version_id,
-        source_location_id: Some(seeded.file_location_id),
-        staging_path: staging.to_path_buf(),
-    })
+    std::fs::write(staging, bytes).unwrap();
+    voom_test_support::staging_seed::seed_staged_artifact(
+        cp.pool_for_test(),
+        seeded.file_version_id,
+        staging,
+    )
     .await
     .unwrap()
 }

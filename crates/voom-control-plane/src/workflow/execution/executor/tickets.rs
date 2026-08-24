@@ -22,6 +22,7 @@ use crate::workflow::plan::binding::{
     render_policy_remux_payload, render_policy_transcode_audio_payload,
     render_policy_transcode_payload, render_policy_verify_artifact_payload,
 };
+use crate::workflow::plan::envelope;
 use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
@@ -43,6 +44,14 @@ impl WorkflowExecutor {
         Ok(())
     }
 
+    /// Create root tickets behind the planned-lineage staleness guard.
+    ///
+    /// The guard is a precondition on dispatch, so it runs FIRST: a prepared
+    /// run whose active versions were superseded must be rejected with
+    /// `STALE_IDENTITY_EVIDENCE` before any ticket work happens. Envelope
+    /// rendering during `render_node_ticket` can fail with configuration
+    /// errors of its own; letting it precede the guard would misreport a
+    /// superseded run as `CONFIG_INVALID` and hide the replan-needed cause.
     pub(super) async fn create_guarded_root_tickets(
         &self,
         plan: &WorkflowPlan,
@@ -51,6 +60,13 @@ impl WorkflowExecutor {
         now: OffsetDateTime,
         lineage_guard: &PlannedLineageGuard,
     ) -> Result<(), VoomError> {
+        let mut guard_tx = begin_immediate_tx(&self.control_plane.pool).await?;
+        self.control_plane
+            .identity
+            .require_active_file_versions_in_tx(&mut guard_tx, lineage_guard.expectations())
+            .await?;
+        commit_tx(guard_tx).await?;
+
         let mut inputs = Vec::new();
         for node in &plan.nodes {
             if node.depends_on().is_empty() && node.depends_on_selected().is_empty() {
@@ -62,10 +78,6 @@ impl WorkflowExecutor {
         }
 
         let mut tx = begin_immediate_tx(&self.control_plane.pool).await?;
-        self.control_plane
-            .identity
-            .require_active_file_versions_in_tx(&mut tx, lineage_guard.expectations())
-            .await?;
         for input in inputs {
             let ticket = self
                 .control_plane
@@ -142,8 +154,25 @@ impl WorkflowExecutor {
             plan.timing.base_duration_ms,
             plan.timing.jitter_ms,
         );
-        let rendered_payload =
-            self.render_root_payload(plan, node, &branch, policy_source, timing)?;
+        let mut rendered_payload =
+            Self::render_root_payload(plan, node, &branch, policy_source, timing)?;
+        // ADR 0075 flip: byte-touching media tickets whose planning inputs are
+        // fully derivable carry a handle-shaped dispatch envelope and route to
+        // their storage owner's agent instead of the bundled adapters.
+        if operation.is_node_local_media_dispatch()
+            && let Some(source) = policy_source.as_ref()
+            && let Some(media_dispatch) = envelope::policy_envelope(
+                &self.control_plane,
+                &branch.branch_id,
+                operation,
+                source,
+                node.operation_payload(),
+            )
+            .await?
+            && let Some(object) = rendered_payload.as_object_mut()
+        {
+            object.insert("media_dispatch".to_owned(), media_dispatch);
+        }
         let declared_artifact_access = declaration_for(operation, branch.storage_source.as_ref())?;
         let payload = WorkflowTicketPayload {
             workflow_id: workflow_id.to_owned(),
@@ -169,7 +198,6 @@ impl WorkflowExecutor {
     }
 
     fn render_root_payload(
-        &self,
         plan: &WorkflowPlan,
         node: &OperationNode,
         branch: &BranchContext,
@@ -177,7 +205,6 @@ impl WorkflowExecutor {
         timing: EffectiveTiming,
     ) -> Result<Value, VoomError> {
         let operation = node.operation();
-        let roots = &self.options.artifact_roots;
         match (operation, policy_source) {
             (OperationKind::ScanLibrary, _) => {
                 root_payload_result(render_default_payload_with_fan_out(
@@ -187,42 +214,18 @@ impl WorkflowExecutor {
                     plan.fan_out.max_files,
                 ))
             }
-            (OperationKind::TranscodeVideo, Some(source)) => {
-                root_payload_result(render_policy_transcode_payload(
-                    source,
-                    node.operation_payload(),
-                    &roots.transcode.staging_root,
-                    &roots.transcode.target_dir,
-                    timing,
-                ))
-            }
-            (OperationKind::Remux, Some(source)) => {
-                root_payload_result(render_policy_remux_payload(
-                    source,
-                    node.operation_payload(),
-                    &roots.remux.staging_root,
-                    &roots.remux.target_dir,
-                    timing,
-                ))
-            }
-            (OperationKind::TranscodeAudio, Some(source)) => {
-                root_payload_result(render_policy_transcode_audio_payload(
-                    source,
-                    node.operation_payload(),
-                    &roots.audio.staging_root,
-                    &roots.audio.target_dir,
-                    timing,
-                ))
-            }
-            (OperationKind::ExtractAudio, Some(source)) => {
-                root_payload_result(render_policy_extract_audio_payload(
-                    source,
-                    node.operation_payload(),
-                    &roots.audio.staging_root,
-                    &roots.audio.target_dir,
-                    timing,
-                ))
-            }
+            (OperationKind::TranscodeVideo, Some(source)) => root_payload_result(
+                render_policy_transcode_payload(source, node.operation_payload(), timing),
+            ),
+            (OperationKind::Remux, Some(source)) => root_payload_result(
+                render_policy_remux_payload(source, node.operation_payload(), timing),
+            ),
+            (OperationKind::TranscodeAudio, Some(source)) => root_payload_result(
+                render_policy_transcode_audio_payload(source, node.operation_payload(), timing),
+            ),
+            (OperationKind::ExtractAudio, Some(source)) => root_payload_result(
+                render_policy_extract_audio_payload(source, node.operation_payload(), timing),
+            ),
             (OperationKind::VerifyArtifact, Some(source)) => {
                 root_payload_result(render_policy_verify_artifact_payload(source, timing))
             }

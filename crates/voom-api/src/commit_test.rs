@@ -16,7 +16,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
 use tower::ServiceExt;
-use voom_control_plane::artifact::StageCopyInput;
 use voom_control_plane::artifact_commit::{
     CommitArtifactCommandError, CommitArtifactInput, CommitArtifactReport,
 };
@@ -168,8 +167,8 @@ struct VerifiedStaging {
 
 /// Seed a staged artifact whose bytes carry a successful verification row so
 /// `commit_artifact` can prepare a fenced intent. The bundled verify worker
-/// binary is not available next to the API test binary, so the verification
-/// row is persisted directly with exactly the facts `stage_copy` recorded.
+/// binary is not available next to the API test binary, so the staging rows
+/// and the verification row are persisted directly with matching facts.
 async fn seed_verified_staging(fixture: &CommitApiFixture, bytes: &[u8]) -> VerifiedStaging {
     let source = fixture.dir.path().join("source.bin");
     std::fs::write(&source, bytes).unwrap();
@@ -189,23 +188,20 @@ async fn seed_verified_staging(fixture: &CommitApiFixture, bytes: &[u8]) -> Veri
         .await
         .unwrap();
     let IngestOutcome::NewFileAsset {
-        file_version_id,
-        file_location_id,
-        ..
+        file_version_id, ..
     } = outcome
     else {
         panic!("seeded source should create a new file asset");
     };
     let staging_path = fixture.dir.path().join("staged.bin");
-    let report = fixture
-        .cp
-        .stage_copy(StageCopyInput {
-            file_version_id,
-            source_location_id: Some(file_location_id),
-            staging_path: staging_path.clone(),
-        })
-        .await
-        .unwrap();
+    std::fs::write(&staging_path, bytes).unwrap();
+    let staged = voom_test_support::staging_seed::seed_staged_artifact(
+        &fixture.pool,
+        file_version_id,
+        &staging_path,
+    )
+    .await
+    .unwrap();
 
     sqlx::query(
         "INSERT INTO workers (name, kind, status, registered_at, last_seen_at, node_id) \
@@ -228,20 +224,20 @@ async fn seed_verified_staging(fixture: &CommitApiFixture, bytes: &[u8]) -> Veri
          VALUES (?, ?, ?, ?, 'succeeded', ?, ?, ?, ?, '{}', \
                  '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
     )
-    .bind(i64::try_from(report.artifact_handle_id.0).unwrap())
-    .bind(i64::try_from(report.artifact_location_id.0).unwrap())
+    .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
+    .bind(i64::try_from(staged.artifact_location_id.0).unwrap())
     .bind(staging_path.display().to_string())
     .bind(worker_id)
-    .bind(i64::try_from(report.size_bytes).unwrap())
-    .bind(&report.checksum)
-    .bind(i64::try_from(report.size_bytes).unwrap())
-    .bind(&report.checksum)
+    .bind(i64::try_from(staged.size_bytes).unwrap())
+    .bind(&staged.checksum)
+    .bind(i64::try_from(staged.size_bytes).unwrap())
+    .bind(&staged.checksum)
     .execute(&fixture.pool)
     .await
     .unwrap();
 
     VerifiedStaging {
-        artifact_handle_id: report.artifact_handle_id,
+        artifact_handle_id: staged.artifact_handle_id,
     }
 }
 

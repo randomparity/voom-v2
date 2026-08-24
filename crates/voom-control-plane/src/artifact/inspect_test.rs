@@ -6,8 +6,7 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId,
-    rng_test_support::FrozenRng,
+    ArtifactHandleId, ErrorCode, FailureClass, FileVersionId, rng_test_support::FrozenRng,
 };
 use voom_store::repo::media::artifacts::{
     ArtifactCommitFailure, ArtifactCommitState, ArtifactVerificationStatus, NewArtifactCommitRecord,
@@ -19,7 +18,6 @@ use voom_worker_protocol::{
 
 use crate::ControlPlane;
 use crate::artifact::commit::CommitArtifactInput;
-use crate::artifact::stage::{StageCopyInput, StageCopyReport};
 use crate::artifact::verify::{
     NoVerifyArtifactHooks, VerifyArtifactDispatcher, VerifyArtifactInput,
     verify_artifact_with_dispatcher,
@@ -323,16 +321,21 @@ async fn listed_ids(
     .collect()
 }
 
-async fn stage_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> StageCopyReport {
+async fn stage_bytes(
+    cp: &ControlPlane,
+    dir: &Path,
+    bytes: &[u8],
+) -> voom_test_support::staging_seed::SeededStagedArtifact {
     let source = unique_path(dir, "source.bin");
     let staging = unique_path(dir, "staged.bin");
     std::fs::write(&source, bytes).unwrap();
     let seeded = seed_source(cp, &source, bytes).await;
-    cp.stage_copy(StageCopyInput {
-        file_version_id: seeded.file_version_id,
-        source_location_id: Some(seeded.file_location_id),
-        staging_path: staging,
-    })
+    std::fs::write(&staging, bytes).unwrap();
+    voom_test_support::staging_seed::seed_staged_artifact(
+        cp.pool_for_test(),
+        seeded.file_version_id,
+        &staging,
+    )
     .await
     .unwrap()
 }
@@ -341,7 +344,13 @@ async fn stage_and_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> 
     let staged = stage_bytes(cp, dir, bytes).await;
     verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(bytes.to_vec()),
         &NoVerifyArtifactHooks,
     )
@@ -358,7 +367,13 @@ async fn stage_and_fail_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]
     let staged = stage_bytes(cp, dir, bytes).await;
     verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::failure(
             FailureClass::ArtifactChecksumMismatch,
             ErrorCode::ArtifactChecksumMismatch,
@@ -474,7 +489,6 @@ async fn stage_verify_and_recovery_commit_bytes(
 #[derive(Debug, Clone, Copy)]
 struct SeededSource {
     file_version_id: FileVersionId,
-    file_location_id: FileLocationId,
 }
 
 async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSource {
@@ -495,17 +509,12 @@ async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSour
         .await
         .unwrap();
     let IngestOutcome::NewFileAsset {
-        file_version_id,
-        file_location_id,
-        ..
+        file_version_id, ..
     } = outcome
     else {
         panic!("seed_source should create a new file asset");
     };
-    SeededSource {
-        file_version_id,
-        file_location_id,
-    }
+    SeededSource { file_version_id }
 }
 
 async fn latest_verification_id(

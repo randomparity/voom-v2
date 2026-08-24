@@ -1416,15 +1416,6 @@ impl TicketStateArg {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ArtifactCommand {
-    /// Copy a scanned file version into a staging path.
-    StageCopy {
-        #[arg(long)]
-        file_version_id: u64,
-        #[arg(long)]
-        source_location_id: Option<u64>,
-        #[arg(long)]
-        staging_path: PathBuf,
-    },
     /// Verify the live staging bytes for an artifact handle.
     Verify {
         #[arg(long)]
@@ -1445,23 +1436,6 @@ pub enum ArtifactCommand {
     RecoverCommit {
         #[arg(long)]
         artifact_handle_id: u64,
-    },
-    /// Acknowledge that one quarantined audio-extraction worker attempt is quiescent.
-    AcknowledgeExtractQuiescence {
-        #[arg(long)]
-        operation_key: String,
-        #[arg(long)]
-        generation: u32,
-        #[arg(long)]
-        attempt_id: u64,
-        #[arg(long)]
-        worker_id: u64,
-        #[arg(long)]
-        worker_epoch: u32,
-        #[arg(long)]
-        idempotency_key: String,
-        #[arg(long)]
-        acknowledged_by: String,
     },
     /// List artifact handles, optionally filtered by inspection state.
     List {

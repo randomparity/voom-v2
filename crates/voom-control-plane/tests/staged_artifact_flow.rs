@@ -9,8 +9,7 @@ use std::sync::OnceLock;
 use tempfile::TempDir;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::artifact::{
-    ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, StageCopyInput,
-    VerifyArtifactInput,
+    ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, VerifyArtifactInput,
 };
 use voom_core::ErrorCode;
 use voom_store::repo::media::artifacts::ArtifactCommitState;
@@ -73,14 +72,15 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
     .unwrap();
     let seeded = &seeded[0];
     let staging_path = dir.path().join("staged.mp4");
-    let staged = cp
-        .stage_copy(StageCopyInput {
-            file_version_id: seeded.file_version_id,
-            source_location_id: Some(seeded.file_location_id),
-            staging_path: staging_path.clone(),
-        })
-        .await
-        .unwrap();
+    std::fs::copy(&media, &staging_path).unwrap();
+    let pool = voom_store::connect(&db.url).await.unwrap();
+    let staged = voom_test_support::staging_seed::seed_staged_artifact(
+        &pool,
+        seeded.file_version_id,
+        &staging_path,
+    )
+    .await
+    .unwrap();
     let verified = cp
         .verify_artifact(VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
@@ -146,10 +146,10 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
     )
     .await
     .unwrap();
-    let unverified = staged_fixture(&cp, dir.path(), "unverified", &seeded[0]).await;
-    let verified = verified_fixture(&cp, dir.path(), "drift", &seeded[1]).await;
+    let unverified = staged_fixture(&db, dir.path(), "unverified", &seeded[0]).await;
+    let verified = verified_fixture(&cp, &db, dir.path(), "drift", &seeded[1]).await;
     std::fs::write(&verified.staging_path, b"changed bytes").unwrap();
-    let recovery = verified_fixture(&cp, dir.path(), "recovery", &seeded[2]).await;
+    let recovery = verified_fixture(&cp, &db, dir.path(), "recovery", &seeded[2]).await;
 
     let unverified_err = cp
         .commit_artifact(CommitArtifactInput {
@@ -237,21 +237,17 @@ struct StagedFixture {
     verification_id: Option<voom_core::ids::ArtifactVerificationId>,
 }
 
-async fn staged_fixture(
-    cp: &ControlPlane,
-    dir: &Path,
-    name: &str,
-    seeded: &SeededSource,
-) -> StagedFixture {
+async fn staged_fixture(db: &Db, dir: &Path, name: &str, seeded: &SeededSource) -> StagedFixture {
     let staging_path = dir.join(format!("{name}-staged.mp4"));
-    let staged = cp
-        .stage_copy(StageCopyInput {
-            file_version_id: seeded.file_version_id,
-            source_location_id: Some(seeded.file_location_id),
-            staging_path: staging_path.clone(),
-        })
-        .await
-        .unwrap();
+    std::fs::copy(dir.join(format!("{name}-source.mp4")), &staging_path).unwrap();
+    let pool = voom_store::connect(&db.url).await.unwrap();
+    let staged = voom_test_support::staging_seed::seed_staged_artifact(
+        &pool,
+        seeded.file_version_id,
+        &staging_path,
+    )
+    .await
+    .unwrap();
     StagedFixture {
         artifact_handle_id: staged.artifact_handle_id,
         source_file_version_id: staged.source_file_version_id,
@@ -262,11 +258,12 @@ async fn staged_fixture(
 
 async fn verified_fixture(
     cp: &ControlPlane,
+    db: &Db,
     dir: &Path,
     name: &str,
     seeded: &SeededSource,
 ) -> StagedFixture {
-    let mut staged = staged_fixture(cp, dir, name, seeded).await;
+    let mut staged = staged_fixture(db, dir, name, seeded).await;
     let verified = cp
         .verify_artifact(VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,

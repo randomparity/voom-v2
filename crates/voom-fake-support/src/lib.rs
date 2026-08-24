@@ -21,7 +21,7 @@ mod streaming;
 mod validation;
 
 pub use catalog::{ProviderDefinition, provider_definition, provider_definition_for_operation};
-pub use results::synthetic_artifact_access_evidence;
+pub use results::{FAKE_SCANNER_FIRST_LOCATION_ID, synthetic_artifact_access_evidence};
 pub use runtime::{dispatch_provider, run_provider};
 pub use scenario::{Scenario, ScenarioError, ScenarioEvent, ScenarioPlayer, load_scenario};
 

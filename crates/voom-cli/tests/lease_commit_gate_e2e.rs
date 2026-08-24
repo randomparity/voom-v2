@@ -107,23 +107,19 @@ async fn manual_lock_blocks_commit_and_force_release_unblocks_it() {
     .unwrap();
     let seeded_source = &seeded_source[0];
     let file_version_id = seeded_source.file_version_id.0;
-    let file_location_id = seeded_source.file_location_id.0;
 
-    let stage = run(
-        cmd(&url)
-            .args([
-                "artifact",
-                "stage-copy",
-                "--file-version-id",
-                &file_version_id.to_string(),
-                "--source-location-id",
-                &file_location_id.to_string(),
-                "--staging-path",
-            ])
-            .arg(&staging),
-        0,
-    );
-    let artifact_handle_id = id(&stage["data"]["artifact"]["artifact_handle_id"]);
+    // `artifact stage-copy` is gone (ADR 0075): seed the staged bytes and
+    // their durable rows directly, exactly as the retired command recorded
+    // them.
+    std::fs::copy(&source, &staging).unwrap();
+    let staged = voom_test_support::staging_seed::seed_staged_artifact(
+        &pool,
+        seeded_source.file_version_id,
+        &staging,
+    )
+    .await
+    .unwrap();
+    let artifact_handle_id = staged.artifact_handle_id.0;
     let verify = run(
         cmd(&url)
             .args([

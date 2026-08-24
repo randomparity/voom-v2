@@ -292,7 +292,6 @@ fn map_verify_stream_error(err: WorkerStreamError) -> VerifyWorkerError {
             class,
             code,
             message,
-            payload: _,
         } => VerifyWorkerError::terminal_error(class, code, message),
         WorkerStreamError::ProgressHandler { source } => {
             VerifyWorkerError::malformed_worker_result(format!(
@@ -304,8 +303,6 @@ fn map_verify_stream_error(err: WorkerStreamError) -> VerifyWorkerError {
 
 const fn verify_stream_labels() -> WorkerStreamLabels {
     WorkerStreamLabels {
-        payload_encode: "verify_artifact payload encode",
-        dispatch_failed: "verify_artifact dispatch failed",
         progress_idle_timeout: "verify_artifact worker progress idle timeout",
         stream_protocol: "worker progress stream protocol error",
         terminal_frame_as_progress: "worker sent terminal frame as non-terminal progress frame",

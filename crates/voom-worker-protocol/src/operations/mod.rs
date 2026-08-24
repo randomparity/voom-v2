@@ -1,5 +1,6 @@
 pub(crate) mod audio;
 pub(crate) mod backup;
+pub(crate) mod dispatch;
 pub(crate) mod hash_file;
 pub(crate) mod probe_file;
 pub(crate) mod remux;

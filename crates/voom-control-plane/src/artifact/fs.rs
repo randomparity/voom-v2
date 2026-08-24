@@ -26,9 +26,13 @@ pub struct PromotionReport {
     pub temp_path: PathBuf,
 }
 
+// The context fields are read only by test failpoints since the staging
+// byte-copy retired (ADR 0075); production installs run failpoint-free.
 #[derive(Debug, Clone, Copy)]
 pub struct PromotionFailpointContext<'a> {
+    #[cfg_attr(not(test), expect(dead_code))]
     pub temp_path: &'a Path,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub target_path: &'a Path,
 }
 
@@ -37,11 +41,6 @@ pub trait PromotionFailpoint: Send + Sync {
         Ok(())
     }
 }
-
-#[derive(Debug, Clone, Copy)]
-pub struct NoPromotionFailpoint;
-
-impl PromotionFailpoint for NoPromotionFailpoint {}
 
 pub async fn canonical_existing_file_no_symlink(
     path: impl AsRef<Path>,
@@ -306,16 +305,22 @@ pub(crate) async fn copy_regular_file_with_expected(
 }
 
 #[cfg(test)]
+struct NoFailpoint;
+
+#[cfg(test)]
+impl PromotionFailpoint for NoFailpoint {}
+
+#[cfg(test)]
 pub async fn copy_to_unique_temp_then_install_no_replace(
     source: impl AsRef<Path>,
     final_path: impl AsRef<Path>,
 ) -> Result<ArtifactFileFacts, VoomError> {
     let expected = observe_regular_file(source.as_ref()).await?;
-    let report =
-        promote_staged_add_only(source, final_path, &expected, &NoPromotionFailpoint).await?;
+    let report = promote_staged_add_only(source, final_path, &expected, &NoFailpoint).await?;
     Ok(report.target)
 }
 
+#[cfg_attr(not(test), expect(dead_code))]
 pub async fn promote_staged_add_only(
     staging: impl AsRef<Path>,
     target: impl AsRef<Path>,
@@ -326,146 +331,6 @@ pub async fn promote_staged_add_only(
     let target = canonical_new_leaf_no_symlink(target).await?;
     let (temp_path, staging_facts) = copy_to_unique_temp(staging, &target, expected).await?;
     promote_staged_add_only_from_temp(staging_facts, &target, temp_path, expected, failpoint).await
-}
-
-pub async fn promote_staged_add_only_with_temp(
-    staging: impl AsRef<Path>,
-    target: impl AsRef<Path>,
-    temp_path: impl AsRef<Path>,
-    expected: &ArtifactFileFacts,
-) -> Result<PromotionReport, VoomError> {
-    let staging = staging.as_ref();
-    let target = canonical_new_leaf_no_symlink(target).await?;
-    let temp_path = canonical_new_leaf_no_symlink(temp_path).await?;
-    if temp_path.parent() != target.parent() {
-        return Err(VoomError::CommitFailure(format!(
-            "temporary artifact path {} must be beside target {}",
-            temp_path.display(),
-            target.display()
-        )));
-    }
-    let staging_facts = copy_regular_file_with_expected(staging, &temp_path, expected).await?;
-    promote_staged_add_only_from_temp(
-        staging_facts,
-        &target,
-        temp_path,
-        expected,
-        &NoPromotionFailpoint,
-    )
-    .await
-}
-
-pub async fn recover_staged_add_only_with_temp(
-    staging: impl AsRef<Path>,
-    target: impl AsRef<Path>,
-    temp_path: impl AsRef<Path>,
-    expected: &ArtifactFileFacts,
-) -> Result<PromotionReport, VoomError> {
-    let staging_facts = require_expected_staging_facts(staging.as_ref(), expected).await?;
-    let target = target.as_ref();
-    let temp_path = temp_path.as_ref();
-    match fs::symlink_metadata(target).await {
-        Ok(_) => {
-            let target_facts = observe_regular_file(target).await?;
-            if !same_file_facts(&target_facts, expected) {
-                return Err(VoomError::Conflict(format!(
-                    "recovery target has mismatched facts: {}",
-                    target.display()
-                )));
-            }
-            remove_exact_recovery_temp(temp_path, expected).await?;
-            Ok(PromotionReport {
-                staging: staging_facts,
-                target: target_facts,
-                temp_path: temp_path.to_path_buf(),
-            })
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            recover_missing_target(staging_facts, target, temp_path, expected).await
-        }
-        Err(error) => Err(VoomError::CommitFailure(format!(
-            "cannot inspect recovery target {}: {error}",
-            target.display()
-        ))),
-    }
-}
-
-async fn recover_missing_target(
-    staging_facts: ArtifactFileFacts,
-    target: &Path,
-    temp_path: &Path,
-    expected: &ArtifactFileFacts,
-) -> Result<PromotionReport, VoomError> {
-    let target = canonical_new_leaf_no_symlink(target).await?;
-    match fs::symlink_metadata(temp_path).await {
-        Ok(_) => {
-            let temp_facts = observe_regular_file(temp_path).await?;
-            if !same_file_facts(&temp_facts, expected) {
-                return Err(VoomError::Conflict(format!(
-                    "recovery temporary artifact has mismatched facts: {}",
-                    temp_path.display()
-                )));
-            }
-            promote_staged_add_only_from_temp(
-                staging_facts,
-                &target,
-                temp_path.to_path_buf(),
-                expected,
-                &NoPromotionFailpoint,
-            )
-            .await
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            promote_staged_add_only_with_temp(&staging_facts.path, &target, temp_path, expected)
-                .await
-        }
-        Err(error) => Err(VoomError::CommitFailure(format!(
-            "cannot inspect recovery temporary artifact {}: {error}",
-            temp_path.display()
-        ))),
-    }
-}
-
-async fn remove_exact_recovery_temp(
-    temp_path: &Path,
-    expected: &ArtifactFileFacts,
-) -> Result<(), VoomError> {
-    match fs::symlink_metadata(temp_path).await {
-        Ok(_) => {
-            let temp_facts = observe_regular_file(temp_path).await?;
-            if !same_file_facts(&temp_facts, expected) {
-                return Err(VoomError::Conflict(format!(
-                    "recovery temporary artifact has mismatched facts: {}",
-                    temp_path.display()
-                )));
-            }
-            fs::remove_file(temp_path).await.map_err(|error| {
-                VoomError::CommitFailure(format!(
-                    "remove recovered temporary artifact {}: {error}",
-                    temp_path.display()
-                ))
-            })
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(VoomError::CommitFailure(format!(
-            "cannot inspect recovery temporary artifact {}: {error}",
-            temp_path.display()
-        ))),
-    }
-}
-
-pub(crate) async fn require_expected_staging_facts(
-    staging: &Path,
-    expected: &ArtifactFileFacts,
-) -> Result<ArtifactFileFacts, VoomError> {
-    let staging_facts = observe_regular_file(staging).await?;
-    if !same_file_facts(&staging_facts, expected) {
-        return Err(VoomError::ArtifactChecksumMismatch(format!(
-            "staged artifact facts do not match expected facts: {}",
-            staging_facts.path.display()
-        )));
-    }
-    Ok(staging_facts)
 }
 
 async fn promote_staged_add_only_from_temp(

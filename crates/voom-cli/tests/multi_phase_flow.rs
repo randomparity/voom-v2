@@ -1,21 +1,18 @@
 //! Multi-phase `compliance execute` run + `compliance report --job-id` read-back
-//! through the `voom` CLI, against the real `voom-ffmpeg-worker` + real ffprobe
-//! stack (issue #166).
-//!
-//! Fake workers cannot commit a second mutation phase — the fake transcoder's
-//! audio result hardcodes null stream facts that satisfy neither the planner's
-//! preservation-fact gate nor the host's preserved-facts commit check — so a
-//! genuine two-committed-phase run requires the real ffmpeg worker. Real ffmpeg
-//! output embeds run-/version-varying `bitrate`/`duration`, so this is a
-//! field-assertion test, not an `insta` golden (the same reason
-//! `crates/voom-control-plane/tests/phase_barrier_flow.rs` asserts fields).
+//! through the `voom` CLI, with media execution routed through owner-node
+//! envelopes (issue #166 contract on the #423 owner-node dispatch cutover).
 //!
 //! A two-`transcode video` phase policy is the proven two-commit shape: phase 0
 //! transcodes the scanned h264 to default hevc and commits; phase 1 re-plans
-//! against the committed artifact and applies the independently necessary
-//! 10-bit `hevc-archive` profile. Both phases land a `Committed`
-//! per-`(file, phase)` row, and `compliance report --job-id` reads the durable
-//! two-phase chain back.
+//! against the committed artifact — its envelope renders from the produced
+//! version's committed location and reprobe snapshot — and applies the
+//! independently necessary 10-bit `hevc-archive` profile. Both phases land a
+//! `Committed` per-`(file, phase)` row, and `compliance report --job-id` reads
+//! the durable two-phase chain back.
+//!
+//! Media tickets are settled by the owner-node emulator
+//! (`support/owner_node.rs`) standing in for the storage owner's agent, the
+//! same stand-in pattern the durable workflow drivers use.
 
 #![expect(
     clippy::unwrap_used,
@@ -24,7 +21,6 @@
 )]
 
 use std::path::Path;
-use std::process::Command;
 
 use serde_json::{Value, json};
 use voom_control_plane::ControlPlane;
@@ -34,25 +30,51 @@ use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, hide_stale_fake_ffprobe_sibling, target_debug_binary,
+    TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build, target_debug_binary,
 };
 
+#[path = "support/owner_node.rs"]
+mod owner_node;
+
 /// `compliance execute` drives a two-phase transcode policy to completion through
-/// the CLI, and `compliance report --job-id` reads the durable two-phase chain
-/// back: two `completed` phases, two `committed` per-file rows, phase 1 rooted at
+/// the CLI, and `compliance report --job-id` reads the durable two-phase chain back: two `completed` phases, two `committed` per-file rows, phase 1 rooted at
 /// phase 0's produced version, and the post-run read returns the same chain with
 /// `latest_phase_index` pointing at phase 1.
+struct TranscodeWorkerLaunch {
+    inner: TestWorkerLaunch,
+}
+
+impl TranscodeWorkerLaunch {
+    async fn start(cp: &ControlPlane) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            inner: TestWorkerLaunch::start(
+                cp,
+                TestWorkerConfig::synthetic(
+                    target_debug_binary("voom-ffmpeg-worker"),
+                    "cli-multi-phase-transcode",
+                    "cli-multi-phase-e2e-secret",
+                    "transcode_video",
+                ),
+            )
+            .await?,
+        })
+    }
+
+    fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.inner.shutdown()
+    }
+}
+
 #[tokio::test]
 async fn multi_phase_execute_then_report_by_job_id() {
-    cargo_build("voom-ffprobe-worker");
-    cargo_build("voom-verify-artifact-worker");
+    let _verify_worker =
+        cargo_bin_or_build("voom-verify-artifact-worker", "voom-verify-artifact-worker").unwrap();
     cargo_build("voom-ffmpeg-worker");
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("multi-phase-flow").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let source = root.join("Movie.mp4");
-    generate_h264_fixture(&source);
+    std::fs::write(&source, b"multi-phase e2e source bytes").unwrap();
 
     let db = TempDatabase::new().unwrap();
     let url = sqlite_url_for(db.path());
@@ -61,51 +83,26 @@ async fn multi_phase_execute_then_report_by_job_id() {
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
-    // Background stand-in for the storage-owner agent (ADR 0074): drives the
-    // fenced commit intent so the workflow's commit phase converges.
-    {
-        let driver_url = url.clone();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(async move {
-                let pool = voom_store::connect(&driver_url).await.unwrap();
-                let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
-                node.install(&pool).await.unwrap();
-                let cp = voom_control_plane::ControlPlane::open(&driver_url)
-                    .await
-                    .unwrap();
-                loop {
-                    let pending: Option<(i64, i64)> = sqlx::query_as(
-                        "SELECT id, artifact_handle_id FROM artifact_commit_intents \
-                         WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
-                    )
-                    .fetch_optional(&pool)
-                    .await
-                    .unwrap();
-                    if let Some((_, handle)) = pending {
-                        let _ = node
-                            .drive_pending_commit(
-                                &cp,
-                                &pool,
-                                voom_core::ArtifactHandleId(u64::try_from(handle).unwrap()),
-                            )
-                            .await;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            });
-        });
-    }
     voom_store::test_support::set_test_storage_root_path(&pool, &root)
         .await
         .unwrap();
+    // Envelope destinations resolve through the library root's staging/backup
+    // defaults; point both at the seeded test root.
+    sqlx::query(
+        "UPDATE library_roots SET default_staging_root_id = id, \
+         default_backup_root_id = id WHERE id = ?",
+    )
+    .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Storage-owner stand-ins: fenced commit-intent driver + media settlement.
+    let _emulator = owner_node::OwnerNodeEmulator::spawn(&url);
+
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
-        .unwrap()
-        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
+        .unwrap();
 
     let file = scan_one(&cp, &url, &root, &source).await;
     let policy = cp
@@ -125,9 +122,9 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let version_id = policy.version.id.0;
     let input_id = input.id.0;
 
-    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
     let out_dir = root.join("out");
     let staging_root = root.join("stage");
+    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
     let execute = run_voom(
         &url,
         &[
@@ -252,7 +249,7 @@ fn file_phase_at(file_phases: &[Value], ordinal: u64) -> &Value {
 }
 
 fn run_voom(url: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_voom"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_voom"))
         .env(
             "VOOM_LOCAL_NODE_ID",
             voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
@@ -348,6 +345,10 @@ fn single_file_input(file: ScannedFile) -> PolicyInputSetDraft {
     }
 }
 
+fn cargo_build(package: &str) {
+    voom_test_support::worker::cargo_build_package(package).unwrap();
+}
+
 /// The `produced_from_version_id` (chain parent) recorded for a file version,
 /// read directly so the test pins the durable lineage column.
 async fn produced_from(url: &str, version: FileVersionId) -> Option<i64> {
@@ -359,60 +360,4 @@ async fn produced_from(url: &str, version: FileVersionId) -> Option<i64> {
     .fetch_one(&pool)
     .await
     .unwrap()
-}
-
-fn cargo_build(package: &str) {
-    voom_test_support::worker::cargo_build_package(package).unwrap();
-}
-
-fn generate_h264_fixture(path: &Path) {
-    let status = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=32x32:rate=1",
-            "-t",
-            "1",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            path.to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
-    assert!(
-        status.success(),
-        "ffmpeg fixture generation failed: {status}"
-    );
-}
-
-struct TranscodeWorkerLaunch {
-    inner: TestWorkerLaunch,
-}
-
-impl TranscodeWorkerLaunch {
-    async fn start(cp: &ControlPlane) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
-            inner: TestWorkerLaunch::start(
-                cp,
-                TestWorkerConfig::synthetic(
-                    target_debug_binary("voom-ffmpeg-worker"),
-                    "cli-multi-phase-transcode",
-                    "cli-multi-phase-e2e-secret",
-                    "transcode_video",
-                ),
-            )
-            .await?,
-        })
-    }
-
-    fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.inner.shutdown()
-    }
 }

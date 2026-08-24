@@ -17,6 +17,7 @@ use voom_store::repo::execution::tickets::{
 
 use super::access_declaration::{TicketStorageSource, declaration_for};
 use super::binding::{BranchContext, render_default_payload};
+use super::envelope;
 use super::model::{OperationNode, WorkflowPlan};
 use super::ticket_payload::WorkflowTicketPayload;
 use crate::ControlPlane;
@@ -74,23 +75,27 @@ pub(crate) async fn expand_scanner_completion(
     let mut specs = Vec::new();
     for (file, branch_id) in files.into_iter().zip(branch_ids) {
         for node_id in ["probe", "hash", "identity"] {
-            specs.push(spec_for_branch(
-                ctx,
-                node_id,
-                &BranchContext {
-                    branch_id: branch_id.clone(),
-                    path: file.path.clone(),
-                    probe_codec: (node_id == "probe")
-                        .then(|| branch_codec(ctx.plan.seed, &branch_id).to_owned()),
-                    source_file: Some(file.source_file.clone()),
-                    storage_source: Some(TicketStorageSource::Location {
-                        storage_root_id,
-                        file_location_id: file.file_location_id,
-                    }),
-                },
-                scanner_ticket.id,
-                scanner_ticket,
-            )?);
+            specs.push(
+                spec_for_branch(
+                    ctx,
+                    node_id,
+                    &BranchContext {
+                        branch_id: branch_id.clone(),
+                        path: file.path.clone(),
+                        probe_codec: (node_id == "probe")
+                            .then(|| branch_codec(ctx.plan.seed, &branch_id).to_owned()),
+                        source_file: Some(file.source_file.clone()),
+                        storage_source: Some(TicketStorageSource::Location {
+                            storage_root_id,
+                            file_location_id: file.file_location_id,
+                        }),
+                    },
+                    scanner_ticket.id,
+                    scanner_ticket,
+                    None,
+                )
+                .await?,
+            );
         }
     }
     create_missing_tickets(ctx, specs).await
@@ -117,7 +122,9 @@ pub(crate) async fn expand_probe_completion(
         },
         probe_ticket.id,
         probe_ticket,
-    )?;
+        None,
+    )
+    .await?;
     create_missing_tickets(ctx, vec![spec]).await
 }
 
@@ -147,7 +154,9 @@ pub(crate) async fn expand_quality_completion(
         },
         quality_ticket.id,
         quality_ticket,
-    )?;
+        None,
+    )
+    .await?;
     create_missing_tickets(ctx, vec![spec]).await
 }
 
@@ -172,13 +181,30 @@ pub(crate) async fn expand_transform_completion(
     };
     let mut specs = Vec::new();
     for node_id in ["backup", "external-sync", "issue", "use-lease"] {
-        specs.push(spec_for_branch(
-            ctx,
-            node_id,
-            &branch,
-            transform_ticket.id,
-            transform_ticket,
-        )?);
+        // ADR 0075: when the parent rendered an envelope, its recorded staged
+        // output is what the backup child copies — addressed by handle, not by
+        // the parent's agent-local output path.
+        let child_envelope = if node_id == "backup" {
+            envelope::backup_child_envelope(
+                ctx.control,
+                &branch.branch_id,
+                &transform_payload.rendered_payload,
+            )
+            .await?
+        } else {
+            None
+        };
+        specs.push(
+            spec_for_branch(
+                ctx,
+                node_id,
+                &branch,
+                transform_ticket.id,
+                transform_ticket,
+                child_envelope.as_ref(),
+            )
+            .await?,
+        );
     }
     create_missing_tickets(ctx, specs).await
 }
@@ -190,6 +216,13 @@ pub(crate) async fn expand_backup_completion(
 ) -> Result<Vec<Ticket>, VoomError> {
     let local_backup_id = string_result_field(backup_ticket, "local_backup_id")?;
     let backup_payload = parse_workflow_payload(backup_ticket)?;
+    // ADR 0075: the verify child targets the backup's recorded staged output
+    // with the facts the agent observed writing it, data-only off the parent's
+    // released result.
+    let child_envelope = envelope::verify_child_envelope(
+        &backup_payload.rendered_payload,
+        backup_ticket.result.as_ref(),
+    )?;
     let spec = spec_for_branch(
         ctx,
         "verify",
@@ -205,7 +238,9 @@ pub(crate) async fn expand_backup_completion(
         },
         backup_ticket.id,
         backup_ticket,
-    )?;
+        child_envelope.as_ref(),
+    )
+    .await?;
     create_missing_tickets(ctx, vec![spec]).await
 }
 
@@ -221,17 +256,34 @@ struct TicketSpec {
     source_file_version_id: Option<FileVersionId>,
 }
 
-fn spec_for_branch(
+async fn spec_for_branch(
     ctx: &ExpansionContext<'_>,
     node_id: &str,
     branch: &BranchContext,
     depends_on: TicketId,
     parent_ticket: &Ticket,
+    child_envelope: Option<&Value>,
 ) -> Result<TicketSpec, VoomError> {
     let operation = operation_for_node(ctx.plan, node_id)?;
     let timing = timing(ctx, node_id, &branch.branch_id);
-    let rendered_payload = render_default_payload(operation, branch, timing)
+    let mut rendered_payload = render_default_payload(operation, branch, timing)
         .map_err(|e| VoomError::Config(format!("workflow payload binding: {e}")))?;
+    // ADR 0075 flip: derivable children carry a handle-shaped dispatch
+    // envelope so they route to their storage owner's agent. An explicitly
+    // computed child envelope (transform->backup, backup->verify) takes
+    // precedence over the generic derivable-input rendering.
+    if operation.is_node_local_media_dispatch()
+        && let Some(media_dispatch) = match child_envelope {
+            Some(envelope) => Some(envelope.clone()),
+            None => {
+                envelope::expansion_envelope(ctx.control, operation, branch, &rendered_payload)
+                    .await?
+            }
+        }
+        && let Some(object) = rendered_payload.as_object_mut()
+    {
+        object.insert("media_dispatch".to_owned(), media_dispatch);
+    }
     let source_file_version_id = rendered_payload
         .get("source_file_version_id")
         .and_then(Value::as_u64)

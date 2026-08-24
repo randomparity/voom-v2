@@ -38,6 +38,12 @@ pub use operations::audio::{
     validate_extract_audio_request, validate_extract_audio_result,
 };
 pub use operations::backup::{BackUpFileRequest, BackUpFileResult, BackUpFileStatus};
+pub use operations::dispatch::{
+    MediaBackUpFileDispatch, MediaDispatch, MediaExtractAudioDispatch, MediaExtractOutput,
+    MediaPlannedOutput, MediaProbeDispatch, MediaRemuxDispatch, MediaSourceRef,
+    MediaTranscodeAudioDispatch, MediaTranscodeVideoDispatch, MediaVerifyArtifactDispatch,
+    decode_media_dispatch,
+};
 pub use operations::hash_file::{HashFileRequest, HashFileResult, HashedSidecar};
 pub use operations::probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,

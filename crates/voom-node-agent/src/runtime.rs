@@ -423,6 +423,7 @@ impl AgentRuntime {
             .map(|worker| (worker.name.as_str(), worker))
             .collect::<HashMap<_, _>>();
         let endpoints = ChildEndpointRegistry::new(&self.config.config.workers);
+        let storage_roots = storage_root_bindings(&self.config.config)?;
         let mut coordinators = JoinSet::new();
         for child in children {
             let worker = workers.get(child.spec().logical_name()).ok_or_else(|| {
@@ -442,6 +443,7 @@ impl AgentRuntime {
                 poll_interval: Duration::from_millis(self.config.config.poll_interval_ms),
                 shutdown_grace: self.shutdown_grace(),
                 worker: (*worker).clone(),
+                storage_roots: storage_roots.clone(),
                 fatal_tx: fatal_tx.clone(),
             };
             let coordinator_rng = derive_schedule_rng(schedule_rng);
@@ -459,7 +461,7 @@ impl AgentRuntime {
             node_id: self.config.config.node_id,
             incarnation_id,
             poll_interval: Duration::from_millis(self.config.config.poll_interval_ms),
-            storage_roots: storage_root_bindings(&self.config.config)?,
+            storage_roots,
         };
         coordinators.spawn(run_commit_coordinator(
             commit_context,
@@ -591,20 +593,24 @@ impl NodeHeartbeatHandle {
 }
 
 #[derive(Clone)]
-struct CoordinatorContext {
-    client: Arc<dyn ControlPlaneApi>,
+pub(crate) struct CoordinatorContext {
+    pub(crate) client: Arc<dyn ControlPlaneApi>,
     /// Concrete HTTP transport for the scan-session pump; absent in tests.
-    scan_client: Option<Arc<ControlPlaneClient>>,
-    node_id: voom_core::NodeId,
-    incarnation_id: NodeIncarnationId,
-    worker_id: WorkerId,
-    lease_ttl: Duration,
-    progress_timeout: Duration,
-    poll_interval: Duration,
-    shutdown_grace: Duration,
-    worker: WorkerConfig,
-    endpoints: ChildEndpointRegistry,
-    fatal_tx: mpsc::UnboundedSender<RuntimeFatal>,
+    pub(crate) scan_client: Option<Arc<ControlPlaneClient>>,
+    pub(crate) node_id: voom_core::NodeId,
+    pub(crate) incarnation_id: NodeIncarnationId,
+    pub(crate) worker_id: WorkerId,
+    pub(crate) lease_ttl: Duration,
+    pub(crate) progress_timeout: Duration,
+    pub(crate) poll_interval: Duration,
+    pub(crate) shutdown_grace: Duration,
+    pub(crate) worker: WorkerConfig,
+    pub(crate) endpoints: ChildEndpointRegistry,
+    /// Configured storage-root provider locators by root id (spawn-time
+    /// index shared with the commit coordinator); media dispatch resolves
+    /// location handles against it.
+    pub(crate) storage_roots: HashMap<u64, PathBuf>,
+    pub(crate) fatal_tx: mpsc::UnboundedSender<RuntimeFatal>,
 }
 
 #[derive(Debug)]
@@ -1009,8 +1015,9 @@ async fn lease_heartbeat_loop(
 }
 
 /// Routes one leased operation: `scan_library` drives the durable scan-session
-/// pump against the shared child-endpoint registry; everything else keeps the
-/// plain single-child dispatch.
+/// pump against the shared child-endpoint registry; byte-touching media
+/// operations run through the node-local media executor (ADR 0075 design C3);
+/// everything else keeps the plain single-child dispatch.
 async fn dispatch_outcome(
     dispatch: &LeaseDispatch,
     child: Arc<dyn ClientHandle>,
@@ -1019,6 +1026,17 @@ async fn dispatch_outcome(
 ) -> LeaseOutcome {
     if dispatch.operation == OperationKind::ScanLibrary.as_str() {
         return scan_library_outcome(dispatch, child, credentials, context).await;
+    }
+    if crate::media::is_media_dispatch_operation(&dispatch.operation) {
+        return crate::media::media_outcome(
+            dispatch,
+            child,
+            credentials,
+            context,
+            &context.storage_roots,
+            &context.endpoints,
+        )
+        .await;
     }
     dispatch_to_child(dispatch, child.as_ref(), credentials, context).await
 }
@@ -1086,7 +1104,7 @@ async fn dispatch_to_child(
     consume_progress_stream(stream, context.progress_timeout).await
 }
 
-async fn open_worker_stream(
+pub(crate) async fn open_worker_stream(
     dispatch: &LeaseDispatch,
     child: &dyn ClientHandle,
     credentials: &WorkerCredentials,
@@ -1113,7 +1131,7 @@ async fn open_worker_stream(
     }
 }
 
-async fn consume_progress_stream(
+pub(crate) async fn consume_progress_stream(
     mut stream: voom_worker_protocol::NdjsonStream,
     progress_timeout: Duration,
 ) -> LeaseOutcome {
@@ -1907,7 +1925,7 @@ fn duration_seconds_i64(duration: Duration) -> i64 {
     i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
 }
 
-fn duration_millis_u32(duration: Duration) -> u32 {
+pub(crate) fn duration_millis_u32(duration: Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
 }
 

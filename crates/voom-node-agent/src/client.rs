@@ -755,6 +755,10 @@ pub struct OpenCommitIntent {
     pub staging_storage_root_id: StorageRootId,
     pub staging_provider_relative_locator: String,
     pub staging_location_epoch: u64,
+    /// Where the staged bytes come from: the pinned source rooted address
+    /// this agent materializes staging from during `applying` (ADR 0075).
+    pub source_storage_root_id: StorageRootId,
+    pub source_provider_relative_locator: String,
     pub target_storage_root_id: StorageRootId,
     pub target_provider_relative_locator: String,
     pub target_root_epoch: u64,
@@ -786,6 +790,9 @@ pub struct CommitAuthorizeOutcome {
     pub staging_provider_relative_locator: String,
     pub target_storage_root_id: StorageRootId,
     pub target_provider_relative_locator: String,
+    /// The pinned source rooted address staging is materialized from.
+    pub source_storage_root_id: StorageRootId,
+    pub source_provider_relative_locator: String,
     pub expected_size_bytes: u64,
     pub expected_content_hash: String,
     /// Hex-encoded one-time 32-byte commit fence. Never logged or re-sent
@@ -809,6 +816,11 @@ impl std::fmt::Debug for CommitAuthorizeOutcome {
             .field(
                 "target_provider_relative_locator",
                 &self.target_provider_relative_locator,
+            )
+            .field("source_storage_root_id", &self.source_storage_root_id)
+            .field(
+                "source_provider_relative_locator",
+                &self.source_provider_relative_locator,
             )
             .field("expected_size_bytes", &self.expected_size_bytes)
             .field("expected_content_hash", &self.expected_content_hash)

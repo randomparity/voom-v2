@@ -17,7 +17,7 @@ use time::{Duration, OffsetDateTime};
 use voom_test_support::TempDatabase;
 
 use voom_control_plane::ControlPlane;
-use voom_control_plane::artifact::{CommitArtifactInput, StageCopyInput, VerifyArtifactInput};
+use voom_control_plane::artifact::{CommitArtifactInput, VerifyArtifactInput};
 use voom_core::ErrorCode;
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
@@ -333,14 +333,15 @@ async fn verified_fixture(cp: &ControlPlane, db: &Db, dir: &Path, name: &str) ->
     .unwrap();
     let seeded = &seeded[0];
     let staging_path = dir.join(format!("{name}-staged.mp4"));
-    let staged = cp
-        .stage_copy(StageCopyInput {
-            file_version_id: seeded.file_version_id,
-            source_location_id: Some(seeded.file_location_id),
-            staging_path: staging_path.clone(),
-        })
-        .await
-        .unwrap();
+    std::fs::copy(&source_path, &staging_path).unwrap();
+    let pool = voom_store::connect(&db.url).await.unwrap();
+    let staged = voom_test_support::staging_seed::seed_staged_artifact(
+        &pool,
+        seeded.file_version_id,
+        &staging_path,
+    )
+    .await
+    .unwrap();
     let verified = cp
         .verify_artifact(VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,

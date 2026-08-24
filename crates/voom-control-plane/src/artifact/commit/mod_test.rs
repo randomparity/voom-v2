@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitIntentId, ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, NodeId,
-    StorageRootId, VoomError, rng_test_support::FrozenRng,
+    ArtifactHandleId, ErrorCode, FailureClass, FileVersionId, NodeId, StorageRootId, VoomError,
+    rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
@@ -21,7 +21,6 @@ use voom_store::repo::media::identity::{
 };
 
 use crate::ControlPlane;
-use crate::artifact::stage::{StageCopyInput, StageCopyReport};
 use crate::artifact::verify::{
     NoVerifyArtifactHooks, VerifyArtifactDispatcher, VerifyArtifactInput,
     verify_artifact_with_dispatcher,
@@ -1111,6 +1110,11 @@ fn authorize_outcome_debug_redacts_fence_hex() {
         commit_record_id: ArtifactCommitRecordId(1),
         staging_storage_root_id: StorageRootId(1),
         staging_provider_relative_locator: "staging/a.bin".to_owned(),
+        source_storage_root_id: StorageRootId(1),
+        source_provider_relative_locator: voom_core::ProviderRelativeLocator::new(
+            "sources/a.bin".to_owned(),
+        )
+        .unwrap(),
         target_storage_root_id: StorageRootId(1),
         target_provider_relative_locator: "committed/a.bin".to_owned(),
         expected_size_bytes: 1,
@@ -1149,6 +1153,11 @@ fn authorize_outcome_replay_decode_rejects_unknown_fields() {
         commit_record_id: ArtifactCommitRecordId(1),
         staging_storage_root_id: StorageRootId(1),
         staging_provider_relative_locator: "staging/a.bin".to_owned(),
+        source_storage_root_id: StorageRootId(1),
+        source_provider_relative_locator: voom_core::ProviderRelativeLocator::new(
+            "sources/a.bin".to_owned(),
+        )
+        .unwrap(),
         target_storage_root_id: StorageRootId(1),
         target_provider_relative_locator: "committed/a.bin".to_owned(),
         expected_size_bytes: 1,
@@ -1466,16 +1475,21 @@ fn artifact_tempdir() -> tempfile::TempDir {
     tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
-async fn stage_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> StageCopyReport {
+async fn stage_bytes(
+    cp: &ControlPlane,
+    dir: &Path,
+    bytes: &[u8],
+) -> voom_test_support::staging_seed::SeededStagedArtifact {
     let source = unique_path(dir, "source.bin");
     let staging = unique_path(dir, "staged.bin");
     std::fs::write(&source, bytes).unwrap();
     let seeded = seed_source(cp, &source, bytes).await;
-    cp.stage_copy(StageCopyInput {
-        file_version_id: seeded.file_version_id,
-        source_location_id: Some(seeded.file_location_id),
-        staging_path: staging,
-    })
+    std::fs::write(&staging, bytes).unwrap();
+    voom_test_support::staging_seed::seed_staged_artifact(
+        cp.pool_for_test(),
+        seeded.file_version_id,
+        &staging,
+    )
     .await
     .unwrap()
 }
@@ -1484,7 +1498,13 @@ async fn stage_and_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> 
     let staged = stage_bytes(cp, dir, bytes).await;
     verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(bytes.to_vec()),
         &NoVerifyArtifactHooks,
     )
@@ -1501,7 +1521,6 @@ async fn stage_and_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> 
 #[derive(Debug, Clone, Copy)]
 struct SeededSource {
     file_version_id: FileVersionId,
-    file_location_id: FileLocationId,
 }
 
 async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSource {
@@ -1522,17 +1541,12 @@ async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSour
         .await
         .unwrap();
     let IngestOutcome::NewFileAsset {
-        file_version_id,
-        file_location_id,
-        ..
+        file_version_id, ..
     } = outcome
     else {
         panic!("seed_source should create a new file asset");
     };
-    SeededSource {
-        file_version_id,
-        file_location_id,
-    }
+    SeededSource { file_version_id }
 }
 
 async fn create_pending_commit(
