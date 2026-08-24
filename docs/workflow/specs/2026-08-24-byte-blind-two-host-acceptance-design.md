@@ -98,9 +98,12 @@ The entrypoint:
   any build or fixture work;
 - prebuilds the acceptance test and all production binaries it executes so no
   binary is relinked while an agent may exec it;
+- starts `unshare` as a tracked child with `--fork`, a PID namespace, and
+  `--kill-child=SIGKILL`; shell traps forward `SIGINT`/`SIGTERM`, wait for the
+  namespace init to exit, and make init exit kill/reap every descendant;
 - enters one private user/mount/PID namespace and invokes only the ignored
   acceptance test;
-- leaves no host mount, user, network, database, or fixture state behind.
+- leaves no host mount, user, network, database, fixture, or live process state.
 
 The script is the actual smoke command and receives a `just` recipe. The test is
 ignored in the normal cross-platform workspace suite because it intentionally
@@ -183,12 +186,14 @@ The harness performs faults at real boundaries:
   that response is held, and start a replacement incarnation. Incarnation
   fencing makes the partial session stale. The old location remains live. A
   successful replacement scan retires it, after which cleanup restores the file.
-- **Slow post-dispatch work:** configure agent A's FFmpeg dependency through a
-  generated executable wrapper that sleeps only for transform invocations and
-  then execs the real FFmpeg. The delay exceeds the configured initial
-  five-second lease TTL. The API must accept heartbeats for the original lease;
+- **Slow post-dispatch work:** after the transform child, agent-side fact checks,
+  and staged-output probe have returned, middleware holds the original
+  lease-complete request before the API applies it. The hold exceeds the initial
+  five-second TTL while the agent's independent heartbeat task must keep that
+  exact lease alive. After release, the API applies the original completion and
   durable evidence must retain the same lease, attempt, synthesis claim token,
-  and claim generation through commit, with no expiry or requeue fact.
+  and claim generation through verification and commit, with successful
+  heartbeat responses and no expiry or requeue fact.
 - **Response loss and restart:** arm middleware immediately before workflow
   execution. After the owner has performed the add-only filesystem mutation,
   durably recorded its `applied` receipt, and the API has applied the matching
@@ -208,11 +213,13 @@ paths settle, to observe durable invariants and counts.
 After private agent mounts exist, the parent bind-mounts an empty denial tree over
 both owner backing roots and every configured media, staging, output, backup, and
 recovery provider path. Before dispatch, the harness places a distinct sentinel
-beneath every provider root and every host-side backing alias, then requires both
-directory traversal and opening that sentinel to fail from the control-plane
-namespace. Only then may scan or compliance work begin. A successful CLI workflow,
-output probe from inside the current owner namespace, and completed durable phase
-chain prove the workflow.
+beneath every provider root and every host-side backing alias. It then parses its
+own mount table and requires each configured path to resolve to the denial-cover
+mount identity, and requires every backing sentinel/alias open to fail. The cover
+itself may remain traversable; its emptiness and mount identity prove that the
+backing bytes are not in the control-plane view. Only then may scan or compliance
+work begin. A successful CLI workflow, output probe from inside the current owner
+namespace, and completed durable phase chain prove the workflow.
 
 ### C2 — equal paths remain distinct
 
@@ -238,12 +245,12 @@ session.
 
 ### C5 — post-dispatch delay preserves claims
 
-The configured transform delay is greater than the initial lease TTL. The
-accounting middleware must observe successful lease-heartbeat responses for the
-same delayed lease. Durable assertions require one lease and dispatch attempt,
-one unchanged synthesis claim token/generation through commit, zero lease-expiry
-or ticket-requeue events for that workflow, no replacement lease, successful
-terminal workflow state, and synthesis state `committed`.
+The middleware holds the post-dispatch lease-complete request for longer than the
+initial TTL. It must observe successful lease-heartbeat responses for that same
+delayed lease while the hold is active. Durable assertions require one lease and
+dispatch attempt, one unchanged synthesis claim token/generation through commit,
+zero lease-expiry or ticket-requeue events for that workflow, no replacement
+lease, successful terminal workflow state, and synthesis state `committed`.
 
 ### C6 — response loss and restart are idempotent
 
@@ -257,15 +264,20 @@ provider mutation is recorded.
 ### C7 — only control traffic crosses the channel
 
 Every API request and delivered response body is counted around the production
-router. Every non-empty body parses as JSON on an allowlisted control route. For
-each generated source and preserved output marker, accounting rejects raw bytes,
-hex text, and base64 text at all three source-alignment offsets. The largest body
-stays within the explicit existing per-message bound, and total delivered body
-bytes stay below the smallest generated media object rather than an aggregate
-total. The final diagnostic reports request, response, discarded-response,
-message, route, and maximum-body counts. Strict production route decoding plus
-per-object, alignment-safe markers distinguish protocol metadata from raw or
-encoded media without a source-text assertion.
+router. Each observed route/direction pair must decode into its exact production
+request or response type. A route-specific semantic classifier then attributes
+every variable-length leaf to a bounded control category: bearer/idempotency
+identity, durable IDs/epochs, root-relative locators, operation/taxonomy tokens,
+expected/observed facts and hashes, bounded probe snapshots, diagnostics, or
+strict operation results. The classifier rejects an unknown route, field, leaf
+kind, or unbounded opaque value; in particular, lease-complete `result` values
+are decoded by the durable ticket's operation into the matching strict worker or
+scan result before their leaves are classified. Per-object raw/hex/alignment-safe
+base64 markers and whole-channel totals remain independent backstops, not the
+attribution proof. The final diagnostic reports request, response,
+discarded-response, message, route/category, maximum-leaf, and maximum-body
+counts. This accounts for all payload values as protocol metadata without a
+source-text assertion.
 
 ### C8 — cleanup preserves source
 
