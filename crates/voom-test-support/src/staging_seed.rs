@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
-use voom_core::ids::{ArtifactHandleId, ArtifactLocationId, FileVersionId};
 use voom_core::VoomError;
+use voom_core::ids::{ArtifactHandleId, ArtifactLocationId, FileVersionId};
 use voom_store::repo::media::artifacts::{
     ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactHandle, NewArtifactLocation,
     SqliteArtifactRepo,
@@ -56,12 +56,9 @@ pub async fn seed_staged_artifact(
     // BEGIN IMMEDIATE: the tx writes (handle insert) after reads; a deferred
     // start deadlocks into SQLITE_BUSY under parallel test load when the
     // upgrade races a concurrent writer.
-    let mut tx = pool
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|error| {
-            VoomError::database_context("seed_staged_artifact begin transaction", error)
-        })?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(|error| {
+        VoomError::database_context("seed_staged_artifact begin transaction", error)
+    })?;
     let version = identity
         .get_file_version_in_tx(&mut tx, file_version_id)
         .await?

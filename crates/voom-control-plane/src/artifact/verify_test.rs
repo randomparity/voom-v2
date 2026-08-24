@@ -6,8 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileVersionId, WorkerId,
-    rng_test_support::FrozenRng,
+    ArtifactHandleId, ErrorCode, FailureClass, FileVersionId, WorkerId, rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
@@ -447,7 +446,9 @@ async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSour
         )
         .await
         .unwrap();
-    let IngestOutcome::NewFileAsset { file_version_id, .. } = outcome
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
     else {
         panic!("seed_source should create a new file asset");
     };

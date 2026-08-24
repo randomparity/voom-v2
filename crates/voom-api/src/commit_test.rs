@@ -187,7 +187,9 @@ async fn seed_verified_staging(fixture: &CommitApiFixture, bytes: &[u8]) -> Veri
         )
         .await
         .unwrap();
-    let IngestOutcome::NewFileAsset { file_version_id, .. } = outcome
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
     else {
         panic!("seeded source should create a new file asset");
     };

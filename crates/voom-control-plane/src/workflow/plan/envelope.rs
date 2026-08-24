@@ -112,7 +112,6 @@ impl SourceFacts {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code))] // T8: backup->verify chain
 fn verify_facts(facts: SourceFacts) -> VerifyArtifactExpectedFacts {
     VerifyArtifactExpectedFacts {
         size_bytes: facts.size_bytes,
@@ -122,7 +121,9 @@ fn verify_facts(facts: SourceFacts) -> VerifyArtifactExpectedFacts {
     }
 }
 
-/// The live rooted handle behind one recorded source identity.
+/// The live rooted handle behind one recorded source identity, plus the file
+/// version that location resolves to (remux/audio children need it to find
+/// their planning snapshot).
 ///
 /// `Ok(None)` means the location row vanished or lost its rooted address
 /// between declaration and render; the ticket then stays on the legacy
@@ -131,7 +132,13 @@ pub(crate) async fn location_source(
     cp: &ControlPlane,
     storage_root_id: StorageRootId,
     file_location_id: FileLocationId,
-) -> Result<Option<media_dispatch::MediaDispatchSource>, VoomError> {
+) -> Result<
+    Option<(
+        media_dispatch::MediaDispatchSource,
+        voom_core::FileVersionId,
+    )>,
+    VoomError,
+> {
     let Some(location) = cp.identity.get_file_location(file_location_id).await? else {
         return Ok(None);
     };
@@ -147,11 +154,14 @@ pub(crate) async fn location_source(
              but the ticket declares root {storage_root_id}"
         )));
     }
-    Ok(Some(media_dispatch::MediaDispatchSource::Location {
-        storage_root_id: root,
-        file_location_id,
-        provider_relative_locator: locator.clone(),
-    }))
+    Ok(Some((
+        media_dispatch::MediaDispatchSource::Location {
+            storage_root_id: root,
+            file_location_id,
+            provider_relative_locator: locator.clone(),
+        },
+        location.file_version_id,
+    )))
 }
 
 fn root_default(
@@ -245,7 +255,8 @@ pub(crate) async fn policy_envelope(
     source: &PolicyFileSource,
     operation_payload: &Value,
 ) -> Result<Option<Value>, VoomError> {
-    let Some(source_ref) = location_source(cp, source.storage_root_id, source.location_id).await?
+    let Some((source_ref, _)) =
+        location_source(cp, source.storage_root_id, source.location_id).await?
     else {
         return Ok(None);
     };
@@ -439,7 +450,6 @@ async fn audio_envelope(
 /// Returns `(storage_root_id, locator)` for the producing operation's single
 /// planned output; `None` when the parent has no envelope (its child then
 /// stays on the legacy contract too).
-#[cfg_attr(not(test), expect(dead_code))] // T8: backup->verify chain
 pub(crate) fn parent_envelope_output(
     parent_rendered_payload: &Value,
 ) -> Option<(StorageRootId, voom_core::ProviderRelativeLocator)> {
@@ -460,17 +470,76 @@ pub(crate) fn parent_envelope_output(
 
 /// The observed facts a completed parent reported for its staged output,
 /// read data-only off the released lease result (`agent_observed.outputs`).
-#[cfg_attr(not(test), expect(dead_code))] // T8: backup->verify chain
 pub(crate) fn observed_output_facts(ticket_result: &Value) -> Option<SourceFacts> {
     let outputs = ticket_result
         .get("agent_observed")?
         .get("outputs")?
         .as_array()?;
-    let first = outputs.first()?;
+    let facts = outputs.first()?.get("facts")?;
     Some(SourceFacts {
-        size_bytes: first.get("size_bytes")?.as_u64()?,
-        content_hash: first.get("content_hash")?.as_str()?.to_owned(),
+        size_bytes: facts.get("size_bytes")?.as_u64()?,
+        content_hash: facts.get("content_hash")?.as_str()?.to_owned(),
     })
+}
+
+/// Render the `media_dispatch` `BackUpFile` envelope for the backup child of a
+/// producing operation (transform->backup): the parent's recorded staged
+/// output is what gets copied, onto the backup root its staging root names.
+///
+/// `Ok(None)` keeps the child on the legacy contract — the parent had no
+/// envelope, or no backup root is configured.
+pub(crate) async fn backup_child_envelope(
+    cp: &ControlPlane,
+    branch_id: &str,
+    parent_rendered_payload: &Value,
+) -> Result<Option<Value>, VoomError> {
+    let Some((root, locator)) = parent_envelope_output(parent_rendered_payload) else {
+        return Ok(None);
+    };
+    let Some(destination) =
+        destination_root(cp, media_dispatch::DestinationRole::Backup, root).await?
+    else {
+        return Ok(None);
+    };
+    let source = media_dispatch::MediaDispatchSource::RecordedStagedOutput {
+        storage_root_id: root,
+        provider_relative_locator: locator,
+    };
+    binding_result(media_dispatch::render_media_dispatch_back_up_staged_output(
+        branch_id,
+        &source,
+        destination,
+    ))
+}
+
+/// Render the `media_dispatch` `VerifyArtifact` envelope for the verify child of
+/// a completed backup ticket (backup->verify): the target is the backup's
+/// recorded staged output and the expected facts are what the agent observed
+/// writing there.
+///
+/// `Ok(None)` keeps the child on the legacy contract when the parent has no
+/// envelope or released no observed output facts (e.g. it ran bundled).
+pub(crate) fn verify_child_envelope(
+    parent_rendered_payload: &Value,
+    parent_ticket_result: Option<&Value>,
+) -> Result<Option<Value>, VoomError> {
+    let Some(result) = parent_ticket_result else {
+        return Ok(None);
+    };
+    let Some((root, locator)) = parent_envelope_output(parent_rendered_payload) else {
+        return Ok(None);
+    };
+    let Some(facts) = observed_output_facts(result) else {
+        return Ok(None);
+    };
+    let source = media_dispatch::MediaDispatchSource::RecordedStagedOutput {
+        storage_root_id: root,
+        provider_relative_locator: locator,
+    };
+    binding_result(media_dispatch::render_media_dispatch_verify_artifact(
+        &source,
+        verify_facts(facts),
+    ))
 }
 
 /// Render the `media_dispatch` envelope for an **expansion child** ticket.
@@ -479,8 +548,9 @@ pub(crate) fn observed_output_facts(ticket_result: &Value) -> Option<SourceFacts
 /// `rendered_payload` is the default payload already rendered for the node.
 /// Only children whose inputs are fully derivable flip: probe children read
 /// their facts off the scan result, transcode-video children reuse the
-/// default profile the payload already pins. Everything else keeps the
-/// pre-envelope contract until its flow migrates (T8).
+/// default profile the payload already pins, remux children resolve their
+/// selection against the file version's latest recorded snapshot. Everything
+/// not yet derivable keeps the pre-envelope contract until its flow migrates.
 pub(crate) async fn expansion_envelope(
     cp: &ControlPlane,
     operation: OperationKind,
@@ -500,7 +570,9 @@ pub(crate) async fn expansion_envelope(
         // A whole-root declaration names no bytes; envelopes address one.
         return Ok(None);
     };
-    let Some(source_ref) = location_source(cp, storage_root_id, file_location_id).await? else {
+    let Some((source_ref, version_id)) =
+        location_source(cp, storage_root_id, file_location_id).await?
+    else {
         return Ok(None);
     };
     let Ok(facts) = SourceFacts::from_source_file(source_file) else {
@@ -532,6 +604,43 @@ pub(crate) async fn expansion_envelope(
                 profile,
                 None,
                 false,
+            ))
+        }
+        OperationKind::Remux => {
+            let Some(snapshot) = cp
+                .identity
+                .list_media_snapshots_by_version(version_id)
+                .await?
+                .into_iter()
+                .next_back()
+            else {
+                return Ok(None);
+            };
+            let mut operation_payload = rendered_payload.clone();
+            if let Some(object) = operation_payload.as_object_mut() {
+                // The default child payload carries no planner tag and pins no
+                // snapshot; both are required to derive a selection.
+                object.insert("type".to_owned(), Value::from("remux"));
+                object.insert(
+                    "source_media_snapshot_id".to_owned(),
+                    Value::from(snapshot.id.0),
+                );
+            }
+            let Ok(selection) = crate::remux::selection::selection_from_payload_and_snapshot(
+                &operation_payload,
+                &snapshot,
+            ) else {
+                return Ok(None);
+            };
+            let Some(destination) = staging_destination(cp, storage_root_id).await? else {
+                return Ok(None);
+            };
+            binding_result(media_dispatch::render_media_dispatch_remux(
+                &branch.branch_id,
+                &source_ref,
+                facts.remux(),
+                selection,
+                destination,
             ))
         }
         _ => Ok(None),

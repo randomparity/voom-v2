@@ -70,7 +70,10 @@ fn observed_output_facts_read_the_first_reported_output() {
     let result = json!({
         "agent_observed": {
             "outputs": [
-                { "size_bytes": 33_u64, "content_hash": "blake3:out" },
+                {
+                    "provider_relative_locator": "b/branch/out.mkv",
+                    "facts": { "size_bytes": 33_u64, "content_hash": "blake3:out" },
+                },
             ],
         },
     });

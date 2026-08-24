@@ -447,7 +447,6 @@ fn commit_summary_fixture() -> CommitSummary {
     }
 }
 
-
 fn verify_report_fixture() -> VerifyArtifactReport {
     VerifyArtifactReport {
         artifact_handle_id: ArtifactHandleId(10),

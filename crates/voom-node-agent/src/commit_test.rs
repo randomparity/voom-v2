@@ -452,9 +452,13 @@ async fn absent_staging_is_materialized_from_source_handle_then_promoted() {
         [CommitOutcomeEvidence::Applied(_)]
     ));
     drop(evidences);
-    let staged =
-        tokio::fs::read(f.root.path().join("staging/asset.bin")).await.unwrap();
-    assert_eq!(staged, bytes, "staging must hold the materialized source bytes");
+    let staged = tokio::fs::read(f.root.path().join("staging/asset.bin"))
+        .await
+        .unwrap();
+    assert_eq!(
+        staged, bytes,
+        "staging must hold the materialized source bytes"
+    );
     let promoted = tokio::fs::read(f.target_path()).await.unwrap();
     assert_eq!(promoted, bytes);
 }

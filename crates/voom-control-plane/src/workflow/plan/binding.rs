@@ -434,9 +434,9 @@ pub(crate) mod media_dispatch {
             provider_relative_locator: ProviderRelativeLocator,
         },
         /// A recorded staged-output address left by a producing operation.
-        /// Constructed only by the backup->verify chain, which migrates with
-        /// T8; until then only `binding_test.rs` pins its shapes.
-        #[cfg_attr(not(test), expect(dead_code))]
+        /// Constructed by the transform->backup and backup->verify chains;
+        /// backup-file reads it as bytes-at-an-address, verification targets
+        /// it exclusively.
         RecordedStagedOutput {
             storage_root_id: StorageRootId,
             provider_relative_locator: ProviderRelativeLocator,
@@ -469,8 +469,9 @@ pub(crate) mod media_dispatch {
         ///
         /// # Errors
         ///
-        /// Fails for [`MediaDispatchSource::RecordedStagedOutput`]: only artifact
-        /// verification consumes a recorded staged-output address.
+        /// Fails for [`MediaDispatchSource::RecordedStagedOutput`]: only
+        /// artifact verification targets a recorded staged-output address, and
+        /// backup-file reads one through [`Self::address_ref`] instead.
         pub(crate) fn location_ref(&self, operation: &str) -> Result<MediaSourceRef, BindingError> {
             match self {
                 Self::Location {
@@ -485,6 +486,27 @@ pub(crate) mod media_dispatch {
                     "{operation} requires a live location source; a recorded \
                      staged-output address is reserved for artifact verification"
                 ))),
+            }
+        }
+
+        /// The envelope reference for an operation reading bytes at an
+        /// addressable handle. Both source kinds qualify: a live location and
+        /// a recorded staged output are equally addressable to the resolving
+        /// agent, which owns containment either way.
+        fn address_ref(&self) -> MediaSourceRef {
+            match self {
+                Self::Location {
+                    storage_root_id,
+                    provider_relative_locator,
+                    ..
+                }
+                | Self::RecordedStagedOutput {
+                    storage_root_id,
+                    provider_relative_locator,
+                } => MediaSourceRef {
+                    storage_root_id: *storage_root_id,
+                    provider_relative_locator: provider_relative_locator.clone(),
+                },
             }
         }
 
@@ -898,13 +920,38 @@ pub(crate) mod media_dispatch {
         }))
     }
 
+    /// Render the nested `media_dispatch` object for a backup-file ticket
+    /// whose source is a producing operation's recorded staged output (the
+    /// transform->backup chain). The destination mirrors the source locator's
+    /// own branch namespacing — `<branch-id>/<file-name>` under the resolved
+    /// backup root — because a staged output has no file-version identity yet,
+    /// so the `v<file-version-id>/` library layout cannot name it.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unusable source or any unaddressable derived locator.
+    pub(crate) fn render_media_dispatch_back_up_staged_output(
+        branch_id: &str,
+        source: &MediaDispatchSource,
+        destination_root_id: StorageRootId,
+    ) -> Result<Value, BindingError> {
+        let file_name = media_source_file_name(source)?;
+        encode_media_dispatch(MediaDispatch::BackUpFile(MediaBackUpFileDispatch {
+            schema: PROTOCOL_VERSION,
+            source: source.address_ref(),
+            destination: planned_output(
+                destination_root_id,
+                planned_output_locator(branch_id, &file_name)?,
+            ),
+        }))
+    }
+
     /// Render the nested `media_dispatch` object for a verify-artifact ticket
     /// targeting a producing operation's recorded staged-output address.
     ///
     /// # Errors
     ///
     /// Fails when `source` is not a recorded staged-output address.
-    #[cfg_attr(not(test), expect(dead_code))] // T8: backup->verify chain
     pub(crate) fn render_media_dispatch_verify_artifact(
         source: &MediaDispatchSource,
         expected: VerifyArtifactExpectedFacts,

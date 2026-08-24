@@ -469,11 +469,7 @@ async fn create_staged_artifact(seeded: &Seeded, dir: &Path, name: &str) -> Arti
     }
 }
 
-async fn create_verified_artifact(
-    seeded: &Seeded,
-    dir: &Path,
-    name: &str,
-) -> ArtifactFixture {
+async fn create_verified_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
     let mut artifact = create_staged_artifact(seeded, dir, name).await;
     let verify = run(
         artifact_command(seeded)
@@ -492,11 +488,7 @@ async fn create_verified_artifact(
     artifact
 }
 
-async fn create_committed_artifact(
-    seeded: &Seeded,
-    dir: &Path,
-    name: &str,
-) -> ArtifactFixture {
+async fn create_committed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
     let mut artifact = create_verified_artifact(seeded, dir, name).await;
     let target_path = dir.join(format!("{name}-committed.mp4"));
     let commit = run(

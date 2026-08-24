@@ -237,12 +237,7 @@ struct StagedFixture {
     verification_id: Option<voom_core::ids::ArtifactVerificationId>,
 }
 
-async fn staged_fixture(
-    db: &Db,
-    dir: &Path,
-    name: &str,
-    seeded: &SeededSource,
-) -> StagedFixture {
+async fn staged_fixture(db: &Db, dir: &Path, name: &str, seeded: &SeededSource) -> StagedFixture {
     let staging_path = dir.join(format!("{name}-staged.mp4"));
     std::fs::copy(dir.join(format!("{name}-source.mp4")), &staging_path).unwrap();
     let pool = voom_store::connect(&db.url).await.unwrap();

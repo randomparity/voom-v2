@@ -265,6 +265,146 @@ async fn backup_completion_creates_verify_after_local_backup_id_exists() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one durable chain reads better than three fragment fixtures"
+)]
+async fn transform_and_backup_children_render_dispatch_envelopes_from_parent_handles() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    fixture.point_default_staging_at_self().await;
+    fixture.point_default_backup_at_self().await;
+
+    // The transform ran on an agent: its payload carries the remux envelope
+    // whose planned output is what the backup child must copy.
+    let output_locator = "file-001/file-001.mkv";
+    let transform = fixture
+        .seed_succeeded_ticket_in_branch(
+            "transcode",
+            BranchContext {
+                branch_id: "file-001".to_owned(),
+                path: "/agent-tmp/staging/file-001/file-001.mkv".to_owned(),
+                probe_codec: None,
+                source_file: Some(source_file_for_branch("file-001")),
+                storage_source: Some(TicketStorageSource::Location {
+                    storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                    file_location_id: SEED_LOCATION,
+                }),
+            },
+            OperationKind::TranscodeVideo,
+            serde_json::json!({
+                "media_dispatch": {
+                    "operation": "remux",
+                    "schema": voom_core::PROTOCOL_VERSION,
+                    "source": {
+                        "storage_root_id": voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+                        "provider_relative_locator": "library/source.mkv",
+                    },
+                    "expected": {
+                        "size_bytes": 4_200_000_000_u64,
+                        "content_hash": "blake3:file-001",
+                    },
+                    "output_container": "mkv",
+                    "output": {
+                        "storage_root_id": voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+                        "provider_relative_locator": output_locator,
+                        "overwrite": false,
+                    },
+                    "selection": {},
+                }
+            }),
+            serde_json::json!({
+                "output_path": "/agent-tmp/staging/file-001/file-001.mkv"
+            }),
+        )
+        .await;
+
+    expand_transform_completion(&fixture.ctx(), "file-001", &transform)
+        .await
+        .unwrap();
+
+    let backup = fixture.ticket("backup", "file-001").await;
+    let Some(dispatch) = backup.rendered_payload.get("media_dispatch") else {
+        panic!("backup child of an envelope-backed transform must carry media_dispatch");
+    };
+    let decoded = voom_worker_protocol::decode_media_dispatch(dispatch).unwrap();
+    let destination_locator = match &decoded {
+        voom_worker_protocol::MediaDispatch::BackUpFile(backup) => {
+            assert_eq!(
+                backup.source.storage_root_id,
+                voom_store::test_support::TEST_STORAGE_ROOT_ID
+            );
+            assert_eq!(
+                backup.source.provider_relative_locator.as_str(),
+                output_locator
+            );
+            backup.destination.provider_relative_locator.clone()
+        }
+        other => panic!("unexpected dispatch envelope: {other:?}"),
+    };
+
+    // The backup completed on the agent; its released result carries the
+    // observed output facts the verify child pins as expectations.
+    let backup_ticket = fixture
+        .seed_succeeded_ticket_in_branch(
+            "backup",
+            BranchContext {
+                branch_id: "file-001".to_owned(),
+                path: "backup-local-001".to_owned(),
+                probe_codec: None,
+                source_file: Some(source_file_for_branch("file-001")),
+                storage_source: Some(TicketStorageSource::Root {
+                    storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                }),
+            },
+            OperationKind::BackUpFile,
+            serde_json::json!({
+                "media_dispatch": {
+                    "operation": "back_up_file",
+                    "schema": voom_core::PROTOCOL_VERSION,
+                    "source": {
+                        "storage_root_id": voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+                        "provider_relative_locator": output_locator,
+                    },
+                    "destination": {
+                        "storage_root_id": voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+                        "provider_relative_locator": destination_locator.as_str(),
+                        "overwrite": false,
+                    },
+                }
+            }),
+            serde_json::json!({
+                "local_backup_id": "backup-local-001",
+                "agent_observed": {
+                    "outputs": [{
+                        "provider_relative_locator": destination_locator.as_str(),
+                        "facts": {"size_bytes": 99_u64, "content_hash": "blake3:copy"},
+                    }]
+                },
+            }),
+        )
+        .await;
+
+    expand_backup_completion(&fixture.ctx(), "file-001", &backup_ticket)
+        .await
+        .unwrap();
+
+    let verify = fixture.ticket("verify", "file-001").await;
+    let Some(dispatch) = verify.rendered_payload.get("media_dispatch") else {
+        panic!("verify child of an envelope-backed backup must carry media_dispatch");
+    };
+    match voom_worker_protocol::decode_media_dispatch(dispatch).unwrap() {
+        voom_worker_protocol::MediaDispatch::VerifyArtifact(verify) => {
+            assert_eq!(
+                verify.target.provider_relative_locator.as_str(),
+                destination_locator.as_str()
+            );
+            assert_eq!(verify.expected.size_bytes, 99);
+            assert_eq!(verify.expected.content_hash, "blake3:copy");
+        }
+        other => panic!("unexpected dispatch envelope: {other:?}"),
+    }
+}
+#[tokio::test]
 async fn expansion_promotes_existing_pending_ticket_after_restart() {
     let fixture = WorkflowExpansionFixture::new().await;
     let probe = fixture
@@ -292,6 +432,63 @@ async fn expansion_promotes_existing_pending_ticket_after_restart() {
     );
     fixture.assert_ticket_count(2).await;
     fixture.assert_dependency_count(1).await;
+}
+
+#[tokio::test]
+async fn quality_completion_remux_child_renders_dispatch_envelope() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    let (version_id, location_id) = fixture.seed_rooted_source().await;
+    fixture.record_snapshot(version_id).await;
+    fixture.point_default_staging_at_self().await;
+
+    // The quality ticket's storage source names the real rooted location,
+    // which is what makes the remux child's inputs fully derivable.
+    let branch = BranchContext {
+        branch_id: "file-001".to_owned(),
+        path: "/library/file-001.mkv".to_owned(),
+        probe_codec: Some("h264".to_owned()),
+        source_file: Some(source_file_for_branch("file-001")),
+        storage_source: Some(TicketStorageSource::Location {
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            file_location_id: location_id,
+        }),
+    };
+    let quality = fixture
+        .seed_succeeded_ticket_in_branch(
+            "quality",
+            branch,
+            OperationKind::ScoreQuality,
+            serde_json::json!({}),
+            serde_json::json!({"needs_transcode": false}),
+        )
+        .await;
+
+    expand_quality_completion(&fixture.ctx(), "file-001", &quality)
+        .await
+        .unwrap();
+
+    let remux = fixture.ticket("remux", "file-001").await;
+    let Some(dispatch) = remux.rendered_payload.get("media_dispatch") else {
+        panic!(
+            "remux child with live rooted source, snapshot, and staging default must carry \
+             media_dispatch"
+        );
+    };
+    let decoded = voom_worker_protocol::decode_media_dispatch(dispatch).unwrap();
+    match decoded {
+        voom_worker_protocol::MediaDispatch::Remux(remux) => {
+            assert_eq!(
+                remux.source.storage_root_id,
+                voom_store::test_support::TEST_STORAGE_ROOT_ID
+            );
+            assert_eq!(
+                remux.output.storage_root_id,
+                voom_store::test_support::TEST_STORAGE_ROOT_ID
+            );
+            assert!(!remux.selection.default_streams.is_empty());
+        }
+        other => panic!("unexpected dispatch envelope: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -455,20 +652,48 @@ impl WorkflowExpansionFixture {
         result: Value,
     ) -> Ticket {
         let branch = branch_for_seed(branch_id, operation);
-        let rendered_payload = if operation == OperationKind::ScanLibrary {
+        self.seed_succeeded_ticket_in_branch(
+            node_id,
+            branch,
+            operation,
+            serde_json::json!({}),
+            result,
+        )
+        .await
+    }
+
+    /// Seeds a succeeded ticket whose rendered payload carries `rendered_extra`
+    /// merged in on top of the defaults (e.g. an agent-written envelope).
+    async fn seed_succeeded_ticket_in_branch(
+        &self,
+        node_id: &str,
+        branch: BranchContext,
+        operation: OperationKind,
+        rendered_extra: Value,
+        result: Value,
+    ) -> Ticket {
+        let branch_id = branch.branch_id.clone();
+        let mut rendered_payload = if operation == OperationKind::ScanLibrary {
             render_default_payload_with_fan_out(operation, &branch, timing(), 3).unwrap()
         } else {
             render_default_payload(operation, &branch, timing()).unwrap()
         };
+        if let (Some(extra), Some(base)) =
+            (rendered_extra.as_object(), rendered_payload.as_object_mut())
+        {
+            for (key, value) in extra {
+                base.insert(key.clone(), value.clone());
+            }
+        }
         let payload = WorkflowTicketPayload {
             workflow_id: self.workflow_id.clone(),
             plan_id: self.plan_id.clone(),
             node_id: node_id.to_owned(),
-            branch_id: branch_id.to_owned(),
+            branch_id,
             operation,
             rendered_payload,
             timing: timing(),
-            source_file: Some(source_file_for_branch(branch_id)),
+            source_file: branch.source_file.clone(),
             declared_artifact_access: declaration_for(operation, branch.storage_source.as_ref())
                 .unwrap(),
         }
@@ -529,6 +754,87 @@ impl WorkflowExpansionFixture {
         self.cp
             .tickets()
             .add_dependency(ticket_id, depends_on)
+            .await
+            .unwrap();
+    }
+
+    /// Seed a real discovered file on the shared test storage root and return
+    /// its version + location ids.
+    async fn seed_rooted_source(&self) -> (voom_core::FileVersionId, voom_core::FileLocationId) {
+        use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
+
+        let outcome = self
+            .cp
+            .record_discovered_file(
+                DiscoveredFile {
+                    storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                    provider_relative_locator: voom_store::test_support::test_relative_locator(
+                        "/library/file-001.mkv",
+                    ),
+                    content_hash: "blake3:file-001".to_owned(),
+                    size_bytes: 4_200_000_000,
+                    observed_at: T0,
+                    proof: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match outcome {
+            IngestOutcome::NewFileAsset {
+                file_version_id,
+                file_location_id,
+                ..
+            } => (file_version_id, file_location_id),
+            IngestOutcome::AliasAttached { .. } => panic!("seed must create a new file asset"),
+        }
+    }
+
+    async fn record_snapshot(&self, file_version_id: voom_core::FileVersionId) {
+        self.cp
+            .record_media_snapshot(
+                file_version_id,
+                None,
+                serde_json::json!({
+                    "container": "mkv",
+                    "video_codec": "h264",
+                    "streams": [
+                        {
+                            "id": "stream-0",
+                            "index": 0,
+                            "kind": "video",
+                            "codec_name": "h264",
+                            "disposition": {"default": true}
+                        },
+                        {
+                            "id": "stream-audio-1",
+                            "index": 1,
+                            "kind": "audio",
+                            "codec_name": "aac",
+                            "language": "eng",
+                            "channels": 2,
+                            "disposition": {"default": false, "forced": false}
+                        }
+                    ]
+                }),
+                T0,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn point_default_staging_at_self(&self) {
+        sqlx::query("UPDATE library_roots SET default_staging_root_id = id WHERE id = ?")
+            .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+            .execute(&self.cp.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn point_default_backup_at_self(&self) {
+        sqlx::query("UPDATE library_roots SET default_backup_root_id = id WHERE id = ?")
+            .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+            .execute(&self.cp.pool)
             .await
             .unwrap();
     }
