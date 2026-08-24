@@ -185,6 +185,10 @@ async fn video_hardware_on_a_different_node_does_not_satisfy_the_target() {
     let message = error.to_string();
     assert!(message.contains("software-target-node"), "{message}");
     assert!(!message.contains("voom worker run-local"), "{message}");
+    assert!(
+        message.contains("remote accelerator descriptors are not supported"),
+        "{message}"
+    );
 }
 
 /// The retired run-local providers keep perfect eligibility rows, yet they own
@@ -545,6 +549,22 @@ async fn an_unlocated_target_is_reported_before_tool_observation() {
         !message.contains("on node \""),
         "tools were observed despite no resolvable target: {message}"
     );
+}
+
+#[tokio::test]
+async fn a_target_location_database_failure_propagates() {
+    let (cp, _tmp) = cp().await;
+    cp.pool_for_test().close().await;
+
+    let error = cp
+        .preflight_policy_tools(
+            &mut policy_requiring(&["ffmpeg"]),
+            &one_target(FileVersionId(424_242)),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
 }
 
 #[tokio::test]

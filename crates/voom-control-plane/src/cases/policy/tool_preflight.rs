@@ -15,6 +15,8 @@ use crate::ControlPlane;
 use crate::operation_source::select_location;
 use crate::video_hardware::candidate_accelerator_descriptor;
 
+const REMOTE_ACCELERATOR_DEFERRED_GUIDANCE: &str = "remote accelerator descriptors are not supported by the current node activation contract; \
+     accelerator-backed remote profiles are deferred";
 const LEGACY_REQUIRES_TOOLS_WARNING: &str = "metadata_requires_tools_deferred";
 
 /// One stored policy target whose storage owner must satisfy the tools.
@@ -138,13 +140,14 @@ impl ControlPlane {
         let subject = format!("target {}", target.ordinal);
         let location = match select_location(self, target.file_version_id, None).await {
             Ok(location) => location,
-            Err(error) => {
+            Err(error @ (VoomError::Config(_) | VoomError::NotFound(_))) => {
                 return Ok(TargetOwner::Unavailable(UnavailableTool {
                     subject,
                     reason: error.to_string(),
                     guidance: "re-scan or re-ingest the file onto an owned storage root",
                 }));
             }
+            Err(error) => return Err(error),
         };
         let (storage_root_id, _) = location.rooted_address()?;
         let effective = self
@@ -414,8 +417,8 @@ fn missing_backend_workers(
             ""
         };
         missing.push(format!(
-            "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; {}",
-            guidance("a matching NVIDIA-bound ffmpeg worker")
+            "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder} on owner \
+             node \"{owner_node}\"; {REMOTE_ACCELERATOR_DEFERRED_GUIDANCE}"
         ));
     }
     if requirements.vaapi.required && !availability.contains(&VideoEncoderBackend::Vaapi) {
@@ -425,8 +428,8 @@ fn missing_backend_workers(
             ""
         };
         missing.push(format!(
-            "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder}; {}",
-            guidance("a matching VAAPI-bound ffmpeg worker")
+            "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder} on owner \
+             node \"{owner_node}\"; {REMOTE_ACCELERATOR_DEFERRED_GUIDANCE}"
         ));
     }
     if requirements.videotoolbox.required
@@ -445,8 +448,8 @@ fn missing_backend_workers(
         };
         missing.push(format!(
             "VideoToolbox profiles require a live host-bound ffmpeg worker advertising \
-             [{encoders}]{decoder}; {}",
-            guidance("a matching VideoToolbox-bound ffmpeg worker")
+             [{encoders}]{decoder} on owner node \"{owner_node}\"; \
+             {REMOTE_ACCELERATOR_DEFERRED_GUIDANCE}"
         ));
     }
     missing
