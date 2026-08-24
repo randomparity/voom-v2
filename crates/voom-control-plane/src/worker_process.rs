@@ -61,13 +61,6 @@ impl WorkerCommand {
 
     #[cfg(test)]
     #[must_use]
-    pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
-        self.args.push(arg.as_ref().to_os_string());
-        self
-    }
-
-    #[cfg(test)]
-    #[must_use]
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.env
             .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
@@ -164,14 +157,6 @@ impl BundledWorkerProcess {
         command: WorkerCommand,
     ) -> Result<Self, WorkerProcessError> {
         Self::launch_inner(worker_id, command, STARTUP_TIMEOUT).await
-    }
-
-    pub(crate) async fn launch_with_startup_timeout(
-        worker_id: WorkerId,
-        command: WorkerCommand,
-        startup_timeout: Duration,
-    ) -> Result<Self, WorkerProcessError> {
-        Self::launch_inner(worker_id, command, startup_timeout).await
     }
 
     async fn launch_inner(

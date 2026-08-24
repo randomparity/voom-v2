@@ -6,8 +6,6 @@
     reason = "integration tests fail loudly with scenario and child-process diagnostics"
 )]
 
-#[path = "support/local_worker.rs"]
-mod local_worker;
 #[path = "support/media_inspect.rs"]
 mod media_inspect;
 #[path = "support/process.rs"]

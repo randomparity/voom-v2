@@ -78,13 +78,14 @@ impl OwnerNodeEmulator {
             runtime.block_on(async move {
                 let pool = voom_store::connect(&commit_url).await.unwrap();
                 let node = SimulatedOwnerNode::new().unwrap();
-                node.install(&pool).await.unwrap();
+                node.install_principal(&pool).await.unwrap();
                 let cp = ControlPlane::open(&commit_url)
                     .await
                     .unwrap()
                     .with_local_node_id(Some(voom_core::NodeId(
                         voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
                     )));
+                activate_owner_media_workers(&cp, &node).await.unwrap();
                 loop {
                     let pending: Option<(i64, i64)> = sqlx::query_as(
                         "SELECT id, artifact_handle_id FROM artifact_commit_intents \
@@ -171,6 +172,51 @@ async fn ensure_emulator_worker(cp: &ControlPlane, pool: &SqlitePool) -> Result<
     Ok(())
 }
 
+/// Activate the owner principal's manifest with one declared worker per media
+/// tool, exactly as a real node agent's activation does (ADR 0076): the
+/// resulting remote workers satisfy owner-scoped `requires_tools` preflight.
+async fn activate_owner_media_workers(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+) -> Result<(), VoomError> {
+    use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
+    use voom_core::{ArtifactAccessMode, OperationKind};
+    let declarations = [
+        (
+            "ffmpeg",
+            vec![
+                OperationKind::TranscodeVideo,
+                OperationKind::TranscodeAudio,
+                OperationKind::ExtractAudio,
+            ],
+        ),
+        ("mkvtoolnix", vec![OperationKind::Remux]),
+        ("ffprobe", vec![OperationKind::ProbeFile]),
+    ]
+    .into_iter()
+    .map(|(logical_name, operations)| RemoteWorkerDeclaration {
+        logical_name: logical_name.to_owned(),
+        operations,
+        artifact_access: vec![ArtifactAccessMode::SharedMount],
+        max_parallel: 2,
+    })
+    .collect();
+    // One authenticated agent incarnation both supervises these workers and
+    // drives the commit-intent protocol below. Activating a second incarnation
+    // would supersede the principal used by `drive_pending_commit`.
+    let incarnation_id = node.incarnation_id;
+    cp.remote_activate(RemoteActivateInput {
+        node_id: node.node_id,
+        token: node.token.clone(),
+        idempotency_key: "activate-owner-media-workers".to_owned(),
+        request_hash: "activate-owner-media-workers-body".to_owned(),
+        incarnation_id,
+        workers: declarations,
+    })
+    .await
+    .map(|_| ())
+}
+
 /// Map a raw sqlx error into the crate error for `?` plumbing.
 fn db(error: &sqlx::Error) -> VoomError {
     VoomError::database(error.to_string())
@@ -182,7 +228,6 @@ struct ReadyTicket {
     rendered: Value,
     envelope: MediaDispatch,
 }
-
 /// Load a `ready` ticket and strict-decode its media-dispatch envelope.
 async fn ready_ticket(pool: &SqlitePool, ticket_id: i64) -> Result<ReadyTicket, VoomError> {
     let (job_id, payload): (Option<i64>, String) =

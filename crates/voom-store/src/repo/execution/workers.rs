@@ -933,6 +933,35 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
+    /// List every worker owned by one node, in any status.
+    ///
+    /// Owner-scoped tool readiness classifies these rows against the node's
+    /// active incarnation itself, so the query deliberately does not filter by
+    /// status or bound incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
+    pub async fn list_by_node(&self, node_id: NodeId) -> Result<Vec<Worker>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id \
+             FROM workers w \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+             WHERE w.node_id = ? \
+             ORDER BY w.registered_at ASC, w.id ASC",
+        )
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id)),
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("workers list by node", e))?;
+        rows.iter().map(row_to_worker).collect()
+    }
+
     /// List workers and their optional node context.
     ///
     /// # Errors

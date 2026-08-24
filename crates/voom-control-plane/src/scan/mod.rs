@@ -3,15 +3,11 @@
 //!
 //! `run` requests runs (fail-closed availability, ADR 0027); `sessions` owns
 //! the durable session state machine and its remote routes' inputs; `publish`
-//! turns evidence into identity inside the completion transaction; `worker`
-//! and `bootstrap` keep the bundled-ffprobe surfaces shared with the
-//! audio/remux/transcode commit pipelines.
+//! turns evidence into identity inside the completion transaction.
 
-pub(crate) mod bootstrap;
 pub(crate) mod publish;
 pub mod run;
 pub mod sessions;
-pub(crate) mod worker;
 
 pub use run::{RootBlockReason, RootScanBlocked, ScanRunOutcome, ScanRunRequested};
 pub use sessions::{

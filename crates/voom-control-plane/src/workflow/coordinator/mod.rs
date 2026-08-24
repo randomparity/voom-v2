@@ -40,6 +40,7 @@ use voom_store::repo::media::identity::{MediaSnapshot, MediaSnapshotRepo};
 use crate::ControlPlane;
 use crate::cases::policy::compliance::{ComplianceExecutionOptions, PromotionPlan};
 use crate::cases::policy::plans::plan_compiled_policy_with_input;
+use crate::cases::policy::tool_preflight::PolicyToolTarget;
 use crate::cases::{begin_immediate_tx, begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
@@ -1010,7 +1011,7 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let (_, inputs) = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id)
             .await?;
         Box::pin(self.run_prepared_phase_barrier(inputs, options, runtimes)).await
     }
@@ -1086,7 +1087,7 @@ impl ControlPlane {
             .into());
         }
         let (_, inputs) = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id)
             .await?;
         let prepared = self
             .prepare_resume_phase_barrier_run_inputs(prior_job_id, inputs)
@@ -1172,7 +1173,6 @@ impl ControlPlane {
         &self,
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
-        runtimes: &WorkerRuntimeRegistry,
     ) -> Result<(ExecutionPlan, PhaseBarrierRunInputs), VoomError> {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
@@ -1185,7 +1185,15 @@ impl ControlPlane {
         if stored.files.is_empty() {
             crate::cases::policy::tool_preflight::normalize_policy_tool_requirements(&mut policy)?;
         } else {
-            self.preflight_policy_tools(&mut policy, runtimes).await?;
+            let targets = stored
+                .files
+                .iter()
+                .map(|file| PolicyToolTarget {
+                    ordinal: file.ordinal,
+                    file_version_id: file.selected_version_id,
+                })
+                .collect::<Vec<_>>();
+            self.preflight_policy_tools(&mut policy, &targets).await?;
             self.ensure_policy_verifier(&policy).await?;
         }
         let context = PlanningContext {

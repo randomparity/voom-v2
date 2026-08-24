@@ -26,29 +26,20 @@ use voom_test_support::TempDatabase;
 use voom_test_support::scan_seed::{SeedFile, SeededSource, seed_scanned_files};
 use voom_test_support::worker::cargo_build_package;
 
-use crate::local_worker::LocalWorker;
-
 #[path = "owner_node.rs"]
 mod owner_node;
 
 use crate::published_grammar_media::ScenarioMedia;
 use owner_node::OwnerNodeEmulator;
 
-pub struct WorkerBinaryGuard {
-    _ffprobe_guard: (),
-}
+pub struct WorkerBinaryGuard;
 
 pub fn prepare_worker_binaries() -> io::Result<WorkerBinaryGuard> {
-    // The binaries back the preflight-capable workers each scenario launches;
-    // building them here keeps scenario failures off cargo output.
-    for package in [
-        "voom-ffmpeg-worker",
-        "voom-mkvtoolnix-worker",
-        "voom-verify-artifact-worker",
-    ] {
-        cargo_build_package(package).map_err(|error| io::Error::other(error.to_string()))?;
-    }
-    Ok(WorkerBinaryGuard { _ffprobe_guard: () })
+    // Verification remains a bundled control-plane operation; build its
+    // worker before the scenarios so a test never relinks it during dispatch.
+    cargo_build_package("voom-verify-artifact-worker")
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    Ok(WorkerBinaryGuard)
 }
 
 struct ScenarioRun {
@@ -56,12 +47,10 @@ struct ScenarioRun {
     url: String,
     library: PathBuf,
     _emulator: OwnerNodeEmulator,
-    ffmpeg: LocalWorker,
-    mkvtoolnix: LocalWorker,
 }
 
 pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root, &media.library)?;
+    let run = ScenarioRun::start(&media.root, &media.library)?;
     let seeded = run.scan(&media.library)?;
     require(seeded.len() == 1, "C1 scan ingested")?;
     let version_id = run.create_policy("published-grammar-core", "published-grammar-core.voom")?;
@@ -79,11 +68,11 @@ pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
         "C1 stored report",
     )?;
     assert_stored_matches(&execute, &stored)?;
-    run.shutdown()
+    Ok(())
 }
 
 pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root, &media.library)?;
+    let run = ScenarioRun::start(&media.root, &media.library)?;
     let seeded = run.scan(&media.library)?;
     require(seeded.len() == 3, "T1 scan ingested")?;
     let version_id =
@@ -126,11 +115,11 @@ pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
         "T1 stored report",
     )?;
     assert_stored_matches(&execute, &stored)?;
-    run.shutdown()
+    Ok(())
 }
 
 pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root, &media.library)?;
+    let run = ScenarioRun::start(&media.root, &media.library)?;
     let seeded = run.scan(&media.library)?;
     // The scenario's .eng.srt sidecar is no longer a scanned identity row;
     // only the feature's media file seeds.
@@ -178,11 +167,11 @@ pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
         "A1 stored report",
     )?;
     assert_stored_matches(&execute, &stored)?;
-    run.shutdown()
+    Ok(())
 }
 
 pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root, &media.library)?;
+    let run = ScenarioRun::start(&media.root, &media.library)?;
     let seeded = run.scan(&media.library)?;
     require(seeded.len() == 3, "F1 scan ingested")?;
     let version_id = run.create_policy(
@@ -202,7 +191,7 @@ pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
         "F1 stored report",
     )?;
     assert_stored_matches(&execute, &stored)?;
-    run.shutdown()
+    Ok(())
 }
 
 impl ScenarioRun {
@@ -240,21 +229,16 @@ impl ScenarioRun {
         // Storage-owner stand-ins settle envelope media tickets and drive
         // fenced commit intents (ADR 0075).
         let emulator = OwnerNodeEmulator::spawn(&url);
-        // Reserved local providers satisfy the policies' `requires_tools`
-        // preflight exactly as in a real deployment; media tickets themselves
-        // stay node-local.
-        let mut ffmpeg = LocalWorker::spawn(&url, "ffmpeg")?;
-        let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix")?;
-        ffmpeg.wait_for_ready(std::time::Duration::from_mins(1))?;
-        mkvtoolnix.wait_for_ready(std::time::Duration::from_mins(1))?;
+        // The emulator's owner principal activates one declared worker per
+        // media tool (ADR 0076); its remote workers satisfy the owner-scoped
+        // `requires_tools` preflight exactly as a real node agent would.
+        wait_for_owner_tooling(&url)?;
 
         Ok(Self {
             _db: db,
             url,
             library: library.to_path_buf(),
             _emulator: emulator,
-            ffmpeg,
-            mkvtoolnix,
         })
     }
 
@@ -419,16 +403,43 @@ impl ScenarioRun {
         let output = run_cli(&self.url, args)?;
         assert_ok_envelope(&output, command, what)
     }
+}
 
-    fn shutdown(&mut self) -> io::Result<()> {
-        self.ffmpeg
-            .shutdown(std::time::Duration::from_secs(30))
+/// Block until the emulator's owner principal has activated its media-tool
+/// manifest so the first compliance execute observes a ready storage owner.
+fn wait_for_owner_tooling(url: &str) -> io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let pool = voom_store::connect(url)
+            .await
             .map_err(|error| io::Error::other(error.to_string()))?;
-        self.mkvtoolnix
-            .shutdown(std::time::Duration::from_secs(30))
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let live_workers: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workers w \
+                 JOIN nodes n ON n.active_incarnation_id = w.node_incarnation_id \
+                 WHERE n.id = ? AND w.status IN ('registered', 'active')",
+            )
+            .bind(
+                i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0)
+                    .map_err(|error| io::Error::other(error.to_string()))?,
+            )
+            .fetch_one(&pool)
+            .await
             .map_err(|error| io::Error::other(error.to_string()))?;
-        Ok(())
-    }
+            if live_workers >= 3 {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(io::Error::other(
+                    "owner node media workers never became ready",
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
 }
 
 // --- shared execution-shape assertions ---
