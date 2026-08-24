@@ -1,7 +1,6 @@
 //! Executor configuration: timing, queue, artifact-root, and dispatch/stream
 //! option structs plus the synthetic workflow job-kind constant.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -36,26 +35,8 @@ pub(crate) struct WorkflowQueueOptions {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WorkflowArtifactRoots {
-    pub transcode: OperationArtifactRoots,
-    pub remux: OperationArtifactRoots,
-    pub audio: OperationArtifactRoots,
-    /// Opt-in backup-before-mutation destination root (`--backup-root`). When
-    /// `Some`, every mutating operation backs up its source here before
-    /// dispatch. `None` disables the gate. See ADR 0025.
-    pub backup_root: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct OperationArtifactRoots {
-    pub staging_root: PathBuf,
-    pub target_dir: PathBuf,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct WorkflowDispatchOptions {
     pub timing: WorkflowTimingOptions,
-    pub artifact_roots: WorkflowArtifactRoots,
     #[cfg(test)]
     pub chaos: WorkflowChaosOptions,
 }
@@ -119,58 +100,6 @@ impl WorkflowQueueOptions {
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod tests;
-
-impl OperationArtifactRoots {
-    #[must_use]
-    pub fn new(staging_root: PathBuf, target_dir: PathBuf) -> Self {
-        Self {
-            staging_root,
-            target_dir,
-        }
-    }
-}
-
-impl Default for WorkflowArtifactRoots {
-    fn default() -> Self {
-        Self {
-            transcode: OperationArtifactRoots::new(
-                PathBuf::from("/tmp/voom/transcode/staging"),
-                PathBuf::from("/tmp/voom/transcode/output"),
-            ),
-            remux: OperationArtifactRoots::new(
-                PathBuf::from("/tmp/voom/remux/staging"),
-                PathBuf::from("/tmp/voom/remux/output"),
-            ),
-            audio: OperationArtifactRoots::new(
-                PathBuf::from("/tmp/voom/audio/staging"),
-                PathBuf::from("/tmp/voom/audio/output"),
-            ),
-            backup_root: None,
-        }
-    }
-}
-
-impl WorkflowArtifactRoots {
-    #[cfg(test)]
-    #[must_use]
-    pub fn for_tests() -> Self {
-        Self {
-            transcode: OperationArtifactRoots::new(
-                PathBuf::from("/tmp/voom-test/transcode/staging"),
-                PathBuf::from("/tmp/voom-test/transcode/output"),
-            ),
-            remux: OperationArtifactRoots::new(
-                PathBuf::from("/tmp/voom-test/remux/staging"),
-                PathBuf::from("/tmp/voom-test/remux/output"),
-            ),
-            audio: OperationArtifactRoots::new(
-                PathBuf::from("/tmp/voom-test/audio/staging"),
-                PathBuf::from("/tmp/voom-test/audio/output"),
-            ),
-            backup_root: None,
-        }
-    }
-}
 
 impl WorkflowDispatchOptions {
     #[must_use]

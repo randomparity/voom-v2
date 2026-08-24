@@ -1,6 +1,5 @@
 use serde_json::Map;
 use serde_json::{Value, json};
-use std::path::Path;
 use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId, StorageRootId};
 use voom_plan::planner::audio::{AudioOperationPayload, AudioOperationType};
@@ -177,8 +176,6 @@ pub struct PolicyFileSource {
 pub fn render_policy_transcode_payload(
     source: PolicyFileSource,
     operation_payload: &Value,
-    staging_root: &Path,
-    target_dir: &Path,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
     let target_codec = required_string(operation_payload, "target_codec")?;
@@ -205,8 +202,6 @@ pub fn render_policy_transcode_payload(
         "container": container,
         "profile": profile,
         "resolved_profile": resolved_profile,
-        "staging_root": staging_root,
-        "target_dir": target_dir,
         "duration_ms": timing.duration_ms,
         "progress_interval_ms": timing.progress_interval_ms,
     });
@@ -238,8 +233,6 @@ pub fn render_policy_transcode_payload(
 pub fn render_policy_remux_payload(
     source: PolicyFileSource,
     operation_payload: &Value,
-    staging_root: &Path,
-    target_dir: &Path,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
     let remux_payload = RemuxOperationPayload::try_from_execution_value(operation_payload)
@@ -248,8 +241,6 @@ pub fn render_policy_remux_payload(
     let mut payload = json!({
         "operation": "remux",
         "remux": remux_payload,
-        "staging_root": staging_root,
-        "target_dir": target_dir,
         "duration_ms": timing.duration_ms,
         "progress_interval_ms": timing.progress_interval_ms,
     });
@@ -263,8 +254,6 @@ pub fn render_policy_remux_payload(
 pub fn render_policy_transcode_audio_payload(
     source: PolicyFileSource,
     operation_payload: &Value,
-    staging_root: &Path,
-    target_dir: &Path,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
     render_policy_audio_payload(
@@ -272,8 +261,6 @@ pub fn render_policy_transcode_audio_payload(
         operation_payload,
         AudioOperationType::TranscodeAudio,
         "transcode_audio",
-        staging_root,
-        target_dir,
         timing,
     )
 }
@@ -281,8 +268,6 @@ pub fn render_policy_transcode_audio_payload(
 pub fn render_policy_extract_audio_payload(
     source: PolicyFileSource,
     operation_payload: &Value,
-    staging_root: &Path,
-    target_dir: &Path,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
     render_policy_audio_payload(
@@ -290,8 +275,6 @@ pub fn render_policy_extract_audio_payload(
         operation_payload,
         AudioOperationType::ExtractAudio,
         "extract_audio",
-        staging_root,
-        target_dir,
         timing,
     )
 }
@@ -317,8 +300,6 @@ fn render_policy_audio_payload(
     operation_payload: &Value,
     expected_type: AudioOperationType,
     operation: &str,
-    staging_root: &Path,
-    target_dir: &Path,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
     let audio_payload = AudioOperationPayload::try_from_execution_value(operation_payload)
@@ -334,8 +315,6 @@ fn render_policy_audio_payload(
     let mut payload = json!({
         "operation": operation,
         "audio": audio_payload.into_value(),
-        "staging_root": staging_root,
-        "target_dir": target_dir,
         "duration_ms": timing.duration_ms,
         "progress_interval_ms": timing.progress_interval_ms,
     });

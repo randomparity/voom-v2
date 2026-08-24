@@ -5,11 +5,10 @@
 //! `TranscodeVideoProfile` plus an output container, consumed by the planner.
 
 use voom_core::{
-    TranscodeVideoProfile, VoomError, canonical_video_codec, encoder_descriptor,
-    normalize_codec_token, validate_profile_against_descriptor,
+    TranscodeVideoProfile, VoomError, encoder_descriptor, validate_profile_against_descriptor,
 };
-use voom_plan::planner::transcode_video::{inline_profile_id, video_stream_field};
-use voom_policy::{MediaSnapshotInput, VideoProfileRef, VideoProfileSettings};
+use voom_plan::planner::transcode_video::inline_profile_id;
+use voom_policy::{VideoProfileRef, VideoProfileSettings};
 use voom_store::repo::policy::video_profiles::SqliteVideoProfileRepo;
 
 #[derive(Debug, Clone)]
@@ -131,97 +130,6 @@ pub fn resolve_inline_profiles_in_policy(
         }
     }
     Ok(())
-}
-
-/// Decides whether the worker can stream-copy the video track rather than
-/// re-encoding it.
-///
-/// Returns `true` only when ALL of the following hold:
-/// - `profile.copy_compatible` is set (the profile explicitly opts in),
-/// - the source video codec already matches the target (`canonical_video_codec`
-///   alias-aware comparison, mirroring `planner.rs::transcode_video_needs_change`),
-/// - dimension caps are satisfied (source is within `max_width`/`max_height`),
-/// - if a target `pixel_format` is constrained, the source matches,
-/// - if a target `codec_profile`/`codec_level` is constrained, the source
-///   matches (using `normalize_codec_token`, as in `planner.rs`).
-///
-/// Any constrained observable that is unknown in the snapshot returns `false`
-/// (refuse to copy when we can't verify compliance).
-#[must_use]
-pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapshotInput) -> bool {
-    if !profile.copy_compatible {
-        return false;
-    }
-
-    // Codec must already be correct (alias-aware).
-    let Some(observed_codec) = snapshot.video_codec.as_deref() else {
-        return false;
-    };
-    let codec_matches = canonical_video_codec(observed_codec)
-        .is_some_and(|canonical| canonical.eq_ignore_ascii_case(&profile.target_codec));
-    if !codec_matches {
-        return false;
-    }
-
-    // Dimensions must be within caps.
-    if let Some(cap_w) = profile.max_width {
-        let Some(width) = snapshot.width else {
-            return false;
-        };
-        if width > cap_w {
-            return false;
-        }
-    }
-    if let Some(cap_h) = profile.max_height {
-        let Some(height) = snapshot.height else {
-            return false;
-        };
-        if height > cap_h {
-            return false;
-        }
-    }
-
-    // Pixel format must match if constrained. `-c:v copy` runs no encoder, so the
-    // comparison is against the format a conforming output *file* carries, never the
-    // hardware surface the profile names: comparing the surface would refuse every
-    // legitimate copy under a hardware profile, and a copy is not a hardware operation.
-    // An unmappable surface means we cannot verify conformance, so we refuse to copy —
-    // the same rule this function applies to every unknown observable.
-    match voom_core::expected_output_pixel_format(profile) {
-        Err(_) => return false,
-        Ok(None) => {}
-        Ok(Some(target_pf)) => {
-            let Some(observed_pf) = video_stream_field(snapshot, "pixel_format") else {
-                return false;
-            };
-            if !observed_pf.eq_ignore_ascii_case(target_pf) {
-                return false;
-            }
-        }
-    }
-
-    // Codec profile must match if constrained (normalize whitespace/case like the planner).
-    // Cross-reference: planner.rs::codec_profile_needs_change uses the same normalization.
-    if let Some(target_cp) = profile.codec_profile.as_deref() {
-        let Some(observed_cp) = video_stream_field(snapshot, "profile") else {
-            return false;
-        };
-        if normalize_codec_token(observed_cp) != normalize_codec_token(target_cp) {
-            return false;
-        }
-    }
-
-    // Codec level must match if constrained.
-    if let Some(target_cl) = profile.codec_level.as_deref() {
-        let Some(observed_cl) = video_stream_field(snapshot, "level") else {
-            return false;
-        };
-        if normalize_codec_token(observed_cl) != normalize_codec_token(target_cl) {
-            return false;
-        }
-    }
-
-    true
 }
 
 #[cfg(test)]

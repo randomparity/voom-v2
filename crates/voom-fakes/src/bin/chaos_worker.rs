@@ -301,7 +301,13 @@ async fn handle_operation(
 }
 
 fn dispatch_operation(req: &OperationRequest) -> Result<ChaosResponse, ProtocolError> {
-    if req.operation != OperationKind::ProbeFile {
+    // ProbeFile is the historical target; HashFile is the current one —
+    // probe is an envelope-family operation that no longer leases workers,
+    // so the executor's dispatch-failure coverage faults a generic op.
+    if !matches!(
+        req.operation,
+        OperationKind::ProbeFile | OperationKind::HashFile
+    ) {
         return Ok(json_response(
             "400 Bad Request",
             &ProtocolError::UnknownOperation {

@@ -1498,7 +1498,13 @@ async fn stage_and_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> 
     let staged = stage_bytes(cp, dir, bytes).await;
     verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(bytes.to_vec()),
         &NoVerifyArtifactHooks,
     )

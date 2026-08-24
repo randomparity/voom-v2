@@ -132,6 +132,77 @@ pub async fn seed_test_rooted_location(pool: &SqlitePool) -> Result<FileLocation
     Ok(TEST_FILE_LOCATION_ID)
 }
 
+/// Seed real rooted identity rows for a band of synthetic ids, one asset +
+/// version + location per id, all on the shared test storage root.
+///
+/// This is the fake-scanner flow's fulfillment of its own deferral note: scan
+/// results name discovered locations by id, and envelope-bearing children now
+/// resolve those ids, so the band a fake scan reports must exist as rows.
+///
+/// # Errors
+///
+/// Returns a database error if any identity row cannot be written.
+pub async fn seed_synthetic_rooted_locations(
+    pool: &SqlitePool,
+    first_location_id: u64,
+    count: u64,
+) -> Result<Vec<(FileVersionId, FileLocationId)>, VoomError> {
+    seed_test_storage_root(pool).await?;
+    let mut ids = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    for offset in 0..count {
+        let id = first_location_id + offset;
+        sqlx::query(
+            "INSERT OR IGNORE INTO file_assets (id, created_at, retired_at, epoch) \
+             VALUES (?, '1970-01-01T00:00:00Z', NULL, 0)",
+        )
+        .bind(i64::try_from(id).map_err(|error| {
+            VoomError::database_context("seed synthetic test file asset", error)
+        })?)
+        .execute(pool)
+        .await
+        .map_err(|error| VoomError::database_context("seed synthetic test file asset", error))?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO file_versions \
+             (id, file_asset_id, content_hash, size_bytes, produced_by, \
+              produced_from_version_id, created_at, retired_at, epoch) \
+             VALUES (?, ?, ?, 1024, 'ingest', NULL, \
+                     '1970-01-01T00:00:00Z', NULL, 0)",
+        )
+        .bind(i64::try_from(id).map_err(|error| {
+            VoomError::database_context("seed synthetic test file version", error)
+        })?)
+        .bind(i64::try_from(id).map_err(|error| {
+            VoomError::database_context("seed synthetic test file version", error)
+        })?)
+        .bind(format!("blake3:synthetic-fixture-{id}"))
+        .execute(pool)
+        .await
+        .map_err(|error| VoomError::database_context("seed synthetic test file version", error))?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO file_locations \
+             (id, file_version_id, address_state, storage_root_id, provider_relative_locator, \
+              legacy_kind, legacy_locator, proof_kind, proof_value, observed_at, retired_at, epoch) \
+             VALUES (?, ?, 'rooted', ?, ?, NULL, NULL, NULL, NULL, \
+                     '1970-01-01T00:00:00Z', NULL, 0)",
+        )
+        .bind(i64::try_from(id).map_err(|error| {
+            VoomError::database_context("seed synthetic test file location", error)
+        })?)
+        .bind(i64::try_from(id).map_err(|error| {
+            VoomError::database_context("seed synthetic test file location", error)
+        })?)
+        .bind(i64::try_from(TEST_STORAGE_ROOT_ID.0).map_err(|error| {
+            VoomError::database_context("seed synthetic test file location", error)
+        })?)
+        .bind(format!("synthetic-{id}.mkv"))
+        .execute(pool)
+        .await
+        .map_err(|error| VoomError::database_context("seed synthetic test file location", error))?;
+        ids.push((FileVersionId(id), FileLocationId(id)));
+    }
+    Ok(ids)
+}
+
 /// Point the shared active test root at an isolated fixture directory.
 ///
 /// # Errors

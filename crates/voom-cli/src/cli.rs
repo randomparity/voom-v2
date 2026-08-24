@@ -1437,23 +1437,6 @@ pub enum ArtifactCommand {
         #[arg(long)]
         artifact_handle_id: u64,
     },
-    /// Acknowledge that one quarantined audio-extraction worker attempt is quiescent.
-    AcknowledgeExtractQuiescence {
-        #[arg(long)]
-        operation_key: String,
-        #[arg(long)]
-        generation: u32,
-        #[arg(long)]
-        attempt_id: u64,
-        #[arg(long)]
-        worker_id: u64,
-        #[arg(long)]
-        worker_epoch: u32,
-        #[arg(long)]
-        idempotency_key: String,
-        #[arg(long)]
-        acknowledged_by: String,
-    },
     /// List artifact handles, optionally filtered by inspection state.
     List {
         #[arg(long)]

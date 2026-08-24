@@ -17,7 +17,6 @@ use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{count, cp, transcodable_input};
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
-use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -74,19 +73,17 @@ fn progress_counts_skipped_is_not_remaining() {
     assert_eq!(counts.skipped, 1);
     assert_eq!(counts.remaining, 0);
 }
-
 #[test]
 fn compliance_execution_defaults_use_production_transcode_paths() {
-    let workflow_defaults = WorkflowExecutorOptions::default();
     let compliance_defaults = super::ComplianceExecutionOptions::default();
 
     assert_eq!(
         compliance_defaults.transcode_staging_root,
-        workflow_defaults.artifact_roots.transcode.staging_root
+        PathBuf::from("/tmp/voom/transcode/staging")
     );
     assert_eq!(
         compliance_defaults.transcode_target_dir,
-        workflow_defaults.artifact_roots.transcode.target_dir
+        PathBuf::from("/tmp/voom/transcode/output")
     );
 }
 
@@ -108,36 +105,34 @@ fn compliance_execution_defaults_to_fifteen_minute_accelerator_recovery() {
 
 #[test]
 fn compliance_execution_defaults_use_production_remux_paths() {
-    let workflow_defaults = WorkflowExecutorOptions::default();
     let compliance_defaults = super::ComplianceExecutionOptions::default();
 
     assert_eq!(
         compliance_defaults.remux_staging_root,
-        workflow_defaults.artifact_roots.remux.staging_root
+        PathBuf::from("/tmp/voom/remux/staging")
     );
     assert_eq!(
         compliance_defaults.remux_target_dir,
-        workflow_defaults.artifact_roots.remux.target_dir
+        PathBuf::from("/tmp/voom/remux/output")
     );
 }
 
 #[test]
 fn compliance_execution_defaults_use_production_audio_paths() {
-    let workflow_defaults = WorkflowExecutorOptions::default();
     let compliance_defaults = super::ComplianceExecutionOptions::default();
 
     assert_eq!(
         compliance_defaults.audio_staging_root,
-        workflow_defaults.artifact_roots.audio.staging_root
+        PathBuf::from("/tmp/voom/audio/staging")
     );
     assert_eq!(
         compliance_defaults.audio_target_dir,
-        workflow_defaults.artifact_roots.audio.target_dir
+        PathBuf::from("/tmp/voom/audio/output")
     );
 }
 
 #[test]
-fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default() {
+fn compliance_options_convert_leaves_paths_to_the_facade_and_rest_default() {
     let options = super::ComplianceExecutionOptions {
         max_in_flight_files: 7,
         accelerator_unavailable_timeout: Duration::from_secs(700),
@@ -151,69 +146,28 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
         safety_policy_slug: None,
     };
 
-    let converted = WorkflowExecutorOptions::from(options.clone());
-
-    // Staging roots pass through unchanged.
+    // Byte-path configuration stays on the facade (promotion reads it
+    // directly); the workflow executor no longer carries artifact roots.
     assert_eq!(
-        converted.artifact_roots.transcode.staging_root,
-        options.transcode_staging_root
-    );
-    assert_eq!(
-        converted.artifact_roots.remux.staging_root,
-        options.remux_staging_root
-    );
-    assert_eq!(
-        converted.artifact_roots.audio.staging_root,
-        options.audio_staging_root
-    );
-    // Commit target dirs route to per-operation working dirs, NOT the operator
-    // output dirs (`*_target_dir`); post-run promotion moves finals out.
-    assert_eq!(
-        converted.artifact_roots.transcode.target_dir,
+        options.promotion_plan().pairs[0].working_dir,
         super::committed_working_dir(&options.transcode_staging_root, "transcode")
     );
-    assert_eq!(
-        converted.artifact_roots.remux.target_dir,
-        super::committed_working_dir(&options.remux_staging_root, "remux")
-    );
-    assert_eq!(
-        converted.artifact_roots.audio.target_dir,
-        super::committed_working_dir(&options.audio_staging_root, "audio")
-    );
-    assert_ne!(
-        converted.artifact_roots.transcode.target_dir,
-        options.transcode_target_dir
-    );
-    // Non-path fields stay at workflow defaults: the facade carries paths only.
+
+    let converted = WorkflowExecutorOptions::from(options);
+    // Non-path fields still flow through; everything else stays at defaults.
     let workflow_defaults = WorkflowExecutorOptions::default();
-    assert_eq!(
-        converted.queue.max_attempts,
-        workflow_defaults.queue.max_attempts
-    );
     assert_eq!(
         converted.queue.accelerator_unavailable_timeout,
         Duration::from_secs(700)
     );
     assert_eq!(
+        converted.queue.max_attempts,
+        workflow_defaults.queue.max_attempts
+    );
+    assert_eq!(
         converted.timing.lease_ttl,
         workflow_defaults.timing.lease_ttl
     );
-}
-
-#[test]
-fn committed_source_dir_namespaces_per_source_under_the_working_dir() {
-    use voom_core::FileVersionId;
-
-    let working = super::committed_working_dir(&PathBuf::from("/srv/staging"), "remux");
-    let a = super::committed_source_dir(&working, FileVersionId(7));
-    let b = super::committed_source_dir(&working, FileVersionId(8));
-
-    // Distinct sources get distinct commit dirs (no flat collision), and each
-    // stays under the operation working dir so promotion's prefix match holds.
-    assert_eq!(a, working.join("v7"));
-    assert_ne!(a, b);
-    assert!(a.starts_with(&working));
-    assert!(b.starts_with(&working));
 }
 
 #[test]
@@ -694,137 +648,6 @@ async fn compliance_execution_rejects_unknown_compiled_fields_without_partial_wr
     for table in ["jobs", "tickets", "leases"] {
         assert_eq!(count_rows(&cp, table).await, 0, "{table} received a row");
     }
-}
-
-#[tokio::test]
-async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
-    let (cp, _tmp) = cp().await;
-    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
-    let created_policy = cp
-        .create_policy_document("container-metadata", &source)
-        .await
-        .unwrap();
-    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_video(&cp).await;
-    let input = cp
-        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
-            slug: "scan-remux-roots".to_owned(),
-            file_version_id,
-            media_snapshot_id,
-            container: "mp4".to_owned(),
-            video_codec: "h264".to_owned(),
-        })
-        .await
-        .unwrap();
-    register_policy_remux_worker(&cp).await;
-    let options = super::ComplianceExecutionOptions {
-        remux_staging_root: PathBuf::from("/custom/remux/staging"),
-        remux_target_dir: PathBuf::from("/custom/remux/output"),
-        ..super::ComplianceExecutionOptions::default()
-    };
-
-    let err = cp
-        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
-            created_policy.version.id,
-            input.input_set_id,
-            WorkerRuntimeRegistry::new(),
-            options,
-        )
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.source.code(), "CONFIG_INVALID", "{err:?}");
-    let ticket_payload: String =
-        sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
-            .bind("synthetic.workflow.operation.remux")
-            .fetch_one(cp.pool_for_test())
-            .await
-            .unwrap();
-    let payload = serde_json::from_str(&ticket_payload).unwrap();
-    let workflow_payload =
-        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", payload).unwrap();
-    assert_eq!(
-        workflow_payload.rendered_payload["staging_root"],
-        "/custom/remux/staging"
-    );
-    // Commits route to a per-operation working dir; promotion later moves the
-    // terminal artifact to `/custom/remux/output`.
-    assert_eq!(
-        workflow_payload.rendered_payload["target_dir"],
-        "/custom/remux/staging/.committed/remux"
-    );
-    assert_eq!(
-        workflow_payload.rendered_payload["source_file_version_id"],
-        file_version_id.0
-    );
-}
-
-#[tokio::test]
-async fn compliance_execute_options_reach_policy_audio_ticket_payload() {
-    let (cp, _tmp) = cp().await;
-    let source = load_policy_fixture("fixtures/policies/audio-transcode-extract.voom").unwrap();
-    let created_policy = cp
-        .create_policy_document("audio-transcode-extract", &source)
-        .await
-        .unwrap();
-    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_audio(&cp).await;
-    let input = cp
-        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
-            slug: "scan-audio-roots".to_owned(),
-            file_version_id,
-            media_snapshot_id,
-            container: "mkv".to_owned(),
-            video_codec: "h264".to_owned(),
-        })
-        .await
-        .unwrap();
-    register_policy_audio_worker(&cp, OperationKind::TranscodeAudio).await;
-    let options = super::ComplianceExecutionOptions {
-        audio_staging_root: PathBuf::from("/custom/audio/staging"),
-        audio_target_dir: PathBuf::from("/custom/audio/output"),
-        ..super::ComplianceExecutionOptions::default()
-    };
-
-    let err = cp
-        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
-            created_policy.version.id,
-            input.input_set_id,
-            WorkerRuntimeRegistry::new(),
-            options,
-        )
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.source.code(), "CONFIG_INVALID", "{err:?}");
-    let ticket_payload: String =
-        sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
-            .bind("synthetic.workflow.operation.transcode_audio")
-            .fetch_one(cp.pool_for_test())
-            .await
-            .unwrap();
-    let payload = serde_json::from_str(&ticket_payload).unwrap();
-    let workflow_payload = WorkflowTicketPayload::parse_ticket(
-        "synthetic.workflow.operation.transcode_audio",
-        payload,
-    )
-    .unwrap();
-    assert_eq!(
-        workflow_payload.rendered_payload["staging_root"],
-        "/custom/audio/staging"
-    );
-    // Commits route to a per-operation working dir; promotion later moves the
-    // terminal artifact to `/custom/audio/output`.
-    assert_eq!(
-        workflow_payload.rendered_payload["target_dir"],
-        "/custom/audio/staging/.committed/audio"
-    );
-    assert_eq!(
-        workflow_payload.rendered_payload["source_file_version_id"],
-        file_version_id.0
-    );
-    assert_eq!(
-        workflow_payload.rendered_payload["audio"]["type"],
-        "transcode_audio"
-    );
 }
 
 #[tokio::test]
@@ -1754,82 +1577,6 @@ async fn scanned_snapshot_for_existing_file(
     (file_version_id, snapshot.id)
 }
 
-async fn scanned_snapshot_with_audio(
-    cp: &crate::ControlPlane,
-) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
-    let (provider_relative_locator, content_hash, size_bytes) =
-        materialized_scan_source(cp, "audio-roots.mkv", b"audio source").await;
-    let outcome = cp
-        .record_discovered_file(
-            DiscoveredFile {
-                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
-                provider_relative_locator,
-                content_hash,
-                size_bytes,
-                observed_at: T0,
-                proof: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-    let IngestOutcome::NewFileAsset {
-        file_version_id, ..
-    } = outcome
-    else {
-        panic!("expected a new file asset");
-    };
-    let snapshot = cp
-        .record_media_snapshot(
-            file_version_id,
-            None,
-            serde_json::json!({
-                "format": "test",
-                "container": { "format_name": "mkv" },
-                "streams": [
-                    {
-                        "id": "stream-0",
-                        "index": 0,
-                        "kind": "video",
-                        "codec_name": "h264"
-                    },
-                    {
-                        "id": "audio-1",
-                        "index": 1,
-                        "kind": "audio",
-                        "codec_name": "opus",
-                        "language": "eng",
-                        "title": "Main",
-                        "channels": 2,
-                        "disposition": {
-                            "default": false,
-                            "forced": false,
-                            "commentary": false
-                        }
-                    },
-                    {
-                        "id": "audio-2",
-                        "index": 2,
-                        "kind": "audio",
-                        "codec_name": "opus",
-                        "language": "eng",
-                        "title": "Commentary",
-                        "channels": 2,
-                        "disposition": {
-                            "default": false,
-                            "forced": false,
-                            "commentary": true
-                        }
-                    }
-                ]
-            }),
-            T0,
-        )
-        .await
-        .unwrap();
-    (file_version_id, snapshot.id)
-}
-
 async fn materialized_scan_source(
     cp: &crate::ControlPlane,
     name: &str,
@@ -1851,16 +1598,6 @@ async fn materialized_scan_source(
         format!("blake3:{}", blake3::hash(bytes).to_hex()),
         u64::try_from(bytes.len()).unwrap(),
     )
-}
-
-async fn register_policy_remux_worker(cp: &crate::ControlPlane) -> voom_core::WorkerId {
-    register_policy_worker_with_extra(
-        cp,
-        OperationKind::Remux,
-        "policy-test-remux",
-        serde_json::json!({}),
-    )
-    .await
 }
 
 async fn register_policy_worker_with_extra(
@@ -1899,14 +1636,6 @@ async fn register_policy_worker_with_extra(
     .await
     .unwrap();
     worker.id
-}
-
-async fn register_policy_audio_worker(
-    cp: &crate::ControlPlane,
-    operation: OperationKind,
-) -> voom_core::WorkerId {
-    register_policy_worker_with_extra(cp, operation, "policy-test-audio", serde_json::json!({}))
-        .await
 }
 
 fn operation_name(operation: OperationKind) -> &'static str {

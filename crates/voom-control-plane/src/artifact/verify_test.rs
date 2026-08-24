@@ -50,7 +50,13 @@ async fn verify_requires_exactly_one_live_staging_location() {
         .unwrap();
     let zero_err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -79,7 +85,13 @@ async fn verify_requires_exactly_one_live_staging_location() {
 
     let multiple_err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -98,7 +110,13 @@ async fn missing_location_during_persist_returns_not_found() {
 
     let err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &DeleteLocationBeforePersist {
             location_id: staged.artifact_location_id,
@@ -121,7 +139,13 @@ async fn worker_success_persists_verification_with_bootstrapped_worker_id() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &dispatcher,
         &NoVerifyArtifactHooks,
     )
@@ -233,7 +257,13 @@ async fn worker_terminal_failure_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::failure(
             FailureClass::ArtifactChecksumMismatch,
             ErrorCode::ArtifactChecksumMismatch,
@@ -280,7 +310,13 @@ async fn mismatched_worker_success_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"different bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -307,7 +343,13 @@ async fn malformed_worker_result_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::failure(
             FailureClass::MalformedWorkerResult,
             ErrorCode::MalformedWorkerResult,
@@ -333,7 +375,13 @@ async fn retired_staging_location_before_persist_records_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &RetireLocationBeforePersist {
             location_id: staged.artifact_location_id,
@@ -358,7 +406,13 @@ async fn second_staging_location_before_persist_records_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &RecordSecondStagingBeforePersist {
             path: second.display().to_string(),
@@ -382,7 +436,13 @@ async fn verification_events_use_same_transaction_as_persisted_verification_rows
 
     let err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
+        VerifyArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged
+                .staging_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("/"), ToOwned::to_owned),
+        },
         &StaticDispatcher::success(b"source bytes"),
         &FailBeforeTerminalEvent,
     )

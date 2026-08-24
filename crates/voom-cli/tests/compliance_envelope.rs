@@ -4,23 +4,17 @@
     reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
 )]
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
-
 use serde_json::{Value, json};
+use std::process::Command;
+
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use voom_control_plane::policy::PolicyInputFromScanInput;
-use voom_control_plane::workflow::WorkflowTicketPayload;
-use voom_core::{TicketOperation, WorkerId};
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
-use voom_store::repo::execution::leases::NewLease;
-use voom_store::repo::execution::tickets::NewTicket;
 use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
-use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build};
+use voom_test_support::worker::cargo_bin_or_build;
 
 const TEST_LOCAL_NODE_ID: &str = "9000001";
 
@@ -56,135 +50,6 @@ async fn apply_outputs_report_and_issue_summary() {
     assert_eq!(json["data"]["issues"]["created_count"], 1);
     redact_local(&mut json);
     insta::assert_json_snapshot!("apply_outputs_report_and_issue_summary", json);
-}
-
-#[tokio::test]
-async fn execute_scanned_remux_outputs_committed_file_phase() {
-    let seeded = seed_scanned_remux().await;
-    let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
-
-    let remux_root = seeded.dir.path().canonicalize().unwrap();
-    let staging_root = remux_root.join("stage");
-    let output_dir = remux_root.join("out");
-    let ffprobe_bin = fake_ffprobe_bin(&remux_root);
-    let output = compliance_execute_command_with_dirs(
-        &seeded.url,
-        seeded.version_id,
-        seeded.input_id,
-        &staging_root,
-        &output_dir,
-        &ffprobe_bin,
-    );
-    provider.shutdown().unwrap();
-
-    assert_eq!(output.status.code(), Some(0));
-    let mut json = envelope(output.stdout);
-    assert_eq!(json["command"], "compliance");
-    assert_eq!(json["status"], "ok");
-    // The remux committed: one `completed` phase and one committed
-    // per-(file, phase) row carrying the produced references.
-    assert_eq!(json["data"]["phases"].as_array().unwrap().len(), 1);
-    assert_eq!(json["data"]["phases"][0]["outcome"], "completed");
-    assert_eq!(
-        json["data"]["phases"][0]["report"]["checks"][0]["observed_state"]["container"],
-        "mp4"
-    );
-    let file_phases = json["data"]["file_phases"].as_array().unwrap();
-    assert_eq!(file_phases.len(), 1);
-    assert_eq!(file_phases[0]["outcome"], "committed");
-    for field in [
-        "produced_file_version_id",
-        "produced_file_location_id",
-        "reprobe_snapshot_id",
-    ] {
-        assert!(
-            file_phases[0][field].is_number(),
-            "{field} should be a stable numeric id"
-        );
-    }
-    redact_local(&mut json);
-    redact_execute_ids(&mut json);
-    insta::assert_json_snapshot!("execute_scanned_remux_outputs_committed_file_phase", json);
-}
-
-#[tokio::test]
-async fn execute_process_waits_for_cross_process_worker_capacity() {
-    let seeded = seed_scanned_remux().await;
-    let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
-    let pool = voom_store::connect(&seeded.url).await.unwrap();
-    let cp = voom_control_plane::ControlPlane::open_with_pool(
-        pool.clone(),
-        std::sync::Arc::new(voom_core::SystemClock),
-    )
-    .await
-    .unwrap();
-    let worker_id: i64 = sqlx::query_scalar("SELECT id FROM workers WHERE name = ?")
-        .bind("cli-compliance-remux")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let worker_id = WorkerId(u64::try_from(worker_id).unwrap());
-    let now = cp.clock().now();
-    let capacity_ticket = cp
-        .create_ticket(NewTicket {
-            job_id: None,
-            kind: TicketOperation::new("remux").unwrap(),
-            priority: 0,
-            payload: json!({}),
-            max_attempts: 1,
-            created_at: now,
-        })
-        .await
-        .unwrap();
-    cp.mark_ready_if_unblocked(capacity_ticket.id, now)
-        .await
-        .unwrap();
-    let capacity_lease = cp
-        .acquire_lease(NewLease {
-            ticket_id: capacity_ticket.id,
-            worker_id,
-            ttl: time::Duration::seconds(60),
-            now,
-        })
-        .await
-        .unwrap();
-
-    let root = seeded.dir.path().canonicalize().unwrap();
-    let staging_root = root.join("stage");
-    let output_dir = root.join("out");
-    let ffprobe_bin = fake_ffprobe_bin(&root);
-    let mut execution = spawn_compliance_execute(&seeded, &staging_root, &output_dir, &ffprobe_bin);
-    let workflow_ticket_id = wait_for_ready_workflow_remux_ticket(&pool).await;
-
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_waiting_capacity_state(&mut execution, &pool, workflow_ticket_id).await;
-
-    cp.release_lease(
-        capacity_lease.id,
-        json!({"status": "capacity released"}),
-        cp.clock().now(),
-    )
-    .await
-    .unwrap();
-    let output = execution.wait_with_output().unwrap();
-    provider.shutdown().unwrap();
-
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json = envelope(output.stdout);
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["file_phases"][0]["outcome"], "committed");
-    let completed: String = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
-        .bind(i64::try_from(workflow_ticket_id).unwrap())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(completed, "succeeded");
 }
 
 #[tokio::test]
@@ -230,136 +95,6 @@ async fn execute_and_report_expose_policy_artifact_verification() {
         verification_id
     );
     assert_eq!(report["data"]["file_phases"][0]["outcome"], "verified");
-}
-
-#[tokio::test]
-async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
-    let seeded = seed_scanned_remux().await;
-    let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
-
-    let remux_root = seeded.dir.path().canonicalize().unwrap();
-    let staging_root = remux_root.join("stage");
-    let output_dir = remux_root.join("out");
-    let ffprobe_bin = fake_ffprobe_bin(&remux_root);
-    std::fs::create_dir_all(&output_dir).unwrap();
-    std::fs::write(output_dir.join("Movie.remux.mkv"), b"existing").unwrap();
-
-    let output = compliance_execute_command_with_dirs(
-        &seeded.url,
-        seeded.version_id,
-        seeded.input_id,
-        &staging_root,
-        &output_dir,
-        &ffprobe_bin,
-    );
-    provider.shutdown().unwrap();
-
-    assert_eq!(output.status.code(), Some(2));
-    let mut json = envelope(output.stdout);
-    assert_eq!(json["command"], "compliance");
-    assert_eq!(json["status"], "error");
-    assert_eq!(json["error"]["code"], "CONFIG_INVALID");
-    // The remux now commits to the working dir; the add-only conflict with an
-    // existing --output-dir file surfaces at post-run promotion instead of at
-    // commit time. The run fails (job failed, no terminal artifact promoted).
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("artifact path must not already exist")),
-        "stdout={} stderr={}",
-        serde_json::to_string_pretty(&json).unwrap(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // The promotion failure happens after the remux already committed, so the
-    // partial outcome must preserve the run's execution diagnostics rather than
-    // discarding them: the committed `(file, phase)` row survives in the error
-    // envelope's data.
-    let file_phases = json["data"]["file_phases"].as_array().unwrap();
-    assert_eq!(file_phases.len(), 1, "the committed remux row must survive");
-    assert_eq!(file_phases[0]["outcome"], "committed");
-    assert_eq!(
-        json["data"]["phases"][0]["report"]["checks"][0]["observed_state"]["container"],
-        "mp4"
-    );
-    redact_local(&mut json);
-    redact_execute_ids(&mut json);
-    redact_temp_path_values(&mut json, &remux_root);
-    insta::assert_json_snapshot!(
-        "execute_scanned_remux_existing_target_outputs_failure_envelope",
-        json
-    );
-}
-
-#[tokio::test]
-async fn execute_audio_uses_cli_staging_and_output_overrides() {
-    let seeded = seed_scanned_audio().await;
-    let pool = voom_store::connect(&seeded.url).await.unwrap();
-    let cp = voom_control_plane::ControlPlane::open_with_pool(
-        pool.clone(),
-        std::sync::Arc::new(voom_core::SystemClock),
-    )
-    .await
-    .unwrap();
-    let mut provider = TestWorkerLaunch::start(
-        &cp,
-        TestWorkerConfig::synthetic(
-            cargo_bin_or_build("voom-fakes", "fake-transcoder").unwrap(),
-            "cli-compliance-audio",
-            "cli-compliance-audio-secret",
-            "transcode_audio",
-        ),
-    )
-    .await
-    .unwrap();
-    let root = seeded.dir.path().canonicalize().unwrap();
-    let staging_root = root.join("audio-stage");
-    let output_dir = root.join("audio-out");
-    let ffprobe_bin = fake_ffprobe_bin(&root);
-
-    let output = compliance_execute_command_with_dirs(
-        &seeded.url,
-        seeded.version_id,
-        seeded.input_id,
-        &staging_root,
-        &output_dir,
-        &ffprobe_bin,
-    );
-    provider.shutdown().unwrap();
-
-    let json = envelope(output.stdout);
-    assert!(
-        matches!(output.status.code(), Some(0 | 2)),
-        "stdout={} stderr={}",
-        serde_json::to_string_pretty(&json).unwrap(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let ticket_payload: String =
-        sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
-            .bind("synthetic.workflow.operation.transcode_audio")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let payload = serde_json::from_str(&ticket_payload).unwrap();
-    let workflow_payload = WorkflowTicketPayload::parse_ticket(
-        "synthetic.workflow.operation.transcode_audio",
-        payload,
-    )
-    .unwrap();
-    assert_eq!(
-        workflow_payload.rendered_payload["staging_root"],
-        staging_root.display().to_string()
-    );
-    // Commits route to a per-operation working dir under the staging root, not
-    // the operator `--output-dir`; post-run promotion moves the terminal
-    // artifact out to `--output-dir`.
-    assert_eq!(
-        workflow_payload.rendered_payload["target_dir"],
-        staging_root
-            .join(".committed")
-            .join("audio")
-            .display()
-            .to_string()
-    );
 }
 
 #[tokio::test]
@@ -485,7 +220,8 @@ fn execute_unsupported_operation_uses_policy_execution_error() {
 
 struct Seeded {
     _tmp: TempDatabase,
-    dir: TempDir,
+    /// Keeps the seeded media bytes alive for the test's duration.
+    _dir: tempfile::TempDir,
     url: String,
     version_id: u64,
     input_id: u64,
@@ -514,8 +250,8 @@ async fn seed(fixture: FixtureName) -> Seeded {
         .await
         .unwrap();
     Seeded {
+        _dir: tempfile::TempDir::new().unwrap(),
         _tmp: tmp,
-        dir: TempDir::new().unwrap(),
         url,
         version_id: created.version.id.0,
         input_id: input.id.0,
@@ -557,104 +293,6 @@ fn spawn_commit_driver(url: &str) {
             }
         });
     });
-}
-
-async fn seed_scanned_remux() -> Seeded {
-    let tmp = TempDatabase::new().unwrap();
-    let dir = TempDir::new().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let url = sqlite_url_for(tmp.path());
-    voom_store::init(&url).await.unwrap();
-    let pool = voom_store::connect(&url).await.unwrap();
-    voom_store::test_support::seed_test_storage_root(&pool)
-        .await
-        .unwrap();
-
-    spawn_commit_driver(&url);
-    let cp = voom_control_plane::ControlPlane::open_with_pool(
-        pool,
-        std::sync::Arc::new(voom_core::SystemClock),
-    )
-    .await
-    .unwrap();
-    let created = cp
-        .create_policy_document(
-            "container-metadata",
-            &load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap(),
-        )
-        .await
-        .unwrap();
-    let source = root.join("Movie.mp4");
-    let source_bytes = b"source bytes";
-    std::fs::write(&source, source_bytes).unwrap();
-    let outcome = cp
-        .record_discovered_file(
-            DiscoveredFile {
-                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
-                provider_relative_locator: voom_store::test_support::test_relative_locator(
-                    &source.display().to_string(),
-                ),
-                content_hash: blake3_checksum(source_bytes),
-                size_bytes: u64::try_from(source_bytes.len()).unwrap(),
-                observed_at: OffsetDateTime::UNIX_EPOCH,
-                proof: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-    let IngestOutcome::NewFileAsset {
-        file_version_id, ..
-    } = outcome
-    else {
-        panic!("seed_scanned_remux should create a new file asset");
-    };
-    let snapshot = cp
-        .record_media_snapshot(
-            file_version_id,
-            None,
-            json!({
-                "container": { "format_name": "mp4" },
-                "streams": [
-                    {
-                        "id": "stream-0",
-                        "index": 0,
-                        "kind": "video",
-                        "codec_name": "h264",
-                        "disposition": {"default": true}
-                    },
-                    {
-                        "id": "stream-1",
-                        "index": 1,
-                        "kind": "audio",
-                        "codec_name": "aac",
-                        "language": "eng",
-                        "channels": 2,
-                        "disposition": {"default": false}
-                    }
-                ]
-            }),
-            OffsetDateTime::UNIX_EPOCH,
-        )
-        .await
-        .unwrap();
-    let input = cp
-        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
-            slug: "cli-scan-remux".to_owned(),
-            file_version_id,
-            media_snapshot_id: snapshot.id,
-            container: "mp4".to_owned(),
-            video_codec: "h264".to_owned(),
-        })
-        .await
-        .unwrap();
-    Seeded {
-        _tmp: tmp,
-        dir,
-        url,
-        version_id: created.version.id.0,
-        input_id: input.input_set_id.0,
-    }
 }
 
 async fn seed_scanned_verify() -> Seeded {
@@ -736,123 +374,11 @@ async fn seed_scanned_verify() -> Seeded {
         .unwrap();
     Seeded {
         _tmp: tmp,
-        dir,
+        _dir: dir,
         url,
         version_id: created.version.id.0,
         input_id: input.input_set_id.0,
     }
-}
-
-async fn seed_scanned_audio() -> Seeded {
-    let tmp = TempDatabase::new().unwrap();
-    let dir = TempDir::new().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let url = sqlite_url_for(tmp.path());
-    voom_store::init(&url).await.unwrap();
-    let pool = voom_store::connect(&url).await.unwrap();
-    voom_store::test_support::seed_test_storage_root(&pool)
-        .await
-        .unwrap();
-
-    spawn_commit_driver(&url);
-    let cp = voom_control_plane::ControlPlane::open_with_pool(
-        pool,
-        std::sync::Arc::new(voom_core::SystemClock),
-    )
-    .await
-    .unwrap();
-    let created = cp
-        .create_policy_document(
-            "audio-transcode-extract",
-            &load_policy_fixture("fixtures/policies/audio-transcode-extract.voom").unwrap(),
-        )
-        .await
-        .unwrap();
-    let source = root.join("Movie.mkv");
-    let source_bytes = b"audio source bytes";
-    std::fs::write(&source, source_bytes).unwrap();
-    let outcome = cp
-        .record_discovered_file(
-            DiscoveredFile {
-                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
-                provider_relative_locator: voom_store::test_support::test_relative_locator(
-                    &source.display().to_string(),
-                ),
-                content_hash: blake3_checksum(source_bytes),
-                size_bytes: u64::try_from(source_bytes.len()).unwrap(),
-                observed_at: OffsetDateTime::UNIX_EPOCH,
-                proof: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-    let IngestOutcome::NewFileAsset {
-        file_version_id, ..
-    } = outcome
-    else {
-        panic!("seed_scanned_audio should create a new file asset");
-    };
-    let snapshot = cp
-        .record_media_snapshot(
-            file_version_id,
-            None,
-            audio_snapshot_payload(),
-            OffsetDateTime::UNIX_EPOCH,
-        )
-        .await
-        .unwrap();
-    let input = cp
-        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
-            slug: "cli-scan-audio".to_owned(),
-            file_version_id,
-            media_snapshot_id: snapshot.id,
-            container: "mkv".to_owned(),
-            video_codec: "h264".to_owned(),
-        })
-        .await
-        .unwrap();
-    Seeded {
-        _tmp: tmp,
-        dir,
-        url,
-        version_id: created.version.id.0,
-        input_id: input.input_set_id.0,
-    }
-}
-
-fn audio_snapshot_payload() -> Value {
-    json!({
-        "container": { "format_name": "mkv" },
-        "streams": [
-            {
-                "id": "stream-0",
-                "index": 0,
-                "kind": "video",
-                "codec_name": "h264",
-                "disposition": {"default": true}
-            },
-            audio_stream_payload("audio-1", 1, "Main", false),
-            audio_stream_payload("audio-2", 2, "Commentary", true)
-        ]
-    })
-}
-
-fn audio_stream_payload(id: &str, index: u64, title: &str, commentary: bool) -> Value {
-    json!({
-        "id": id,
-        "index": index,
-        "kind": "audio",
-        "codec_name": "opus",
-        "language": "eng",
-        "title": title,
-        "channels": 2,
-        "disposition": {
-            "default": false,
-            "forced": false,
-            "commentary": commentary
-        }
-    })
 }
 
 async fn seed_with_stale_policy() -> Seeded {
@@ -895,167 +421,6 @@ fn compliance_command(
         .unwrap()
 }
 
-fn compliance_execute_command_with_dirs(
-    url: &str,
-    version_id: u64,
-    input_id: u64,
-    staging_root: &Path,
-    output_dir: &Path,
-    ffprobe_bin: &Path,
-) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_voom"))
-        .env("VOOM_LOCAL_NODE_ID", TEST_LOCAL_NODE_ID)
-        .env("VOOM_FFPROBE_BIN", ffprobe_bin)
-        .args([
-            "--database-url",
-            url,
-            "compliance",
-            "execute",
-            "--policy-version-id",
-            &version_id.to_string(),
-            "--input-set-id",
-            &input_id.to_string(),
-            "--staging-root",
-            &staging_root.display().to_string(),
-            "--output-dir",
-            &output_dir.display().to_string(),
-        ])
-        .output()
-        .unwrap()
-}
-
-async fn wait_for_ready_workflow_remux_ticket(pool: &sqlx::SqlitePool) -> u64 {
-    for _ in 0..500 {
-        let ticket_id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM tickets \
-             WHERE kind = 'synthetic.workflow.operation.remux' AND state = 'ready' \
-             ORDER BY id ASC LIMIT 1",
-        )
-        .fetch_optional(pool)
-        .await
-        .unwrap();
-        if let Some(ticket_id) = ticket_id {
-            return u64::try_from(ticket_id).unwrap();
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("CLI execution did not create a ready remux ticket");
-}
-
-fn spawn_compliance_execute(
-    seeded: &Seeded,
-    staging_root: &Path,
-    output_dir: &Path,
-    ffprobe_bin: &Path,
-) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_voom"))
-        .env("VOOM_LOCAL_NODE_ID", TEST_LOCAL_NODE_ID)
-        .env("VOOM_FFPROBE_BIN", ffprobe_bin)
-        .args([
-            "--database-url",
-            &seeded.url,
-            "compliance",
-            "execute",
-            "--policy-version-id",
-            &seeded.version_id.to_string(),
-            "--input-set-id",
-            &seeded.input_id.to_string(),
-            "--staging-root",
-            &staging_root.display().to_string(),
-            "--output-dir",
-            &output_dir.display().to_string(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
-}
-
-async fn assert_waiting_capacity_state(
-    execution: &mut Child,
-    pool: &sqlx::SqlitePool,
-    workflow_ticket_id: u64,
-) {
-    assert!(
-        execution.try_wait().unwrap().is_none(),
-        "execution must still be waiting while durable capacity is full"
-    );
-    let waiting: (String, i64, i64) =
-        sqlx::query_as("SELECT state, attempt, epoch FROM tickets WHERE id = ?")
-            .bind(i64::try_from(workflow_ticket_id).unwrap())
-            .fetch_one(pool)
-            .await
-            .unwrap();
-    assert_eq!(waiting, ("ready".to_owned(), 0, 1));
-    let waiting_events: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM events \
-         WHERE subject_type = 'ticket' AND subject_id = ? \
-           AND kind IN ('ticket.leased', 'ticket.failed_retriable', 'ticket.failed_terminal')",
-    )
-    .bind(i64::try_from(workflow_ticket_id).unwrap())
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    assert_eq!(waiting_events, 0);
-    let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 'held'")
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    assert_eq!(held, 1);
-}
-
-fn fake_ffprobe_bin(dir: &Path) -> PathBuf {
-    let path = dir.join(format!("ffprobe-test{}", script_suffix()));
-    std::fs::write(
-        dir.join("basic-mp4.json"),
-        include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json"),
-    )
-    .unwrap();
-    std::fs::write(&path, fake_ffprobe_script()).unwrap();
-    make_executable(&path);
-    path
-}
-
-#[cfg(unix)]
-fn script_suffix() -> &'static str {
-    ""
-}
-
-#[cfg(windows)]
-fn script_suffix() -> &'static str {
-    ".cmd"
-}
-
-#[cfg(unix)]
-fn fake_ffprobe_script() -> String {
-    "#!/bin/sh\n\
-     if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version test-helper\\n'; exit 0; fi\n\
-     script_dir=${0%/*}\n\
-     if [ \"$script_dir\" = \"$0\" ]; then script_dir=.; fi\n\
-     cat \"$script_dir/basic-mp4.json\"\n"
-        .to_owned()
-}
-
-#[cfg(windows)]
-fn fake_ffprobe_script() -> String {
-    "@echo off\r\n\
-     if \"%1\"==\"-version\" echo ffprobe version test-helper& exit /B 0\r\n\
-     type \"%~dp0basic-mp4.json\"\r\n"
-        .to_owned()
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = std::fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).unwrap();
-}
-
-#[cfg(windows)]
-fn make_executable(_path: &Path) {}
-
 fn envelope(stdout: Vec<u8>) -> Value {
     let stdout = String::from_utf8(stdout).unwrap();
     serde_json::from_str(stdout.trim())
@@ -1073,78 +438,6 @@ fn redact_local(json: &mut Value) {
 /// Replace the volatile DB row ids a committed file-phase row carries (produced
 /// version/location, reprobe snapshot, and ticket ids) with stable placeholders
 /// so the golden does not pin autoincrement ids.
-fn redact_execute_ids(json: &mut Value) {
-    let Some(file_phases) = json["data"]["file_phases"].as_array_mut() else {
-        return;
-    };
-    for file_phase in file_phases {
-        for field in [
-            "produced_file_version_id",
-            "produced_file_location_id",
-            "reprobe_snapshot_id",
-        ] {
-            if file_phase[field].is_number() {
-                file_phase[field] = Value::String(format!("[{field}]"));
-            }
-        }
-        if let Some(ticket_ids) = file_phase["ticket_ids"].as_array_mut() {
-            for id in ticket_ids {
-                *id = Value::String("[ticket-id]".to_owned());
-            }
-        }
-    }
-}
-
-fn redact_temp_path_values(json: &mut Value, temp_dir: &Path) {
-    match json {
-        Value::String(value) => {
-            *value = value.replace(&temp_dir.display().to_string(), "[tmp-dir]");
-        }
-        Value::Array(values) => {
-            for value in values {
-                redact_temp_path_values(value, temp_dir);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                redact_temp_path_values(value, temp_dir);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
 fn blake3_checksum(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
-}
-
-struct RemuxProviderLaunch {
-    inner: TestWorkerLaunch,
-}
-
-impl RemuxProviderLaunch {
-    async fn start(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let pool = voom_store::connect(url).await?;
-        let cp = voom_control_plane::ControlPlane::open_with_pool(
-            pool,
-            std::sync::Arc::new(voom_core::SystemClock),
-        )
-        .await?;
-        Ok(Self {
-            inner: TestWorkerLaunch::start(
-                &cp,
-                TestWorkerConfig::synthetic(
-                    cargo_bin_or_build("voom-fakes", "fake-remuxer")?,
-                    "cli-compliance-remux",
-                    "cli-compliance-remux-secret",
-                    "remux",
-                ),
-            )
-            .await?,
-        })
-    }
-
-    fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.inner.shutdown()
-    }
 }

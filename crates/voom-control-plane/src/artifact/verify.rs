@@ -33,27 +33,6 @@ pub struct VerifyArtifactInput {
     pub staging_root: PathBuf,
 }
 
-impl VerifyArtifactInput {
-    /// Build an input whose containment root is the directory holding the
-    /// just-staged file. The workflow wrote the artifact there, so that
-    /// directory is the authoritative staging boundary — and because it is
-    /// derived from the workflow's own path rather than the DB-read location
-    /// value, it still catches a location that has been corrupted to point
-    /// elsewhere.
-    #[must_use]
-    pub(crate) fn for_staged_file(
-        artifact_handle_id: ArtifactHandleId,
-        staged_path: &Path,
-    ) -> Self {
-        Self {
-            artifact_handle_id,
-            staging_root: staged_path
-                .parent()
-                .map_or_else(|| PathBuf::from("/"), Path::to_path_buf),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct VerifyArtifactReport {
     pub artifact_handle_id: ArtifactHandleId,
@@ -85,52 +64,6 @@ pub(crate) trait VerifyArtifactDispatcher: Send + Sync {
         worker_id: WorkerId,
         request: VerifyArtifactRequest,
     ) -> Result<VerifyArtifactResult, VerifyWorkerError>;
-
-    fn start_session(&self) -> Box<dyn VerifyArtifactSession + '_> {
-        Box::new(PerDispatchVerifyArtifactSession { dispatcher: self })
-    }
-}
-
-#[async_trait]
-pub(crate) trait VerifyArtifactSession: VerifyArtifactDispatcher {
-    async fn shutdown(self: Box<Self>);
-}
-
-struct PerDispatchVerifyArtifactSession<
-    'a,
-    D: VerifyArtifactDispatcher + ?Sized = dyn VerifyArtifactDispatcher + 'a,
-> {
-    dispatcher: &'a D,
-}
-
-#[async_trait]
-impl<D> VerifyArtifactDispatcher for PerDispatchVerifyArtifactSession<'_, D>
-where
-    D: VerifyArtifactDispatcher + ?Sized,
-{
-    async fn dispatch_verify_artifact(
-        &self,
-        worker_id: WorkerId,
-        request: VerifyArtifactRequest,
-    ) -> Result<VerifyArtifactResult, VerifyWorkerError> {
-        self.dispatcher
-            .dispatch_verify_artifact(worker_id, request)
-            .await
-    }
-
-    fn start_session(&self) -> Box<dyn VerifyArtifactSession + '_> {
-        Box::new(Self {
-            dispatcher: self.dispatcher,
-        })
-    }
-}
-
-#[async_trait]
-impl<D> VerifyArtifactSession for PerDispatchVerifyArtifactSession<'_, D>
-where
-    D: VerifyArtifactDispatcher + ?Sized,
-{
-    async fn shutdown(self: Box<Self>) {}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -147,65 +80,6 @@ impl VerifyArtifactDispatcher for BundledVerifyArtifactDispatcher {
         let result = worker.dispatch_verify_artifact(request).await;
         let _status = worker.shutdown(std::time::Duration::from_secs(5)).await;
         result
-    }
-
-    fn start_session(&self) -> Box<dyn VerifyArtifactSession + '_> {
-        Box::new(BundledVerifyArtifactSession::default())
-    }
-}
-
-#[derive(Debug, Default)]
-struct BundledVerifyArtifactSession {
-    worker: tokio::sync::Mutex<Option<(WorkerId, BundledWorkerProcess)>>,
-}
-
-#[async_trait]
-impl VerifyArtifactDispatcher for BundledVerifyArtifactSession {
-    async fn dispatch_verify_artifact(
-        &self,
-        worker_id: WorkerId,
-        request: VerifyArtifactRequest,
-    ) -> Result<VerifyArtifactResult, VerifyWorkerError> {
-        let mut session_worker = self.worker.lock().await;
-        let result = {
-            let worker = if let Some((session_worker_id, worker)) = session_worker.as_mut() {
-                if *session_worker_id != worker_id {
-                    return Err(VerifyWorkerError::terminal_error(
-                        FailureClass::MalformedWorkerResult,
-                        ErrorCode::MalformedWorkerResult,
-                        format!(
-                            "verify session worker changed from {session_worker_id} \
-                                 to {worker_id}"
-                        ),
-                    ));
-                }
-                worker
-            } else {
-                let launched =
-                    BundledWorkerProcess::launch_bundled_verify_artifact(worker_id).await?;
-                &mut session_worker.insert((worker_id, launched)).1
-            };
-            worker.dispatch_verify_artifact(request).await
-        };
-        if result
-            .as_ref()
-            .is_err_and(VerifyWorkerError::should_shutdown_worker)
-        {
-            *session_worker = None;
-        }
-        result
-    }
-}
-
-#[async_trait]
-impl VerifyArtifactSession for BundledVerifyArtifactSession {
-    async fn shutdown(self: Box<Self>) {
-        let Some((_worker_id, worker)) = self.worker.into_inner() else {
-            return;
-        };
-        if let Err(error) = worker.shutdown(std::time::Duration::from_secs(5)).await {
-            tracing::warn!(%error, "verify artifact worker session shutdown failed");
-        }
     }
 }
 

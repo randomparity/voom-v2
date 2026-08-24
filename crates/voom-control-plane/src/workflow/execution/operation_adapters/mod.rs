@@ -1,91 +1,33 @@
 use std::future::Future;
-use std::path::Path;
-use std::pin::Pin;
 
 use serde_json::Value;
-use voom_core::OperationKind;
-use voom_core::{FileLocationId, FileVersionId, JobId, LeaseId, TicketId, VoomError};
-use voom_store::repo::execution::tickets::Ticket;
+use voom_core::{LeaseId, OperationKind, VoomError};
 
 use crate::ControlPlane;
 #[cfg(test)]
 use crate::workflow::execution::executor::WorkflowChaosOptions;
-use crate::workflow::execution::executor::{
-    OperationArtifactRoots, WorkflowDispatchOptions, WorkflowTimingOptions,
-};
-use crate::workflow::execution::runtime::WorkerRuntime;
+use crate::workflow::execution::executor::{WorkflowDispatchOptions, WorkflowTimingOptions};
+use voom_store::repo::execution::tickets::Ticket;
 
 mod policy_verify;
-
-#[cfg(test)]
-pub(super) use crate::remux::workflow::dispatch_control_plane_remux;
-
-type AdapterFuture<'a> = Pin<Box<dyn Future<Output = Result<(), VoomError>> + Send + 'a>>;
 
 pub(super) async fn dispatch_control_plane_ticket(
     context: TicketDispatchContext<'_>,
 ) -> Option<Result<(), VoomError>> {
-    context.payload.get("source_file_version_id")?;
-    let adapter: AdapterFuture<'_> =
-        if uses_bundled_policy_verification(context.operation, context.payload) {
-            Box::pin(policy_verify::dispatch_policy_verify_artifact(context))
-        } else {
-            let Some(runtime) = context.runtime else {
-                return Some(Err(VoomError::Config(format!(
-                    "missing runtime for worker {}",
-                    context.worker_id
-                ))));
-            };
-            select_runtime_adapter(context, runtime)?
-        };
+    // T8: the only control-plane-executed ticket family left is the bundled
+    // policy verification (#528/#424 owns its retarget). Everything else falls
+    // through to the generic worker-protocol dispatch.
+    if !uses_bundled_policy_verification(context.operation, context.payload) {
+        return None;
+    }
     Some(
         await_with_lease_heartbeats(
             context.lease_heartbeat_context(),
             context.operation,
-            adapter,
+            policy_verify::dispatch_policy_verify_artifact(context),
         )
         .await,
     )
-}
-
-fn select_runtime_adapter<'a>(
-    context: TicketDispatchContext<'a>,
-    runtime: &'a WorkerRuntime,
-) -> Option<AdapterFuture<'a>> {
-    let adapter_context = |artifact_roots| OperationAdapterContext {
-        control: context.control,
-        runtime,
-        ticket: context.ticket,
-        lease_id: context.lease_id,
-        payload: context.payload,
-        artifact_roots,
-        backup_root: context.options.artifact_roots.backup_root.as_deref(),
-        #[cfg(test)]
-        chaos: &context.options.chaos,
-    };
-    match context.operation {
-        OperationKind::TranscodeVideo => Some(Box::pin(
-            crate::transcode::workflow::dispatch_control_plane_transcode(adapter_context(
-                &context.options.artifact_roots.transcode,
-            )),
-        )),
-        OperationKind::Remux => Some(Box::pin(
-            crate::remux::workflow::dispatch_control_plane_remux_context(adapter_context(
-                &context.options.artifact_roots.remux,
-            )),
-        )),
-        OperationKind::TranscodeAudio => Some(Box::pin(
-            crate::audio::workflow::dispatch_control_plane_transcode_audio(adapter_context(
-                &context.options.artifact_roots.audio,
-            )),
-        )),
-        OperationKind::ExtractAudio => Some(Box::pin(
-            crate::audio::workflow::dispatch_control_plane_extract_audio(adapter_context(
-                &context.options.artifact_roots.audio,
-            )),
-        )),
-        _ => None,
-    }
 }
 
 pub(super) fn uses_bundled_policy_verification(operation: OperationKind, payload: &Value) -> bool {
@@ -95,7 +37,6 @@ pub(super) fn uses_bundled_policy_verification(operation: OperationKind, payload
 #[derive(Clone, Copy)]
 pub(super) struct TicketDispatchContext<'a> {
     pub(super) control: &'a ControlPlane,
-    pub(super) runtime: Option<&'a WorkerRuntime>,
     pub(super) worker_id: voom_core::WorkerId,
     pub(super) ticket: &'a Ticket,
     pub(super) operation: OperationKind,
@@ -114,60 +55,6 @@ impl<'a> TicketDispatchContext<'a> {
             chaos: &self.options.chaos,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct OperationAdapterContext<'a> {
-    pub(crate) control: &'a ControlPlane,
-    pub(crate) runtime: &'a WorkerRuntime,
-    pub(crate) ticket: &'a Ticket,
-    pub(crate) lease_id: LeaseId,
-    pub(crate) payload: &'a Value,
-    pub(crate) artifact_roots: &'a OperationArtifactRoots,
-    pub(crate) backup_root: Option<&'a Path>,
-    #[cfg(test)]
-    pub(crate) chaos: &'a WorkflowChaosOptions,
-}
-
-impl<'a> OperationAdapterContext<'a> {
-    pub(crate) fn runtime_dispatch_context(self) -> RuntimeDispatchContext<'a> {
-        RuntimeDispatchContext {
-            runtime: self.runtime,
-            ticket_id: self.ticket.id,
-            lease_id: self.lease_id,
-            #[cfg(test)]
-            chaos: self.chaos,
-        }
-    }
-
-    pub(crate) fn job_id(self, operation: &str) -> Result<JobId, VoomError> {
-        self.ticket.job_id.ok_or_else(|| {
-            VoomError::Config(format!(
-                "{operation} ticket {} missing job_id",
-                self.ticket.id
-            ))
-        })
-    }
-
-    pub(crate) fn source_file_version_id(self) -> Result<FileVersionId, VoomError> {
-        Ok(FileVersionId(required_u64(
-            self.payload,
-            "source_file_version_id",
-        )?))
-    }
-
-    pub(crate) fn source_location_id(self) -> Option<FileLocationId> {
-        optional_u64(self.payload, "source_location_id").map(FileLocationId)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RuntimeDispatchContext<'a> {
-    pub(crate) runtime: &'a WorkerRuntime,
-    pub(crate) ticket_id: TicketId,
-    pub(crate) lease_id: LeaseId,
-    #[cfg(test)]
-    pub(crate) chaos: &'a WorkflowChaosOptions,
 }
 
 #[derive(Clone, Copy)]
@@ -245,10 +132,6 @@ async fn heartbeat_lease(
         crate::workflow::execution::leases::time_duration(context.timing.lease_ttl)?,
     )
     .await
-}
-
-pub(crate) fn workflow_idempotency_key(ticket_id: TicketId, lease_id: LeaseId) -> String {
-    format!("ticket-{}-lease-{}", ticket_id.0, lease_id.0)
 }
 
 pub(super) fn required_u64(payload: &Value, field: &str) -> Result<u64, VoomError> {

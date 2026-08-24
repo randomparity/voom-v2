@@ -8,7 +8,6 @@ use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
 use voom_core::ids::{
     ArtifactCommitIntentId, ArtifactCommitRecordId, ArtifactLocationId, ArtifactVerificationId,
 };
@@ -28,8 +27,6 @@ pub(crate) mod commit_test_support;
 
 mod prepare;
 mod recovery;
-
-pub(crate) use prepare::evaluate_commit_safety_gate;
 
 /// Upper bound on how long [`ControlPlane::commit_artifact`] waits after the
 /// durable prepare for the fenced intent to reach a terminal state. Must
@@ -243,19 +240,6 @@ pub(crate) async fn commit_artifact_with_hooks(
     .await
 }
 
-/// Poll the durable record until the fenced intent converges. Terminal
-/// `committed` reports success; `recovery_required`/`failed` return a command
-/// error carrying the durable report; the deadline leaves the record pending
-/// and names the intent.
-pub(crate) async fn wait_for_record_convergence(
-    cp: &ControlPlane,
-    artifact_handle_id: ArtifactHandleId,
-    record_id: ArtifactCommitRecordId,
-    target_path: &Path,
-) -> Result<CommitArtifactReport, CommitArtifactCommandError> {
-    wait_for_commit_convergence(cp, artifact_handle_id, record_id, target_path, None).await
-}
-
 async fn wait_for_commit_convergence(
     cp: &ControlPlane,
     artifact_handle_id: ArtifactHandleId,
@@ -316,42 +300,6 @@ async fn wait_for_commit_convergence(
         }
         tokio::time::sleep(COMMIT_CONVERGENCE_POLL).await;
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedRootedTarget {
-    storage_root_id: u64,
-    provider_relative_locator: String,
-}
-
-pub(crate) fn rooted_target_from_commit_report(
-    record: &ArtifactCommitRecord,
-) -> Result<(StorageRootId, ProviderRelativeLocator), VoomError> {
-    let value = record.report.get("rooted_target").ok_or_else(|| {
-        VoomError::database(format!(
-            "artifact commit {} report is missing rooted_target",
-            record.id
-        ))
-    })?;
-    let persisted: PersistedRootedTarget =
-        serde_json::from_value(value.clone()).map_err(|error| {
-            VoomError::database(format!(
-                "artifact commit {} report has invalid rooted_target: {error}",
-                record.id
-            ))
-        })?;
-    if persisted.storage_root_id == 0 || persisted.storage_root_id > i64::MAX.unsigned_abs() {
-        return Err(VoomError::database(format!(
-            "artifact commit {} report rooted_target.storage_root_id {} is not a valid SQLite ID",
-            record.id, persisted.storage_root_id
-        )));
-    }
-    let relative = ProviderRelativeLocator::parse_database(
-        "artifact_commit_records.report.rooted_target.provider_relative_locator",
-        &persisted.provider_relative_locator,
-    )?;
-    Ok((StorageRootId(persisted.storage_root_id), relative))
 }
 
 /// Everything the finalize transaction needs to converge one prepared commit.

@@ -66,7 +66,10 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
             .map_err(|err| io_error(format!("workflow failed: {:?}", err.source)))?;
 
         expect_eq("branch_count", &summary.branch_count, &3)?;
-        expect_eq("dispatch_count", &summary.dispatch_count, &31)?;
+        // Only generic operations mint leases now: the 12 envelope-family
+        // tickets (3 probes, 2 remux + 1 transcode, 3 backups, 3 verifies)
+        // are executed by their storage owner's agent without a lease.
+        expect_eq("dispatch_count", &summary.dispatch_count, &19)?;
         expect_eq(
             "remux operation count",
             &summary.operation_count(OperationKind::Remux),
@@ -101,14 +104,17 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
 // frame followed by a typed ProgressTimeout terminal signal. The latter preserves
 // lease-heartbeat evidence without depending on a short wall-clock deadline.
 //
-// `third_party/chaos-librarian` is unrelated: it is a media-library *fixture*
-// generator (synthetic files/scenarios for scanner/probe tests), with no worker,
-// lease, or failure-class concept, so it does not replace the `chaos-worker` fake.
+// The fault target is HashFile, not ProbeFile: probe is an envelope-family
+// operation that routes to its storage owner's agent and never leases a
+// worker, so its failure classes come from agent settlement, not from the
+// worker-dispatch machinery these tests pin. HashFile still traverses that
+// machinery. The emulated media chain runs alongside so the workflow fails
+// only on the injected fault.
 #[tokio::test]
 async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
     let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
-        OperationKind::ProbeFile,
+        OperationKind::HashFile,
         ChaosWorkerMode::Crash,
     )
     .await?;
@@ -123,16 +129,16 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
         fixture
             .assert_ticket_failed_with(
                 summary.job_id,
-                OperationKind::ProbeFile,
+                OperationKind::HashFile,
                 FailureClass::WorkerCrash,
             )
             .await?;
         fixture
-            .assert_no_success_for_operation(summary.job_id, OperationKind::ProbeFile)
+            .assert_no_success_for_operation(summary.job_id, OperationKind::HashFile)
             .await?;
         DurableWorkflowFixture::assert_failure_summary(
             &summary,
-            OperationKind::ProbeFile,
+            OperationKind::HashFile,
             FailureClass::WorkerCrash,
         )
     }
@@ -144,7 +150,7 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
 #[tokio::test]
 async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
     let mut fixture =
-        DurableWorkflowFixture::start_with_unreachable_runtime_override(OperationKind::ProbeFile)
+        DurableWorkflowFixture::start_with_unreachable_runtime_override(OperationKind::HashFile)
             .await?;
     let result = async {
         let summary = fixture
@@ -157,16 +163,16 @@ async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
         fixture
             .assert_ticket_failed_with(
                 summary.job_id,
-                OperationKind::ProbeFile,
+                OperationKind::HashFile,
                 FailureClass::WorkerTimeout,
             )
             .await?;
         fixture
-            .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::ProbeFile)
+            .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::HashFile)
             .await?;
         DurableWorkflowFixture::assert_failure_summary(
             &summary,
-            OperationKind::ProbeFile,
+            OperationKind::HashFile,
             FailureClass::WorkerTimeout,
         )
     }
@@ -179,7 +185,7 @@ async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
 async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<()> {
     let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
-        OperationKind::ProbeFile,
+        OperationKind::HashFile,
         ChaosWorkerMode::MalformedResult,
     )
     .await?;
@@ -194,20 +200,20 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
         fixture
             .assert_ticket_failed_with(
                 summary.job_id,
-                OperationKind::ProbeFile,
+                OperationKind::HashFile,
                 FailureClass::MalformedWorkerResult,
             )
             .await?;
         fixture
             .assert_no_failure_class(
                 summary.job_id,
-                OperationKind::ProbeFile,
+                OperationKind::HashFile,
                 FailureClass::WorkerCrash,
             )
             .await?;
         DurableWorkflowFixture::assert_failure_summary(
             &summary,
-            OperationKind::ProbeFile,
+            OperationKind::HashFile,
             FailureClass::MalformedWorkerResult,
         )
     }
@@ -219,8 +225,7 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
 #[tokio::test]
 async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
     let mut fixture =
-        DurableWorkflowFixture::start_with_progress_timeout_signal(OperationKind::ProbeFile)
-            .await?;
+        DurableWorkflowFixture::start_with_progress_timeout_signal(OperationKind::HashFile).await?;
     let result = async {
         let summary = fixture
             .executor()
@@ -232,16 +237,16 @@ async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
         fixture
             .assert_ticket_failed_with(
                 summary.job_id,
-                OperationKind::ProbeFile,
+                OperationKind::HashFile,
                 FailureClass::ProgressTimeout,
             )
             .await?;
         fixture
-            .assert_heartbeat_events_exist(summary.job_id, OperationKind::ProbeFile)
+            .assert_heartbeat_events_exist(summary.job_id, OperationKind::HashFile)
             .await?;
         DurableWorkflowFixture::assert_failure_summary(
             &summary,
-            OperationKind::ProbeFile,
+            OperationKind::HashFile,
             FailureClass::ProgressTimeout,
         )
     }
@@ -253,9 +258,9 @@ async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
 #[tokio::test]
 async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
     let _process_provider_guard = process_provider_test_guard().await;
-    let chaos = WorkflowChaosOptions::suppress_heartbeats_for_operation(OperationKind::ProbeFile);
+    let chaos = WorkflowChaosOptions::suppress_heartbeats_for_operation(OperationKind::HashFile);
     let mut fixture = DurableWorkflowFixture::start_with_chaos_override_and_options(
-        OperationKind::ProbeFile,
+        OperationKind::HashFile,
         ChaosWorkerMode::Stall,
         chaos,
         DeadlineFixture {
@@ -276,25 +281,25 @@ async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
         fixture
             .assert_ticket_failed_with(
                 summary.job_id,
-                OperationKind::ProbeFile,
+                OperationKind::HashFile,
                 FailureClass::WorkerTimeout,
             )
             .await?;
         fixture
-            .assert_no_expire_due_path(summary.job_id, OperationKind::ProbeFile)
+            .assert_no_expire_due_path(summary.job_id, OperationKind::HashFile)
             .await?;
         fixture
-            .assert_no_progress_triggered_heartbeat(summary.job_id, OperationKind::ProbeFile)
+            .assert_no_progress_triggered_heartbeat(summary.job_id, OperationKind::HashFile)
             .await?;
         fixture
-            .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::ProbeFile)
+            .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::HashFile)
             .await?;
         fixture
-            .assert_no_malformed_frame(summary.job_id, OperationKind::ProbeFile)
+            .assert_no_malformed_frame(summary.job_id, OperationKind::HashFile)
             .await?;
         DurableWorkflowFixture::assert_failure_summary(
             &summary,
-            OperationKind::ProbeFile,
+            OperationKind::HashFile,
             FailureClass::WorkerTimeout,
         )
     }
@@ -414,6 +419,7 @@ struct DurableWorkflowFixture {
     registered_workers: Vec<(WorkerId, u32)>,
     executor_options: WorkflowExecutorOptions,
     deadline_fixture: Option<DeadlineFixture>,
+    owner_node_emulator: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DurableWorkflowFixture {
@@ -423,6 +429,7 @@ impl DurableWorkflowFixture {
 
     async fn start_all_fake_providers_with_max_parallel(max_parallel: u32) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
+        fixture.enable_owner_node_emulation().await?;
         fixture.executor_options.timing.heartbeat_timeout = Duration::from_secs(2);
         fixture.executor_options.timing.progress_idle_timeout = Duration::from_secs(2);
         for provider in provider_specs() {
@@ -438,6 +445,7 @@ impl DurableWorkflowFixture {
 
     async fn start_all_in_process_fake_providers(max_parallel: u32) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
+        fixture.enable_owner_node_emulation().await?;
         fixture.executor_options.timing.heartbeat_timeout = Duration::from_secs(2);
         fixture.executor_options.timing.progress_idle_timeout = Duration::from_secs(2);
         for provider in provider_specs() {
@@ -492,6 +500,7 @@ impl DurableWorkflowFixture {
             .chaos
             .set_payload_mode_for_operation(operation, mode.payload_mode());
         let mut fixture = Self::without_fake_providers().await?;
+        fixture.enable_owner_node_emulation().await?;
         fixture.executor_options = options;
         fixture.deadline_fixture = deadline_fixture;
         let setup = async {
@@ -517,6 +526,7 @@ impl DurableWorkflowFixture {
         // version used out-of-process workers under a 120ms watchdog, which let a
         // loaded runner time out a prerequisite branch and flake the assertion.
         let mut fixture = Self::without_fake_providers().await?;
+        fixture.enable_owner_node_emulation().await?;
         fixture.executor_options.timing.heartbeat_timeout = Duration::from_secs(2);
         fixture.executor_options.timing.progress_idle_timeout = Duration::from_secs(2);
         let setup = async {
@@ -534,6 +544,7 @@ impl DurableWorkflowFixture {
 
     async fn start_with_progress_timeout_signal(operation: OperationKind) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
+        fixture.enable_owner_node_emulation().await?;
         let setup = async {
             fixture
                 .register_in_process_providers_except(operation, 4)
@@ -560,7 +571,6 @@ impl DurableWorkflowFixture {
         .await?;
         // Byte-touching plan nodes must name a live rooted location.
         let source_location_id = voom_store::test_support::seed_test_rooted_location(&pool).await?;
-
         Ok(Self {
             cp,
             pool,
@@ -571,7 +581,45 @@ impl DurableWorkflowFixture {
             registered_workers: Vec::new(),
             executor_options: WorkflowExecutorOptions::for_tests(),
             deadline_fixture: None,
+            owner_node_emulator: None,
         })
+    }
+
+    /// Seed the durable inputs envelope-bearing media tickets resolve against
+    /// (the fake scanner's synthetic location band, per-version snapshots,
+    /// staging/backup defaults) and start the owner-node emulator that
+    /// settles them.
+    ///
+    /// ADR 0075: media tickets are never leased by the executor — they wait
+    /// ready for their storage owner's agent. These drivers have no real
+    /// agent, so a task stands in for one: it polls ready node-local tickets
+    /// and completes them with the success results their downstream
+    /// expansions consume. Chaos drivers keep this on too: the emulated media
+    /// chain must succeed so the workflow's failure comes from the fault the
+    /// test injects into a generic operation.
+    async fn enable_owner_node_emulation(&mut self) -> TestResult<()> {
+        let seeded = voom_store::test_support::seed_synthetic_rooted_locations(
+            &self.pool,
+            voom_fake_support::FAKE_SCANNER_FIRST_LOCATION_ID,
+            3,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE library_roots SET default_staging_root_id = id, \
+             default_backup_root_id = id WHERE id = ?",
+        )
+        .bind(i64::try_from(
+            voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+        )?)
+        .execute(&self.pool)
+        .await?;
+        for (version_id, _) in &seeded {
+            self.cp
+                .record_media_snapshot(*version_id, None, fixture_media_snapshot(), T0)
+                .await?;
+        }
+        self.owner_node_emulator = Some(tokio::spawn(run_owner_node_emulator(self.pool.clone())));
+        Ok(())
     }
 
     fn executor(&self) -> WorkflowExecutor {
@@ -695,14 +743,9 @@ impl DurableWorkflowFixture {
         operation: OperationKind,
         mode: ChaosWorkerMode,
     ) -> TestResult<()> {
-        expect_eq(
-            "chaos worker operation",
-            &operation,
-            &OperationKind::ProbeFile,
-        )?;
         let secret = "durable-workflow-chaos-secret";
         let worker = self
-            .register_worker_without_runtime("chaos-probe", &[operation], 1, secret)
+            .register_worker_without_runtime("chaos-worker", &[operation], 1, secret)
             .await?;
         self.registered_workers.push((worker, 1));
         let launch = ProviderLaunch::spawn(
@@ -1094,6 +1137,9 @@ impl DurableWorkflowFixture {
     }
 
     async fn shutdown(&mut self) -> TestResult<()> {
+        if let Some(handle) = self.owner_node_emulator.take() {
+            handle.abort();
+        }
         let mut cleanup_error: Option<String> = None;
         while let Some(mut launch) = self.launches.pop() {
             if let Err(err) = launch.shutdown().await {
@@ -1143,6 +1189,9 @@ struct DeadlineFixture {
 }
 
 fn provider_specs() -> Vec<ProviderSpec> {
+    // Only generic operations register worker runtimes: the envelope family
+    // (probe, transcode/remux/audio, backup, verify) routes to its storage
+    // owner's agent — emulated here — and never leases a worker.
     vec![
         ProviderSpec {
             name: "fake-scanner",
@@ -1150,27 +1199,7 @@ fn provider_specs() -> Vec<ProviderSpec> {
         },
         ProviderSpec {
             name: "fake-prober",
-            operations: &[OperationKind::ProbeFile, OperationKind::HashFile],
-        },
-        ProviderSpec {
-            name: "fake-transcoder",
-            operations: &[
-                OperationKind::TranscodeVideo,
-                OperationKind::TranscodeAudio,
-                OperationKind::ExtractAudio,
-            ],
-        },
-        ProviderSpec {
-            name: "fake-remuxer",
-            operations: &[OperationKind::Remux],
-        },
-        ProviderSpec {
-            name: "fake-backup-store",
-            operations: &[OperationKind::BackUpFile, OperationKind::DeleteArtifact],
-        },
-        ProviderSpec {
-            name: "fake-health-checker",
-            operations: &[OperationKind::VerifyArtifact],
+            operations: &[OperationKind::HashFile],
         },
         ProviderSpec {
             name: "fake-identity-provider",
@@ -1518,5 +1547,103 @@ fn combine_result_and_cleanup<T>(result: TestResult<T>, cleanup: TestResult<()>)
         (Err(err), Err(cleanup_err)) => Err(io_error(format!(
             "{err}; provider cleanup failed: {cleanup_err}"
         ))),
+    }
+}
+
+/// The media snapshot every synthetic fixture version carries: enough for a
+/// remux child's selection to derive from the recorded streams.
+fn fixture_media_snapshot() -> Value {
+    serde_json::json!({
+        "container": "mkv",
+        "video_codec": "h264",
+        "streams": [
+            {
+                "id": "stream-0",
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "disposition": {"default": true}
+            },
+            {
+                "id": "stream-audio-1",
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng",
+                "channels": 2,
+                "disposition": {"default": false, "forced": false}
+            }
+        ]
+    })
+}
+
+/// Emulate the storage owner's agent for envelope-bearing media tickets
+/// (ADR 0075): poll ready node-local tickets and settle them with the success
+/// results their downstream expansions consume.
+///
+/// The executor never leases these tickets — they wait `ready` for their
+/// storage owner's agent — so without something answering, a workflow holding
+/// them waits in the externally-held idle state forever. Settlement mirrors
+/// what an owner node reports: probe echoes its codec, transforms name their
+/// planned output, backups release the observed output facts their verify
+/// child pins as expectations.
+async fn run_owner_node_emulator(pool: SqlitePool) {
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    loop {
+        tick.tick().await;
+        let Ok(outstanding) = sqlx::query_as::<
+            _,
+            (
+                i64,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT id, \
+             json_extract(payload, '$.operation'), \
+             json_extract(payload, '$.rendered_payload.media_dispatch.output.provider_relative_locator'), \
+             json_extract(payload, '$.rendered_payload.codec') \
+             FROM tickets \
+             WHERE state = 'ready' \
+               AND json_extract(payload, '$.rendered_payload.media_dispatch') IS NOT NULL",
+        )
+        .fetch_all(&pool)
+        .await else {
+            continue;
+        };
+        for (ticket_id, operation, output_locator, codec) in outstanding {
+            let result = match operation.as_deref() {
+                Some("probe_file") => serde_json::json!({
+                    "codec": codec.as_deref().unwrap_or("h264"),
+                }),
+                Some("remux" | "transcode_video") => serde_json::json!({
+                    "output_path": output_locator
+                        .clone()
+                        .unwrap_or_else(|| "/staging/emulated.mkv".to_owned()),
+                }),
+                Some("back_up_file") => serde_json::json!({
+                    "local_backup_id": format!("backup-{ticket_id}"),
+                    "agent_observed": {
+                        "outputs": [{
+                            "facts": {
+                                "size_bytes": 1024_u64,
+                                "content_hash": "blake3:owner-node-emulator",
+                            },
+                        }]
+                    },
+                }),
+                _ => serde_json::json!({}),
+            };
+            let _ = sqlx::query(
+                "UPDATE tickets SET state = 'succeeded', result = ?, \
+                 state_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), epoch = epoch + 1 \
+                 WHERE id = ? AND state = 'ready'",
+            )
+            .bind(result.to_string())
+            .bind(ticket_id)
+            .execute(&pool)
+            .await;
+        }
     }
 }

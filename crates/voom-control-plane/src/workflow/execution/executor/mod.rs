@@ -24,8 +24,8 @@ mod spawn;
 mod tickets;
 
 pub(crate) use config::{
-    OperationArtifactRoots, WORKFLOW_JOB_KIND, WorkflowArtifactRoots, WorkflowDispatchOptions,
-    WorkflowQueueOptions, WorkflowStreamOptions, WorkflowTimingOptions,
+    WORKFLOW_JOB_KIND, WorkflowDispatchOptions, WorkflowQueueOptions, WorkflowStreamOptions,
+    WorkflowTimingOptions,
 };
 pub(crate) use errors::{WorkflowFailureDisposition, WorkflowRunError};
 use spawn::SpawnOutcome;
@@ -83,7 +83,6 @@ impl PlannedLineageGuard {
 pub struct WorkflowExecutorOptions {
     pub timing: WorkflowTimingOptions,
     pub queue: WorkflowQueueOptions,
-    pub artifact_roots: WorkflowArtifactRoots,
     #[cfg(test)]
     pub chaos: WorkflowChaosOptions,
     #[cfg(test)]
@@ -111,7 +110,6 @@ impl WorkflowExecutorOptions {
     pub(crate) fn dispatch_options(&self) -> WorkflowDispatchOptions {
         WorkflowDispatchOptions {
             timing: self.timing.clone(),
-            artifact_roots: self.artifact_roots.clone(),
             #[cfg(test)]
             chaos: self.chaos.clone(),
         }
@@ -123,7 +121,6 @@ impl WorkflowExecutorOptions {
         Self {
             timing: WorkflowTimingOptions::for_tests(),
             queue: WorkflowQueueOptions::for_tests(),
-            artifact_roots: WorkflowArtifactRoots::for_tests(),
             chaos: WorkflowChaosOptions::default(),
             capacity_deferred_sync: None,
         }
@@ -211,6 +208,11 @@ struct RunLoopState {
     /// remote completion. The executor owns no lease for these; it polls their
     /// durable states and runs expansion/failure handling as they settle.
     node_local_outstanding: HashMap<TicketId, OperationKind>,
+    /// Media tickets whose settlement has already been folded into the run.
+    /// Settlement is driven off durable state, not just the outstanding map:
+    /// an agent can complete a ticket between observation windows — before it
+    /// was ever seen `ready` — and its expansion children must still run.
+    node_local_settled: HashSet<TicketId>,
 }
 
 struct RunInvocation<'a> {
@@ -270,6 +272,7 @@ impl RunLoopState {
             accelerator_wait_started: HashMap::new(),
             accelerator_history: HashMap::new(),
             node_local_outstanding: HashMap::new(),
+            node_local_settled: HashSet::new(),
         }
     }
 

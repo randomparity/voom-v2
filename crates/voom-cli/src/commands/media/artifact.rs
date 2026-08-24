@@ -8,8 +8,7 @@ use voom_control_plane::artifact::{
     CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
     VerificationSummary, VerifyArtifactInput, VerifyArtifactReport,
 };
-use voom_control_plane::audio::AcknowledgeExtractDispatchQuiescenceInput;
-use voom_core::{ArtifactHandleId, ErrorCode, WorkerId};
+use voom_core::{ArtifactHandleId, ErrorCode};
 use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 
 use crate::cli::{ArtifactCommand, ArtifactStateArg};
@@ -19,25 +18,12 @@ use crate::envelope::{Local, emit_err, emit_err_with_data, emit_ok, emit_ok_page
 const COMMAND_VERIFY: &str = "artifact.verify";
 const COMMAND_COMMIT: &str = "artifact.commit";
 const COMMAND_RECOVER_COMMIT: &str = "artifact.recover_commit";
-const COMMAND_ACKNOWLEDGE_EXTRACT_QUIESCENCE: &str = "artifact.acknowledge_extract_quiescence";
 const COMMAND_LIST: &str = "artifact.list";
 const COMMAND_SHOW: &str = "artifact.show";
 
 #[derive(Debug, Serialize)]
 struct ArtifactEnvelopeData<T> {
     artifact: T,
-}
-
-#[derive(Debug, Serialize)]
-struct ExtractQuiescenceData {
-    operation_key: String,
-    generation: u32,
-    attempt_id: u64,
-    worker_id: u64,
-    worker_epoch: u32,
-    idempotency_key: String,
-    acknowledged_by: String,
-    status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,30 +232,6 @@ pub async fn run(database_url: &str, local: Local, command: ArtifactCommand) -> 
         ArtifactCommand::RecoverCommit { artifact_handle_id } => {
             recover_commit(database_url, local, artifact_handle_id).await
         }
-        ArtifactCommand::AcknowledgeExtractQuiescence {
-            operation_key,
-            generation,
-            attempt_id,
-            worker_id,
-            worker_epoch,
-            idempotency_key,
-            acknowledged_by,
-        } => {
-            acknowledge_extract_quiescence(
-                database_url,
-                local,
-                AcknowledgeExtractDispatchQuiescenceInput {
-                    operation_key,
-                    generation,
-                    attempt_id,
-                    worker_id: WorkerId(worker_id),
-                    worker_epoch,
-                    idempotency_key,
-                    acknowledged_by,
-                },
-            )
-            .await
-        }
         ArtifactCommand::List {
             state,
             after_id,
@@ -392,39 +354,6 @@ async fn recover_commit(
         )
         .map(|()| 0),
         Err(err) => emit_voom_error(COMMAND_RECOVER_COMMIT, &err, local),
-    }
-}
-
-async fn acknowledge_extract_quiescence(
-    database_url: &str,
-    local: Local,
-    input: AcknowledgeExtractDispatchQuiescenceInput,
-) -> io::Result<i32> {
-    let cp = match open_control_plane(COMMAND_ACKNOWLEDGE_EXTRACT_QUIESCENCE, database_url, &local)
-        .await?
-    {
-        Ok(cp) => cp,
-        Err(code) => return Ok(code),
-    };
-    let data = ExtractQuiescenceData {
-        operation_key: input.operation_key.clone(),
-        generation: input.generation,
-        attempt_id: input.attempt_id,
-        worker_id: input.worker_id.0,
-        worker_epoch: input.worker_epoch,
-        idempotency_key: input.idempotency_key.clone(),
-        acknowledged_by: input.acknowledged_by.clone(),
-        status: "quiesced",
-    };
-    match cp.acknowledge_extract_dispatch_quiescence(input).await {
-        Ok(()) => emit_ok(
-            COMMAND_ACKNOWLEDGE_EXTRACT_QUIESCENCE,
-            data,
-            Some(local),
-            Vec::new(),
-        )
-        .map(|()| 0),
-        Err(error) => emit_voom_error(COMMAND_ACKNOWLEDGE_EXTRACT_QUIESCENCE, &error, local),
     }
 }
 

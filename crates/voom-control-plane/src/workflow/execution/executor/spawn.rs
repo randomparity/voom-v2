@@ -237,19 +237,42 @@ impl WorkflowExecutor {
         state: &mut RunLoopState,
         invocation: &RunInvocation<'_>,
     ) -> Result<(), VoomError> {
-        let outstanding: Vec<(TicketId, OperationKind)> = state
-            .node_local_outstanding
-            .iter()
-            .map(|(ticket_id, operation)| (*ticket_id, *operation))
-            .collect();
-        for (ticket_id, operation) in outstanding {
+        // Settlement is driven off durable state, not just the outstanding
+        // map: an agent can complete a ticket between observation windows —
+        // before the executor ever observed it `ready` — and its expansion
+        // children must still run. Candidates are therefore the union of the
+        // outstanding map and every terminal media ticket durably recorded
+        // for this workflow; `node_local_settled` folds each in exactly once.
+        let mut candidate_ids: HashSet<TicketId> =
+            state.node_local_outstanding.keys().copied().collect();
+        for (ticket_id, _, _) in self
+            .control_plane
+            .tickets
+            .terminal_workflow_media_tickets(invocation.job_id, invocation.workflow_id)
+            .await?
+        {
+            candidate_ids.insert(ticket_id);
+        }
+
+        for ticket_id in candidate_ids {
+            if state.node_local_settled.contains(&ticket_id) {
+                continue;
+            }
             let Some(ticket) = self.control_plane.tickets.get(ticket_id).await? else {
                 state.node_local_outstanding.remove(&ticket_id);
                 continue;
             };
+            if !matches!(ticket.state, TicketState::Succeeded | TicketState::Failed) {
+                // Still awaiting its storage owner's agent.
+                continue;
+            }
+            let operation = match state.node_local_outstanding.remove(&ticket_id) {
+                Some(operation) => operation,
+                None => parse_payload(&ticket)?.operation,
+            };
+            state.node_local_settled.insert(ticket_id);
             match ticket.state {
                 TicketState::Succeeded => {
-                    state.node_local_outstanding.remove(&ticket_id);
                     state.summary.record_success(operation);
                     self.expand_successful_ticket(
                         invocation.plan,
@@ -260,7 +283,6 @@ impl WorkflowExecutor {
                     .await?;
                 }
                 TicketState::Failed => {
-                    state.node_local_outstanding.remove(&ticket_id);
                     let class = self
                         .ticket_failure_class(ticket_id)
                         .await?

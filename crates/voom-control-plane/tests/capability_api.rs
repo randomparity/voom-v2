@@ -1,27 +1,14 @@
-use async_trait::async_trait;
 use voom_control_plane::execution::PreLeaseFailureOutcome;
 use voom_control_plane::policy::{ArtifactVerificationView, BackupEvidence, ProgressCountsView};
-use voom_control_plane::remux::{RemuxDispatcher, RemuxProgressSink};
 use voom_control_plane::transcode::ResolvedProfile;
+use voom_control_plane::workers::{LocalWorkerKind, RegisteredNode};
 use voom_control_plane::workflow::{EffectiveTiming, WorkflowTicketPayloadError};
-use voom_core::VoomError;
-use voom_worker_protocol::{RemuxRequest, RemuxResult};
 
-struct ExternalRemuxDispatcher;
-
-#[async_trait]
-impl RemuxDispatcher for ExternalRemuxDispatcher {
-    async fn dispatch_remux_with_progress(
-        &self,
-        _request: RemuxRequest,
-        _progress: &mut dyn RemuxProgressSink,
-    ) -> Result<RemuxResult, VoomError> {
-        Err(VoomError::Internal(
-            "compile-only dispatcher invoked".to_owned(),
-        ))
-    }
-}
-
+// The bundled control-plane remux dispatcher (`RemuxDispatcher`,
+// `RemuxProgressSink`) was removed with the T8 sweep: remux tickets execute on
+// their storage owner's agent via `media_dispatch` envelopes. Downstream
+// capability now rests on the node/local-worker registration surface instead
+// of an in-process remux dispatcher trait.
 #[test]
 fn capability_contract_types_are_nameable_downstream() {
     fn assert_nameable<T>() {}
@@ -33,7 +20,6 @@ fn capability_contract_types_are_nameable_downstream() {
     assert_nameable::<ResolvedProfile>();
     assert_nameable::<EffectiveTiming>();
     assert_nameable::<WorkflowTicketPayloadError>();
-
-    let dispatcher: &dyn RemuxDispatcher = &ExternalRemuxDispatcher;
-    let _ = dispatcher;
+    assert_nameable::<LocalWorkerKind>();
+    assert_nameable::<RegisteredNode>();
 }

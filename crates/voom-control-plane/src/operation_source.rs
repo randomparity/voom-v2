@@ -6,23 +6,15 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use serde_json::Value;
-use voom_core::{
-    FileLocationId, FileVersionId, MediaSnapshotId, ProviderRelativeLocator, StorageRootId,
-    VoomError,
-};
+use voom_core::{FileLocationId, FileVersionId, ProviderRelativeLocator, StorageRootId, VoomError};
 use voom_store::repo::library::library_roots::EffectiveLibraryRoot;
-use voom_store::repo::media::identity::{
-    FileLocation, FileLocationAddress, FileLocationRepo, FileVersion, FileVersionRepo,
-    MediaSnapshot, MediaSnapshotRepo,
-};
+use voom_store::repo::media::identity::{FileLocation, FileLocationAddress, FileLocationRepo};
 
 use crate::ControlPlane;
 use crate::artifact::fs::{canonical_existing_file_no_symlink, canonical_new_leaf_no_symlink};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SelectedSource {
-    pub(crate) version: FileVersion,
     pub(crate) location: FileLocation,
     pub(crate) canonical_path: PathBuf,
 }
@@ -33,59 +25,12 @@ pub(crate) async fn select_local_source(
     file_version_id: FileVersionId,
     source_location_id: Option<FileLocationId>,
 ) -> Result<SelectedSource, VoomError> {
-    let version = cp
-        .identity
-        .get_file_version(file_version_id)
-        .await?
-        .ok_or_else(|| VoomError::NotFound(format!("file_version {file_version_id}")))?;
-    if version.retired_at.is_some() {
-        return Err(VoomError::NotFound(format!(
-            "file_version {file_version_id} is retired"
-        )));
-    }
     let location = select_location(cp, file_version_id, source_location_id).await?;
     let canonical_path = resolve_rooted_existing_path(cp, operation_label, &location).await?;
     Ok(SelectedSource {
-        version,
         location,
         canonical_path,
     })
-}
-
-pub(crate) async fn read_required_media_snapshot(
-    cp: &ControlPlane,
-    operation_label: &'static str,
-    file_version_id: FileVersionId,
-    operation_payload: &Value,
-) -> Result<MediaSnapshot, VoomError> {
-    let snapshot_id = source_media_snapshot_id(operation_label, operation_payload)?;
-    let snapshot = cp
-        .identity
-        .get_media_snapshot(snapshot_id)
-        .await?
-        .ok_or_else(|| VoomError::NotFound(format!("media_snapshot {snapshot_id}")))?;
-    if snapshot.file_version_id != file_version_id {
-        return Err(VoomError::Config(format!(
-            "media_snapshot {snapshot_id} does not belong to file_version {file_version_id}"
-        )));
-    }
-    Ok(snapshot)
-}
-
-fn source_media_snapshot_id(
-    operation_label: &'static str,
-    operation_payload: &Value,
-) -> Result<MediaSnapshotId, VoomError> {
-    operation_payload
-        .get("source_media_snapshot_id")
-        .and_then(Value::as_u64)
-        .filter(|id| *id > 0)
-        .map(MediaSnapshotId)
-        .ok_or_else(|| {
-            VoomError::Config(format!(
-                "{operation_label} operation payload requires source_media_snapshot_id"
-            ))
-        })
 }
 
 /// Resolve a file version to exactly one live rooted location, failing closed on
@@ -225,59 +170,6 @@ pub(crate) async fn resolve_artifact_target(
         &root_path,
         canonical_target,
     )
-}
-
-pub(crate) async fn resolve_exact_artifact_recovery_target(
-    cp: &ControlPlane,
-    operation_label: &'static str,
-    source_storage_root_id: StorageRootId,
-    target_storage_root_id: StorageRootId,
-    target_relative_locator: &ProviderRelativeLocator,
-    requested_target: &std::path::Path,
-) -> Result<PathBuf, VoomError> {
-    let source = cp
-        .effective_library_root(source_storage_root_id)
-        .await?
-        .ok_or_else(|| VoomError::NotFound(format!("storage root {source_storage_root_id}")))?;
-    let target = cp
-        .effective_library_root(target_storage_root_id)
-        .await?
-        .ok_or_else(|| VoomError::NotFound(format!("storage root {target_storage_root_id}")))?;
-    if target.root.library_id != source.root.library_id {
-        return Err(VoomError::database(format!(
-            "{operation_label} persisted target root {target_storage_root_id} belongs to library \
-             {}, expected {} from source root {source_storage_root_id}",
-            target.root.library_id, source.root.library_id
-        )));
-    }
-    let root_path = require_effective_local_root_path(cp, operation_label, &target).await?;
-    let canonical_target = match tokio::fs::symlink_metadata(requested_target).await {
-        Ok(_) => canonical_existing_file_no_symlink(requested_target).await?,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            canonical_new_leaf_no_symlink(requested_target).await?
-        }
-        Err(error) => {
-            return Err(VoomError::ArtifactUnavailable(format!(
-                "cannot inspect {operation_label} recovery target {}: {error}",
-                requested_target.display()
-            )));
-        }
-    };
-    let (_, resolved_relative_locator, canonical_target) = rooted_target_address(
-        operation_label,
-        target_storage_root_id,
-        &root_path,
-        canonical_target,
-    )?;
-    if &resolved_relative_locator != target_relative_locator {
-        return Err(VoomError::database(format!(
-            "{operation_label} persisted target address ({target_storage_root_id}, {}) does not \
-             match target path {}",
-            target_relative_locator.as_str(),
-            requested_target.display()
-        )));
-    }
-    Ok(canonical_target)
 }
 
 async fn artifact_target_root(

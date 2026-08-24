@@ -6,10 +6,10 @@
 //! or open a byte. An envelope renders only when all of its inputs are
 //! derivable: a live rooted source handle, expected facts, and — for
 //! operations with planned outputs — the library's configured destination
-//! root. When an input is missing the caller keeps the pre-envelope payload
-//! shape, which migration 0042 already anticipates for in-flight tickets;
-//! the routing gate stays dormant for exactly those tickets until their
-//! flow migrates (T8).
+//! root. When an input is unset the render fails: since the bundled
+//! media adapters are gone (T8), a byte-touching ticket without an
+//! envelope has no execution contract left, so a missing input aborts
+//! ticket creation with a render error instead of silently falling back.
 
 use serde_json::Value;
 use voom_core::{FileLocationId, FileVersionId, OperationKind, StorageRootId, VoomError};
@@ -125,43 +125,54 @@ fn verify_facts(facts: SourceFacts) -> VerifyArtifactExpectedFacts {
 /// version that location resolves to (remux/audio children need it to find
 /// their planning snapshot).
 ///
-/// `Ok(None)` means the location row vanished or lost its rooted address
-/// between declaration and render; the ticket then stays on the legacy
-/// contract rather than rendering an unresolvable envelope.
+/// # Errors
+/// When the location row vanished or lost its rooted address between
+/// declaration and render: an unresolvable source must not reach a lease.
 pub(crate) async fn location_source(
     cp: &ControlPlane,
     storage_root_id: StorageRootId,
     file_location_id: FileLocationId,
 ) -> Result<
-    Option<(
+    (
         media_dispatch::MediaDispatchSource,
         voom_core::FileVersionId,
-    )>,
+    ),
     VoomError,
 > {
-    let Some(location) = cp.identity.get_file_location(file_location_id).await? else {
-        return Ok(None);
-    };
-    if crate::operation_source::require_live_rooted(&location).is_err() {
-        return Ok(None);
-    }
-    let Ok((root, locator)) = location.rooted_address() else {
-        return Ok(None);
-    };
+    let location = cp
+        .identity
+        .get_file_location(file_location_id)
+        .await?
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "media dispatch envelope: file_location {file_location_id} vanished"
+            ))
+        })?;
+    crate::operation_source::require_live_rooted(&location).map_err(|error| {
+        VoomError::Config(format!(
+            "media dispatch envelope: file_location {file_location_id} is not live rooted: {error}"
+        ))
+    })?;
+    let (root, locator) = location.rooted_address().map_err(|error| {
+        VoomError::Config(format!(
+            "media dispatch envelope: file_location {file_location_id} has no rooted address: \
+             {error}"
+        ))
+    })?;
     if root != storage_root_id {
         return Err(VoomError::Config(format!(
             "file_location {file_location_id} moved to storage root {root}, \
              but the ticket declares root {storage_root_id}"
         )));
     }
-    Ok(Some((
+    Ok((
         media_dispatch::MediaDispatchSource::Location {
             storage_root_id: root,
             file_location_id,
             provider_relative_locator: locator.clone(),
         },
         location.file_version_id,
-    )))
+    ))
 }
 
 fn root_default(
@@ -184,56 +195,68 @@ fn names_default(
 }
 
 /// Resolve the default root `role` resolves to relative to
-/// `configured_root_id`, or `None` when nothing is configured.
+/// `configured_root_id`.
 ///
 /// A library root resolves its own row first; a staging/output leaf resolves
 /// through whichever library row assigns it as a default, because that owner
 /// holds the sibling defaults.
+///
+/// # Errors
+/// When nothing is configured: the bundled fallback that used to execute such
+/// tickets is gone, so an unaddressable destination must fail the render.
 pub(crate) async fn destination_root(
     cp: &ControlPlane,
     role: media_dispatch::DestinationRole,
     configured_root_id: StorageRootId,
-) -> Result<Option<StorageRootId>, VoomError> {
+) -> Result<StorageRootId, VoomError> {
     if let Some(root) = cp.libraries.get_library_root(configured_root_id).await?
         && let Some(direct) = root_default(&root, role)
     {
-        return Ok(Some(direct));
+        return Ok(direct);
     }
     let roots = cp.libraries.list_library_roots(None).await?;
-    Ok(roots
+    roots
         .iter()
         .filter(|root| names_default(root, configured_root_id, role))
-        .find_map(|owner| root_default(owner, role)))
+        .find_map(|owner| root_default(owner, role))
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "media dispatch envelope: no default {role:?} root configured for \
+                 storage root {configured_root_id}"
+            ))
+        })
 }
 
 async fn snapshot_for(
     cp: &ControlPlane,
     file_version_id: FileVersionId,
     operation_payload: &Value,
-) -> Result<Option<MediaSnapshot>, VoomError> {
-    let Some(id) = operation_payload
+) -> Result<MediaSnapshot, VoomError> {
+    let id = operation_payload
         .get("source_media_snapshot_id")
         .and_then(Value::as_u64)
         .filter(|id| *id > 0)
-    else {
-        return Ok(None);
-    };
-    let Some(snapshot) = cp
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "media dispatch envelope: operation payload for file_version {file_version_id} \
+                 pins no source_media_snapshot_id"
+            ))
+        })?;
+    let snapshot = cp
         .identity
         .get_media_snapshot(voom_core::ids::MediaSnapshotId(id))
         .await?
-    else {
-        // A payload pinning an unresolvable snapshot keeps the pre-envelope
-        // contract here; the execution-time snapshot reader still rejects it,
-        // so nothing silent survives to a lease.
-        return Ok(None);
-    };
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "media dispatch envelope: media_snapshot {id} does not resolve"
+            ))
+        })?;
     if snapshot.file_version_id != file_version_id {
         return Err(VoomError::Config(format!(
             "media_snapshot {id} does not belong to file_version {file_version_id}"
         )));
     }
-    Ok(Some(snapshot))
+    Ok(snapshot)
 }
 
 fn binding_result(result: Result<Value, BindingError>) -> Result<Option<Value>, VoomError> {
@@ -245,9 +268,10 @@ fn binding_result(result: Result<Value, BindingError>) -> Result<Option<Value>, 
 /// Render the `media_dispatch` envelope for a **policy-root** media ticket.
 ///
 /// `operation_payload` is the planner node's raw payload (the `type:`-tagged
-/// block). Every arm fails closed into `Ok(None)` when a planning input is
-/// absent — those tickets keep the pre-envelope contract instead of
-/// rendering an envelope the agent could not execute.
+/// block). An unset planning input is a render error: with the bundled media
+/// adapters removed there is no fallback contract to keep. `Ok(None)` is
+/// reserved for operations outside the envelope family and for policy-root
+/// verify tickets, which stay bundled until #528/#424 retargets them.
 pub(crate) async fn policy_envelope(
     cp: &ControlPlane,
     branch_id: &str,
@@ -255,14 +279,17 @@ pub(crate) async fn policy_envelope(
     source: &PolicyFileSource,
     operation_payload: &Value,
 ) -> Result<Option<Value>, VoomError> {
-    let Some((source_ref, _)) =
-        location_source(cp, source.storage_root_id, source.location_id).await?
-    else {
-        return Ok(None);
-    };
-    let Some(version) = cp.identity.get_file_version(source.file_version_id).await? else {
-        return Ok(None);
-    };
+    let (source_ref, _) = location_source(cp, source.storage_root_id, source.location_id).await?;
+    let version = cp
+        .identity
+        .get_file_version(source.file_version_id)
+        .await?
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "media dispatch envelope: file_version {} vanished",
+                source.file_version_id.0
+            ))
+        })?;
     let facts = SourceFacts::from_version(&version);
 
     match operation {
@@ -271,15 +298,12 @@ pub(crate) async fn policy_envelope(
             facts.file(),
         )),
         OperationKind::BackUpFile => {
-            let Some(destination) = destination_root(
+            let destination = destination_root(
                 cp,
                 media_dispatch::DestinationRole::Backup,
                 source.storage_root_id,
             )
-            .await?
-            else {
-                return Ok(None);
-            };
+            .await?;
             binding_result(media_dispatch::render_media_dispatch_back_up_file(
                 &source_ref,
                 source.file_version_id,
@@ -287,17 +311,18 @@ pub(crate) async fn policy_envelope(
             ))
         }
         OperationKind::TranscodeVideo => {
-            let Ok(profile) = serde_json::from_value::<TranscodeVideoProfile>(
+            let profile = serde_json::from_value::<TranscodeVideoProfile>(
                 operation_payload
                     .get("resolved_profile")
                     .cloned()
                     .unwrap_or(Value::Null),
-            ) else {
-                return Ok(None);
-            };
-            let Some(destination) = staging_destination(cp, source.storage_root_id).await? else {
-                return Ok(None);
-            };
+            )
+            .map_err(|error| {
+                VoomError::Config(format!(
+                    "media dispatch envelope: transcode-video profile does not resolve: {error}"
+                ))
+            })?;
+            let destination = staging_destination(cp, source.storage_root_id).await?;
             binding_result(media_dispatch::render_media_dispatch_transcode_video(
                 branch_id,
                 &source_ref,
@@ -309,20 +334,17 @@ pub(crate) async fn policy_envelope(
             ))
         }
         OperationKind::Remux => {
-            let Some(snapshot) =
-                snapshot_for(cp, source.file_version_id, operation_payload).await?
-            else {
-                return Ok(None);
-            };
-            let Ok(selection) = crate::remux::selection::selection_from_payload_and_snapshot(
+            let snapshot = snapshot_for(cp, source.file_version_id, operation_payload).await?;
+            let selection = crate::remux::selection::selection_from_payload_and_snapshot(
                 operation_payload,
                 &snapshot,
-            ) else {
-                return Ok(None);
-            };
-            let Some(destination) = staging_destination(cp, source.storage_root_id).await? else {
-                return Ok(None);
-            };
+            )
+            .map_err(|error| {
+                VoomError::Config(format!(
+                    "media dispatch envelope: remux selection does not derive: {error}"
+                ))
+            })?;
+            let destination = staging_destination(cp, source.storage_root_id).await?;
             binding_result(media_dispatch::render_media_dispatch_remux(
                 branch_id,
                 &source_ref,
@@ -353,7 +375,7 @@ pub(crate) async fn policy_envelope(
 async fn staging_destination(
     cp: &ControlPlane,
     storage_root_id: StorageRootId,
-) -> Result<Option<StorageRootId>, VoomError> {
+) -> Result<StorageRootId, VoomError> {
     destination_root(
         cp,
         media_dispatch::DestinationRole::Staging,
@@ -363,6 +385,10 @@ async fn staging_destination(
 }
 
 /// Audio synth/transcode/extract envelope from the planner audio block.
+///
+/// # Errors
+/// When the audio planning block, snapshot, or staging destination does not
+/// resolve — with the bundled adapters removed there is no fallback contract.
 async fn audio_envelope(
     cp: &ControlPlane,
     branch_id: &str,
@@ -371,14 +397,15 @@ async fn audio_envelope(
     operation_payload: &Value,
     facts: SourceFacts,
 ) -> Result<Option<Value>, VoomError> {
-    let Ok(payload) = voom_plan::planner::audio::AudioOperationPayload::try_from_execution_value(
+    let payload = voom_plan::planner::audio::AudioOperationPayload::try_from_execution_value(
         operation_payload,
-    ) else {
-        return Ok(None);
-    };
-    let Some(snapshot) = snapshot_for(cp, file_version_id, operation_payload).await? else {
-        return Ok(None);
-    };
+    )
+    .map_err(|error| {
+        VoomError::Config(format!(
+            "media dispatch envelope: audio planning block does not decode: {error}"
+        ))
+    })?;
+    let snapshot = snapshot_for(cp, file_version_id, operation_payload).await?;
     let declared_root = match source_ref {
         media_dispatch::MediaDispatchSource::Location {
             storage_root_id, ..
@@ -387,24 +414,27 @@ async fn audio_envelope(
             storage_root_id, ..
         } => *storage_root_id,
     };
-    let Some(destination) = staging_destination(cp, declared_root).await? else {
-        return Ok(None);
-    };
+    let destination = staging_destination(cp, declared_root).await?;
     match payload.operation_type {
         AudioOperationType::ExtractAudio => {
-            let Ok(plan) = crate::audio::selection::extract_selection_from_payload_and_snapshot(
+            let plan = crate::audio::selection::extract_selection_from_payload_and_snapshot(
                 operation_payload,
                 &snapshot,
-            ) else {
-                return Ok(None);
-            };
+            )
+            .map_err(|error| {
+                VoomError::Config(format!(
+                    "media dispatch envelope: extract-audio selection does not derive: {error}"
+                ))
+            })?;
             let mut extractions = Vec::with_capacity(plan.outputs.len());
             for output in &plan.outputs {
-                let Some(output_id) = output.output_id.clone() else {
-                    // Legacy single-output extractions carry no stable output
-                    // id; they stay on the pre-envelope contract.
-                    return Ok(None);
-                };
+                let output_id = output.output_id.clone().ok_or_else(|| {
+                    VoomError::Config(
+                        "media dispatch envelope: extract-audio output carries no stable \
+                         output id"
+                            .to_owned(),
+                    )
+                })?;
                 extractions.push(media_dispatch::MediaExtractionRequest {
                     output_id,
                     selection: output.stream.clone(),
@@ -420,12 +450,15 @@ async fn audio_envelope(
             ))
         }
         AudioOperationType::TranscodeAudio | AudioOperationType::SynthesizeAudio => {
-            let Ok(plan) = crate::audio::selection::transcode_selection_from_payload_and_snapshot(
+            let plan = crate::audio::selection::transcode_selection_from_payload_and_snapshot(
                 operation_payload,
                 &snapshot,
-            ) else {
-                return Ok(None);
-            };
+            )
+            .map_err(|error| {
+                VoomError::Config(format!(
+                    "media dispatch envelope: transcode-audio selection does not derive: {error}"
+                ))
+            })?;
             let settings = voom_worker_protocol::TranscodeAudioSettings {
                 target_codec: plan.target_codec.clone(),
                 profile: "default".to_owned(),
@@ -486,21 +519,21 @@ pub(crate) fn observed_output_facts(ticket_result: &Value) -> Option<SourceFacts
 /// producing operation (transform->backup): the parent's recorded staged
 /// output is what gets copied, onto the backup root its staging root names.
 ///
-/// `Ok(None)` keeps the child on the legacy contract — the parent had no
-/// envelope, or no backup root is configured.
+/// # Errors
+/// When the parent rendered no envelope or no backup root is configured — the
+/// bundled backup path that used to absorb both cases is gone.
 pub(crate) async fn backup_child_envelope(
     cp: &ControlPlane,
     branch_id: &str,
     parent_rendered_payload: &Value,
 ) -> Result<Option<Value>, VoomError> {
-    let Some((root, locator)) = parent_envelope_output(parent_rendered_payload) else {
-        return Ok(None);
-    };
-    let Some(destination) =
-        destination_root(cp, media_dispatch::DestinationRole::Backup, root).await?
-    else {
-        return Ok(None);
-    };
+    let (root, locator) = parent_envelope_output(parent_rendered_payload).ok_or_else(|| {
+        VoomError::Config(format!(
+            "media dispatch envelope: parent of backup child {branch_id} recorded no staged \
+             output"
+        ))
+    })?;
+    let destination = destination_root(cp, media_dispatch::DestinationRole::Backup, root).await?;
     let source = media_dispatch::MediaDispatchSource::RecordedStagedOutput {
         storage_root_id: root,
         provider_relative_locator: locator,
@@ -517,21 +550,29 @@ pub(crate) async fn backup_child_envelope(
 /// recorded staged output and the expected facts are what the agent observed
 /// writing there.
 ///
-/// `Ok(None)` keeps the child on the legacy contract when the parent has no
-/// envelope or released no observed output facts (e.g. it ran bundled).
+/// # Errors
+/// When the parent released no result or no observed output facts: agent
+/// completions always carry `agent_observed` evidence, so a missing block is a
+/// render error, not a fallback to the removed bundled verify path.
 pub(crate) fn verify_child_envelope(
     parent_rendered_payload: &Value,
     parent_ticket_result: Option<&Value>,
 ) -> Result<Option<Value>, VoomError> {
-    let Some(result) = parent_ticket_result else {
-        return Ok(None);
-    };
-    let Some((root, locator)) = parent_envelope_output(parent_rendered_payload) else {
-        return Ok(None);
-    };
-    let Some(facts) = observed_output_facts(result) else {
-        return Ok(None);
-    };
+    let result = parent_ticket_result.ok_or_else(|| {
+        VoomError::Config(
+            "media dispatch envelope: parent of verify child released no result".to_owned(),
+        )
+    })?;
+    let (root, locator) = parent_envelope_output(parent_rendered_payload).ok_or_else(|| {
+        VoomError::Config(
+            "media dispatch envelope: parent of verify child recorded no staged output".to_owned(),
+        )
+    })?;
+    let facts = observed_output_facts(result).ok_or_else(|| {
+        VoomError::Config(
+            "media dispatch envelope: parent of verify child observed no output facts".to_owned(),
+        )
+    })?;
     let source = media_dispatch::MediaDispatchSource::RecordedStagedOutput {
         storage_root_id: root,
         provider_relative_locator: locator,
@@ -543,14 +584,8 @@ pub(crate) fn verify_child_envelope(
 }
 
 /// Render the `media_dispatch` envelope for an **expansion child** ticket.
-///
-/// `branch` carries the child's declared source and scan-recorded facts;
-/// `rendered_payload` is the default payload already rendered for the node.
-/// Only children whose inputs are fully derivable flip: probe children read
-/// their facts off the scan result, transcode-video children reuse the
-/// default profile the payload already pins, remux children resolve their
-/// selection against the file version's latest recorded snapshot. Everything
-/// not yet derivable keeps the pre-envelope contract until its flow migrates.
+/// An unset planning input is a render error; with the bundled media adapters
+/// removed there is no legacy contract for an expansion child to fall back to.
 pub(crate) async fn expansion_envelope(
     cp: &ControlPlane,
     operation: OperationKind,
@@ -559,25 +594,30 @@ pub(crate) async fn expansion_envelope(
 ) -> Result<Option<Value>, VoomError> {
     use crate::workflow::plan::access_declaration::TicketStorageSource;
 
-    let Some(source_file) = branch.source_file.as_ref() else {
-        return Ok(None);
-    };
+    let source_file = branch.source_file.as_ref().ok_or_else(|| {
+        VoomError::Config(format!(
+            "media dispatch envelope: expansion child {op} carries no scan-recorded facts",
+            op = operation.as_str()
+        ))
+    })?;
     let Some(TicketStorageSource::Location {
         storage_root_id,
         file_location_id,
     }) = branch.storage_source
     else {
         // A whole-root declaration names no bytes; envelopes address one.
-        return Ok(None);
+        return Err(VoomError::Config(format!(
+            "media dispatch envelope: expansion child {op} declares no rooted location",
+            op = operation.as_str()
+        )));
     };
-    let Some((source_ref, version_id)) =
-        location_source(cp, storage_root_id, file_location_id).await?
-    else {
-        return Ok(None);
-    };
-    let Ok(facts) = SourceFacts::from_source_file(source_file) else {
-        return Ok(None);
-    };
+    let (source_ref, version_id) = location_source(cp, storage_root_id, file_location_id).await?;
+    let facts = SourceFacts::from_source_file(source_file).map_err(|error| {
+        VoomError::Config(format!(
+            "media dispatch envelope: expansion child {op} facts do not decode: {error}",
+            op = operation.as_str()
+        ))
+    })?;
 
     match operation {
         OperationKind::ProbeFile => binding_result(media_dispatch::render_media_dispatch_probe(
@@ -585,17 +625,18 @@ pub(crate) async fn expansion_envelope(
             facts.file(),
         )),
         OperationKind::TranscodeVideo => {
-            let Ok(profile) = serde_json::from_value::<TranscodeVideoProfile>(
+            let profile = serde_json::from_value::<TranscodeVideoProfile>(
                 rendered_payload
                     .get("profile")
                     .cloned()
                     .unwrap_or(Value::Null),
-            ) else {
-                return Ok(None);
-            };
-            let Some(destination) = staging_destination(cp, storage_root_id).await? else {
-                return Ok(None);
-            };
+            )
+            .map_err(|error| {
+                VoomError::Config(format!(
+                    "media dispatch envelope: transcode-video profile does not resolve: {error}"
+                ))
+            })?;
+            let destination = staging_destination(cp, storage_root_id).await?;
             binding_result(media_dispatch::render_media_dispatch_transcode_video(
                 &branch.branch_id,
                 &source_ref,
@@ -607,15 +648,19 @@ pub(crate) async fn expansion_envelope(
             ))
         }
         OperationKind::Remux => {
-            let Some(snapshot) = cp
+            let snapshot = cp
                 .identity
                 .list_media_snapshots_by_version(version_id)
                 .await?
                 .into_iter()
                 .next_back()
-            else {
-                return Ok(None);
-            };
+                .ok_or_else(|| {
+                    VoomError::Config(format!(
+                        "media dispatch envelope: remux child of file_version {} has no \
+                         recorded snapshot",
+                        version_id.0
+                    ))
+                })?;
             let mut operation_payload = rendered_payload.clone();
             if let Some(object) = operation_payload.as_object_mut() {
                 // The default child payload carries no planner tag and pins no
@@ -626,15 +671,16 @@ pub(crate) async fn expansion_envelope(
                     Value::from(snapshot.id.0),
                 );
             }
-            let Ok(selection) = crate::remux::selection::selection_from_payload_and_snapshot(
+            let selection = crate::remux::selection::selection_from_payload_and_snapshot(
                 &operation_payload,
                 &snapshot,
-            ) else {
-                return Ok(None);
-            };
-            let Some(destination) = staging_destination(cp, storage_root_id).await? else {
-                return Ok(None);
-            };
+            )
+            .map_err(|error| {
+                VoomError::Config(format!(
+                    "media dispatch envelope: remux selection does not derive: {error}"
+                ))
+            })?;
+            let destination = staging_destination(cp, storage_root_id).await?;
             binding_result(media_dispatch::render_media_dispatch_remux(
                 &branch.branch_id,
                 &source_ref,
@@ -643,7 +689,14 @@ pub(crate) async fn expansion_envelope(
                 destination,
             ))
         }
-        _ => Ok(None),
+        // A policy verification targets a live library location, but the
+        // envelope family reserves verify-artifact for recorded staged
+        // outputs; retargeting the policy surface stays with #528/#424.
+        OperationKind::VerifyArtifact => Ok(None),
+        other => Err(VoomError::Config(format!(
+            "media dispatch envelope: expansion child operation {} has no envelope arm",
+            other.as_str()
+        ))),
     }
 }
 

@@ -58,7 +58,6 @@ use voom_store::{SchemaState, connect, probe_schema};
 
 pub mod artifact;
 pub mod audio;
-mod backup;
 mod cases;
 mod health;
 mod local_worker;
