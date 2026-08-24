@@ -3167,6 +3167,7 @@ dependencies = [
  "voom-policy",
  "voom-store",
  "voom-test-support",
+ "voom-worker-protocol",
 ]
 
 [[package]]
