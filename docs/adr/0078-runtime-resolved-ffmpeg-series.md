@@ -108,9 +108,16 @@ at or above the same floor.
   upper bound, and its normalizer accepts BtbN's `n8.1` form. No test in either tree exercises
   a non-7.x ffmpeg, and #493 no longer applies, so the residual is an untested remainder
   rather than a known break. Dispatching the workflow on this branch **now**, while #498 is
-  still open, is what keeps that remainder from compounding: it establishes what ffmpeg 8 does
-  to the suite separately from what #498 does, so the first Monday after #498 lands carries one
-  new variable instead of two.
+  still open, characterises most of that remainder ahead of merge — the install step, Chaos
+  Librarian's capability gate, and the eleven tests that pass today — so those carry one new
+  variable rather than two. **One arm it cannot reach**, and it is the most exposed one:
+  `transcode_required_executes_real_worker_and_commits_hevc_mkv` is the suite's only real
+  ffmpeg *encode* (the single `TranscodeWorkerLaunch` in
+  `crates/voom-cli/tests/chaos_librarian_e2e.rs`), and it is precisely the test #491 masks. For
+  that one test the first Monday after #498 lands is both the first run of #498's fix and the
+  first time ffmpeg 8's encoder meets the suite — libx265 into HEVC/MKV, the arm a major
+  version is likeliest to move. A failure there must not be read as #498 regressing without
+  ruling out ffmpeg 8 first.
 - **The series pin is replaced by a pin on BtbN's filename grammar and on the `latest` tag.**
   That grammar is not stable across BtbN's own history: the autobuild assets `0d0c0ce1` and
   `7212262f` pinned had a different shape

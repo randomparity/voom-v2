@@ -139,6 +139,16 @@ Two consequences for this work, both of which it must state rather than discover
    ffmpeg 7.1; the same 11 passing on 8.1 is the evidence the residual can get before #498
    merges. That comparison, not a green checkmark, is what this design reads.
 
+**What that comparison cannot cover.** The masked test,
+`transcode_required_executes_real_worker_and_commits_hevc_mkv`, is the suite's *only* real
+ffmpeg encode — `TranscodeWorkerLaunch` appears exactly once in
+`crates/voom-cli/tests/chaos_librarian_e2e.rs`, inside it. The other eleven exercise scan,
+probe, policy and plan paths. So the dispatch characterises ffmpeg 8 everywhere except the
+encoder, which is the surface a major version is likeliest to move (libx265 into HEVC/MKV).
+For that one test the first run after #498 lands carries two new variables at once. Anyone
+triaging a transcode failure that Monday must rule out ffmpeg 8 before concluding #498
+regressed.
+
 ## Goal
 
 The `chaos-e2e` ffmpeg install stops naming a version series. It selects a series from what
