@@ -88,6 +88,10 @@ jobs:
             echo "::error::could not evaluate the major version in: $installed_version"
             exit 1
           fi
+          # FFMPEG_MAJOR_FLOOR reaches this arithmetic already validated: the selector
+          # above rejects a non-integer or zero-padded floor with exit 2 before the
+          # download runs. That coupling is why no floor check is repeated here --
+          # do not add one, and do not reorder this after removing that call.
           if ((installed_major < FFMPEG_MAJOR_FLOOR)); then
             echo "::error::expected ffmpeg >= $FFMPEG_MAJOR_FLOOR, got: $installed_version"
             exit 1

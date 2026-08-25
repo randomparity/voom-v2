@@ -191,7 +191,7 @@ Candidate assets must match this exact ERE, as a whole line — **the dots are e
 that is load-bearing, not cosmetic**:
 
 ```text
-^ffmpeg-n([0-9]+)\.([0-9]+)-latest-linux64-gpl-([0-9]+)\.([0-9]+)\.tar\.xz$
+^ffmpeg-n([[:digit:]]+)\.([[:digit:]]+)-latest-linux64-gpl-([[:digit:]]+)\.([[:digit:]]+)\.tar\.xz$
 ```
 
 Unescaped, `.` matches any character including `/`, so
@@ -336,7 +336,7 @@ would put them exactly where the "keep it inline" argument says logic must not g
 
 Reserving `2` for caller error matches `scripts/check-adr-index.sh`.
 
-**Input grammar.** Exactly one argument, matching `^[0-9]+$`. Anything else exits `2`: no
+**Input grammar.** Exactly one argument, matching `^[[:digit:]]+$`. Anything else exits `2`: no
 argument, the empty string, two arguments, `abc`, `-1`, and — deliberately — `7.0`. The
 project states its floor as "7.0+", so a caller passing `7.0` verbatim is plausible; rejecting
 it loudly beats truncating it silently, and the workflow passes `7` literally.
@@ -381,7 +381,9 @@ neither more nor less trusted.
 - *Asset names* — the whole-line-anchored pattern is the load-bearing control. Admitting only
   `ffmpeg-n`, digits, `.`, `-latest-linux64-gpl-` and `.tar.xz` means a hostile name cannot
   carry a path separator, a shell metacharacter, or a URL that leaves the release; only
-  `[0-9]` reaches arithmetic, base-10 forced. The matched name is used as a single URL path
+  ASCII digits reach arithmetic, base-10 forced — the class is `[[:digit:]]`, not the range
+  `[0-9]`, which glibc collates by locale and which therefore admits non-ASCII digits under a
+  UTF-8 locale. The matched name is used as a single URL path
   segment.
 - *Asset contents* — the floor is asserted against the extracted binary's own `-version`
   output, over TLS via `curl -fL`. Extraction stays `tar -xJf` into a job-scoped

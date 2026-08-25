@@ -129,6 +129,17 @@ at or above the same floor.
   test #491 masks. For that one test the first Monday after #498 lands carries both new
   variables, so a failure there must not be read as #498 regressing without ruling out
   ffmpeg 8 first.
+- **The dispatch run happened, and it did not go as this record predicted.** Run 32883241965
+  on the implementing branch: the install step, `Verify external tools` and Chaos Librarian's
+  capability gate all passed under `ffmpeg version n8.1.2-44-g7c533d0f86`, so the acquisition
+  path is proven end to end. The suite, however, is **9 passed / 3 failed**, not the
+  11-passed/1-failed baseline this record expected — and #491's recorded symptom does not
+  appear at all. All three failures are policy-preflight and readiness outcomes raised before
+  any media work ("requires an unbound ffmpeg worker on owner node …"), which points at
+  `main`'s own owner-node envelope rework rather than at ffmpeg 8. No chaos-e2e run had
+  exercised those commits, because the 404 masked every run since 2026-08-24. Tracked as #540.
+  This is the "do nothing" bullet's argument landing exactly as written: the 404 was hiding
+  the real state, and every Monday issue named the wrong cause.
 - **The series pin is replaced by a pin on BtbN's filename grammar and on the `latest` tag.**
   That grammar is not stable across BtbN's own history: the autobuild assets `0d0c0ce1` and
   `7212262f` pinned had a different shape
@@ -149,8 +160,11 @@ at or above the same floor.
   public — the job token authenticates the request for rate-limit purposes but grants no
   access there, so no permission change applies and `contents: read` is unchanged.
 - Asset names become a parsed untrusted input. The whole-line-anchored pattern is the control;
-  it admits no shell metacharacter, no path separator, and no digits into arithmetic beyond
-  `[0-9]`.
+  it admits no shell metacharacter and no path separator. Its digit class is `[[:digit:]]`, not
+  the range `[0-9]`: glibc collates a bracket range by locale, so under a UTF-8 locale a range
+  admits Arabic-Indic and fullwidth digits, which then fail in `10#`. The script also exports
+  `LC_ALL=C`; either construct suffices, and the selftest pins the class independently of the
+  export.
 - **The blast radius of a bad build is a failed test.** ffmpeg here is a test-time tool inside
   one non-gating weekly job; it is not linked into, nor shipped with, any voom binary, and the
   job holds no secret beyond its `contents: read` token.

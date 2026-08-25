@@ -242,15 +242,30 @@ expect_ok "zero-padded series" 7 "ffmpeg-n08.08-latest-linux64-gpl-08.08.tar.xz"
 	ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
 EOF
 
-# Non-ASCII digits must not be admitted. A bracket RANGE like [0-9] is
-# locale-collated in glibc, so under a UTF-8 locale it matches Arabic-Indic and
-# fullwidth digits, which then blow up in 10#. This case reddens against a range
-# and passes against [[:digit:]].
+# Non-ASCII digits must not be admitted. Two independent constructs stop them:
+# the [[:digit:]] class, and the script's own `export LC_ALL=C`. This end-to-end
+# case pins the PAIR -- either alone still passes it, so it does not tell you
+# which is load-bearing. The pattern case below pins the class on its own.
 expect_ok "non-ascii digits rejected" 7 "ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz" <<-'EOF'
 	ffmpeg-n٨.١-latest-linux64-gpl-٨.١.tar.xz
 	ffmpeg-n８.１-latest-linux64-gpl-８.１.tar.xz
 	ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
 EOF
+
+# Pin the digit class independently of the locale pin: read the real `pattern=`
+# line out of the script -- so it cannot drift from what ships -- and evaluate it
+# in a subshell forced to a UTF-8 locale, where a bracket range would match.
+# glibc collates [0-9] by locale; [[:digit:]] is ASCII-only in every locale.
+pattern_line=$(grep -m1 '^pattern=' "$select_script")
+if [[ -z $pattern_line ]]; then
+	echo "select-ffmpeg-asset-selftest: pattern class: no pattern= line in $select_script" >&2
+	failures=$((failures + 1))
+elif LC_ALL=en_US.UTF-8 bash -c "
+	$pattern_line
+	[[ \$1 =~ \$pattern ]]" _ "ffmpeg-n٨.١-latest-linux64-gpl-٨.١.tar.xz" 2>/dev/null; then
+	echo "select-ffmpeg-asset-selftest: pattern class: pattern admits non-ASCII digits under a UTF-8 locale" >&2
+	failures=$((failures + 1))
+fi
 
 # A read that yielded nothing is not a retired catalogue. The here-string carries
 # real spaces; <<- would strip tabs and collapse a tab-indented line to empty.
