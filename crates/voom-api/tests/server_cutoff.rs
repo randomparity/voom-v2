@@ -127,12 +127,9 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
     Ok(())
 }
 
-/// One connection's stream: a request pipe read by the server, a response pipe written by it.
-type ConnectionIo = Join<ReadHalf<SimplexStream>, WriteHalf<SimplexStream>>;
-
 fn spawn_one_connection(
     router: axum::Router,
-    stream: ConnectionIo,
+    stream: Join<ReadHalf<SimplexStream>, WriteHalf<SimplexStream>>,
 ) -> tokio::task::JoinHandle<Result<Result<(), hyper::Error>, tokio::time::error::Elapsed>> {
     tokio::spawn(async move {
         let bounded = DeadlineStream::new(stream, Duration::from_millis(250));
