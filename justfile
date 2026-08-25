@@ -26,6 +26,7 @@ ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-s
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
     check-adr-index check-adr-index-selftest select-ffmpeg-asset-selftest \
+    run-constrained-selftest \
     test doc deny audit
     @echo "==> All CI checks passed"
 
@@ -114,6 +115,51 @@ check-adr-index-selftest:
 # Self-test for the ffmpeg asset selector (keeps its pattern, floor and ordering honest)
 select-ffmpeg-asset-selftest:
     ./scripts/select-ffmpeg-asset-selftest.sh
+
+# Self-test for the constrained-run wrapper (argument handling only; runs nothing)
+run-constrained-selftest:
+    ./scripts/run-constrained-selftest.sh
+
+# Races in this suite are found by repetition, not by a single run: issue #546
+# reproduces at roughly 1 run in 8 on idle hardware, so "it passed locally"
+# after one run means very little.
+#
+#   just test-repeat voom-node-agent delayed_acquire_replay_never_dispatches
+#   just test-repeat voom-control-plane chaos_ 50
+
+# Repeat one filtered test up to COUNT times, stopping on the first failure
+test-repeat PKG FILTER COUNT='25':
+    #!/usr/bin/env bash
+    set -uo pipefail
+    for i in $(seq 1 {{ COUNT }}); do
+        if ! cargo test -p {{ PKG }} {{ FILTER }} >/dev/null 2>&1; then
+            echo "FAILED on run $i of {{ COUNT }}; rerunning it with output:"
+            cargo test -p {{ PKG }} {{ FILTER }}
+            exit 1
+        fi
+        printf '\rrun %s/%s ok' "$i" "{{ COUNT }}"
+    done
+    echo $'\nno failure in {{ COUNT }} runs'
+
+# The two ends of the parallelism range CI already runs, named so either can be
+# reproduced on purpose. Each end has found races the other missed, so try both
+# before concluding a test is not flaky.
+
+# Run the suite serialized, as the coverage job does
+test-serial *ARGS:
+    cargo test --workspace --all-features {{ ARGS }} -- --test-threads=1
+
+# Run the suite at this host's default parallelism, as the test job does
+test-parallel *ARGS:
+    cargo test --workspace --all-features {{ ARGS }}
+
+# Reach for `test-repeat` first: constraints did not separate the cells for the
+# one race measured so far, and this is for what repetition cannot reach
+# (memory pressure, slow storage). See `scripts/run-constrained.sh --help`.
+
+# Run the suite under runner-like limits, 4 cpus and 16G (Linux cgroup v2 only)
+test-constrained *ARGS:
+    ./scripts/run-constrained.sh -- cargo test --workspace --all-features {{ ARGS }}
 
 # Run the CLI binary
 run *ARGS:

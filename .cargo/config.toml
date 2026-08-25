@@ -1,0 +1,20 @@
+# Pin the test temp root to real storage inside the repo.
+#
+# `tempfile` is used directly in dozens of test files and resolves `TMPDIR`,
+# so without this every SQLite test inherits whatever `/tmp` happens to be:
+# tmpfs on Fedora and Ubuntu 24.04+, a real disk on CI runners and macOS.
+# `fsync` is nearly free on tmpfs and costs milliseconds on a disk, and in this
+# suite fsync duration is how long a SQLite write lock is held -- so the host's
+# `/tmp` silently changes the timing the tests are exercising.
+#
+# `force = true` because the point is uniformity: macOS sets `TMPDIR` from
+# launchd and some Linux distributions set it too, and an inherited value would
+# quietly reintroduce the divergence this removes.
+#
+# `.test-tmp/` is kept alive by a tracked self-ignoring `.gitignore`, not created
+# on demand: `tempfile` fails outright when `TMPDIR` does not exist, so a fresh
+# clone running bare `cargo test` has to find the directory already there.
+#
+# See docs/adr/0079-deterministic-test-temp-root.md.
+[env]
+TMPDIR = { value = ".test-tmp", relative = true, force = true }

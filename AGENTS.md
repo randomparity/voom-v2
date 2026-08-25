@@ -262,4 +262,25 @@ control *domain* time through the injected `Clock` (`ManualClock`).
 one test file references `SqlitePool`/`ControlPlane` and also calls
 `tokio::time::pause`/`advance`. See `docs/adr/0012-paused-time-db-pool-guard.md`.
 
+**Tests run on a pinned temp root, not the host's `/tmp`.**
+`.cargo/config.toml` forces `TMPDIR` to `.test-tmp/` in the workspace so every
+host puts `SQLite` test databases on real storage. Without it a workstation with
+a tmpfs `/tmp` (the Fedora and Ubuntu 24.04+ default) gets a nearly free
+`fsync` while CI and macOS pay milliseconds, and `fsync` duration is how long a
+`SQLite` write lock is held. `temp_databases_land_on_the_pinned_repo_local_root`
+fails if the pin stops working. See
+`docs/adr/0079-deterministic-test-temp-root.md`.
+
+**A single green run does not mean a test is not flaky.** The races in this
+suite are found by repetition and by changing parallelism, not by one run:
+
+- `just test-repeat PKG FILTER [COUNT]` — loop one test, stop on first failure.
+- `just test-serial` / `just test-parallel` — the two ends CI already runs (the
+  `coverage` job serializes, the `test` job does not). Each end has found races
+  the other missed.
+- `just test-constrained` — 4 cpus and a 16G ceiling via cgroup v2, for what
+  repetition cannot reach (memory pressure, slow storage). Linux only, and it
+  is the last thing to reach for, not the first: constraint knobs did not
+  separate the cells for the one race measured so far.
+
 `just coverage` produces `lcov.info` consumed by SonarCloud.
