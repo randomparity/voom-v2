@@ -1579,6 +1579,42 @@ async fn expire_due_emits_paired_events_requeued() {
     assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 0);
 }
 
+/// `expire_due` scans overdue leases and then updates them plus their tickets,
+/// so its transaction must take the write lock at `BEGIN`. Under a deferred
+/// `BEGIN` the first UPDATE asks `SQLite` to upgrade a read lock, which is
+/// refused with `SQLITE_BUSY` *without* consulting `busy_timeout` — the flake
+/// behind `voom-node-agent`'s `delayed_acquire_replay_never_dispatches`, whose
+/// production twin is `remote_recover`.
+#[tokio::test]
+async fn expire_due_waits_out_a_concurrent_writer() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
+    let _lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(30),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let competing_writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+    let release_writer = async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        commit_tx(competing_writer).await.unwrap();
+    };
+
+    let (expired, ()) = tokio::join!(cp.expire_due(T0 + TDuration::seconds(60)), release_writer);
+
+    let report = expired.unwrap_or_else(|error| {
+        panic!("expire_due must wait out the writer, not fail with SQLITE_BUSY: {error:?}")
+    });
+    assert_eq!(report.requeued_tickets, vec![t.id]);
+    assert_eq!(count(&cp, EventKind::LeaseExpired).await, 1);
+}
+
 #[tokio::test]
 async fn expire_due_emits_paired_events_terminal() {
     let (cp, _tmp) = cp().await;
