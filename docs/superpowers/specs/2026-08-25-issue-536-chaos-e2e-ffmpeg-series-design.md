@@ -560,7 +560,16 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–13):
     Any **additional** test failure under the newer ffmpeg is likewise non-blocking — it is
     the wanted notification the requirement describes — but it is filed as a new issue before
     merge. The run's URL and per-test outcome go in the PR.
-21. #499 is closed as a duplicate of #536 — same 404, same cause. #493 is closed as stale
+21. **#536 itself** is closed with a comment that splits what shipped from what did not: the
+    404 it was filed against is fixed, and the scheduled run will still fail at
+    `Run Chaos Librarian E2E` for #491 until PR #498 lands. That split matters — #536's title
+    is "Scheduled chaos-e2e run failed", and a bare `Closes #536` would tell the tracker the
+    weekly job is fixed when it will fail again the following Monday for a different, still-open
+    reason. The same argument that keeps #500 open applies here, and is why the closing comment
+    is required rather than optional. The PR body carries explicit `Closes` lines rather than
+    relying on `gh pr create --fill`, matching this repository's convention (#537 `Closes #424`,
+    #535 `Closes #423`, #527 `Closes #524`).
+    #499 is closed as a duplicate of #536 — same 404, same cause. #493 is closed as stale
     with the `0f146f4b` evidence in its closing comment. **#500 stays open**, narrowed: this
     design removes the dependency on a *predicted asset name*, not the per-run dependency on
     BtbN publishing at all, which is what #500 actually asks for. Its three options are priced
