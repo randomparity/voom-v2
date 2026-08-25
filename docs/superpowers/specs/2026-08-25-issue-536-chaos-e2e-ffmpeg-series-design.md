@@ -31,13 +31,19 @@ ffmpeg-n9.0-latest-linux64-gpl-shared-9.0.tar.xz
 BtbN rotates which release series it builds. The `n7.1` series was retired, and the
 pinned URL went with it.
 
-### This is the third recurrence
+### This is the second failure of the same step
 
-| Commit | Approach | How it broke |
+| Commit | Approach | Outcome |
 |---|---|---|
-| `0d0c0ce1` | Pin a dated `autobuild-*` tag + SHA-256 | BtbN garbage-collects dated tags; 404 |
-| `7212262f` | Re-pin to a newer dated tag + SHA-256 | Same garbage collection; 404 again |
-| `359ba425` | Rolling `latest` asset, pinned to series `n7.1` | BtbN retired the `n7.1` series; 404 |
+| `0d0c0ce1` | Pin a dated `autobuild-*` tag + SHA-256 | Green at merge; 404 once BtbN pruned the tag (run 27394271913, 2026-06-12) |
+| `7212262f` | Re-pin to a newer dated tag + SHA-256 | Green (run 27394705387); superseded 17 minutes later by `359ba425`, never pruned |
+| `359ba425` | Rolling `latest` asset, pinned to series `n7.1` | Green for two months; 404 once BtbN retired `n7.1` (run 32696142015, 2026-08-24) |
+
+Two failures, not three — `7212262f`'s pin was replaced pre-emptively rather than breaking.
+The pattern that matters is not the count but the shape: **every pin was green when it
+merged and decayed afterwards.** No pre-merge gate can catch that, because at merge time
+nothing is wrong. A fix cannot promise to make the decay detectable earlier; what it can do
+is stop the job from depending on an artifact name the repository has to predict.
 
 `359ba425`'s commit message states its goal as "ending the recurring prune breakage." It
 removed the tag pin and the digest pin but left a third pin in place — the **version
@@ -54,6 +60,27 @@ The requirement is a **floor**, not an exact version. `359ba425` encoded it as a
 against `7.1`, which is stricter than the requirement and is exactly what BtbN's rotation
 invalidates. The `ubuntu-latest` apt package cannot satisfy the floor — the issue-73 design
 spec records it resolving to 6.1.1 — so `apt install ffmpeg` remains unavailable to this job.
+
+### A floor is not a compatibility statement
+
+The documented "7.0+" says what is too old. It says nothing about whether the suite works on
+an arbitrarily newer major, and nothing in the tree supplies that half:
+`src/chaos_librarian/materializer/content/source_capabilities.py` gates only on
+`ffmpeg_available` — there is no version parse, no upper bound, and no test exercising a
+non-7.x ffmpeg.
+
+That matters immediately rather than hypothetically. BtbN's lowest qualifying series today is
+`n8.1`, so the **first run under this design moves the suite from ffmpeg 7.1 to 8.1** — a
+major bump the suite has never been run against. If ffmpeg 8 changed something the
+materializer depends on, the break lands as a red weekly job that reads like a product
+regression; the 2026-08-10 and 2026-08-17 scheduled runs already failed inside
+`Run Chaos Librarian E2E` for unrelated reasons, so that confusion is live.
+
+This design does not assume the bump is safe. A `workflow_dispatch` run of `chaos-e2e` on the
+implementing branch is what settles it, and its result is recorded in ADR 0078's Context
+before the record is accepted. If ffmpeg 8 does break the suite, that is a finding about the
+suite's real compatibility range — and the response is to raise the floor's upper half
+deliberately, not to re-pin a series by accident.
 
 ## Goal
 
@@ -74,7 +101,13 @@ message when nothing published meets the floor.
 
 ### Selection rule
 
-Choose the **lowest** published release series whose major version meets the floor.
+Choose the **lowest** published release series whose major version meets the floor, comparing
+series as a numeric `(major, minor)` pair.
+
+Numeric, not lexical. `sort` over asset names puts `n10.0` below `n8.1`, so a lexical
+comparison would silently invert the rule the first time ffmpeg reaches major 10 — returning
+the *highest* series, which is the outcome this rule exists to avoid. The selftest carries a
+double-digit-major case so the ordering is pinned by a test rather than by a reading.
 
 Lowest, not highest, for two reasons. It is the most conservative version that satisfies the
 stated requirement, so the suite does not silently start exercising a brand-new ffmpeg major
@@ -128,7 +161,6 @@ reviewer looks for it, and keeps the script free of anything that needs a networ
 
 ```yaml
       - name: Install ffmpeg
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           # Chaos Librarian documents ffmpeg/ffprobe 7.0+ as its floor
@@ -138,10 +170,13 @@ reviewer looks for it, and keeps the script free of anything that needs a networ
           FFMPEG_MAJOR_FLOOR: "7"
           FFMPEG_RELEASE_BASE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
         run: |
-          asset=$(
-            gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name' \
-              | ./scripts/select-ffmpeg-asset.sh "$FFMPEG_MAJOR_FLOOR"
-          )
+          assets="$RUNNER_TEMP/ffmpeg-assets.txt"
+          gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name' >"$assets"
+          if [ ! -s "$assets" ]; then
+            echo "::error::BtbN latest release listed no assets; this is a release-read failure, not a retired series"
+            exit 1
+          fi
+          asset=$(./scripts/select-ffmpeg-asset.sh "$FFMPEG_MAJOR_FLOOR" <"$assets")
           echo "Selected asset: $asset"
           archive="$RUNNER_TEMP/ffmpeg.tar.xz"
           install_dir="$RUNNER_TEMP/ffmpeg"
@@ -162,18 +197,23 @@ reviewer looks for it, and keeps the script free of anything that needs a networ
 The step is renamed from `Install ffmpeg 7` to `Install ffmpeg`, because the version is no
 longer a property of the step.
 
-Two shell details are deliberate:
+Three details are deliberate:
 
-- **`shell: bash`**, which GitHub runs as `bash --noprofile --norc -eo pipefail {0}`. The
-  default `run:` shell is `bash -e` *without* `pipefail`, under which a failing `gh api`
-  would hand the selection script empty input and surface as "no qualifying asset" —
-  a true failure reported with the wrong cause. `pipefail` makes `gh`'s own error the
-  failure. `shell: bash` is scoped to this one step; no other step changes.
-- **No `| head -n1`** on `ffmpeg -version`. Under `pipefail`, closing the pipe after one
-  line can reap `ffmpeg` with `SIGPIPE` (exit 141) and fail the step depending on how much
-  of ffmpeg's output fits in the pipe buffer — a flake that would appear only sometimes.
-  Bash's `${var%%$'\n'*}` takes the first line with no pipe at all. The major version is
-  extracted with `[[ =~ ]]` for the same reason.
+- **The release read goes to a file, not down a pipe into the script.** GitHub's default
+  `run:` shell is `bash -e` *without* `pipefail`, so in a pipeline a failing `gh api` would
+  not abort — it would hand the script empty input, which the script reports as "no
+  qualifying asset": a true failure with the wrong cause named. Writing to a file lets `-e`
+  catch the `gh` failure directly and lets the emptiness check speak for itself. It also
+  leaves the catalogue on disk in the runner for anyone debugging the next BtbN change. No
+  pipeline remains in the step, so no `shell:` override is needed and none is added.
+- **The empty-asset-list check is separate from selection.** An API outage, a rate limit, a
+  token problem, and a genuine asset rename would otherwise all reach the operator as the
+  same "no qualifying asset" message. Only the rename is a retired-catalogue event; the
+  others are read failures, and they get their own error.
+- **No `| head -n1`** on `ffmpeg -version`. Closing the pipe after one line can reap
+  `ffmpeg` with `SIGPIPE`, which becomes a real failure the moment anything adds `pipefail`
+  — a latent flake for no benefit. Bash's `${var%%$'\n'*}` takes the first line with no pipe
+  at all, and `[[ =~ ]]` extracts the major version for the same reason.
 
 `10#` forces base-10 on the captured digits so a hypothetical `08` series cannot be read as
 an invalid octal literal.
@@ -194,10 +234,20 @@ is therefore the same build; the existing `Verify external tools` step continues
 
 ### Failure behavior
 
-`select-ffmpeg-asset.sh` exits non-zero with a message on stderr when no candidate meets the
-floor, naming the floor and how many candidates it considered. That is the signal that BtbN
-has retired every series the project can use — a real decision for a human (raise the floor's
-upstream, change distributor, vendor a build), not something the workflow should paper over.
+Two failures are kept distinct because they call for different responses.
+
+**No asset names at all** is a release-read failure — an API outage, a rate limit, a token
+problem, a changed response field. The workflow detects it before selection runs and says so.
+Retrying is the response.
+
+**Names, but none qualifying** is what the script reports: BtbN has retired every series the
+project can use. Its message names the floor and how many candidates it considered. This is a
+real decision for a human — raise the floor's upstream, change distributor, vendor a build —
+not something the workflow should paper over.
+
+Collapsing the two would reintroduce the defect this change is about, one layer up: an
+operator handed "no qualifying asset" during a GitHub API incident would go looking at BtbN's
+release page and find nothing wrong.
 
 Exit codes: `2` for a malformed floor argument (caller error), `1` for no qualifying asset
 (environment), `0` on success. This matches `scripts/check-adr-index.sh`, which reserves `2`
@@ -293,14 +343,24 @@ the 7.x pin's stability. The sentence is corrected to describe the runtime resol
 4. Given a list containing `ffmpeg-n10.0-latest-linux64-gpl-10.0.tar.xz` and
    `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz`, it prints the `n9.0` asset — numeric
    comparison, not lexical.
-5. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
-6. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
-7. `just ci` passes.
-8. `docs/operations/chaos-e2e.md` describes what the workflow does.
-9. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
-   (`just check-adr-index` passes).
+5. Given only `master` and `-shared-` assets, it exits non-zero — neither family is a
+   candidate.
+6. Given a malformed floor argument, it exits `2`, distinct from the `1` in criteria 3 and 5.
+7. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
+8. The workflow reports a release-read failure distinctly from a retired catalogue: with an
+   empty asset list it errors naming the read, not the floor.
+9. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
+10. `just ci` passes.
+11. `docs/operations/chaos-e2e.md` describes what the workflow does.
+12. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
+    (`just check-adr-index` passes).
+13. A `workflow_dispatch` run of `chaos-e2e` on the branch completes green, proving the
+    resolved `n8.1` asset downloads, extracts, satisfies the floor, **and that the Chaos
+    Librarian suite passes on ffmpeg 8**. Its run URL and outcome are recorded in ADR 0078's
+    Context.
 
-Criteria 2–4 are the selftest's cases, so they are checked by criterion 5 on every commit.
+Criteria 2–6 are the selftest's cases, so they are checked by criterion 7 on every commit.
+Criterion 13 is the only one no local guardrail can reach.
 
 ## Verification
 
@@ -311,7 +371,8 @@ Criteria 2–4 are the selftest's cases, so they are checked by criterion 5 on e
 - `shellcheck scripts/select-ffmpeg-asset.sh scripts/select-ffmpeg-asset-selftest.sh`
 - `just ci`
 - Manual `workflow_dispatch` of `chaos-e2e` on the branch. This is the only end-to-end proof
-  that the resolved asset downloads, extracts, and satisfies the floor, because no local
+  that the resolved asset downloads, extracts, satisfies the floor, **and that the suite
+  passes on ffmpeg 8** — the major bump this design's first selection causes. No local
   guardrail contacts BtbN.
 
 ## Related
