@@ -469,31 +469,48 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–13):
 6. Given only `master` and `-shared-` assets, exit `1`. Neither family is a candidate, and
    neither is excluded by a rule the script implements — the pattern admits neither, anchored
    or not.
-7. Given `ffmpeg-n8/1-latest-linux64-gpl-8/1.tar.xz`, exit `1`. This pins the escaped dots:
-   an unescaped `.` matches `/`, and the resulting name would leave the release path when
-   interpolated into the download URL.
+7. Escaped dots, **one case per dot position**, each its own invocation, all exit `1`:
+   `ffmpeg-n8/1-latest-linux64-gpl-8.1.tar.xz`,
+   `ffmpeg-n8.1-latest-linux64-gpl-8/1.tar.xz`,
+   `ffmpeg-n8.1-latest-linux64-gpl-8.1/tar.xz`,
+   `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar/xz`.
+   An unescaped `.` matches `/`, and the resulting name would leave the release path when
+   interpolated into the download URL. Four separate cases because a single fixture carrying
+   `/` at several positions stays green when only one `\.` is unescaped.
 8. Given `evil/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz` and
    `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz.sig`, exit `1`. This pins the whole-line
    anchoring: an unanchored pattern matches *inside* both names, and the selected string
    would carry a leading path segment or a trailing extension into the download URL —
    defeating the control the threat model calls load-bearing. Deleting `^` or `$` from an
    implementation leaves every other criterion byte-identical.
-9. Given `ffmpeg-n8.1-latest-linux64-gpl-9.0.tar.xz` and floor `7`, exit `1`. The ERE admits
-   this name — only the post-match `1==3, 2==4` comparison rejects it. Without this case an
-   implementation that drops captures 3 and 4 entirely passes every other criterion, leaving
-   the one rule whose purpose is to notice an upstream naming drift with no coverage at all.
-10. Given `ffmpeg-n6.1-latest-linux64-gpl-6.1.tar.xz` and
-   `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz` with floor `7`, prints the `n8.1` asset —
-   the lowest **qualifying** series, not the lowest matching one. Given only the `n6.1`
-   name, exit `1`. Without these two inputs the floor comparison is unpinned: deleting
-   `major >= floor` from an implementation leaves every other criterion byte-identical.
+9. Capture agreement, **split by capture**, both at floor `7` and both exit `1`:
+   `ffmpeg-n8.1-latest-linux64-gpl-9.1.tar.xz` (major disagrees, minor agrees) and
+   `ffmpeg-n8.1-latest-linux64-gpl-8.0.tar.xz` (minor disagrees, major agrees). The ERE admits
+   both — only the post-match `1==3, 2==4` comparison rejects them. Split, because a fixture
+   disagreeing on *both* stays green when only one of the two checks is deleted.
+10. The floor, four inputs:
+    - `n6.1` + `n8.1` at floor `7` → prints the `n8.1` asset (the lowest **qualifying**
+      series, not the lowest matching one);
+    - `n6.1` alone at floor `7` → exit `1`;
+    - `n6.1` + `n7.1` + `n8.1` at floor `7` → prints the `n7.1` asset. This pins the
+      **boundary**: with no major equal to the floor, `>=` and `>` are indistinguishable, and
+      "7.0 or later" is exactly what the boundary encodes;
+    - `n9.0` + `n10.0` at floor **`10`** → prints the `n10.0` asset. This pins the floor
+      *argument's plumbing*: every other case passes `7`, so a hardcoded `>= 7` survives them
+      all, and under string collation `"9" > "10"`, so a string compare would let `n9.0` win.
 11. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
-   `7.0`, and two arguments.
-12. Given `ffmpeg-n08.1-latest-linux64-gpl-08.1.tar.xz` and
-    `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz` with floor `7`, prints the `n08.1` asset,
-    exit `0` — captured digits reach arithmetic in base 10, not octal.
-13. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
-    message naming the release read rather than the floor.
+    `7.0`, `08` (zero-padded — rejected rather than read as an invalid octal literal), and
+    two arguments.
+12. Given `ffmpeg-n08.08-latest-linux64-gpl-08.08.tar.xz` and
+    `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz` with floor `7`, prints the `n08.08` asset,
+    exit `0` — captured digits reach arithmetic in base 10, not octal. **Both** major and
+    minor are padded: a major-only pad exercises captures 1 and 3 and leaves the guards on
+    captures 2 and 4 unpinned.
+13. Three stdin cases. Empty stdin → exit `3`. Stdin holding only a newline → exit `3`. Both
+    with a message naming the release read rather than the floor. And a real name wrapped in
+    spaces, `  ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz  ` at floor `7` → prints the
+    unwrapped name, exit `0`: the trim must *preserve* what it keeps, and an all-whitespace
+    fixture pins the two trim expansions only as a pair.
 
 14. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
 15. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
@@ -517,18 +534,28 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–13):
     2026-08-25; a different series is a pass, not a failure, since resolving a different
     series is the design working.
 
-    **Blocking** — this change's own path: the install step, `Verify external tools`, and
-    Chaos Librarian's capability gate all pass.
+    **Blocking** — and only this, because only this is what the change produces:
 
-    **Observational** — everything downstream of that, because it is suite behaviour the
-    charter excludes and #491 / PR #498 own. Expected: the run reaches
-    `Run Chaos Librarian E2E` and produces per-test results, with #491's
+    1. the `Install ffmpeg` step succeeds, logging a resolved asset name and an `Installed:`
+       line whose major meets the floor;
+    2. within `Verify external tools`, the `ffmpeg -version` and `ffprobe -version` commands
+       succeed. Not the whole step: it also runs `uv --version`,
+       `uv python install 3.13`, `uv run --python 3.13 python --version` and
+       `mkvmerge --version`, four commands this change neither touches nor owns;
+    3. Chaos Librarian's capability gate reports the ffmpeg/ffprobe minimum met — direct
+       evidence for this change, since `capabilities.py` enforces `MIN_VERSIONS` with no
+       upper bound.
+
+    **Observational** — everything else, because it is suite behaviour the charter excludes
+    and #491 / PR #498 own. Expected: the run reaches `Run Chaos Librarian E2E` and produces
+    per-test results, with #491's
     `transcode_required_executes_real_worker_and_commits_hevc_mkv` the single failure while
     #498 is unlanded (12 passed once it lands — that test passing is the good outcome, not a
     criterion failure). If the suite instead fails *earlier or differently* — a build failure
-    on the base, `uv sync --locked`, a capability-gate flake — record the run URL and the
-    observed step, attribute it to its owner, and file it. Do **not** block this change on it:
-    an exclusion must not gate work that neither touches nor owns it.
+    on the base, `uv sync --locked`, a capability-gate failure for any reason **other than**
+    the ffmpeg/ffprobe minimum — record the run URL and the observed step, attribute it to its
+    owner, and file it. Do **not** block this change on it: an exclusion must not gate work
+    that neither touches nor owns it.
 
     Any **additional** test failure under the newer ffmpeg is likewise non-blocking — it is
     the wanted notification the requirement describes — but it is filed as a new issue before
@@ -539,10 +566,21 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–13):
     BtbN publishing at all, which is what #500 actually asks for. Its three options are priced
     and declined in ADR 0078, and a comment records that — but closing it would overstate what
     shipped and would drop the only queue entry for a residual the ADR itself names. Any new
-    issue required by criterion 20 is filed.
+    issue required by criterion 20 is filed — the charter's surface covers the tracker for
+    #493/#499/#500 *and* for new issues raised by concerns this work discovers, which is how
+    #538 was already filed.
 
 Criteria 2–13 are the selftest's cases, so criterion 14 checks them on every commit.
-Criteria 20 and 21 are the only ones no local guardrail can reach. Criterion 20 deliberately
+
+**What is and is not machine-checked.** Criteria 2–13, 14, 15, 17 and 19 are gated: `just ci`
+and the `prek` hooks run them on every commit. Criteria 16 (`actionlint`), 18, 20 and 21 are
+**not** — and neither are the `zizmor` and `shellcheck` bullets in Verification below. This
+repository has no actionlint, zizmor or shellcheck gate anywhere: `rg -n
+'actionlint|zizmor|shellcheck' justfile .pre-commit-config.yaml .github/workflows/` returns
+nothing. They are operator-run, and the rewritten YAML — the artifact that has now decayed
+twice — is among the things no commit hook will catch. Worth knowing before trusting the list.
+
+Criterion 20 deliberately
 does not ask for a green run: #491 makes that unobtainable until PR #498 merges, and demanding
 it would either block this fix behind an unrelated one or invite reading a red run as this
 change's failure.

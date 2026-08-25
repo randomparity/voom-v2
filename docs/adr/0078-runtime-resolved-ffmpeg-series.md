@@ -32,16 +32,20 @@ against `7.1`.
 `chaos-e2e` is not a merge gate: `just ci` does not invoke `chaos-e2e-ci`, and the workflow
 triggers only on `schedule` and `workflow_dispatch`.
 
-### Open issues this decision resolves
+### Open issues this decision bears on
 
 - **#499** — the same 404, reported six days before #536. Its proposed fix repoints at daily
   tag `autobuild-2026-08-11-13-11`, which has since been pruned and now 404s itself. Both it
   and #536 are resolved by this decision.
 - **#500** — the durable-fix issue, enumerating caching, mirroring as a release asset, and
-  publishing a container image; all three are dispositioned below. Its holding that "whether
-  to stay on ffmpeg 7.1 at all... needs its own evaluation rather than being folded into a CI
-  fix" is **explicitly overtaken** by the requirement in the Decision: any version at or above
-  7.0 is acceptable, so no separate version decision remains.
+  publishing a container image; all three are dispositioned below, on cost rather than merit.
+  Its holding that "whether to stay on ffmpeg 7.1 at all... needs its own evaluation rather
+  than being folded into a CI fix" is **explicitly overtaken** by the requirement in the
+  Decision: any version at or above 7.0 is acceptable, so no separate version decision remains.
+  **#500 is not closed by this work.** What it asks for is removing the per-run dependency on
+  an upstream URL; this decision removes the dependency on a *predicted asset name* and leaves
+  the job needing BtbN to publish and the API to answer on every run. Closing it would
+  overstate what shipped.
 - **#493** — recorded a 7.1-vs-8.0.1 divergence resting on
   `assert_eq!(scan.json["data"]["summary"]["failed"], 1)`, an assertion on one ffprobe
   version's tolerance for a damaged header. `0f146f4b` dropped that assertion and renamed the
@@ -188,11 +192,13 @@ their `verified:` grounds are kept because they are the evidence behind that cal
   `docs/superpowers/specs/2026-05-25-issue-73-chaos-e2e-actions-design.md` records the
   `ubuntu-latest` apt package resolving to 6.1.1 during post-merge validation, below the
   documented 7.0+ floor. That finding is why this job downloads a build at all.
-- **Pin a SHA-256 against the rolling asset.** verified: `.github/workflows/chaos-e2e.yml`
-  records that "the `latest` tag's bytes change on every rebuild (a pinned SHA256 can never
-  match for long)", which is why `359ba425` removed the digest check. (That commit's own
-  message makes the byte-churn point about the dated `autobuild-*` assets; the `latest` tag is
-  republished on each of those rebuilds, so it inherits the property.)
+- **Pin a SHA-256 against the rolling asset.** verified: `359ba425`
+  ("ci(chaos-e2e): track rolling ffmpeg 7.1 build instead of pinning a digest") removed the
+  digest check on the ground that BtbN's rolling assets are rebuilt, so a recorded digest stops
+  matching. The step comment that commit introduced put it as "the `latest` tag's bytes change
+  on every rebuild (a pinned SHA256 can never match for long)" — cited from the commit rather
+  than the workflow because **this change replaces that step**, and an immutable record must
+  not point at text it deletes.
 - **Select the highest published series rather than the lowest.** judgment: the requirement
   is a floor, and the oldest qualifying build is the one to take; selecting the highest would
   move the suite onto a new ffmpeg major the day BtbN publishes one, for no stated reason.
