@@ -118,6 +118,7 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
         ChaosWorkerMode::Crash,
     )
     .await?;
+    fixture.assert_watchdog_budget_is_generous()?;
     let result = async {
         let summary = fixture
             .executor()
@@ -189,6 +190,7 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
         ChaosWorkerMode::MalformedResult,
     )
     .await?;
+    fixture.assert_watchdog_budget_is_generous()?;
     let result = async {
         let summary = fixture
             .executor()
@@ -460,10 +462,21 @@ impl DurableWorkflowFixture {
         operation: OperationKind,
         mode: ChaosWorkerMode,
     ) -> TestResult<Self> {
+        // Generous watchdog budgets, for the same reason
+        // `start_with_unreachable_runtime_override` carries them: the healthy
+        // branches here run out-of-process, and the watchdog does not
+        // distinguish a worker that is misbehaving from one the runner has not
+        // scheduled yet. Both fault modes this fixture serves are immediate and
+        // deterministic -- Crash exits the process, MalformedResult answers 200
+        // with an unparseable body -- so neither depends on a deadline, and the
+        // sub-second budgets that used to be here only raced the healthy
+        // branches. Under them a loaded runner reaped `scan_library` first, and
+        // the workflow then aborted before the fault branch ever dispatched
+        // (issue #541).
         let mut options = WorkflowExecutorOptions::for_tests();
         options.timing.heartbeat_interval = Duration::from_millis(20);
-        options.timing.heartbeat_timeout = Duration::from_millis(500);
-        options.timing.progress_idle_timeout = Duration::from_millis(150);
+        options.timing.heartbeat_timeout = Duration::from_secs(2);
+        options.timing.progress_idle_timeout = Duration::from_secs(2);
         Self::start_with_chaos_override_and_executor_options(operation, mode, options, None).await
     }
 
@@ -919,13 +932,16 @@ impl DurableWorkflowFixture {
         class: FailureClass,
     ) -> TestResult<()> {
         let count = self.failure_class_count(job_id, operation, class).await?;
-        expect(
-            &format!(
-                "expected failed {operation:?} ticket with class {}",
-                failure_class_name(class)
-            ),
-            count > 0,
-        )?;
+        if count == 0 {
+            // Report what the job actually recorded. Without this the message
+            // names only the expectation, so a CI-only occurrence says nothing
+            // about which class won and forces a fresh investigation.
+            return Err(io_error(format!(
+                "expected failed {operation:?} ticket with class {}; job recorded {}",
+                failure_class_name(class),
+                self.describe_ticket_outcomes(job_id).await?
+            )));
+        }
         let durable_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) \
              FROM tickets t \
@@ -997,6 +1013,44 @@ impl DurableWorkflowFixture {
         .bind(failure_class_name(class))
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    /// Every ticket in the job as `operation=state[class,...]`, for a failed
+    /// class assertion to quote. A wrong class and a branch that never reached
+    /// the fault produce the same bare count, so the message has to carry both
+    /// the states and the classes to tell them apart.
+    async fn describe_ticket_outcomes(&self, job_id: JobId) -> TestResult<String> {
+        // The operation is read as nullable on purpose. This helper only runs
+        // once an assertion has already failed, and a payload missing
+        // `$.operation` would otherwise turn the diagnosis into a decode error.
+        let rows: Vec<(Option<String>, String, Option<String>)> = sqlx::query_as(
+            "SELECT json_extract(t.payload, '$.operation'), t.state, \
+                    group_concat(DISTINCT json_extract(e.payload, '$.class')) \
+             FROM tickets t \
+             LEFT JOIN events e \
+               ON e.subject_type = 'ticket' AND e.subject_id = t.id \
+              AND e.kind IN ('ticket.failed_terminal', 'ticket.failed_retriable') \
+             WHERE t.job_id = ? \
+             GROUP BY t.id \
+             ORDER BY t.id",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok("no tickets".to_owned());
+        }
+        Ok(rows
+            .iter()
+            .map(|(operation, state, classes)| {
+                let operation = operation.as_deref().unwrap_or("<no operation>");
+                classes.as_ref().map_or_else(
+                    || format!("{operation}={state}"),
+                    |classes| format!("{operation}={state}[{classes}]"),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "))
     }
 
     async fn assert_no_success_for_operation(
@@ -1124,6 +1178,29 @@ impl DurableWorkflowFixture {
             )?;
         }
         Ok(())
+    }
+
+    /// Guard for the fixtures whose fault is immediate and whose healthy
+    /// branches run out-of-process. Their watchdog exists only as an outer
+    /// bound, so re-tightening it buys nothing and reintroduces issue #541.
+    /// One second is a floor against that edit, not a measured cliff -- the
+    /// observed failure ran under 500ms, and how much slack a shared runner
+    /// needs is not a number this suite can pin.
+    ///
+    /// Deliberately not called from the fixture constructor:
+    /// `chaos_missed_heartbeat_uses_executor_watchdog` shares that constructor
+    /// and sets a tight heartbeat deadline on purpose, because there the
+    /// watchdog is the behaviour under test.
+    fn assert_watchdog_budget_is_generous(&self) -> TestResult<()> {
+        let floor = Duration::from_secs(1);
+        expect(
+            "heartbeat timeout should not race the healthy out-of-process branches",
+            self.executor_options.timing.heartbeat_timeout >= floor,
+        )?;
+        expect(
+            "progress idle timeout should not race the healthy out-of-process branches",
+            self.executor_options.timing.progress_idle_timeout >= floor,
+        )
     }
 
     fn assert_heartbeat_deadline_precedes_progress_timeout(&self) -> TestResult<()> {
