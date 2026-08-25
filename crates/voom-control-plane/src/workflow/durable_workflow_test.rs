@@ -1020,7 +1020,10 @@ impl DurableWorkflowFixture {
     /// the fault produce the same bare count, so the message has to carry both
     /// the states and the classes to tell them apart.
     async fn describe_ticket_outcomes(&self, job_id: JobId) -> TestResult<String> {
-        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        // The operation is read as nullable on purpose. This helper only runs
+        // once an assertion has already failed, and a payload missing
+        // `$.operation` would otherwise turn the diagnosis into a decode error.
+        let rows: Vec<(Option<String>, String, Option<String>)> = sqlx::query_as(
             "SELECT json_extract(t.payload, '$.operation'), t.state, \
                     group_concat(DISTINCT json_extract(e.payload, '$.class')) \
              FROM tickets t \
@@ -1040,6 +1043,7 @@ impl DurableWorkflowFixture {
         Ok(rows
             .iter()
             .map(|(operation, state, classes)| {
+                let operation = operation.as_deref().unwrap_or("<no operation>");
                 classes.as_ref().map_or_else(
                     || format!("{operation}={state}"),
                     |classes| format!("{operation}={state}[{classes}]"),
