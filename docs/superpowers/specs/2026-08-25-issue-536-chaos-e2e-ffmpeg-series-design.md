@@ -57,7 +57,8 @@ series**, encoded in the asset filename. That is the pin this design removes.
 - **#500** (P2, tech-debt) — the durable-fix issue. Its three options (cache, mirror as a
   release asset, publish a container image) are each dispositioned in ADR 0078, and its
   "decide separately" clause on the ffmpeg version is answered by the requirement below.
-  Resolved here.
+  **Not closed here**: its three options are priced and declined rather than implemented, and
+  the per-run dependency on BtbN publishing survives this change. See criterion 21.
 - **#493** — stale; see "A floor is not a compatibility statement" below. Closed by this work.
 
 ## Requirement, restated
@@ -496,7 +497,9 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–13):
 
 14. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
 15. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
-    delegates to the `just` recipe, matching the five existing guard-script pairs, and
+    delegates to the `just` recipe, matching the four existing guard-script prek hooks
+    (`check-check-constraint-bypass` has `just ci` recipes but no hook — a pre-existing gap,
+    filed as #538 and out of scope here), and
     `prek run --all-files` passes. Only the selftest hook is wanted: the selection script
     reads no repository file, so a non-selftest hook would have nothing to check.
 16. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
@@ -512,18 +515,31 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–13):
 20. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
     with **the asset the script resolves from the live catalogue** installed — `n8.1` as of
     2026-08-25; a different series is a pass, not a failure, since resolving a different
-    series is the design working. Blocking conditions: the install step,
-    `Verify external tools`, and Chaos Librarian's capability gate all pass; the run produces
-    per-test results; and, **if PR #498 has not landed on this branch's base**, #491's
-    `transcode_required_executes_real_worker_and_commits_hevc_mkv` is among the failures. If
-    #498 has landed, that test is expected to pass and the run should show 12 passed — its
-    passing is the good outcome, not a criterion failure.
-    Any **additional** test failure under the newer ffmpeg does **not** block this change —
-    that is the wanted notification the requirement describes — but it is filed as a new
-    issue before merge. The run's URL and per-test outcome go in the PR.
-21. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
-    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 20 is
-    filed.
+    series is the design working.
+
+    **Blocking** — this change's own path: the install step, `Verify external tools`, and
+    Chaos Librarian's capability gate all pass.
+
+    **Observational** — everything downstream of that, because it is suite behaviour the
+    charter excludes and #491 / PR #498 own. Expected: the run reaches
+    `Run Chaos Librarian E2E` and produces per-test results, with #491's
+    `transcode_required_executes_real_worker_and_commits_hevc_mkv` the single failure while
+    #498 is unlanded (12 passed once it lands — that test passing is the good outcome, not a
+    criterion failure). If the suite instead fails *earlier or differently* — a build failure
+    on the base, `uv sync --locked`, a capability-gate flake — record the run URL and the
+    observed step, attribute it to its owner, and file it. Do **not** block this change on it:
+    an exclusion must not gate work that neither touches nor owns it.
+
+    Any **additional** test failure under the newer ffmpeg is likewise non-blocking — it is
+    the wanted notification the requirement describes — but it is filed as a new issue before
+    merge. The run's URL and per-test outcome go in the PR.
+21. #499 is closed as a duplicate of #536 — same 404, same cause. #493 is closed as stale
+    with the `0f146f4b` evidence in its closing comment. **#500 stays open**, narrowed: this
+    design removes the dependency on a *predicted asset name*, not the per-run dependency on
+    BtbN publishing at all, which is what #500 actually asks for. Its three options are priced
+    and declined in ADR 0078, and a comment records that — but closing it would overstate what
+    shipped and would drop the only queue entry for a residual the ADR itself names. Any new
+    issue required by criterion 20 is filed.
 
 Criteria 2–13 are the selftest's cases, so criterion 14 checks them on every commit.
 Criteria 20 and 21 are the only ones no local guardrail can reach. Criterion 20 deliberately
