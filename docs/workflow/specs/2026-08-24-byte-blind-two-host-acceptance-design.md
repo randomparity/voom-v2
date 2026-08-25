@@ -56,17 +56,26 @@ architecture decision or an alternate orchestrator.
 A checked-in shell entrypoint launches one ignored acceptance supervisor inside
 a disposable outer user/mount/PID namespace. The supervisor creates the generated
 fixtures, two owner mount namespaces, and a separate control-plane child
-user+mount namespace. Agent mounts are owned by the supervisor's user namespace;
-the control-plane child is nested beneath it and has no capability in that
-ancestor, so it cannot join an owner mount namespace through `/proc`, unmount the
-denial covers, or recover a backing alias. The two agents still see different
-backing trees at the same provider paths.
+user+mount+PID namespace with a private procfs. Agent mounts are owned by the
+supervisor's user namespace; the control-plane child uses a newly mapped nested
+user namespace and therefore has no capability in that ancestor, so it cannot
+join an owner mount namespace, unmount the denial covers, or recover a backing
+alias. Its PID namespace sees only the control-plane namespace init and
+descendants, so owner anchor and agent PIDs from the outer namespace have no proc
+entries or proc-root aliases. The two agents still see different backing trees
+at the same provider paths.
 
 The supervisor performs only fixture, namespace, signal, and cleanup mechanics.
-The isolated control-plane role runs the real SQLite/control-plane/API/CLI paths
-and exchanges bounded typed commands with the supervisor over a pre-opened local
-socket for fault timing. Before byte work, that role proves ordinary path denial
-and proves that `setns`/`nsenter` into each owner mount fails with `EPERM`.
+It bind-mounts each live owner's mount-namespace handle onto one allowlisted
+mechanics-only file before nesting the control-plane role. The isolated role runs
+the real SQLite/control-plane/API/CLI paths and exchanges bounded typed commands
+with the supervisor over a pre-opened local socket for fault timing. Before byte
+work, that role proves ordinary path denial, proves that `nsenter
+--mount=<allowlisted-handle>` fails with `EPERM`, closes the handles, and proves
+that each supplied outer owner PID is absent from its private procfs and that
+opening `/proc/<owner-pid>/root` fails with `ENOENT`. The reachable handles make
+the capability assertion independent of the deliberately hidden outer proc
+entries without exposing an owner root or byte-bearing file descriptor.
 
 This is the smallest approach that provides a real OS/process boundary without
 privileged host mutation or a new runtime dependency. Linux `unshare`, `mount`,
@@ -101,15 +110,23 @@ byte accounting.
 The entrypoint:
 
 - fails clearly on non-Linux hosts or missing `unshare`, `mount`, or `nsenter`;
-- proves that an unprivileged user+mount namespace can be created before doing
-  any build or fixture work;
+- proves that both the outer user+mount namespace and a newly mapped nested user
+  namespace with a private PID/proc view can be created before doing any build or
+  fixture work;
 - prebuilds the acceptance test and all production binaries it executes so no
   binary is relinked while an agent may exec it;
-- starts `unshare` as a tracked child with `--fork`, a PID namespace, and
-  `--kill-child=SIGKILL`; shell traps forward `SIGINT`/`SIGTERM`, wait for the
-  namespace init to exit, and make init exit kill/reap every descendant;
+- starts outer `unshare` as a tracked child with `--fork`, a PID namespace, and
+  `--kill-child=SIGKILL`; normal completion waits for it, while `SIGINT`/`SIGTERM`
+  traps send `SIGKILL` to the monitor and wait for that direct child so its
+  kill-child contract synchronously destroys the PID namespace and every
+  descendant instead of forwarding a signal the monitor ignores;
 - enters one private user/mount/PID namespace and invokes only the ignored
   acceptance test;
+- requires the supervisor to track the nested control-plane `unshare` monitor,
+  whose `--map-root-user --mount --pid --fork --mount-proc
+  --kill-child=SIGKILL` lifecycle creates the required capability hierarchy;
+  normal completion waits for the role, while cancellation kills and waits for
+  the monitor before owner anchors, with every wait bounded by `ProcessGuard`;
 - leaves no host mount, user, network, database, fixture, or live process state.
 
 The script is the actual smoke command and receives a `just` recipe. The test is
@@ -128,15 +145,23 @@ The harness has five focused helpers:
 
 - `NamespaceSupervisor` creates generated media and two private backing trees,
   starts one long-lived owner-mount anchor per agent, covers every backing/provider
-  alias outside those owner views, and starts/restarts agents. It never runs a
+  alias outside those owner views, and starts/restarts agents. It bind-mounts one
+  allowlisted persistent handle for each owner mount namespace, launches and
+  tracks the nested control-plane namespace monitor, and never runs a
   control-plane case or workflow.
-- `ControlPlaneRole` re-execs the exact integration-test binary inside a nested
-  user+mount namespace. It runs real SQLite, the production API router, and
-  installed CLI processes. A bounded framed local socket requests only named
-  supervisor mechanics (pause/resume/restart, owner-view rename/restore/probe).
-  The role must demonstrate `EPERM` when it attempts to join either owner mount.
-- `ProcessGuard` bounds startup and shutdown, captures bounded diagnostics, and
-  kills/reaps every child on failure.
+- `ControlPlaneRole` re-execs the exact integration-test binary inside a newly
+  mapped nested user+mount+PID namespace with a private procfs. The nested
+  namespace is launched through a tracked `unshare --map-root-user --mount --pid
+  --fork --mount-proc --kill-child=SIGKILL` monitor. On cancellation the
+  supervisor kills and boundedly reaps that monitor, which fires its kill-child
+  contract, instead of relying on the monitor's ignored `SIGINT`/`SIGTERM` or PID
+  1's default signal semantics. The role runs real SQLite, the production API
+  router, and installed CLI processes. A bounded framed local socket requests
+  only named supervisor mechanics (pause/resume/restart, owner-view
+  rename/restore/probe). Before dispatch, the role must use each allowlisted
+  persistent namespace handle to demonstrate `EPERM`, close the handles,
+  demonstrate that both outer owner PIDs are absent from its procfs, and
+  demonstrate `ENOENT` when opening either `/proc/<owner-pid>/root`.
 - `ControlChannelAccounting` wraps the production API listener's accepted TCP
   streams to count exact HTTP wire bytes, and layers typed axum middleware on the
   production router to attribute methods, targets, headers, statuses, and bodies.
@@ -225,15 +250,22 @@ paths settle, to observe durable invariants and counts.
 After private agent mounts exist, the parent bind-mounts an empty denial tree over
 both owner backing roots and every configured media, staging, output, backup, and
 recovery provider path. Before dispatch, the harness places a distinct sentinel
-beneath every provider root and every host-side backing alias. It then parses its
-own mount table and requires each configured path to resolve to the denial-cover
-mount identity, requires every backing sentinel/alias open to fail, and requires
-namespace entry into each owner anchor to fail with `EPERM`. The cover itself may
-remain traversable; its emptiness, mount identity, and the control-plane role's
-lack of capability in the owner namespaces prove the backing bytes are
-OS-inaccessible. Only then may scan or compliance work begin. A successful CLI
-workflow, supervisor-requested output probe inside the current owner namespace,
-and completed durable phase chain prove the workflow.
+beneath every provider root and every host-side backing alias. It also exposes
+only two mechanics-only persistent owner mount-namespace handles, never an owner
+root descriptor. The isolated role then parses its own mount table and requires
+each configured path to resolve to the denial-cover mount identity, requires
+every backing sentinel/alias open to fail, and requires entry through each
+allowlisted namespace handle to fail with `EPERM` before closing both handles.
+Its private procfs must have a distinct mount identity, must omit the supplied
+outer owner-anchor and agent PIDs, and must return `ENOENT` for direct
+`/proc/<owner-pid>/root` sentinel access. These are positive assertions over the
+live namespace, not assumptions about the host's ptrace policy.
+The cover itself may remain traversable; its emptiness, mount identity, the
+nested PID/proc view, and the control-plane role's lack of capability in the
+owner namespaces prove the backing bytes are OS-inaccessible.
+Only then may scan or compliance work begin. A
+successful CLI workflow, supervisor-requested output probe inside the current
+owner namespace, and completed durable phase chain prove the workflow.
 
 ### C2 — equal paths remain distinct
 
@@ -304,8 +336,9 @@ as protocol metadata without a source-text assertion.
 The harness hashes a relative-path manifest of both generated source libraries
 before denial. Namespace anchors remain alive while cleanup restores the
 fault-renamed file and compares the source manifest from the owner view. It then
-stops agents, removes the denial covers, compares the manifest again from the
-parent view, stops the anchors, and removes the generated temporary environment.
+stops agents, removes the denial covers and persistent namespace-handle mounts,
+compares the manifest again from the parent view, stops the anchors, and removes
+the generated temporary environment.
 
 The operator runbook follows the same invariant for a real host: snapshot the
 source manifest, generate only beneath a uniquely named test directory, direct
@@ -322,9 +355,9 @@ owned paths. Cleanup is idempotent and refuses an empty or unexpected run root.
   printed.
 - Startup waits identify the process and expected readiness fact. Runtime waits
   identify the criterion being proven.
-- Cleanup attempts all child termination, mount restoration, and file restoration
-  steps even after a prior failure. A cleanup error fails the test rather than
-  claiming the source was preserved.
+- Cleanup attempts all child termination, namespace-handle unmount, denial-cover
+  unmount, and file restoration steps even after a prior failure. A cleanup
+  error fails the test rather than claiming the source was preserved.
 - The script uses `set -euo pipefail`; it never uses `--no-verify`, ambient SSH,
   host users, sudo, or destructive wildcard cleanup.
 
@@ -345,7 +378,9 @@ owned paths. Cleanup is idempotent and refuses an empty or unexpected run root.
 4. **Supervisor → isolated roles.** The supervisor is the trusted test
    orchestrator and retains namespace authority; it runs no control-plane logic.
    The actual control-plane/API/CLI role is capability-isolated from owner mounts
-   and can request only the bounded mechanical commands on the local control socket.
+   and PID/proc views and can request only the bounded mechanical commands on the
+   local control socket. Its two mechanics-only namespace handles expose no root
+   or byte-bearing descriptor and are closed immediately after the `EPERM` proof.
 5. **Operator runbook → remote host.** The operator is trusted, but existing
    library data is not expendable. A unique run ID, path-prefix checks, quoted
    argv, manifest comparison, and explicit owned-path list bound cleanup.
@@ -386,7 +421,7 @@ secret and has read-only repository contents plus its ordinary job token.
 
 Focused TDD proceeds in four slices:
 
-1. namespace/process denial and equal-path real scans;
+1. nested namespace/process/proc-root denial and equal-path real scans;
 2. stale heartbeat and incomplete-scan reconciliation;
 3. owner-local/mixed-owner pre-dispatch gates plus slow workflow;
 4. response loss/restart, network accounting, durable/output uniqueness, and
