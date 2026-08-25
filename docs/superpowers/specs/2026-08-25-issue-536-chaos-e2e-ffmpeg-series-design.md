@@ -223,10 +223,6 @@ reviewer looks for it, and keeps the script free of anything that needs a networ
         run: |
           assets="$RUNNER_TEMP/ffmpeg-assets.txt"
           gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name' >"$assets"
-          if [ ! -s "$assets" ]; then
-            echo "::error::BtbN latest release listed no assets; this is a release-read failure, not a retired series"
-            exit 1
-          fi
           asset=$(./scripts/select-ffmpeg-asset.sh "$FFMPEG_MAJOR_FLOOR" <"$assets")
           echo "Selected asset: $asset"
           archive="$RUNNER_TEMP/ffmpeg.tar.xz"
@@ -257,10 +253,11 @@ Three details are deliberate:
   catch the `gh` failure directly and lets the emptiness check speak for itself. It also
   leaves the catalogue on disk in the runner for anyone debugging the next BtbN change. No
   pipeline remains in the step, so no `shell:` override is needed and none is added.
-- **The empty-asset-list check is separate from selection.** An API outage, a rate limit, a
-  token problem, and a genuine asset rename would otherwise all reach the operator as the
-  same "no qualifying asset" message. Only the rename is a retired-catalogue event; the
-  others are read failures, and they get their own error.
+- **The empty-read case is the script's exit `3`, not a workflow branch.** An API outage, a
+  rate limit, a token problem, and a genuine asset rename would otherwise all reach the
+  operator as the same "no qualifying asset" message. Only the rename is a retired-catalogue
+  event; the others are read failures. Putting the distinction in the script means the
+  selftest proves it, which an inline `[ ! -s ]` would not.
 - **No `| head -n1`** on `ffmpeg -version`. Closing the pipe after one line can reap
   `ffmpeg` with `SIGPIPE`, which becomes a real failure the moment anything adds `pipefail`
   — a latent flake for no benefit. Bash's `${var%%$'\n'*}` takes the first line with no pipe
@@ -285,24 +282,31 @@ is therefore the same build; the existing `Verify external tools` step continues
 
 ### Failure behavior
 
-Two failures are kept distinct because they call for different responses.
+Two failures are kept distinct because they call for different responses, and **both live in
+the script** so the selftest covers them. They are branches that run only on a bad day, which
+is the class this extraction exists to bring under test — leaving them in the ungated workflow
+would put them exactly where the "keep it inline" argument says logic must not go.
 
-**No asset names at all** is a release-read failure — an API outage, a rate limit, a token
-problem, a changed response field. The workflow detects it before selection runs and says so.
-Retrying is the response.
+| Exit | Condition | Response |
+|---|---|---|
+| `0` | An asset was selected | — |
+| `1` | Names arrived, none qualifying | BtbN retired every usable series; a human decides |
+| `2` | Malformed floor argument | Caller error |
+| `3` | No names at all on stdin | Release-read failure — API outage, rate limit, token, changed field; retry |
 
-**Names, but none qualifying** is what the script reports: BtbN has retired every series the
-project can use. Its message names the floor and how many candidates it considered. This is a
-real decision for a human — raise the floor's upstream, change distributor, vendor a build —
-not something the workflow should paper over.
+Reserving `2` for caller error matches `scripts/check-adr-index.sh`.
 
-Collapsing the two would reintroduce the defect this change is about, one layer up: an
+Collapsing `1` and `3` would reintroduce the defect this change is about, one layer up: an
 operator handed "no qualifying asset" during a GitHub API incident would go looking at BtbN's
-release page and find nothing wrong.
+release page and find nothing wrong. The `1` message names the floor and how many candidates
+it considered; the `3` message says the read returned nothing.
 
-Exit codes: `2` for a malformed floor argument (caller error), `1` for no qualifying asset
-(environment), `0` on success. This matches `scripts/check-adr-index.sh`, which reserves `2`
-for its own caller-error cases.
+**One branch cannot move.** The post-install assertion that the extracted binary reports a
+major version at or above the floor needs the binary itself, so it cannot sit behind the
+script's stdin boundary and no pre-merge gate reaches it. It is the last check between a wrong
+archive and a green install step, and the only evidence it works comes from a run. That
+residual is recorded rather than engineered around — extracting a second script to verify
+three lines of version comparison would cost more than it removes.
 
 ## Threat model
 
@@ -368,9 +372,9 @@ the 7.x pin's stability. The sentence is corrected to describe the runtime resol
 5. Given only `master` and `-shared-` assets, it exits non-zero — neither family is a
    candidate.
 6. Given a malformed floor argument, it exits `2`, distinct from the `1` in criteria 3 and 5.
-7. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
-8. The workflow reports a release-read failure distinctly from a retired catalogue: with an
-   empty asset list it errors naming the read, not the floor.
+7. Given empty stdin it exits `3`, distinct from `1`, with a message naming the release read
+   rather than the floor.
+8. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
 9. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
 10. `just ci` passes.
 11. `docs/operations/chaos-e2e.md` describes what the workflow does.
@@ -382,8 +386,10 @@ the 7.x pin's stability. The sentence is corrected to describe the runtime resol
     per-test results match the ffmpeg 7.1 baseline of 11 passed / 1 failed, with the single
     failure being issue #491's `transcode_required_executes_real_worker_and_commits_hevc_mkv`
     and no other. The run's URL and per-test outcome are recorded in the PR.
+14. Issues #499 and #500 are closed as resolved by this work, and #493 closed as stale with
+    the `4d8d781d` evidence in its closing comment.
 
-Criteria 2–6 are the selftest's cases, so they are checked by criterion 7 on every commit.
+Criteria 2–7 are the selftest's cases, so they are checked by criterion 8 on every commit.
 Criterion 13 is the only one no local guardrail can reach. It deliberately does **not** ask
 for a green run: #491 makes that unobtainable until PR #498 merges, and demanding it would
 either block this fix behind an unrelated one or invite reading a red run as this change's
