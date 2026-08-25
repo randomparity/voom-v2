@@ -287,10 +287,12 @@ Three details are deliberate:
   catch the `gh` failure directly and lets the emptiness check speak for itself. It also
   leaves the catalogue on disk in the runner for anyone debugging the next BtbN change. No
   pipeline remains in the step, so no `shell:` override is needed and none is added.
-- **The empty-read case is the script's exit `3`, not a workflow branch.** An API outage, a
-  rate limit, a token problem, and a genuine asset rename would otherwise all reach the
-  operator as the same "no qualifying asset" message. Only the rename is a retired-catalogue
-  event; the others are read failures. Putting the distinction in the script means the
+- **The empty-read case is the script's exit `3`, not a workflow branch.** Note what actually
+  reaches it: an outage, a rate limit, or a bad token makes `gh api` exit non-zero, and because
+  the read goes to a file rather than down a pipe, `-e` aborts the step right there with gh's
+  own message — the file-not-pipe choice paying off. What reaches exit `3` is `gh` *succeeding*
+  and yielding no names: an empty `.assets` array, or a renamed response field. Distinguishing
+  that from a retired catalogue still matters, and putting the split in the script means the
   selftest proves it, which an inline `[ ! -s ]` would not.
 - **No `| head -n1`** on `ffmpeg -version`. Closing the pipe after one line can reap
   `ffmpeg` with `SIGPIPE`, which becomes a real failure the moment anything adds `pipefail`
@@ -301,7 +303,7 @@ Three details are deliberate:
 `(major, minor)` comparison as much as in this assertion — so a hypothetical `08` series
 cannot be read as an invalid octal literal. Dropping it from the script passes every other
 selftest case and then fails with `08: value too great for base` on a zero-padded series,
-selecting nothing even when a qualifying asset was on stdin. Criterion 10 pins it.
+selecting nothing even when a qualifying asset was on stdin. Criterion 11 pins it.
 
 ### Assertion
 
@@ -329,7 +331,7 @@ would put them exactly where the "keep it inline" argument says logic must not g
 | `0` | An asset was selected | — |
 | `1` | At least one non-blank line arrived, none qualifying | BtbN retired every usable series; a human decides |
 | `2` | Malformed floor argument | Caller error |
-| `3` | No non-blank line on stdin | Release-read failure — API outage, rate limit, token, changed field; retry |
+| `3` | No non-blank line on stdin | The read returned no names — an empty asset list, or a changed response field. Check the response shape before retrying. |
 
 Reserving `2` for caller error matches `scripts/check-adr-index.sh`.
 
@@ -422,7 +424,7 @@ checksum verification and the 7.x pin's stability. The replacement paragraph is:
 > bytes are pinned. See `docs/adr/0078-runtime-resolved-ffmpeg-series.md`.
 
 Replacing only the quoted second sentence would leave the paragraph opening with two
-near-duplicate sentences that disagree on strength ("may lag" then "lags"), and criterion 16
+near-duplicate sentences that disagree on strength ("may lag" then "lags"), and criterion 17
 as originally written would have passed on that outcome — which is why it now counts the
 phrase.
 
@@ -439,7 +441,7 @@ than invented by the implementer.
    output. (Not a list of today's series names — that check would decay exactly as the pin
    did.)
 
-Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–11):
+Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–12):
 
 2. Given the **full 49-name catalogue** on stdin and floor `7`, prints
    `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz`, exit `0`. The fixture is the complete output
@@ -449,7 +451,8 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–11):
    selection is shown to reject them: in particular
    `ffmpeg-n8.1-latest-linuxarm64-gpl-8.1.tar.xz` ties on `(major, minor)` and must not be
    selected.
-3. Given that catalogue with the `n8.1` and `n9.0` linux64-gpl entries removed, exit `1` with
+3. Given that catalogue with the two `n8.1`/`n9.0` **linux64-gpl** entries removed (the
+   `-shared-`, `lgpl` and other-platform entries stay, so 47 names remain), exit `1` with
    a diagnostic on stderr naming the floor and the number of non-blank input lines considered.
    ("Considered" means every non-blank line read, not only the lines matching the ERE: a line
    can match the ERE and still be rejected by the capture-agreement check or by the floor, so
@@ -471,30 +474,35 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–11):
    this name — only the post-match `1==3, 2==4` comparison rejects it. Without this case an
    implementation that drops captures 3 and 4 entirely passes every other criterion, leaving
    the one rule whose purpose is to notice an upstream naming drift with no coverage at all.
-9. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
+9. Given `ffmpeg-n6.1-latest-linux64-gpl-6.1.tar.xz` and
+   `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz` with floor `7`, prints the `n8.1` asset —
+   the lowest **qualifying** series, not the lowest matching one. Given only the `n6.1`
+   name, exit `1`. Without these two inputs the floor comparison is unpinned: deleting
+   `major >= floor` from an implementation leaves every other criterion byte-identical.
+10. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
    `7.0`, and two arguments.
-10. Given `ffmpeg-n08.1-latest-linux64-gpl-08.1.tar.xz` and
+11. Given `ffmpeg-n08.1-latest-linux64-gpl-08.1.tar.xz` and
     `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz` with floor `7`, prints the `n08.1` asset,
     exit `0` — captured digits reach arithmetic in base 10, not octal.
-11. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
+12. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
     message naming the release read rather than the floor.
 
-12. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
-13. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
+13. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
+14. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
     delegates to the `just` recipe, matching the five existing guard-script pairs, and
     `prek run --all-files` passes. Only the selftest hook is wanted: the selection script
     reads no repository file, so a non-selftest hook would have nothing to check.
-14. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
-15. `just ci` passes.
-16. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
+15. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
+16. `just ci` passes.
+17. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
     `rg -n 'pinned 7\.x|verifies its checksum' docs/operations/chaos-e2e.md` produces no
     output; the replacement paragraph from the Documentation section is present; and
     `rg -c 'apt ffmpeg package' docs/operations/chaos-e2e.md` reports exactly `1`, so a
     partial replacement leaving a duplicated sentence fails the gate rather than a reader.
     Line 10's "ffmpeg/ffprobe 7.0+" is unchanged.
-17. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
+18. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
     (`just check-adr-index` passes).
-18. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
+19. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
     with **the asset the script resolves from the live catalogue** installed — `n8.1` as of
     2026-08-25; a different series is a pass, not a failure, since resolving a different
     series is the design working. Blocking conditions: the install step,
@@ -506,15 +514,15 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–11):
     Any **additional** test failure under the newer ffmpeg does **not** block this change —
     that is the wanted notification the requirement describes — but it is filed as a new
     issue before merge. The run's URL and per-test outcome go in the PR.
-19. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
-    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 18 is
+20. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
+    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 19 is
     filed.
 
-Criteria 2–11 are the selftest's cases, so criterion 12 checks them on every commit.
-Criterion 18 is the only one no local guardrail can reach, and it deliberately does not ask
-for a green run: #491 makes that unobtainable until PR #498 merges, and demanding it would
-either block this fix behind an unrelated one or invite reading a red run as this change's
-failure.
+Criteria 2–12 are the selftest's cases, so criterion 13 checks them on every commit.
+Criteria 19 and 20 are the only ones no local guardrail can reach. Criterion 19 deliberately
+does not ask for a green run: #491 makes that unobtainable until PR #498 merges, and demanding
+it would either block this fix behind an unrelated one or invite reading a red run as this
+change's failure.
 
 ## Verification
 
@@ -528,7 +536,7 @@ failure.
 - Manual `workflow_dispatch` of `chaos-e2e` on the branch, read per-test rather than by its
   conclusion (see "The dispatch run is confounded" above). This is the only end-to-end
   evidence that the resolved asset downloads, extracts, satisfies the floor, and carries the
-  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 18
+  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 19
   defines what blocks and what does not.
 
 ## Related
