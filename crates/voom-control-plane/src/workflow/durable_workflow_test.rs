@@ -118,6 +118,7 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
         ChaosWorkerMode::Crash,
     )
     .await?;
+    fixture.assert_watchdog_budget_is_generous()?;
     let result = async {
         let summary = fixture
             .executor()
@@ -189,6 +190,7 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
         ChaosWorkerMode::MalformedResult,
     )
     .await?;
+    fixture.assert_watchdog_budget_is_generous()?;
     let result = async {
         let summary = fixture
             .executor()
@@ -460,10 +462,21 @@ impl DurableWorkflowFixture {
         operation: OperationKind,
         mode: ChaosWorkerMode,
     ) -> TestResult<Self> {
+        // Generous watchdog budgets, for the same reason
+        // `start_with_unreachable_runtime_override` carries them: the healthy
+        // branches here run out-of-process, and the watchdog does not
+        // distinguish a worker that is misbehaving from one the runner has not
+        // scheduled yet. Both fault modes this fixture serves are immediate and
+        // deterministic -- Crash exits the process, MalformedResult answers 200
+        // with an unparseable body -- so neither depends on a deadline, and the
+        // sub-second budgets that used to be here only raced the healthy
+        // branches. Under them a loaded runner reaped `scan_library` first, and
+        // the workflow then aborted before the fault branch ever dispatched
+        // (issue #541).
         let mut options = WorkflowExecutorOptions::for_tests();
         options.timing.heartbeat_interval = Duration::from_millis(20);
-        options.timing.heartbeat_timeout = Duration::from_millis(500);
-        options.timing.progress_idle_timeout = Duration::from_millis(150);
+        options.timing.heartbeat_timeout = Duration::from_secs(2);
+        options.timing.progress_idle_timeout = Duration::from_secs(2);
         Self::start_with_chaos_override_and_executor_options(operation, mode, options, None).await
     }
 
@@ -1161,6 +1174,29 @@ impl DurableWorkflowFixture {
             )?;
         }
         Ok(())
+    }
+
+    /// Guard for the fixtures whose fault is immediate and whose healthy
+    /// branches run out-of-process. Their watchdog exists only as an outer
+    /// bound, so re-tightening it buys nothing and reintroduces issue #541.
+    /// One second is a floor against that edit, not a measured cliff -- the
+    /// observed failure ran under 500ms, and how much slack a shared runner
+    /// needs is not a number this suite can pin.
+    ///
+    /// Deliberately not called from the fixture constructor:
+    /// `chaos_missed_heartbeat_uses_executor_watchdog` shares that constructor
+    /// and sets a tight heartbeat deadline on purpose, because there the
+    /// watchdog is the behaviour under test.
+    fn assert_watchdog_budget_is_generous(&self) -> TestResult<()> {
+        let floor = Duration::from_secs(1);
+        expect(
+            "heartbeat timeout should not race the healthy out-of-process branches",
+            self.executor_options.timing.heartbeat_timeout >= floor,
+        )?;
+        expect(
+            "progress idle timeout should not race the healthy out-of-process branches",
+            self.executor_options.timing.progress_idle_timeout >= floor,
+        )
     }
 
     fn assert_heartbeat_deadline_precedes_progress_timeout(&self) -> TestResult<()> {
