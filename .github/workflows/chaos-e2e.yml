@@ -40,26 +40,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mkvtoolnix
 
-      - name: Install ffmpeg 7
-        # BtbN ships only rolling builds: dated autobuild-* tags are
-        # garbage-collected (a pinned URL 404s within weeks) and the `latest`
-        # tag's bytes change on every rebuild (a pinned SHA256 can never match
-        # for long). Track the rolling n7.1 `latest` asset for a stable URL over
-        # HTTPS-authenticated transport, and assert the major.minor version at
-        # runtime in place of a digest that cannot track a moving target.
+      - name: Install ffmpeg
         env:
-          FFMPEG_ARCHIVE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz
+          GH_TOKEN: ${{ github.token }}
+          # Chaos Librarian documents ffmpeg/ffprobe 7.0+ as its floor
+          # (third_party/chaos-librarian/README.md). BtbN retires release series,
+          # so the series is resolved at run time rather than named here. See
+          # docs/adr/0078-runtime-resolved-ffmpeg-series.md.
+          FFMPEG_MAJOR_FLOOR: "7"
+          FFMPEG_RELEASE_BASE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
         run: |
+          assets="$RUNNER_TEMP/ffmpeg-assets.txt"
+          # Addressed by tag: `releases/latest` asks GitHub for whichever release it
+          # considers newest, which is BtbN's to repoint at a dated autobuild whose
+          # asset names have a different shape. Writing to a file rather than piping
+          # lets `-e` abort here on an API failure, instead of handing the selector
+          # empty input that it would report as a retired catalogue.
+          gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name' >"$assets"
+          asset=$(./scripts/select-ffmpeg-asset.sh "$FFMPEG_MAJOR_FLOOR" <"$assets")
+          echo "Selected asset: $asset"
           archive="$RUNNER_TEMP/ffmpeg.tar.xz"
           install_dir="$RUNNER_TEMP/ffmpeg"
-          curl -fL "$FFMPEG_ARCHIVE_URL" -o "$archive"
+          curl -fL "$FFMPEG_RELEASE_BASE_URL/$asset" -o "$archive"
           mkdir -p "$install_dir"
           tar -xJf "$archive" -C "$install_dir" --strip-components=1
           echo "$install_dir/bin" >> "$GITHUB_PATH"
-          installed_version="$("$install_dir/bin/ffmpeg" -version | head -n1)"
+          # No `| head -n1`: closing the pipe early can reap ffmpeg with SIGPIPE.
+          version_output=$("$install_dir/bin/ffmpeg" -version)
+          installed_version=${version_output%%$'\n'*}
           echo "Installed: $installed_version"
-          if ! printf '%s\n' "$installed_version" | grep -Eq 'version n?7\.1[ .-]'; then
-            echo "::error::expected ffmpeg 7.1.x, got: $installed_version"
+          if [[ ! $installed_version =~ ^ffmpeg\ version\ n?([0-9]+)\. ]] \
+            || ((10#${BASH_REMATCH[1]} < FFMPEG_MAJOR_FLOOR)); then
+            echo "::error::expected ffmpeg >= $FFMPEG_MAJOR_FLOOR, got: $installed_version"
             exit 1
           fi
 
