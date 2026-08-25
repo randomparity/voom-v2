@@ -61,7 +61,14 @@ The workflow names a **major-version floor**, not a series, and resolves the ser
 runtime from what BtbN currently publishes. Nothing about the version or its digest is
 pinned.
 
-`scripts/select-ffmpeg-asset.sh` reads BtbN's `latest` release asset names on stdin and takes
+The workflow reads asset names from `repos/BtbN/FFmpeg-Builds/releases/tags/latest` — the
+release whose tag is literally `latest`, addressed by tag on purpose. GitHub's
+`releases/latest` form asks for whichever release GitHub currently considers newest, which is
+BtbN's to change by marking a dated autobuild; that would return a catalogue in the
+`ffmpeg-n7.1.5-12-g1fdbca85aa-...` shape, match nothing, and report a wrong-endpoint bug as a
+retired catalogue.
+
+`scripts/select-ffmpeg-asset.sh` reads those names on stdin and takes
 the floor as its argument. It considers only whole-line matches of
 `ffmpeg-n<major>.<minor>-latest-linux64-gpl-<major>.<minor>.tar.xz`. Being anchored, that
 pattern admits neither the `-shared-` variants nor the `master` build, so no separate
@@ -100,10 +107,10 @@ at or above the same floor.
   parses the reported version, enforces `MIN_VERSIONS["ffmpeg"] = Version("7.0")` with no
   upper bound, and its normalizer accepts BtbN's `n8.1` form. No test in either tree exercises
   a non-7.x ffmpeg, and #493 no longer applies, so the residual is an untested remainder
-  rather than a known break. Note the two residuals converge: the first run
-  that reaches the suite at all will be both the first run after PR #498 lands and the first
-  run under ffmpeg 8, so a failure then has two candidate causes and must be triaged against
-  both.
+  rather than a known break. Dispatching the workflow on this branch **now**, while #498 is
+  still open, is what keeps that remainder from compounding: it establishes what ffmpeg 8 does
+  to the suite separately from what #498 does, so the first Monday after #498 lands carries one
+  new variable instead of two.
 - **The series pin is replaced by a pin on BtbN's filename grammar and on the `latest` tag.**
   That grammar is not stable across BtbN's own history: the autobuild assets `0d0c0ce1` and
   `7212262f` pinned had a different shape
@@ -113,10 +120,13 @@ at or above the same floor.
 - Live-catalogue divergence stays detectable only when the job runs; no local guardrail
   contacts BtbN. The selftest proves the selection logic against recorded catalogues. That
   failure class is bounded by this decision, not removed.
-- **The post-install floor assertion stays inline and untested.** It needs the extracted
-  binary, so it cannot move behind the stdin boundary the selftest covers, and no pre-merge
-  gate reaches it. It is the last check standing between a wrong archive and a green install
-  step, and the only evidence it works will come from a run.
+- **The post-install floor assertion stays inline**, outside the selftest's reach: it needs
+  the extracted binary, so it cannot sit behind the stdin boundary, and no *automatic* gate
+  runs it — `just ci` does not invoke this workflow. The evidence for it is a
+  `workflow_dispatch` run on the implementing branch, which exercises the live catalogue read,
+  the selection, the download, the extraction, `GITHUB_PATH` and the assertion together. That
+  is the same path `7212262f` was validated on (run 27394705387), and it is a pre-merge check,
+  not a post-merge hope.
 - The job gains a GitHub REST read of a public repository, authenticated with the job token.
   The workflow's `contents: read` permission is unchanged and sufficient.
 - Asset names become a parsed untrusted input. The whole-line-anchored pattern is the control;
@@ -130,6 +140,9 @@ at or above the same floor.
 
 ## Considered & rejected
 
+The first four bullets are all forms of pinning, which the project's requirement rules out;
+their `verified:` grounds are kept because they are the evidence behind that call.
+
 - **Bump the series pin to `n8.1`.** verified: `gh api
   repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name'` on 2026-08-25 lists
   only `master`, `n8.1`, and `n9.0` `linux64-gpl` assets — `n7.1` was published when
@@ -137,16 +150,23 @@ at or above the same floor.
   retirement reaches `n8.1`, making this the third instance of a fix that has already failed
   twice.
 - **Pin a retained month-end `autobuild-*` tag, keeping 7.1 and restoring the SHA-256.**
-  This is the strongest pin available and was not obvious: verified: BtbN retains every
-  month-end tag — 37 retained releases, a complete monthly series back to
-  `autobuild-2024-09-30-15-36` — while pruning dailies within about two weeks, which is why
-  #499's daily pin died; `autobuild-2026-07-31-14-10` still carries
+  The strongest pin available, and not obvious. verified: BtbN retains every month-end tag —
+  37 retained releases, a complete monthly series back to `autobuild-2024-09-30-15-36` —
+  while pruning dailies within about two weeks, which is why #499's daily pin died;
+  `autobuild-2026-07-31-14-10` still carries
   `ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz` (`gh api .../releases --paginate`,
-  2026-08-25). Being immutable, it also readmits a digest check. judgment: rejected anyway,
-  because the project's requirement is any ffmpeg at or above 7.0 and it does not want to
-  spend maintenance holding a specific older version in place. A pin here buys version
-  stability nobody asked for and costs a recurring manual bump as 7.1 ages out of new
-  snapshots.
+  2026-08-25). Being immutable, it readmits a digest check. judgment: it buys version
+  stability nobody asked for, at the cost of a recurring manual bump as 7.1 ages out.
+- **Take BtbN's versionless `master` asset.** This deserves a real answer, because it is the
+  simplest thing that satisfies the outcome as stated: `ffmpeg-master-latest-linux64-gpl.tar.xz`
+  names no series, so it needs no catalogue read, no selection script, no selftest, and none of
+  the filename-grammar exposure this record calls the next thing to break. verified: it fails
+  downstream anyway. The master build reports a git-snapshot version —
+  `ffmpeg-N-125875-g5d4d3bdc61-linux64-gpl.tar.xz` in `autobuild-2026-07-31-14-10` (`gh api
+  .../releases/tags/autobuild-2026-07-31-14-10 --jq '.assets[].name'`, 2026-08-25) — and
+  Chaos Librarian's normalizer at `capabilities.py:55-71` returns `None` for exactly that form,
+  which the caller treats as `meets_minimum=False`. It would download, extract, and then fail
+  the capability gate, with no major version for the install step's assertion to parse either.
 - **Pin the series but fall back to runtime resolution when it is gone.** judgment: it leaves
   two mechanisms doing one job, and the pinned half still has to be maintained by hand — a
   bump nobody is prompted to make until the fallback silently absorbs it. (Not rejected for
@@ -163,19 +183,14 @@ at or above the same floor.
   is a floor, and the oldest qualifying build is the one to take; selecting the highest would
   move the suite onto a new ffmpeg major the day BtbN publishes one, for no stated reason.
 - **Cache or mirror the working archive** (#500's options 1 and 2) — an `actions/cache` entry
-  keyed on the resolved asset name, or a copy attached to a release in this repository. The
-  **mirror** half is the only option considered that removes the dependency on BtbN publishing
-  anything on the day the job runs. The cache half does not: keying on the resolved asset name
-  still requires reading BtbN's catalogue that day, so what it removes is the dependency on
-  BtbN *serving* 126 MB, not on BtbN publishing. A stable-key variant that would avoid the
-  read is defeated by a 7-day eviction against a 7-day cron. Either way a cache miss degrades
-  to the download path this decision builds anyway, so it is additive rather than a substitute
-  that can fail. judgment: rejected on cost rather than effectiveness — a cache step plus key,
-  holding a ~126 MB entry against a repository-wide cache budget, for one non-gating weekly
-  job. The mirror half would additionally make this repository a redistributor of a GPL ffmpeg
-  build and leave a binary nobody reviews going stale in a release, and its stated draw — a
-  pinnable digest — is not one this boundary needs. The 7-day eviction is from the
-  [caching docs][cache-docs].
+  keyed on the resolved asset name, or a copy attached to a release in this repository. Only
+  the **mirror** half removes the dependency on BtbN publishing that day; a cache keyed on the
+  resolved asset name still needs the catalogue read, and a stable-key variant lands on
+  GitHub's 7-day eviction boundary against a 7-day cron ([caching docs][cache-docs]).
+  judgment: rejected on cost — a ~126 MB entry against a repository-wide cache budget, for one
+  non-gating weekly job — and the mirror half would additionally make this repository a
+  redistributor of a GPL ffmpeg build. Its stated draw, a pinnable digest, is not one this
+  boundary needs.
 - **Publish a container image with ffmpeg baked in** (#500's option 3). judgment: it does
   remove the per-run BtbN dependency, and unlike building from source it builds once and is
   pulled per run. It is rejected on standing cost — an image build, a registry, credentials,
@@ -184,8 +199,8 @@ at or above the same floor.
 - **Vendor a build into the repository.** verified: the `n8.1` linux64-gpl asset is
   126,529,420 bytes (`gh api ... --jq '.assets[] | .size'`, 2026-08-25) — that, in git
   history, for one non-gating weekly job.
-- **Build ffmpeg from source in the job.** judgment: tens of minutes of build time on a
-  hosted runner, every run, to obtain what a download provides in seconds.
+- **Build ffmpeg from source in the job.** judgment: a full source build on every run, to
+  obtain what a download provides in seconds.
 - **Switch to another distributor.** verified: the closest candidate, johnvansickle's
   `ffmpeg-release-amd64-static.tar.xz`, is a versionless URL that would remove the
   series-prediction problem outright — but `curl -sI` on 2026-08-25 returns
