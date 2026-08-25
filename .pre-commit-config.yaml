@@ -93,6 +93,13 @@ repos:
         pass_filenames: false
         files: '^(scripts/select-ffmpeg-asset.*\.sh|justfile)$'
 
+      - id: run-constrained-selftest
+        name: just run-constrained-selftest
+        entry: just run-constrained-selftest
+        language: system
+        pass_filenames: false
+        files: '^(scripts/run-constrained.*\.sh|justfile)$'
+
       - id: cargo-clippy
         name: just lint
         entry: just lint
