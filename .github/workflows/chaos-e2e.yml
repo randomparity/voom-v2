@@ -40,26 +40,60 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mkvtoolnix
 
-      - name: Install ffmpeg 7
-        # BtbN ships only rolling builds: dated autobuild-* tags are
-        # garbage-collected (a pinned URL 404s within weeks) and the `latest`
-        # tag's bytes change on every rebuild (a pinned SHA256 can never match
-        # for long). Track the rolling n7.1 `latest` asset for a stable URL over
-        # HTTPS-authenticated transport, and assert the major.minor version at
-        # runtime in place of a digest that cannot track a moving target.
+      - name: Install ffmpeg
         env:
-          FFMPEG_ARCHIVE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz
+          GH_TOKEN: ${{ github.token }}
+          # Chaos Librarian documents ffmpeg/ffprobe 7.0+ as its floor
+          # (third_party/chaos-librarian/README.md). BtbN retires release series,
+          # so the series is resolved at run time rather than named here. See
+          # docs/adr/0078-runtime-resolved-ffmpeg-series.md.
+          # ASCII-only digit handling; see scripts/select-ffmpeg-asset.sh.
+          LC_ALL: C
+          FFMPEG_MAJOR_FLOOR: "7"
+          FFMPEG_RELEASE_BASE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
         run: |
+          assets="$RUNNER_TEMP/ffmpeg-assets.txt"
+          # Addressed by tag: `releases/latest` asks GitHub for whichever release it
+          # considers newest, which is BtbN's to repoint at a dated autobuild whose
+          # asset names have a different shape. Writing to a file rather than piping
+          # keeps a failed release read attributable to `gh` itself, instead of
+          # reaching the selector as an empty stdin it can only report second-hand.
+          gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name' >"$assets"
+          asset=$(./scripts/select-ffmpeg-asset.sh "$FFMPEG_MAJOR_FLOOR" <"$assets")
+          echo "Selected asset: $asset"
           archive="$RUNNER_TEMP/ffmpeg.tar.xz"
           install_dir="$RUNNER_TEMP/ffmpeg"
-          curl -fL "$FFMPEG_ARCHIVE_URL" -o "$archive"
+          curl -fL "$FFMPEG_RELEASE_BASE_URL/$asset" -o "$archive"
           mkdir -p "$install_dir"
           tar -xJf "$archive" -C "$install_dir" --strip-components=1
           echo "$install_dir/bin" >> "$GITHUB_PATH"
-          installed_version="$("$install_dir/bin/ffmpeg" -version | head -n1)"
+          # No `| head -n1`: closing the pipe early can reap ffmpeg with SIGPIPE.
+          version_output=$("$install_dir/bin/ffmpeg" -version)
+          installed_version=${version_output%%$'\n'*}
           echo "Installed: $installed_version"
-          if ! printf '%s\n' "$installed_version" | grep -Eq 'version n?7\.1[ .-]'; then
-            echo "::error::expected ffmpeg 7.1.x, got: $installed_version"
+          # Check the match first. The earlier shape put the arithmetic inside an
+          # `if` condition after `||`, where an error returned 1, skipped the error
+          # branch, and accepted a below-floor build outright.
+          if [[ ! $installed_version =~ ^ffmpeg\ version\ n?([[:digit:]]+)\. ]]; then
+            echo "::error::could not parse an ffmpeg major version from: $installed_version"
+            exit 1
+          fi
+          installed_major=$((10#${BASH_REMATCH[1]}))
+          # Validate the result rather than the assignment's status. Neither `set -e`
+          # nor `||` catches a failing arithmetic expansion in an assignment: under
+          # `bash -e` it prints its error, leaves the name empty, and returns 0. The
+          # `[[:digit:]]` match above is the real guarantee that only ASCII digits
+          # reach `10#`; this is the check that holds if that ever stops being true.
+          if [[ ! $installed_major =~ ^[[:digit:]]+$ ]]; then
+            echo "::error::could not evaluate the major version in: $installed_version"
+            exit 1
+          fi
+          # FFMPEG_MAJOR_FLOOR reaches this arithmetic already validated: the selector
+          # above rejects a non-integer or zero-padded floor with exit 2 before the
+          # download runs. That coupling is why no floor check is repeated here --
+          # do not add one, and do not reorder this after removing that call.
+          if ((installed_major < FFMPEG_MAJOR_FLOOR)); then
+            echo "::error::expected ffmpeg >= $FFMPEG_MAJOR_FLOOR, got: $installed_version"
             exit 1
           fi
 

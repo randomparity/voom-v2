@@ -81,3 +81,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0075](0075-node-local-location-handle-media-dispatch.md) | Node-local location-handle media dispatch |
 | [0076](0076-owner-node-policy-tool-readiness.md) | Owner-node policy tool readiness |
 | [0077](0077-owner-node-scan-execution.md) | Owner-node scan execution |
+| [0078](0078-runtime-resolved-ffmpeg-series.md) | chaos-e2e resolves its ffmpeg release series at runtime |

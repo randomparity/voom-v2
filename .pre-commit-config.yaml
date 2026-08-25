@@ -86,6 +86,13 @@ repos:
         pass_filenames: false
         files: '^(docs/adr/.*\.md|scripts/check-adr-index.*\.sh)$'
 
+      - id: select-ffmpeg-asset-selftest
+        name: just select-ffmpeg-asset-selftest
+        entry: just select-ffmpeg-asset-selftest
+        language: system
+        pass_filenames: false
+        files: '^(scripts/select-ffmpeg-asset.*\.sh|justfile)$'
+
       - id: cargo-clippy
         name: just lint
         entry: just lint

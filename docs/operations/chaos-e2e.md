@@ -23,9 +23,10 @@ The workflow is not a required merge gate. It exists to make the heavy media
 suite reproducible in a clean runner while runtime cost and tool availability
 are still being characterized.
 
-The Ubuntu runner's apt ffmpeg package may lag Chaos Librarian's minimum. The
-workflow therefore installs ffmpeg/ffprobe from a pinned 7.x archive and
-verifies its checksum before running the suite.
+The Ubuntu runner's apt ffmpeg package lags Chaos Librarian's minimum. The workflow
+therefore resolves the oldest BtbN release series meeting the 7.0+ floor at run time and
+asserts the installed binary's major version against that floor; neither the version nor its
+bytes are pinned. See `docs/adr/0078-runtime-resolved-ffmpeg-series.md`.
 
 ## Bumping the Chaos Librarian pin
 
