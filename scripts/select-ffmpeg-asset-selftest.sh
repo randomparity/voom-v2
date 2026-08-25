@@ -136,8 +136,9 @@ catalogue() {
 	ASSETS
 }
 
-# The full catalogue selects the lowest qualifying linux64-gpl series.
-# ffmpeg-n8.1-latest-linuxarm64-gpl-8.1.tar.xz ties on (major, minor) and must lose.
+# The full catalogue selects the lowest qualifying linux64-gpl series. The
+# linuxarm64 and lgpl entries are rejected by the PATTERN, before any comparison
+# runs -- they do not exercise the tie-break. The case below does that.
 expect_ok "full catalogue" 7 "ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz" < <(catalogue)
 
 # Remove the two qualifying linux64-gpl entries; 47 names remain, none qualifying.
@@ -152,6 +153,14 @@ expect_stderr "no qualifying series" 1 "among 47 name(s)" 7 < <(
 expect_ok "double-digit major" 7 "ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz" <<-'EOF'
 	ffmpeg-n10.0-latest-linux64-gpl-10.0.tar.xz
 	ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
+EOF
+
+# Tie on (major, minor) between two names the pattern accepts: the incumbent must
+# hold. Nothing else pins the minor tie-break -- widening it to <= changes the
+# selection while every other case stays green.
+expect_ok "tie keeps the incumbent" 7 "ffmpeg-n08.01-latest-linux64-gpl-08.01.tar.xz" <<-'EOF'
+	ffmpeg-n08.01-latest-linux64-gpl-08.01.tar.xz
+	ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
 EOF
 
 # Numeric minor comparison. Ascending on purpose: with the higher minor first the

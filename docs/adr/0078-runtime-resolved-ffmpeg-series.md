@@ -121,7 +121,7 @@ at or above the same floor.
   variable rather than two. Encoding is covered: Chaos Librarian's materializer shells out to
   ffmpeg on every scenario, and `transcode_noop_does_not_schedule_worker_mutation` materializes
   `voom-ci/hevc-noop.yaml` (`codec: hevc`, which `media_matrix.py` maps to `libx265`), so the
-  dispatch does exercise ffmpeg 8's libx265 encode inside the passing eleven. **What it cannot
+  dispatch does exercise ffmpeg 8's libx265 encode. **What it cannot
   reach** is narrower: voom's own `voom-ffmpeg-worker` invocation and the artifact-commit path
   around it, exercised only by
   `transcode_required_executes_real_worker_and_commits_hevc_mkv` — the single
@@ -134,10 +134,15 @@ at or above the same floor.
   capability gate all passed under `ffmpeg version n8.1.2-44-g7c533d0f86`, so the acquisition
   path is proven end to end. The suite, however, is **9 passed / 3 failed**, not the
   11-passed/1-failed baseline this record expected — and #491's recorded symptom does not
-  appear at all. The two transcode failures are policy-preflight and readiness outcomes raised
-  before any media work ("requires an unbound ffmpeg worker on owner node …"), which points at
-  `main`'s own owner-node envelope rework rather than at ffmpeg 8; no chaos-e2e run had
-  exercised those commits, because the 404 masked every run since 2026-08-24. The third,
+  appear at all. `transcode_required_executes_real_worker_and_commits_hevc_mkv` is the one
+  policy-preflight failure — it alone carries "requires an unbound ffmpeg worker on owner
+  node …". `transcode_noop_does_not_schedule_worker_mutation` is not: its `compliance report`
+  exited 0 and it failed on a planner node status, `blocked` where `no_op` was expected. Both
+  point at `main`'s own owner-node envelope rework rather than at ffmpeg 8, and for the second
+  the grounds are firmer than provenance — the planner's snapshot comes from
+  `probe_for_extension`, which synthesises the codec from the file extension, so no ffprobe
+  output reaches that decision at all. No chaos-e2e run had exercised those commits, because
+  the 404 masked every run since 2026-08-24. The third,
   `static_library_baseline_seeds_exports_and_compares`, is different: a post-materialization
   comparison finding (`D_SIDECAR_MISSING`, an `.eng.srt` sidecar observed as `.mkv`), and it is
   the one failure an ffmpeg-8 explanation is **not** excluded from. Tracked as #540.
