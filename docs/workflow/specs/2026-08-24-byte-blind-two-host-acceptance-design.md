@@ -17,8 +17,12 @@ This acceptance proof implements issue #425 under accepted ADRs 0050, 0055, 0075
 - ADR 0076 already makes tool readiness owner-scoped.
 - ADR 0077 already routes scan, hash, and probe through the owner agent.
 
-The deliverable is therefore a black-box acceptance environment, not another
-architecture decision or an alternate orchestrator.
+The deliverable is therefore a black-box acceptance environment plus the two
+minimum bindings needed to exercise contracts those ADRs already require: a
+policy verification ticket renders the existing owner-agent verify envelope,
+and a mutating ticket's canonical artifact-access declaration includes both its
+staging destination and configured final output root before scheduling. Neither
+binding adds a wire/schema/API operation or alternate orchestrator.
 
 ## Goals
 
@@ -138,8 +142,10 @@ runs the recipe; macOS remains a normal `just ci` target.
 
 A Linux-only ignored integration test owns the acceptance lifecycle. It uses
 `voom-conformance` because that crate already owns black-box worker protocol
-proofs. Production crates are development-only dependencies; the crate's normal
-architecture edges remain unchanged.
+proofs. Production crates are development-only dependencies of the harness; the
+crate's normal architecture edges remain unchanged. The separately named
+control-plane bindings below complete accepted production contracts without a
+new crate or dependency.
 
 The harness has five focused helpers:
 
@@ -177,18 +183,44 @@ Every asynchronous wait has a named deadline. The supervisor and isolated
 control-plane role run one serial scenario and do not use global host ports,
 fixed temp paths, ambient configuration, or paused Tokio time with SQLite.
 
-### 3. Generated media and reference policy
+### 3. Minimum production contract bindings
 
-The harness generates two small Matroska libraries with FFmpeg and MKVToolNix.
-Both contain `feature.mkv` at the same provider-relative locator, but their
-content differs. Agent A's feature contains video, English 5.1 audio, commentary
-or alternate audio, and a forced English subtitle. Every generated media object
-carries its own high-entropy font attachment: a runtime marker is repeated at
-short fixed intervals through a large attachment, so the attachment is preserved
-by the reference selection policy and any meaningful raw or encoded media chunk
-is visible to channel accounting. The smallest complete media object is larger
-than the whole measured control-body total. Agent A initially also contains
-`retire-me.mkv` for scan reconciliation.
+The control-plane ticket renderer closes two live gaps that otherwise make the
+accepted criteria impossible:
+
+- Policy `verify artifact` consumes the predecessor phase's committed rooted
+  location and renders the existing `MediaDispatch::VerifyArtifact` envelope.
+  The owner agent performs its existing containment, fact check, and worker
+  dispatch; no new wire variant or worker behavior is introduced.
+- Every mutating media ticket resolves the configured final output root before
+  ticket creation. Its canonical artifact-access declaration contains the live
+  source location, actual staging write root, and final output write root.
+  Resolution therefore rejects a mixed owner before a lease exists, while the
+  existing agent envelope continues to name only the staging output it writes.
+  The final-output root ID is additive internal durable planning evidence, not a
+  public API or worker-protocol field.
+
+Both bindings are byte-free database/configuration work required by ADRs 0050
+and 0075. Focused control-plane tests fail first and cover the canonical
+encode/decode declaration, owner fold, and verify envelope before the black-box
+harness depends on them.
+
+### 4. Generated media and reference policy
+
+The harness generates two small Matroska source libraries with FFmpeg and
+MKVToolNix. Each owner namespace also binds separate source, staging, output,
+and backup roots; corresponding paths are identical strings across owners but
+backed by different directories. Both source roots contain `feature.mkv` at the
+same provider-relative locator, but their content differs. Agent A's feature
+contains video, English 5.1 audio, commentary or alternate audio, and a forced
+English subtitle. Every generated media object carries its own high-entropy font
+attachment: a runtime marker is repeated at short fixed intervals through a
+large attachment, so the attachment is preserved by the reference selection
+policy and any meaningful raw or encoded media chunk is visible to channel
+accounting. The smallest complete media object is larger than the whole measured
+control-body total. Agent A initially also contains `retire-me.mkv` for scan
+reconciliation. Source manifests enumerate only the complete source roots;
+staging/output/backup mutations cannot weaken their comparison.
 
 The checked-in acceptance policy combines production reference-policy portions:
 
@@ -200,6 +232,11 @@ The checked-in acceptance policy combines production reference-policy portions:
   `production-normalize-reduced.voom`; and
 - final verification from `verify-artifact.voom`.
 
+The portions execute as a dependency-ordered single-mutation graph: audio
+transcode, then downmix synthesis, then MKV/track-selection remux, then artifact
+verification. Each phase consumes its predecessor's committed rooted artifact;
+no phase contains two audio/remux/video mutations.
+
 The policy uses only published grammar. The test creates it through `voom policy
 create`, creates a root-scoped input set through
 `voom policy input create-from-scan`, and executes it through
@@ -209,7 +246,7 @@ case because root validation has no installed operator CLI command; this is a
 test seam around an existing ADR 0055 transition, not alternate scan or workflow
 orchestration.
 
-### 4. Fault controller
+### 5. Fault controller
 
 The harness performs faults at real boundaries:
 
@@ -280,9 +317,11 @@ The harness pauses agent A before creating ready A-owned work, waits for one
 completed acquire poll from agent B, and requires a no-candidate response with
 no B-owned lease or child dispatch before resuming A. Durable lease/access-plan
 owner evidence must then name A only. The harness also temporarily points A's
-output default at B's root. `voom compliance execute` must fail before any new
-lease or output appears. Restoring the valid A-owned defaults is setup for the
-success workflow, not a retry shim.
+configured final output default at B's output root. Ticket creation folds the
+source, staging, and final-output roots into the canonical access declaration,
+so `voom compliance execute` must fail before any new lease, child dispatch, or
+output appears. Restoring the valid A-owned defaults is setup for the success
+workflow, not a retry shim.
 
 ### C4 — incomplete scan is non-destructive
 
@@ -419,8 +458,11 @@ secret and has read-only repository contents plus its ordinary job token.
 
 ## Verification and CI
 
-Focused TDD proceeds in four slices:
+Focused TDD first closes the two existing control-plane binding gaps, then
+proceeds in four harness slices:
 
+0. owner-agent policy verification envelope plus destination-aware access
+   declarations and mixed-owner rejection;
 1. nested namespace/process/proc-root denial and equal-path real scans;
 2. stale heartbeat and incomplete-scan reconciliation;
 3. owner-local/mixed-owner pre-dispatch gates plus slow workflow;

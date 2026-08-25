@@ -58,10 +58,18 @@ and tempfile already pinned in the workspace; Bash with util-linux `unshare`, `m
 - `crates/voom-conformance/Cargo.toml`: add `blake3.workspace = true` for the
   shared manifest helper; add only existing internal/workspace dev dependencies
   needed by the integration target (`voom-api`, `voom-control-plane`,
-  `voom-store`, `voom-node-agent`, `voom-test-support`, `http-body-util`, hyper,
-  hyper-util, sqlx, and tempfile); and pin the already-used direct test
-  dependencies exactly as their owning crate does: `axum = "0.8.9"` and
+  `voom-store`, `voom-node-agent`, `voom-test-support`, `base64`, `hex`,
+  `http-body-util`, hyper, hyper-util, sqlx, and tempfile); and pin the
+  already-used direct test dependencies exactly as their owning crate does:
+  `axum = "0.8.9"` and
   `tower = { version = "0.5.3", features = ["util"] }`.
+- `crates/voom-control-plane/src/workflow/plan/{access_declaration.rs,
+  access_declaration_test.rs,binding.rs,binding_test.rs,envelope.rs,
+  envelope_test.rs,ticket_payload.rs,ticket_payload_test.rs}` plus
+  `workflow/execution/executor/{tickets.rs,spawn_test.rs}` and
+  `workflow/plan/{expansion.rs,expansion_test.rs}`: the minimum
+  destination-aware canonical access declaration and existing owner-agent
+  policy verification envelope required by ADRs 0050 and 0075.
 - `crates/voom-conformance/src/source_manifest.rs` and
   `source_manifest_test.rs`: complete bounded source-tree enumeration and
   sorted relative-path/size/BLAKE3 manifests shared by the harness and runbook.
@@ -89,9 +97,77 @@ and tempfile already pinned in the workspace; Bash with util-linux `unshare`, `m
   at `/mnt/pool0/test-video`, generated-only run paths, evidence capture, and idempotent
   cleanup.
 
-No production crate, schema, migration, API contract, policy grammar, worker protocol, or
-source fixture is planned to change. A failed acceptance slice that demonstrates a real
-production defect returns to the spec/scope gate before widening this file map.
+Only the named `voom-control-plane` bindings change production code. They add no
+crate, dependency, migration, API operation, worker-protocol variant, or policy
+grammar. Every other change is conformance, script, CI, or runbook surface. A
+later failure that requires more than these bindings returns to the scope gate.
+
+## T0 — Complete existing owner-verification and output-ownership bindings
+
+### Interfaces
+
+The canonical declaration stays one encode/decode authority but accepts the
+rendered destinations it already validates:
+
+```rust
+fn declaration_for(
+    operation: OperationKind,
+    source: Option<&TicketStorageSource>,
+    rendered_payload: &Value,
+) -> Result<Option<ArtifactAccessDeclaration>, VoomError>;
+fn destination_write_roots(
+    operation: OperationKind,
+    rendered_payload: &Value,
+) -> Result<Vec<StorageRootId>, VoomError>;
+```
+
+Every mutating policy media payload carries additive internal planning evidence
+`final_output_storage_root_id`; its existing nested `media_dispatch` output
+supplies the actual staging root. `declaration_for` produces one canonical
+sorted declaration containing the source location with `read` and each unique
+staging/final-output root with `write`. `WorkflowTicketPayload` encode and parse
+recompute the same declaration from the same persisted payload, so omission,
+owner substitution, duplicates, and forged rights fail closed.
+
+`MediaDispatchSource::verification_target_ref` replaces the staged-only helper
+and maps either a committed live rooted location or a recorded staged output to
+the existing `MediaSourceRef`. `policy_envelope` and `expansion_envelope` render
+the existing `MediaDispatch::VerifyArtifact`; there is no new operation or
+wire field.
+
+### TDD steps
+
+1. Add failing binding/envelope tests: policy and expansion
+   `VerifyArtifact` from a live rooted predecessor must render the existing
+   verify envelope with exact root/locator/facts; staged-output verification
+   stays unchanged; malformed or unrooted sources fail. Run
+   `cargo test -p voom-control-plane workflow::plan::envelope`; expect the
+   live-location cases to fail on the current `Ok(None)`/staged-only behavior.
+2. Rename the target helper, permit both addressable source variants, and add
+   the explicit verify arms. Re-run the focused command; expect all verify
+   envelope cases to pass.
+3. Add failing access/ticket tests for one A-owned source location, a distinct
+   A staging root, and a configured B output root. The encoded declaration must
+   contain all three; `resolve_artifact_access` must return `MixedOwner` before
+   any ticket is ready. Also prove encode and parse reject a declaration that
+   omits or replaces either write root.
+4. Resolve `DestinationRole::Output` alongside staging during policy and
+   expansion ticket rendering, persist `final_output_storage_root_id`, and
+   derive the canonical declaration from the strict rendered destination set.
+   Migrate every declaration caller and test in one cutover; remove the
+   dead-code expectation on `DestinationRole::Output`.
+5. Run
+   `cargo test -p voom-control-plane workflow::plan workflow::execution::executor`;
+   expect the verify, canonical declaration, and mixed-owner pre-dispatch cases
+   to pass with no existing workflow regression. Commit as
+   `fix: bind owner verification and output ownership`.
+
+### Acceptance
+
+The added work is byte-free and implements existing ADR contracts. A policy
+verify ticket reaches the owner agent through the existing envelope, and a
+mixed final-output owner fails during canonical access resolution before lease
+creation.
 
 ## T1 — Namespace/process proof and equal-path real scans
 
@@ -161,10 +237,12 @@ not a substitute for assertions at the real boundary.
 2. Implement the strict protocol with `#[serde(deny_unknown_fields)]` request/response
    content structs and exact-length reads. Re-run the command; expect the protocol tests to
    pass.
-3. Add the ignored C1/C2 scenario first: two generated backing trees each contain
-   `feature.mkv` at the same relative locator but with distinct runtime marker attachments;
-   A also contains `retire-me.mkv`. The test must fail until owner namespaces, covers, and
-   the nested control-plane role are wired.
+3. Add the ignored C1/C2 scenario first: two generated owner backing trees
+   each contain separate `source`, `staging`, `output`, and `backup`
+   directories. Both source trees contain `feature.mkv` at the same relative
+   locator with distinct runtime marker attachments; A also contains
+   `retire-me.mkv`. The test must fail until owner namespaces, covers, and the
+   nested control-plane role are wired.
 4. Implement fixture generation with argv-only `Command` calls: FFmpeg creates bounded
    video, English 5.1/alternate audio, and forced English subtitle streams; MKVToolNix adds
    a large repeated high-entropy font attachment. Record marker raw/hex/base64 forms and
@@ -172,31 +250,38 @@ not a substitute for assertions at the real boundary.
 5. Implement complete manifest enumeration in `source_manifest.rs` first. Its
    tests cover sorted output, changed/missing/added files, symlink rejection,
    path containment, and byte/entry bounds. Implement owner anchors next. Each
-   starts under a private mount namespace, makes mount propagation private,
-   bind-mounts its backing tree at the identical absolute provider path,
-   connects to its unique local supervisor socket, and owns agent
+   starts under a private mount namespace, makes mount propagation private, and
+   bind-mounts its four backing directories at the corresponding identical
+   absolute provider paths (`source`, `staging`, `output`, `backup`). It
+   connects to its unique local supervisor socket and owns agent
    start/signal/restart, owner-view rename, full source-root manifest, and
    output-probe commands. It never opens SQLite.
-6. Implement the outer supervisor. Start both anchors before covering the backing aliases;
-   bind each `/proc/<anchor-pid>/ns/mnt` to one mechanics-only persistent handle; bind an
-   empty denial tree over provider and backing aliases in the supervisor view; launch the
-   nested mapped user/mount/PID/proc control-plane role; serve only typed commands; always
-   unmount covers/handles and reap children in reverse order.
+6. Implement the outer supervisor. Start both anchors before covering all eight
+   backing aliases; bind each `/proc/<anchor-pid>/ns/mnt` to one mechanics-only
+   persistent handle; bind an empty denial tree over the four common provider
+   paths and every backing alias in the supervisor view; launch the nested
+   mapped user/mount/PID/proc control-plane role; serve only typed commands; and
+   always unmount covers/handles and reap children in reverse order.
 7. Implement C1 live assertions in the nested role before scan: parse
    `/proc/self/mountinfo` and compare mount IDs; open every sentinel/alias and
-   require `ENOENT` or `EACCES`; run `nsenter --mount=<handle> -- /bin/true` and
-   require `EPERM`; send `CloseNamespaceHandles` and require the supervisor's
-   acknowledged unmount before any scan; require both anchor and returned agent
-   outer PIDs absent from `/proc`; and require
-   `/proc/<pid>/root/<sentinel>` to fail with `ENOENT`.
+   require `ENOENT` or `EACCES`; run
+   `nsenter --mount=<handle> -- /bin/true` and require `EPERM`; send
+   `CloseNamespaceHandles`, whose supervisor side unmounts and unlinks both
+   mountpoint files, require the acknowledgement, and assert both paths now
+   return `ENOENT` before any scan. Require both anchor and returned agent outer
+   PIDs absent from `/proc`, and require `/proc/<pid>/root/<sentinel>` to fail
+   with `ENOENT`.
 8. Initialize SQLite with `voom init`, create two nodes and one durable library
-   containing two differently owned roots with the identical provider locator,
-   activate roots through `ControlPlane::activate_library_root`, write strict
-   agent configs in the shared mechanics directory, and start production
-   node-agent processes. Worker programs are the prebuilt
-   scan/hash/ffprobe/ffmpeg/mkvtoolnix/verify binaries. A generated wrapper
-   supplies the absolute `VOOM_MKVMERGE_BIN` to the unchanged production
-   MKVToolNix worker; all other tool paths use existing agent dependency fields.
+   containing eight roots: A/B source roots with the identical source provider
+   path, plus distinct A/B staging, output, and backup roots whose corresponding
+   provider strings are also identical across owners. Assign each source root's
+   defaults to its same-owner destination roots, activate every root through
+   `ControlPlane::activate_library_root`, write strict agent configs binding the
+   four roots owned by that agent, and start production node-agent processes.
+   Worker programs are the prebuilt scan/hash/ffprobe/ffmpeg/mkvtoolnix/verify
+   binaries. A generated wrapper supplies the absolute `VOOM_MKVMERGE_BIN` to
+   the unchanged production MKVToolNix worker; all other tool paths use existing
+   agent dependency fields.
 9. Start the production router on an ephemeral loopback listener and run real `voom scan`
    for both roots. Assert live location rows have equal provider/relative locator strings,
    distinct owner/root IDs, and distinct hashes/file versions.
@@ -288,9 +373,9 @@ single-mutation graph: `audio_transcode` transcodes English/undefined audio to
 E-AC-3; `audio_downmix` depends on it and synthesizes the 5.1-to-stereo
 companion; `normalize` depends on the downmix and performs the one MKV remux
 with English/non-commentary ordering/defaults plus font selection; `verify`
-depends on normalize and verifies the staged artifact. Each phase consumes its
-predecessor's produced artifact, and no phase contains two audio/remux/video
-mutations.
+depends on normalize and verifies its committed rooted artifact. Each phase
+consumes its predecessor's produced artifact, and no phase contains two
+audio/remux/video mutations.
 
 ### TDD steps
 
@@ -299,10 +384,11 @@ mutations.
    require middleware to observe a completed B acquire poll after work is ready; assert the
    response is idle, no B lease/dispatch exists, and durable access-plan/lease owner evidence
    names A only. Resume A.
-2. Temporarily update A's output default to B's root through the production library-root CLI.
-   Run `voom compliance execute`; require an error envelope before any new lease, child
-   dispatch, intent, or output. Restore A's output/staging defaults through the same CLI and
-   only then start the success run.
+2. Temporarily update A source's output default to B's output root through the
+   production library-root CLI. Run `voom compliance execute`; require an error
+   envelope before any new lease, child dispatch, intent, or output. Restore
+   A's A-owned output default (its staging default never changes) through the
+   same CLI and only then start the success run.
 3. Arm `HoldLeaseComplete` for the audio-synthesis operation. Spawn real `voom compliance
    execute`; middleware must hold the original completion request before router mutation,
    record that transform/fact/probe result was received, and continue serving the same
@@ -430,11 +516,14 @@ not merge.
 
 ## Criterion map
 
-- C1: T1 nested mapped user+mount+PID/proc proof plus full T3/T4 workflow.
+- C1: T0 owner verification plus T1 nested mapped user+mount+PID/proc proof and
+  the full T3/T4 workflow.
 - C2: T1 equal provider/relative locators and distinct real scan hashes.
-- C3: T3 B idle acquire and mixed-root pre-dispatch failure.
+- C3: T0 destination-aware owner fold plus T3 B idle acquire and mixed-root
+  pre-dispatch failure.
 - C4: T2 applied partial batch, fenced incarnation, then complete rescan retirement.
 - C5: T3 held post-dispatch completion, same-lease heartbeats, exact claim continuity.
 - C6: T4 post-mutation lost response, replacement agent, physical/durable uniqueness.
 - C7: T2/T4 counted production listener, strict attribution, marker and size backstops.
-- C8: T1 baseline plus T4 owner/supervisor manifest comparisons and runbook cleanup.
+- C8: T1 source-only baseline plus T4 owner/supervisor manifest comparisons and
+  runbook cleanup.
