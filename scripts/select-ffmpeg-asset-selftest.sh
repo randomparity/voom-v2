@@ -163,6 +163,14 @@ expect_ok "tie keeps the incumbent" 7 "ffmpeg-n08.01-latest-linux64-gpl-08.01.ta
 	ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
 EOF
 
+# A lower minor arriving AFTER a higher one within the same major: only the
+# tie-break clause decides this. Deleting the clause outright leaves every other
+# case green, because none of them supplies this shape.
+expect_ok "lower minor after higher" 7 "ffmpeg-n8.2-latest-linux64-gpl-8.2.tar.xz" <<-'EOF'
+	ffmpeg-n8.9-latest-linux64-gpl-8.9.tar.xz
+	ffmpeg-n8.2-latest-linux64-gpl-8.2.tar.xz
+EOF
+
 # Numeric minor comparison. Ascending on purpose: with the higher minor first the
 # incumbent is always the one that should lose, so widening (major < best_major)
 # to <= would go unnoticed.
@@ -261,25 +269,16 @@ expect_ok "non-ascii digits rejected" 7 "ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.
 	ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
 EOF
 
-# Pin the digit class independently of the locale pin: read the real `pattern=`
-# line out of the script -- so it cannot drift from what ships -- and evaluate it
-# in a subshell forced to a UTF-8 locale, where a bracket range would match.
-# glibc collates [0-9] by locale; [[:digit:]] is ASCII-only in every locale.
-pattern_line=$(grep -m1 '^pattern=' "$select_script")
-# Find a UTF-8 locale the host actually has. Hard-coding one and swallowing
-# setlocale's warning would leave this case running in C, where a bracket range
-# is ASCII-only -- so it would pass on a pattern it exists to reject, silently.
-utf8_locale=$(locale -a 2>/dev/null | grep -iE '\.(utf-?8)$' | grep -viE '^(C|POSIX)\.' | head -n1)
-if [[ -z $pattern_line ]]; then
-	echo "select-ffmpeg-asset-selftest: pattern class: no pattern= line in $select_script" >&2
-	failures=$((failures + 1))
-elif [[ -z $utf8_locale ]]; then
-	echo "select-ffmpeg-asset-selftest: pattern class: no non-C UTF-8 locale on this host; cannot exercise the digit class" >&2
-	failures=$((failures + 1))
-elif LC_ALL=$utf8_locale bash -c "
-	$pattern_line
-	[[ \$1 =~ \$pattern ]]" _ "ffmpeg-n٨.١-latest-linux64-gpl-٨.١.tar.xz"; then
-	echo "select-ffmpeg-asset-selftest: pattern class: pattern admits non-ASCII digits under $utf8_locale" >&2
+# Pin `export LC_ALL=C`, which is the PORTABLE guard. Do not assert that
+# [[:digit:]] is ASCII-only: that holds under glibc but NOT under Darwin's regex,
+# where a UTF-8 locale makes the class match Arabic-Indic digits too (observed on
+# macos-26-arm64, ca_AD.UTF-8, CI run 32887757116). On Darwin the export is the
+# only thing keeping a non-ASCII digit out of `10#`, so its removal must not pass
+# unnoticed. A structural check is what is portable here -- a behavioural one
+# would pass on glibc for the wrong reason.
+if ! grep -qx 'export LC_ALL=C' "$select_script"; then
+	echo "select-ffmpeg-asset-selftest: locale pin: 'export LC_ALL=C' is missing from $select_script" >&2
+	echo "  it is the only digit guard on platforms whose [[:digit:]] is locale-sensitive" >&2
 	failures=$((failures + 1))
 fi
 

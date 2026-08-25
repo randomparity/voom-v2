@@ -171,8 +171,9 @@ at or above the same floor.
   it admits no shell metacharacter and no path separator. Its digit class is `[[:digit:]]`, not
   the range `[0-9]`: glibc collates a bracket range by locale, so under a UTF-8 locale a range
   admits Arabic-Indic and fullwidth digits, which then fail in `10#`. The script also exports
-  `LC_ALL=C`; either construct suffices, and the selftest pins the class independently of the
-  export.
+  `LC_ALL=C`, and the two are **not** interchangeable — Darwin's regex makes `[[:digit:]]`
+  itself locale-sensitive, so on macOS the export is the only guard. The selftest pins the
+  export's presence rather than asserting a class property that holds only under glibc.
 - **The blast radius of a bad build is a failed test.** ffmpeg here is a test-time tool inside
   one non-gating weekly job; it is not linked into, nor shipped with, any voom binary, and the
   job holds no secret beyond its `contents: read` token.

@@ -7,11 +7,17 @@
 # it would have to keep up to date.
 # See docs/adr/0078-runtime-resolved-ffmpeg-series.md.
 set -euo pipefail
-# glibc resolves a bracket RANGE like [0-9] through the locale's collation, so under
-# a UTF-8 locale it admits Arabic-Indic and fullwidth digits -- which then blow up in
-# `10#`. The POSIX class below is ASCII-only in every locale; pinning LC_ALL as well
-# covers the [![:space:]] trim globs and removes the dependency on the runner's
-# unset default.
+# Keep non-ASCII digits out of `10#`. Two constructs, and they are NOT
+# interchangeable:
+#   * `[[:digit:]]` below rather than the range `[0-9]`. glibc resolves a bracket
+#     range through the locale's collation, so under a UTF-8 locale a range admits
+#     Arabic-Indic and fullwidth digits. The class fixes that under glibc.
+#   * this `export LC_ALL=C`, which is the PORTABLE guard. Darwin's regex makes
+#     `[[:digit:]]` itself locale-sensitive -- observed matching Arabic-Indic digits
+#     under ca_AD.UTF-8 on macos-26-arm64 -- so on macOS the export is the only
+#     thing standing between a hostile asset name and the arithmetic below.
+# It also covers the [![:space:]] trim globs and removes the dependency on the
+# runner's unset default. The selftest pins the export's presence for that reason.
 export LC_ALL=C
 
 if (($# != 1)); then
