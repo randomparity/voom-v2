@@ -49,6 +49,17 @@ is stop the job from depending on an artifact name the repository has to predict
 removed the tag pin and the digest pin but left a third pin in place — the **version
 series**, encoded in the asset filename. That is the pin this design removes.
 
+### Open issues this work resolves
+
+- **#499** (P1) — the same 404, reported six days before #536, against dispatch run
+  32090435836. Its proposed fix repoints at daily tag `autobuild-2026-08-11-13-11`, which has
+  since been pruned and now 404s itself. Resolved here alongside #536.
+- **#500** (P2, tech-debt) — the durable-fix issue. Its three options (cache, mirror as a
+  release asset, publish a container image) are each dispositioned in ADR 0078, and its
+  "decide separately" clause on the ffmpeg version is answered by the requirement below.
+  Resolved here.
+- **#493** — stale; see "A floor is not a compatibility statement" below. Closed by this work.
+
 ## Requirement, restated
 
 The Chaos Librarian submodule documents its floor at
@@ -61,10 +72,23 @@ against `7.1`, which is stricter than the requirement and is exactly what BtbN's
 invalidates. The `ubuntu-latest` apt package cannot satisfy the floor — the issue-73 design
 spec records it resolving to 6.1.1 — so `apt install ffmpeg` remains unavailable to this job.
 
+### The requirement, as the project states it
+
+Verify against **7.0 or later**. Any version satisfying that is sufficient. Take the **oldest
+available** version that meets it, and pin neither the version nor its digest. A test that
+fails under a newer ffmpeg is a *wanted notification* — the project would rather learn its
+expectations were version-coupled than spend maintenance chasing a source for an older build.
+
+That last clause is what settles the question #500 left open ("whether to stay on ffmpeg 7.1
+at all... needs its own evaluation rather than being folded into a CI fix"). There is no
+separate evaluation pending: any qualifying version is acceptable by decision, so the CI fix
+is the whole of it.
+
 ### A floor is not a compatibility statement
 
 The documented "7.0+" says what is too old. It says nothing about whether the suite works on
-an arbitrarily newer major.
+an arbitrarily newer major. Under the requirement above that gap is accepted deliberately
+rather than closed — but it should be stated, not discovered.
 
 Chaos Librarian does check the floor, and checks it properly:
 `third_party/chaos-librarian/src/chaos_librarian/materializer/tooling/capabilities.py` defines
@@ -79,7 +103,16 @@ from selection is right, since Chaos Librarian would refuse it at startup.
 Admitting a version is not the same as working under it. No test in either tree exercises a
 non-7.x ffmpeg, and BtbN's lowest qualifying series today is `n8.1`, so the **first run under
 this design moves the suite from ffmpeg 7.1 to 8.1** — a major bump nothing here has been run
-against. This design does not assume the bump is safe; it records it as an open residual.
+against. The one filed observation of a 7.x-vs-8.x divergence in this suite, **#493**, no
+longer applies: `4d8d781d` renamed the test it cites, and the current
+`malformed_media_scan_request_stays_accepted_without_worker_side_effects`
+(`crates/voom-cli/tests/chaos_librarian_e2e.rs:372`) asserts only that the scan request is
+accepted and that one ticket exists — both ffprobe-version-independent. #493 is stale and this
+work closes it.
+
+So the residual is the untested remainder, not a known break. Per the requirement above it is
+accepted rather than closed, and if ffmpeg 8 does surface a coupling, that red job is the
+notification the project asked for.
 
 ### The dispatch run is confounded, and this change does not turn the job green
 
@@ -273,71 +306,42 @@ for its own caller-error cases.
 
 ## Threat model
 
-The change is security-relevant: it alters how a CI job acquires a third-party executable,
-and it adds an authenticated read against the GitHub API.
+**The blast radius is a failed test.** ffmpeg here is a test-time tool: it synthesizes and
+probes media inside one non-gating weekly job, and is never linked into, nor shipped with,
+any voom binary. The job runs only on `schedule` and `workflow_dispatch` — never on
+`pull_request` — so no outside contributor can trigger it, and it holds no secret beyond a
+`contents: read` job token. That bounds what follows and is why this section is short.
 
-### Boundary inventory
+**What the change adds** is one parsed untrusted input and one authenticated public read.
+Asset *names* are new: text from BtbN, matched by `select-ffmpeg-asset.sh`. Asset *contents*
+are not new — the job has executed BtbN's ffmpeg since `0d0c0ce1`, and this design makes that
+neither more nor less trusted.
 
-**Widened — none.** No boundary in this design admits an actor who could not already reach
-the equivalent one.
+**Controls.**
 
-**Existing, restated:**
+- *Asset names* — the whole-line-anchored pattern is the load-bearing control. Admitting only
+  `ffmpeg-n`, digits, `.`, `-latest-linux64-gpl-` and `.tar.xz` means a hostile name cannot
+  carry a path separator, a shell metacharacter, or a URL that leaves the release; only
+  `[0-9]` reaches arithmetic, base-10 forced. The matched name is used as a single URL path
+  segment.
+- *Asset contents* — the floor is asserted against the extracted binary's own `-version`
+  output, over TLS via `curl -fL`. Extraction stays `tar -xJf` into a job-scoped
+  `$RUNNER_TEMP`, unchanged from today.
+- *API read* — `GH_TOKEN` is the job token, passed via `env:` and never interpolated into the
+  `run:` body, so no template-injection surface is created. `contents: read` is unchanged and
+  is sufficient for a public-repository read.
 
-| Boundary | What crosses | Under whose control |
-|---|---|---|
-| BtbN release asset **contents** | An ffmpeg tarball, executed by the job | BtbN |
-| BtbN release asset **names** | Text, parsed by `select-ffmpeg-asset.sh` | BtbN |
-| GitHub REST API read | A release listing | GitHub |
+**Out of scope.**
 
-The second row is the only one this design adds as a *parsed* input. The first row —
-executing BtbN's binary — is unchanged and pre-existing; this design does not make it more
-or less trusted.
-
-### Actor model
-
-The untrusted party is **BtbN**, the third-party build publisher. The job already executes
-BtbN's ffmpeg binary against synthesized media, so BtbN is inside the job's trust boundary
-for code execution and has been since `0d0c0ce1`. The design places its trust there
-knowingly: `359ba425` established that no digest can pin a rolling artifact, and the
-alternatives (vendoring a build, building from source, switching distributor) are recorded
-as rejected in ADR 0078.
-
-GitHub is trusted as the transport and as the API host; the job already depends on GitHub for
-its own source checkout.
-
-There is no anonymous-internet actor and no tenant actor here: `chaos-e2e` runs on
-`workflow_dispatch` (write-access only) and `schedule` (repository-owned), never on
-`pull_request`, so no outside contributor can trigger it.
-
-### Control per boundary
-
-| Boundary | Control | Leak on failure |
-|---|---|---|
-| Asset **names** | Whole-line anchored regex with an explicit character class; only `[0-9]` reaches arithmetic; the matched name is used as a single URL path segment, never as a shell word or a filesystem path | The name itself, in a diagnostic |
-| Asset **contents** | Version floor asserted against the extracted binary's own `-version` output; TLS to `objects.githubusercontent.com` via `curl -fL` | The version string |
-| GitHub API read | `GH_TOKEN` is the job token; the workflow's `contents: read` permission is unchanged and is sufficient for a public-repository read | `gh`'s own error |
-
-The regex is the load-bearing control on the new input. Because it is whole-line anchored and
-admits only `ffmpeg-n`, digits, `.`, `-latest-linux64-gpl-`, and `.tar.xz`, a hostile asset
-name cannot introduce a path traversal (`/` and `.` runs are not admissible in sequence), a
-shell metacharacter, or a URL that leaves the release. Extraction stays `tar -xJf` into a
-job-scoped `$RUNNER_TEMP` directory, unchanged from today.
-
-`GH_TOKEN` is passed through `env:`, never interpolated into the `run:` body, so no
-template-injection surface is created.
-
-### Explicitly out of scope
-
-- **A malicious or compromised BtbN build.** Accepted risk, pre-existing and unchanged. The
-  project has no digest it can pin (`359ba425`) and no reproducible build to compare against.
-  The mitigating facts are that `chaos-e2e` is not a merge gate, holds no secrets beyond the
-  job token, and runs with `contents: read`.
-- **API response truncation.** If BtbN's asset count ever exceeded what the release object
-  embeds, selection could see a partial list. This is not a correctness hazard: a partial
-  list either still contains a qualifying series (selection succeeds, floor still enforced)
-  or contains none (selection fails loudly). BtbN's `latest` release carries 49 assets as of
-  2026-08-25.
-- **Supply-chain review of `gh` itself.** Preinstalled on GitHub-hosted runners; already
+- *A malicious or compromised BtbN build.* Accepted and pre-existing. No digest can pin a
+  rolling artifact (`359ba425`), and the alternatives that would restore one are rejected in
+  ADR 0078 — including a month-end pin that could carry a digest, declined because holding a
+  specific older version in place is maintenance the project does not want. The accepted
+  consequence is bounded by the blast radius above.
+- *API response truncation.* Not a correctness hazard: a partial list either still contains a
+  qualifying series, in which case the floor is still enforced, or contains none, in which
+  case selection fails loudly. BtbN's `latest` carries 49 assets as of 2026-08-25.
+- *Supply-chain review of `gh` itself.* Preinstalled on GitHub-hosted runners and already
   relied on by the `notify-failure` job in this same workflow.
 
 ## Documentation
