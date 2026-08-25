@@ -429,12 +429,20 @@ than invented by the implementer.
    output. (Not a list of today's series names — that check would decay exactly as the pin
    did.)
 
-Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–9):
+Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–10):
 
-2. Given the 2026-08-25 catalogue on stdin and floor `7`, prints
-   `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz`, exit `0`.
-3. Given that catalogue with the `n8.1` and `n9.0` entries removed, exit `1` with a
-   diagnostic on stderr naming the floor and the candidate count.
+2. Given the **full 49-name catalogue** on stdin and floor `7`, prints
+   `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz`, exit `0`. The fixture is the complete output
+   of `gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name'` on
+   2026-08-25 — **not** the six-line `linux64-gpl` excerpt in the Problem section above. It
+   must therefore carry the `linuxarm64`, `win64`, `winarm64` and `lgpl` entries, so the
+   selection is shown to reject them: in particular
+   `ffmpeg-n8.1-latest-linuxarm64-gpl-8.1.tar.xz` ties on `(major, minor)` and must not be
+   selected.
+3. Given that catalogue with the `n8.1` and `n9.0` linux64-gpl entries removed, exit `1` with
+   a diagnostic on stderr naming the floor and the number of non-blank input lines considered.
+   ("Considered" means lines read, not lines matching the ERE — that count is zero by
+   construction whenever exit `1` fires.)
 4. Given `ffmpeg-n10.0-latest-linux64-gpl-10.0.tar.xz` and
    `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz`, prints the `n9.0` asset — numeric major
    comparison, not lexical.
@@ -447,39 +455,46 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–9):
 7. Given `ffmpeg-n8/1-latest-linux64-gpl-8/1.tar.xz`, exit `1`. This pins the escaped dots:
    an unescaped `.` matches `/`, and the resulting name would leave the release path when
    interpolated into the download URL.
-8. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
+8. Given `ffmpeg-n8.1-latest-linux64-gpl-9.0.tar.xz` and floor `7`, exit `1`. The ERE admits
+   this name — only the post-match `1==3, 2==4` comparison rejects it. Without this case an
+   implementation that drops captures 3 and 4 entirely passes every other criterion, leaving
+   the one rule whose purpose is to notice an upstream naming drift with no coverage at all.
+9. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
    `7.0`, and two arguments.
-9. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
-   message naming the release read rather than the floor.
+10. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
+    message naming the release read rather than the floor.
 
-10. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
-11. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
+11. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
+12. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
     delegates to the `just` recipe, matching the five existing guard-script pairs, and
     `prek run --all-files` passes. Only the selftest hook is wanted: the selection script
     reads no repository file, so a non-selftest hook would have nothing to check.
-12. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
-13. `just ci` passes.
-14. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
+13. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
+14. `just ci` passes.
+15. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
     `rg -n 'pinned 7\.x|verifies its checksum' docs/operations/chaos-e2e.md` produces no
     output, and the replacement sentence from the Documentation section is present. Line 10's
     "ffmpeg/ffprobe 7.0+" is unchanged.
-15. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
+16. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
     (`just check-adr-index` passes).
-16. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
+17. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
     with **the asset the script resolves from the live catalogue** installed — `n8.1` as of
     2026-08-25; a different series is a pass, not a failure, since resolving a different
-    series is the design working. The blocking conditions are that the install step,
-    `Verify external tools`, and Chaos Librarian's capability gate all pass, and that #491's
-    `transcode_required_executes_real_worker_and_commits_hevc_mkv` is among the failures.
+    series is the design working. Blocking conditions: the install step,
+    `Verify external tools`, and Chaos Librarian's capability gate all pass; the run produces
+    per-test results; and, **if PR #498 has not landed on this branch's base**, #491's
+    `transcode_required_executes_real_worker_and_commits_hevc_mkv` is among the failures. If
+    #498 has landed, that test is expected to pass and the run should show 12 passed — its
+    passing is the good outcome, not a criterion failure.
     Any **additional** test failure under the newer ffmpeg does **not** block this change —
     that is the wanted notification the requirement describes — but it is filed as a new
     issue before merge. The run's URL and per-test outcome go in the PR.
-17. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
-    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 16 is
+18. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
+    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 17 is
     filed.
 
-Criteria 2–9 are the selftest's cases, so criterion 10 checks them on every commit.
-Criterion 16 is the only one no local guardrail can reach, and it deliberately does not ask
+Criteria 2–10 are the selftest's cases, so criterion 11 checks them on every commit.
+Criterion 17 is the only one no local guardrail can reach, and it deliberately does not ask
 for a green run: #491 makes that unobtainable until PR #498 merges, and demanding it would
 either block this fix behind an unrelated one or invite reading a red run as this change's
 failure.
@@ -496,7 +511,7 @@ failure.
 - Manual `workflow_dispatch` of `chaos-e2e` on the branch, read per-test rather than by its
   conclusion (see "The dispatch run is confounded" above). This is the only end-to-end
   evidence that the resolved asset downloads, extracts, satisfies the floor, and carries the
-  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 16
+  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 17
   defines what blocks and what does not.
 
 ## Related
