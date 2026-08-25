@@ -52,8 +52,8 @@ triggers only on `schedule` and `workflow_dispatch`.
 **This change does not return the weekly job to green.** `main`'s chaos-e2e also fails at the
 step after the install — runs 31361822593 and 32000334810 failed in `Run Chaos Librarian E2E`
 with "artifact commit path escaped storage root". That defect is owned by issue #491 and
-fixed by PR #498, open and unmerged. Fixing the install moves the failure one step later
-until #498 lands.
+fixed by PR #498 — open, and currently `CONFLICTING`, so its landing is not imminent. Fixing
+the install moves the failure one step later until #498 lands.
 
 ## Decision
 
@@ -89,7 +89,8 @@ on a bad day, which is exactly the class this extraction exists to bring under t
 
 The selection lives in a script rather than inline so that
 `scripts/select-ffmpeg-asset-selftest.sh` can prove it under `just ci`, following the
-`<name>.sh` / `<name>-selftest.sh` pair already used by the repository's five guard scripts.
+`<name>.sh` / `<name>-selftest.sh` pair that five of the repository's six guard scripts
+already use.
 
 The workflow keeps acquisition: the release it reads names from, the download URL, extraction,
 `GITHUB_PATH`, and a post-install assertion that the extracted binary reports a major version
@@ -134,8 +135,9 @@ at or above the same floor.
   the selection, the download, the extraction, `GITHUB_PATH` and the assertion together. That
   is the same path `7212262f` was validated on (run 27394705387), and it is a pre-merge check,
   not a post-merge hope.
-- The job gains a GitHub REST read of a public repository, authenticated with the job token.
-  The workflow's `contents: read` permission is unchanged and sufficient.
+- The job gains a GitHub REST read of BtbN's releases. It succeeds because that repository is
+  public — the job token authenticates the request for rate-limit purposes but grants no
+  access there, so no permission change applies and `contents: read` is unchanged.
 - Asset names become a parsed untrusted input. The whole-line-anchored pattern is the control;
   it admits no shell metacharacter, no path separator, and no digits into arithmetic beyond
   `[0-9]`.
@@ -183,9 +185,11 @@ their `verified:` grounds are kept because they are the evidence behind that cal
   `docs/superpowers/specs/2026-05-25-issue-73-chaos-e2e-actions-design.md` records the
   `ubuntu-latest` apt package resolving to 6.1.1 during post-merge validation, below the
   documented 7.0+ floor. That finding is why this job downloads a build at all.
-- **Pin a SHA-256 against the rolling asset.** verified: `359ba425`'s commit message records
-  that the `latest` asset's bytes change on every BtbN rebuild, so a recorded digest stops
-  matching within days; that commit removed the digest check for this reason.
+- **Pin a SHA-256 against the rolling asset.** verified: `.github/workflows/chaos-e2e.yml`
+  records that "the `latest` tag's bytes change on every rebuild (a pinned SHA256 can never
+  match for long)", which is why `359ba425` removed the digest check. (That commit's own
+  message makes the byte-churn point about the dated `autobuild-*` assets; the `latest` tag is
+  republished on each of those rebuilds, so it inherits the property.)
 - **Select the highest published series rather than the lowest.** judgment: the requirement
   is a floor, and the oldest qualifying build is the one to take; selecting the highest would
   move the suite onto a new ffmpeg major the day BtbN publishes one, for no stated reason.
