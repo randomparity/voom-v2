@@ -55,10 +55,19 @@ and tempfile already pinned in the workspace; Bash with util-linux `unshare`, `m
 
 ## File map
 
-- `crates/voom-conformance/Cargo.toml`: add only internal/workspace dev dependencies needed
-  by the integration target (`voom-api`, `voom-control-plane`, `voom-store`,
-  `voom-node-agent`, `voom-test-support`, axum, blake3, http-body-util, hyper,
-  hyper-util, sqlx, tempfile, and tower).
+- `crates/voom-conformance/Cargo.toml`: add `blake3.workspace = true` for the
+  shared manifest helper; add only existing internal/workspace dev dependencies
+  needed by the integration target (`voom-api`, `voom-control-plane`,
+  `voom-store`, `voom-node-agent`, `voom-test-support`, `http-body-util`, hyper,
+  hyper-util, sqlx, and tempfile); and pin the already-used direct test
+  dependencies exactly as their owning crate does: `axum = "0.8.9"` and
+  `tower = { version = "0.5.3", features = ["util"] }`.
+- `crates/voom-conformance/src/source_manifest.rs` and
+  `source_manifest_test.rs`: complete bounded source-tree enumeration and
+  sorted relative-path/size/BLAKE3 manifests shared by the harness and runbook.
+- `crates/voom-conformance/src/bin/byte_blind_manifest.rs`: checked-in
+  one-root operator helper that emits the strict manifest as JSON without a new
+  package; `lib.rs` exports the manifest module.
 - `crates/voom-conformance/tests/byte_blind_two_host.rs`: ignored test entrypoint, role
   selection, common error/result plumbing, and end-to-end criterion ordering.
 - `crates/voom-conformance/tests/byte_blind_two_host/protocol.rs`: bounded framed local
@@ -100,8 +109,9 @@ enum SupervisorCommand {
     SignalAgent { owner: OwnerId, signal: AgentSignal },
     RestartAgent { owner: OwnerId, config_path: PathBuf },
     RenameInOwner { owner: OwnerId, from: PathBuf, to: PathBuf },
-    Manifest { owner: OwnerId, relative_paths: Vec<PathBuf> },
+    Manifest { owner: OwnerId },
     ProbeOutput { owner: OwnerId, relative_locator: PathBuf },
+    CloseNamespaceHandles,
     RemoveDenialCovers,
     Finish,
 }
@@ -111,6 +121,7 @@ enum SupervisorReply {
     Renamed,
     Manifest(SourceManifest),
     OutputProbe(OutputProbe),
+    NamespaceHandlesClosed,
     CoversRemoved,
     Finished,
     Failed { operation: String, message: String },
@@ -158,25 +169,33 @@ not a substitute for assertions at the real boundary.
    video, English 5.1/alternate audio, and forced English subtitle streams; MKVToolNix adds
    a large repeated high-entropy font attachment. Record marker raw/hex/base64 forms and
    require the smallest complete media object to exceed the later control-body total.
-5. Implement owner anchors. Each starts under a private mount namespace, makes mount
-   propagation private, bind-mounts its backing tree at the identical absolute provider
-   path, connects to its unique local supervisor socket, and owns agent start/signal/restart,
-   owner-view rename, manifest, and output-probe commands. It never opens SQLite.
+5. Implement complete manifest enumeration in `source_manifest.rs` first. Its
+   tests cover sorted output, changed/missing/added files, symlink rejection,
+   path containment, and byte/entry bounds. Implement owner anchors next. Each
+   starts under a private mount namespace, makes mount propagation private,
+   bind-mounts its backing tree at the identical absolute provider path,
+   connects to its unique local supervisor socket, and owns agent
+   start/signal/restart, owner-view rename, full source-root manifest, and
+   output-probe commands. It never opens SQLite.
 6. Implement the outer supervisor. Start both anchors before covering the backing aliases;
    bind each `/proc/<anchor-pid>/ns/mnt` to one mechanics-only persistent handle; bind an
    empty denial tree over provider and backing aliases in the supervisor view; launch the
    nested mapped user/mount/PID/proc control-plane role; serve only typed commands; always
    unmount covers/handles and reap children in reverse order.
-7. Implement C1 live assertions in the nested role before scan: parse `/proc/self/mountinfo`
-   and compare mount IDs; open every sentinel/alias and require `ENOENT` or `EACCES`; run
-   `nsenter --mount=<handle> -- /bin/true` and require `EPERM`; remove the handle paths from
-   further use; require both anchor and returned agent outer PIDs absent from `/proc`; and
-   require `/proc/<pid>/root/<sentinel>` to fail with `ENOENT`.
-8. Initialize SQLite with `voom init`, create two nodes/libraries/roots with installed CLI
-   commands, activate roots through `ControlPlane::activate_library_root`, write strict agent
-   configs in the shared mechanics directory, and start production node-agent processes.
-   Worker programs are the prebuilt scan/hash/ffprobe/ffmpeg/mkvtoolnix/verify binaries.
-   A generated wrapper supplies the absolute `VOOM_MKVMERGE_BIN` to the unchanged production
+7. Implement C1 live assertions in the nested role before scan: parse
+   `/proc/self/mountinfo` and compare mount IDs; open every sentinel/alias and
+   require `ENOENT` or `EACCES`; run `nsenter --mount=<handle> -- /bin/true` and
+   require `EPERM`; send `CloseNamespaceHandles` and require the supervisor's
+   acknowledged unmount before any scan; require both anchor and returned agent
+   outer PIDs absent from `/proc`; and require
+   `/proc/<pid>/root/<sentinel>` to fail with `ENOENT`.
+8. Initialize SQLite with `voom init`, create two nodes and one durable library
+   containing two differently owned roots with the identical provider locator,
+   activate roots through `ControlPlane::activate_library_root`, write strict
+   agent configs in the shared mechanics directory, and start production
+   node-agent processes. Worker programs are the prebuilt
+   scan/hash/ffprobe/ffmpeg/mkvtoolnix/verify binaries. A generated wrapper
+   supplies the absolute `VOOM_MKVMERGE_BIN` to the unchanged production
    MKVToolNix worker; all other tool paths use existing agent dependency fields.
 9. Start the production router on an ephemeral loopback listener and run real `voom scan`
    for both roots. Assert live location rows have equal provider/relative locator strings,
@@ -262,11 +281,16 @@ async fn wait_for<F, Fut>(name: &'static str, deadline: Duration, observe: F) ->
 where F: FnMut() -> Fut, Fut: Future<Output = TestResult<bool>>;
 ```
 
-`Cli::run` requires one JSON envelope, validates command/status against the requested
-operation, captures bounded stderr, and rejects extra stdout. The checked-in runtime policy
-is generated by copying the published grammar portions named in the spec into one document:
-audio E-AC-3 transcode, 5.1-to-stereo synthesis, English/non-commentary ordering/defaults,
-MKV/font selection, and dependent artifact verification.
+`Cli::run` requires one JSON envelope, validates command/status against the
+requested operation, captures bounded stderr, and rejects extra stdout. The
+runtime policy copies only published grammar and uses a dependency-ordered,
+single-mutation graph: `audio_transcode` transcodes English/undefined audio to
+E-AC-3; `audio_downmix` depends on it and synthesizes the 5.1-to-stereo
+companion; `normalize` depends on the downmix and performs the one MKV remux
+with English/non-commentary ordering/defaults plus font selection; `verify`
+depends on normalize and verifies the staged artifact. Each phase consumes its
+predecessor's produced artifact, and no phase contains two audio/remux/video
+mutations.
 
 ### TDD steps
 
@@ -285,12 +309,14 @@ MKV/font selection, and dependent artifact verification.
    agent's lease-heartbeat requests.
 4. Hold longer than the configured five-second initial lease TTL using real time. Require at
    least two successful heartbeats for that exact lease, then release the original request.
-   Wait for the CLI workflow to continue through remux, verification, and add-only commit.
-5. Observe durable rows without mutation: one lease and dispatch attempt; the same synthesis
-   operation, dispatch generation, claim token, and claim generation from acquisition through
-   commit; no expiry/requeue/replacement lease fact; terminal workflow success; synthesis
-   state `committed`; completed policy phases include real transcode, synthesized companion,
-   remux/track selection, and verification results.
+   Wait for this first successful workflow to continue through remux,
+   verification, and add-only commit.
+5. Observe durable rows without mutation: one lease and dispatch attempt for
+   the held synthesis work; the same synthesis operation, dispatch generation,
+   claim token, and claim generation from acquisition through commit; no
+   expiry/requeue/replacement lease fact; terminal workflow success; synthesis
+   state `committed`; completed policy phases include real transcode,
+   synthesized companion, remux/track selection, and verification results.
 6. Run `just accept-byte-blind`; expect C3 and C5 plus prior criteria to pass. Commit as
    `test: prove owner gates and live slow-work claims`.
 
@@ -333,32 +359,44 @@ search and the smallest-media-size comparison remain independent backstops.
 
 ### TDD steps
 
-1. Arm `DropCommitOutcome` immediately before the successful workflow's terminal add-only
-   mutation. After the owner has created the file and applied receipt and the production
-   `/v1/artifact/commit/{intent_id}/outcome` handler has durably applied the mutation,
-   middleware counts but replaces exactly that response body with an empty/truncated body and
-   notifies the role.
-2. Kill agent A immediately and start a replacement in the same owner mount namespace. Wait
-   for production recovery to converge. Assert the old incarnation is fenced, the new one is
-   current, and the intent/generation is unchanged.
-3. For every target locator, assert exactly one physical output, completed intent, commit
-   record, applied receipt, live target location, and provider mutation; assert no successor
+1. Snapshot durable/output counts, arm `DropCommitOutcome`, and start a second
+   execution of the same generated-media policy/input. After the owner has
+   created the new target file and applied receipt and the production
+   `/v1/artifact/commit/{intent_id}/outcome` handler has durably applied the
+   mutation, middleware counts but replaces exactly that response body with an
+   empty body and notifies the role.
+2. Kill agent A immediately and start a replacement in the same owner mount
+   namespace. Wait for replacement activation, resolve the dropped intent's
+   artifact handle through read-only observation, and invoke the installed
+   `voom artifact recover-commit --artifact-handle-id <id>` path. Require its
+   success envelope before waiting for convergence. Assert the old incarnation
+   is fenced, the new one is current, and the intent/generation is unchanged.
+3. Relative to the pre-run snapshot, for every target locator assert exactly
+   one physical output, completed intent, commit record, applied receipt, live
+   target location, and provider mutation; assert no successor
    intent/generation or duplicate durable record. This closes C6.
 4. Complete the route classifier for every exchange observed by the full scenario. Assert
    exact read/write totals, positive framing overhead, no unknown value, no marker in raw/hex/
    any base64 alignment, and total control bodies smaller than the smallest media object.
    Emit only aggregate route/category/header/body/stream diagnostics. This closes C7.
-5. Restore `retire-me.mkv` through owner A, rescan successfully, and compare the original
-   source manifest through each live owner anchor. Stop agents, remove denial covers and
-   namespace-handle mounts, compare the manifest from the supervisor view, stop anchors, and
-   let the unique temp root disappear. Repeat cleanup in the test's drop/error path to prove
-   idempotence. This closes C8.
-6. Add the operator runbook. It uses `ssh homer` only when explicitly invoked by an operator,
-   creates `/mnt/pool0/test-video/voom-byte-blind-$RUN_ID/{source,staging,output,backup}`, refuses
-   empty/non-matching run roots, records a sorted BLAKE3 source manifest, uses generated media,
-   records the same CLI/API/durable evidence, restores renamed input, rescans, compares the
-   manifest, and removes only the exact run-ID paths. Running cleanup twice must be a no-op;
-   the runbook never deletes an existing library path.
+5. Restore `retire-me.mkv` through owner A, rescan successfully, and compare
+   the complete original source manifest through each live owner anchor. Stop
+   agents, remove denial covers, compare the complete enumerated path/size/hash
+   sets from the supervisor view, stop anchors, and let the unique temp root
+   disappear. Cleanup tolerates already-unmounted namespace handles and repeats
+   safely in the test's error path. This closes C8.
+6. Add `byte_blind_manifest`, whose exact interface is
+   `byte-blind-manifest <source-root>` and whose only stdout is the strict JSON
+   manifest produced by `SourceManifest::build`. Add the operator runbook. It
+   prebuilds that existing-package helper locally, copies or invokes it on
+   `homer`, creates
+   `/mnt/pool0/test-video/voom-byte-blind-$RUN_ID/{source,staging,output,backup}`,
+   refuses empty/non-matching run roots, records the helper's complete sorted
+   BLAKE3 source manifest, uses generated media, records the same
+   CLI/API/durable evidence, restores renamed input, rescans, compares the
+   manifest byte-for-byte, and removes only the exact run-ID paths. Running
+   cleanup twice is a no-op; the runbook never deletes an existing library
+   path.
 7. Add a dedicated Ubuntu `byte-blind-acceptance` CI job to `.github/workflows/ci.yml` with
    `permissions: contents: read`, existing SHA-pinned checkout/cache/just actions, existing
    FFmpeg/MKVToolNix install, and `just accept-byte-blind`. Do not path-filter the job.
