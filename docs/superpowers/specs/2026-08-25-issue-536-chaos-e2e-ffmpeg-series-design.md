@@ -64,23 +64,41 @@ spec records it resolving to 6.1.1 — so `apt install ffmpeg` remains unavailab
 ### A floor is not a compatibility statement
 
 The documented "7.0+" says what is too old. It says nothing about whether the suite works on
-an arbitrarily newer major, and nothing in the tree supplies that half:
-`src/chaos_librarian/materializer/content/source_capabilities.py` gates only on
-`ffmpeg_available` — there is no version parse, no upper bound, and no test exercising a
-non-7.x ffmpeg.
+an arbitrarily newer major.
 
-That matters immediately rather than hypothetically. BtbN's lowest qualifying series today is
-`n8.1`, so the **first run under this design moves the suite from ffmpeg 7.1 to 8.1** — a
-major bump the suite has never been run against. If ffmpeg 8 changed something the
-materializer depends on, the break lands as a red weekly job that reads like a product
-regression; the 2026-08-10 and 2026-08-17 scheduled runs already failed inside
-`Run Chaos Librarian E2E` for unrelated reasons, so that confusion is live.
+Chaos Librarian does check the floor, and checks it properly:
+`third_party/chaos-librarian/src/chaos_librarian/materializer/tooling/capabilities.py` defines
+`MIN_VERSIONS["ffmpeg"] = Version("7.0")`, parses the reported version with
+`^ffmpeg version (\S+)`, and normalizes it through
+`^[nN]?(\d+(?:\.\d+){0,2})` — so BtbN's `n8.1-...` string parses to `8.1` and passes. Two
+useful facts fall out. There is **no upper bound** anywhere, so nothing rejects a newer major.
+And git-snapshot strings like `N-118412-g0ce1c8f7c5` normalize to `None`, which the gate
+treats as failing the minimum — independent confirmation that excluding BtbN's `master` asset
+from selection is right, since Chaos Librarian would refuse it at startup.
 
-This design does not assume the bump is safe. A `workflow_dispatch` run of `chaos-e2e` on the
-implementing branch is what settles it, and its result is recorded in ADR 0078's Context
-before the record is accepted. If ffmpeg 8 does break the suite, that is a finding about the
-suite's real compatibility range — and the response is to raise the floor's upper half
-deliberately, not to re-pin a series by accident.
+Admitting a version is not the same as working under it. No test in either tree exercises a
+non-7.x ffmpeg, and BtbN's lowest qualifying series today is `n8.1`, so the **first run under
+this design moves the suite from ffmpeg 7.1 to 8.1** — a major bump nothing here has been run
+against. This design does not assume the bump is safe; it records it as an open residual.
+
+### The dispatch run is confounded, and this change does not turn the job green
+
+`main`'s chaos-e2e already fails at the step *after* the install. Runs 31361822593
+(2026-08-10) and 32000334810 (2026-08-17) both failed in `Run Chaos Librarian E2E`, where
+`transcode_required_executes_real_worker_and_commits_hevc_mkv` panics with "artifact commit
+path escaped storage root" (11 passed / 1 failed). That defect is owned by **issue #491** and
+fixed by **PR #498**, which is open and unmerged.
+
+Two consequences for this work, both of which it must state rather than discover:
+
+1. Fixing the install moves the weekly failure one step later. The Monday issue keeps being
+   filed until #498 lands. This design does not claim otherwise.
+2. A `workflow_dispatch` run on this branch will go red at the suite step whatever ffmpeg 8.1
+   does, so its **bare conclusion settles nothing**. What it does settle is everything up to
+   and including the suite's per-test results: the install step, `Verify external tools`, the
+   Chaos Librarian tool gate, and which tests pass. The baseline is 11 passed / 1 failed on
+   ffmpeg 7.1; the same 11 passing on 8.1 is the evidence the residual can get before #498
+   merges. That comparison, not a green checkmark, is what this design reads.
 
 ## Goal
 
@@ -354,13 +372,18 @@ the 7.x pin's stability. The sentence is corrected to describe the runtime resol
 11. `docs/operations/chaos-e2e.md` describes what the workflow does.
 12. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
     (`just check-adr-index` passes).
-13. A `workflow_dispatch` run of `chaos-e2e` on the branch completes green, proving the
-    resolved `n8.1` asset downloads, extracts, satisfies the floor, **and that the Chaos
-    Librarian suite passes on ffmpeg 8**. Its run URL and outcome are recorded in ADR 0078's
-    Context.
+13. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
+    with the resolved `n8.1` asset installed — proving the selection, download, extraction,
+    floor assertion, and Chaos Librarian's own tool gate all pass on ffmpeg 8.1 — and its
+    per-test results match the ffmpeg 7.1 baseline of 11 passed / 1 failed, with the single
+    failure being issue #491's `transcode_required_executes_real_worker_and_commits_hevc_mkv`
+    and no other. The run's URL and per-test outcome are recorded in the PR.
 
 Criteria 2–6 are the selftest's cases, so they are checked by criterion 7 on every commit.
-Criterion 13 is the only one no local guardrail can reach.
+Criterion 13 is the only one no local guardrail can reach. It deliberately does **not** ask
+for a green run: #491 makes that unobtainable until PR #498 merges, and demanding it would
+either block this fix behind an unrelated one or invite reading a red run as this change's
+failure.
 
 ## Verification
 
@@ -370,9 +393,10 @@ Criterion 13 is the only one no local guardrail can reach.
 - `zizmor .github/workflows/chaos-e2e.yml`
 - `shellcheck scripts/select-ffmpeg-asset.sh scripts/select-ffmpeg-asset-selftest.sh`
 - `just ci`
-- Manual `workflow_dispatch` of `chaos-e2e` on the branch. This is the only end-to-end proof
-  that the resolved asset downloads, extracts, satisfies the floor, **and that the suite
-  passes on ffmpeg 8** — the major bump this design's first selection causes. No local
+- Manual `workflow_dispatch` of `chaos-e2e` on the branch, read per-test rather than by its
+  conclusion (see "The dispatch run is confounded" above). This is the only end-to-end
+  evidence that the resolved asset downloads, extracts, satisfies the floor, and carries the
+  suite through the ffmpeg 7.1 → 8.1 bump. No local
   guardrail contacts BtbN.
 
 ## Related
