@@ -134,10 +134,13 @@ at or above the same floor.
   capability gate all passed under `ffmpeg version n8.1.2-44-g7c533d0f86`, so the acquisition
   path is proven end to end. The suite, however, is **9 passed / 3 failed**, not the
   11-passed/1-failed baseline this record expected — and #491's recorded symptom does not
-  appear at all. All three failures are policy-preflight and readiness outcomes raised before
-  any media work ("requires an unbound ffmpeg worker on owner node …"), which points at
-  `main`'s own owner-node envelope rework rather than at ffmpeg 8. No chaos-e2e run had
-  exercised those commits, because the 404 masked every run since 2026-08-24. Tracked as #540.
+  appear at all. The two transcode failures are policy-preflight and readiness outcomes raised
+  before any media work ("requires an unbound ffmpeg worker on owner node …"), which points at
+  `main`'s own owner-node envelope rework rather than at ffmpeg 8; no chaos-e2e run had
+  exercised those commits, because the 404 masked every run since 2026-08-24. The third,
+  `static_library_baseline_seeds_exports_and_compares`, is different: a post-materialization
+  comparison finding (`D_SIDECAR_MISSING`, an `.eng.srt` sidecar observed as `.mkv`), and it is
+  the one failure an ffmpeg-8 explanation is **not** excluded from. Tracked as #540.
   This is the "do nothing" bullet's argument landing exactly as written: the 404 was hiding
   the real state, and every Monday issue named the wrong cause.
 - **The series pin is replaced by a pin on BtbN's filename grammar and on the `latest` tag.**

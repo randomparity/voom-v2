@@ -257,13 +257,20 @@ EOF
 # in a subshell forced to a UTF-8 locale, where a bracket range would match.
 # glibc collates [0-9] by locale; [[:digit:]] is ASCII-only in every locale.
 pattern_line=$(grep -m1 '^pattern=' "$select_script")
+# Find a UTF-8 locale the host actually has. Hard-coding one and swallowing
+# setlocale's warning would leave this case running in C, where a bracket range
+# is ASCII-only -- so it would pass on a pattern it exists to reject, silently.
+utf8_locale=$(locale -a 2>/dev/null | grep -iE '\.(utf-?8)$' | grep -viE '^(C|POSIX)\.' | head -n1)
 if [[ -z $pattern_line ]]; then
 	echo "select-ffmpeg-asset-selftest: pattern class: no pattern= line in $select_script" >&2
 	failures=$((failures + 1))
-elif LC_ALL=en_US.UTF-8 bash -c "
+elif [[ -z $utf8_locale ]]; then
+	echo "select-ffmpeg-asset-selftest: pattern class: no non-C UTF-8 locale on this host; cannot exercise the digit class" >&2
+	failures=$((failures + 1))
+elif LC_ALL=$utf8_locale bash -c "
 	$pattern_line
-	[[ \$1 =~ \$pattern ]]" _ "ffmpeg-n٨.١-latest-linux64-gpl-٨.١.tar.xz" 2>/dev/null; then
-	echo "select-ffmpeg-asset-selftest: pattern class: pattern admits non-ASCII digits under a UTF-8 locale" >&2
+	[[ \$1 =~ \$pattern ]]" _ "ffmpeg-n٨.١-latest-linux64-gpl-٨.١.tar.xz"; then
+	echo "select-ffmpeg-asset-selftest: pattern class: pattern admits non-ASCII digits under $utf8_locale" >&2
 	failures=$((failures + 1))
 fi
 
