@@ -34,9 +34,12 @@ triggers only on `schedule` and `workflow_dispatch`.
 
 ### Open issues this decision bears on
 
-- **#499** — the same 404, reported six days before #536. Its proposed fix repoints at daily
-  tag `autobuild-2026-08-11-13-11`, which has since been pruned and now 404s itself. Both it
-  and #536 are resolved by this decision.
+- **#499** — the same 404, reported six days before #536. Its fix is not merely proposed: it
+  is committed as `57f1bb0e`, the head of PR #498, which rewrites this same install step to
+  pin daily tag `autobuild-2026-08-11-13-11` — a tag that has since been pruned and 404s
+  today. **The two changes edit the same lines**, so whoever rebases #498 must drop that
+  commit rather than resolve the conflict toward it; taking #498's side would reinstate the
+  exact 404 this decision removes. Both #499 and #536 are resolved by this decision.
 - **#500** — the durable-fix issue, enumerating caching, mirroring as a release asset, and
   publishing a container image; all three are dispositioned below, on cost rather than merit.
   Its holding that "whether to stay on ffmpeg 7.1 at all... needs its own evaluation rather

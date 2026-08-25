@@ -7,6 +7,12 @@
 # it would have to keep up to date.
 # See docs/adr/0078-runtime-resolved-ffmpeg-series.md.
 set -euo pipefail
+# glibc resolves a bracket RANGE like [0-9] through the locale's collation, so under
+# a UTF-8 locale it admits Arabic-Indic and fullwidth digits -- which then blow up in
+# `10#`. The POSIX class below is ASCII-only in every locale; pinning LC_ALL as well
+# covers the [![:space:]] trim globs and removes the dependency on the runner's
+# unset default.
+export LC_ALL=C
 
 if (($# != 1)); then
 	echo "select-ffmpeg-asset: usage: select-ffmpeg-asset.sh <major-version-floor>" >&2
@@ -15,7 +21,7 @@ fi
 
 floor_raw=$1
 # Reject a zero-padded floor as well: bash reads 08 as an invalid octal literal.
-if [[ ! $floor_raw =~ ^[0-9]+$ ]] || [[ $floor_raw =~ ^0[0-9] ]]; then
+if [[ ! $floor_raw =~ ^[[:digit:]]+$ ]] || [[ $floor_raw =~ ^0[[:digit:]] ]]; then
 	echo "select-ffmpeg-asset: floor must be an unpadded non-negative integer, got: $floor_raw" >&2
 	exit 2
 fi
@@ -27,7 +33,7 @@ floor=$floor_raw
 # inside a longer name -- either would let the chosen string leave the release path.
 # This admits neither the `master` build nor the `-shared-` variants, so there is
 # deliberately no separate exclusion rule below.
-pattern='^ffmpeg-n([0-9]+)\.([0-9]+)-latest-linux64-gpl-([0-9]+)\.([0-9]+)\.tar\.xz$'
+pattern='^ffmpeg-n([[:digit:]]+)\.([[:digit:]]+)-latest-linux64-gpl-([[:digit:]]+)\.([[:digit:]]+)\.tar\.xz$'
 
 considered=0
 best_major=0

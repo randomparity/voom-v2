@@ -242,6 +242,16 @@ expect_ok "zero-padded series" 7 "ffmpeg-n08.08-latest-linux64-gpl-08.08.tar.xz"
 	ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
 EOF
 
+# Non-ASCII digits must not be admitted. A bracket RANGE like [0-9] is
+# locale-collated in glibc, so under a UTF-8 locale it matches Arabic-Indic and
+# fullwidth digits, which then blow up in 10#. This case reddens against a range
+# and passes against [[:digit:]].
+expect_ok "non-ascii digits rejected" 7 "ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz" <<-'EOF'
+	ffmpeg-n٨.١-latest-linux64-gpl-٨.١.tar.xz
+	ffmpeg-n８.１-latest-linux64-gpl-８.１.tar.xz
+	ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
+EOF
+
 # A read that yielded nothing is not a retired catalogue. The here-string carries
 # real spaces; <<- would strip tabs and collapse a tab-indented line to empty.
 expect_stderr "empty stdin" 3 "the release read returned nothing" 7 </dev/null

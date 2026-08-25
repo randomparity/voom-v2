@@ -47,6 +47,8 @@ jobs:
           # (third_party/chaos-librarian/README.md). BtbN retires release series,
           # so the series is resolved at run time rather than named here. See
           # docs/adr/0078-runtime-resolved-ffmpeg-series.md.
+          # ASCII-only digit handling; see scripts/select-ffmpeg-asset.sh.
+          LC_ALL: C
           FFMPEG_MAJOR_FLOOR: "7"
           FFMPEG_RELEASE_BASE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
         run: |
@@ -54,8 +56,8 @@ jobs:
           # Addressed by tag: `releases/latest` asks GitHub for whichever release it
           # considers newest, which is BtbN's to repoint at a dated autobuild whose
           # asset names have a different shape. Writing to a file rather than piping
-          # lets `-e` abort here on an API failure, instead of handing the selector
-          # empty input that it would report as a retired catalogue.
+          # keeps a failed release read attributable to `gh` itself, instead of
+          # reaching the selector as an empty stdin it can only report second-hand.
           gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest --jq '.assets[].name' >"$assets"
           asset=$(./scripts/select-ffmpeg-asset.sh "$FFMPEG_MAJOR_FLOOR" <"$assets")
           echo "Selected asset: $asset"
@@ -69,8 +71,15 @@ jobs:
           version_output=$("$install_dir/bin/ffmpeg" -version)
           installed_version=${version_output%%$'\n'*}
           echo "Installed: $installed_version"
-          if [[ ! $installed_version =~ ^ffmpeg\ version\ n?([0-9]+)\. ]] \
-            || ((10#${BASH_REMATCH[1]} < FFMPEG_MAJOR_FLOOR)); then
+          # Assign outside the `if` so `set -e` governs the arithmetic. Inside an
+          # `if` condition after `||` it does not, and an arithmetic error there
+          # returns 1 -- skipping the error branch and accepting a below-floor build.
+          if [[ ! $installed_version =~ ^ffmpeg\ version\ n?([[:digit:]]+)\. ]]; then
+            echo "::error::could not parse an ffmpeg major version from: $installed_version"
+            exit 1
+          fi
+          installed_major=$((10#${BASH_REMATCH[1]}))
+          if ((installed_major < FFMPEG_MAJOR_FLOOR)); then
             echo "::error::expected ffmpeg >= $FFMPEG_MAJOR_FLOOR, got: $installed_version"
             exit 1
           fi
