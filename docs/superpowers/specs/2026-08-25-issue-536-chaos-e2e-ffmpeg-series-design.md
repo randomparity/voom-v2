@@ -103,12 +103,18 @@ from selection is right, since Chaos Librarian would refuse it at startup.
 Admitting a version is not the same as working under it. No test in either tree exercises a
 non-7.x ffmpeg, and BtbN's lowest qualifying series today is `n8.1`, so the **first run under
 this design moves the suite from ffmpeg 7.1 to 8.1** — a major bump nothing here has been run
-against. The one filed observation of a 7.x-vs-8.x divergence in this suite, **#493**, no
-longer applies: `4d8d781d` renamed the test it cites, and the current
+against. The one filed observation of a 7.x-vs-8.x divergence in this suite, **#493** (filed
+2026-08-17), no longer applies. It rested on
+`assert_eq!(scan.json["data"]["summary"]["failed"], 1)` — an assertion on ffprobe 7.1's
+tolerance for a damaged container header, which ffprobe 8.0.1 reads instead of rejecting.
+`0f146f4b` (2026-08-22, on `main`) dropped that assertion and renamed the test to
 `malformed_media_scan_request_stays_accepted_without_worker_side_effects`
-(`crates/voom-cli/tests/chaos_librarian_e2e.rs:372`) asserts only that the scan request is
-accepted and that one ticket exists — both ffprobe-version-independent. #493 is stale and this
-work closes it.
+(`crates/voom-cli/tests/chaos_librarian_e2e.rs:372`), which now checks only that the scan
+request is accepted and that one ticket exists — both ffprobe-version-independent. #493 is
+stale and this work closes it.
+
+(The earlier `4d8d781d` is *not* the resolving commit: it predates #493 by two months and
+introduced the very test name the issue cites.)
 
 So the residual is the untested remainder, not a known break. Per the requirement above it is
 accepted rather than closed, and if ffmpeg 8 does surface a coupling, that red job is the
@@ -171,13 +177,19 @@ Candidate assets must match, as a whole line:
 ^ffmpeg-n(MAJOR).(MINOR)-latest-linux64-gpl-(MAJOR).(MINOR).tar.xz$
 ```
 
-with the trailing `MAJOR.MINOR` equal to the one in the `n` prefix. This excludes two asset
-families deliberately:
+with the trailing `MAJOR.MINOR` equal to the one in the `n` prefix.
 
-- `ffmpeg-master-latest-linux64-gpl.tar.xz` — BtbN's git-master build. Not a release series,
-  and its version string carries no series to check a floor against.
-- `...-gpl-shared-...` variants — the job invokes the extracted binaries directly and sets up
-  no shared-library search path, so the static build is the one that works.
+**Write no separate exclusion rules.** Being whole-line anchored, this pattern already admits
+neither `ffmpeg-master-latest-linux64-gpl.tar.xz` (`master` is not `n<digits>.<digits>`) nor
+`ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz` (`-gpl-` must be followed immediately by
+the version). Both are excluded structurally, and coding a `master` check or a `-shared-`
+check on top would be dead branches in a script whose whole justification is that its branches
+are few enough to selftest. The selftest asserts the exclusions hold; the script does not
+implement them.
+
+Both exclusions are wanted, for the record: the `master` build is not a release series and
+carries no series to check a floor against, and the job invokes the extracted binaries
+directly with no shared-library search path, so the static build is the one that works.
 
 Requiring the trailing version to repeat the `n` prefix is a cheap self-check: if BtbN
 changes its naming scheme such that the two stop agreeing, the parse is no longer trusted
@@ -387,7 +399,7 @@ the 7.x pin's stability. The sentence is corrected to describe the runtime resol
     failure being issue #491's `transcode_required_executes_real_worker_and_commits_hevc_mkv`
     and no other. The run's URL and per-test outcome are recorded in the PR.
 14. Issues #499 and #500 are closed as resolved by this work, and #493 closed as stale with
-    the `4d8d781d` evidence in its closing comment.
+    the `0f146f4b` evidence in its closing comment.
 
 Criteria 2–7 are the selftest's cases, so they are checked by criterion 8 on every commit.
 Criterion 13 is the only one no local guardrail can reach. It deliberately does **not** ask

@@ -42,9 +42,12 @@ triggers only on `schedule` and `workflow_dispatch`.
   to stay on ffmpeg 7.1 at all... needs its own evaluation rather than being folded into a CI
   fix" is **explicitly overtaken** by the requirement in the Decision: any version at or above
   7.0 is acceptable, so no separate version decision remains.
-- **#493** — recorded a 7.1-vs-8.0.1 divergence in a test `4d8d781d` has since replaced with a
-  version-independent one. Stale; closed by this work, with the evidence in its closing
-  comment.
+- **#493** — recorded a 7.1-vs-8.0.1 divergence resting on
+  `assert_eq!(scan.json["data"]["summary"]["failed"], 1)`, an assertion on one ffprobe
+  version's tolerance for a damaged header. `0f146f4b` dropped that assertion and renamed the
+  test to `malformed_media_scan_request_stays_accepted_without_worker_side_effects`, which
+  checks only that the scan request is accepted and a ticket exists. Stale; closed by this
+  work, with the evidence in its closing comment.
 
 **This change does not return the weekly job to green.** `main`'s chaos-e2e also fails at the
 step after the install — runs 31361822593 and 32000334810 failed in `Run Chaos Librarian E2E`
@@ -60,11 +63,9 @@ pinned.
 
 `scripts/select-ffmpeg-asset.sh` reads BtbN's `latest` release asset names on stdin and takes
 the floor as its argument. It considers only whole-line matches of
-`ffmpeg-n<major>.<minor>-latest-linux64-gpl-<major>.<minor>.tar.xz`, excluding two families:
-the `-shared-` variants, which need a library search path the job does not set up, and the
-`master` build, which is not a release series — and which Chaos Librarian would refuse
-anyway, since its version normalizer returns `None` for git-snapshot strings like
-`N-118412-g0ce1c8f7c5` and treats that as failing the minimum.
+`ffmpeg-n<major>.<minor>-latest-linux64-gpl-<major>.<minor>.tar.xz`. Being anchored, that
+pattern admits neither the `-shared-` variants nor the `master` build, so no separate
+exclusion rule exists or should be written.
 
 Among the matches it prints the **lowest** series, compared as a numeric `(major, minor)`
 pair. Numeric, because a lexical comparison over asset names puts `n10.0` below `n8.1` and
@@ -99,9 +100,7 @@ at or above the same floor.
   parses the reported version, enforces `MIN_VERSIONS["ffmpeg"] = Version("7.0")` with no
   upper bound, and its normalizer accepts BtbN's `n8.1` form. No test in either tree exercises
   a non-7.x ffmpeg, and #493 no longer applies, so the residual is an untested remainder
-  rather than a known break. A test that fails there is a **wanted signal**, not a defect of
-  this design — the project would rather learn its expectations were version-coupled than
-  spend maintenance sourcing an older build. Note the two residuals converge: the first run
+  rather than a known break. Note the two residuals converge: the first run
   that reaches the suite at all will be both the first run after PR #498 lands and the first
   run under ffmpeg 8, so a failure then has two candidate causes and must be triaged against
   both.
