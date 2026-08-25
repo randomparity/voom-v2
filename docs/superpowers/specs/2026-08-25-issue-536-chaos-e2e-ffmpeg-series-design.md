@@ -303,7 +303,7 @@ Three details are deliberate:
 `(major, minor)` comparison as much as in this assertion — so a hypothetical `08` series
 cannot be read as an invalid octal literal. Dropping it from the script passes every other
 selftest case and then fails with `08: value too great for base` on a zero-padded series,
-selecting nothing even when a qualifying asset was on stdin. Criterion 11 pins it.
+selecting nothing even when a qualifying asset was on stdin. Criterion 12 pins it.
 
 ### Assertion
 
@@ -424,7 +424,7 @@ checksum verification and the 7.x pin's stability. The replacement paragraph is:
 > bytes are pinned. See `docs/adr/0078-runtime-resolved-ffmpeg-series.md`.
 
 Replacing only the quoted second sentence would leave the paragraph opening with two
-near-duplicate sentences that disagree on strength ("may lag" then "lags"), and criterion 17
+near-duplicate sentences that disagree on strength ("may lag" then "lags"), and criterion 18
 as originally written would have passed on that outcome — which is why it now counts the
 phrase.
 
@@ -441,7 +441,7 @@ than invented by the implementer.
    output. (Not a list of today's series names — that check would decay exactly as the pin
    did.)
 
-Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–12):
+Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–13):
 
 2. Given the **full 49-name catalogue** on stdin and floor `7`, prints
    `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz`, exit `0`. The fixture is the complete output
@@ -466,43 +466,50 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–12):
    compared numerically too. An implementation that parses the major as an integer and the
    minor as a string passes criterion 4 and fails this one.
 6. Given only `master` and `-shared-` assets, exit `1`. Neither family is a candidate, and
-   neither is excluded by a rule the script implements — the anchored pattern admits neither.
+   neither is excluded by a rule the script implements — the pattern admits neither, anchored
+   or not.
 7. Given `ffmpeg-n8/1-latest-linux64-gpl-8/1.tar.xz`, exit `1`. This pins the escaped dots:
    an unescaped `.` matches `/`, and the resulting name would leave the release path when
    interpolated into the download URL.
-8. Given `ffmpeg-n8.1-latest-linux64-gpl-9.0.tar.xz` and floor `7`, exit `1`. The ERE admits
+8. Given `evil/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz` and
+   `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz.sig`, exit `1`. This pins the whole-line
+   anchoring: an unanchored pattern matches *inside* both names, and the selected string
+   would carry a leading path segment or a trailing extension into the download URL —
+   defeating the control the threat model calls load-bearing. Deleting `^` or `$` from an
+   implementation leaves every other criterion byte-identical.
+9. Given `ffmpeg-n8.1-latest-linux64-gpl-9.0.tar.xz` and floor `7`, exit `1`. The ERE admits
    this name — only the post-match `1==3, 2==4` comparison rejects it. Without this case an
    implementation that drops captures 3 and 4 entirely passes every other criterion, leaving
    the one rule whose purpose is to notice an upstream naming drift with no coverage at all.
-9. Given `ffmpeg-n6.1-latest-linux64-gpl-6.1.tar.xz` and
+10. Given `ffmpeg-n6.1-latest-linux64-gpl-6.1.tar.xz` and
    `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz` with floor `7`, prints the `n8.1` asset —
    the lowest **qualifying** series, not the lowest matching one. Given only the `n6.1`
    name, exit `1`. Without these two inputs the floor comparison is unpinned: deleting
    `major >= floor` from an implementation leaves every other criterion byte-identical.
-10. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
+11. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
    `7.0`, and two arguments.
-11. Given `ffmpeg-n08.1-latest-linux64-gpl-08.1.tar.xz` and
+12. Given `ffmpeg-n08.1-latest-linux64-gpl-08.1.tar.xz` and
     `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz` with floor `7`, prints the `n08.1` asset,
     exit `0` — captured digits reach arithmetic in base 10, not octal.
-12. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
+13. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
     message naming the release read rather than the floor.
 
-13. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
-14. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
+14. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
+15. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
     delegates to the `just` recipe, matching the five existing guard-script pairs, and
     `prek run --all-files` passes. Only the selftest hook is wanted: the selection script
     reads no repository file, so a non-selftest hook would have nothing to check.
-15. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
-16. `just ci` passes.
-17. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
+16. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
+17. `just ci` passes.
+18. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
     `rg -n 'pinned 7\.x|verifies its checksum' docs/operations/chaos-e2e.md` produces no
     output; the replacement paragraph from the Documentation section is present; and
     `rg -c 'apt ffmpeg package' docs/operations/chaos-e2e.md` reports exactly `1`, so a
     partial replacement leaving a duplicated sentence fails the gate rather than a reader.
     Line 10's "ffmpeg/ffprobe 7.0+" is unchanged.
-18. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
+19. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
     (`just check-adr-index` passes).
-19. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
+20. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
     with **the asset the script resolves from the live catalogue** installed — `n8.1` as of
     2026-08-25; a different series is a pass, not a failure, since resolving a different
     series is the design working. Blocking conditions: the install step,
@@ -514,12 +521,12 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–12):
     Any **additional** test failure under the newer ffmpeg does **not** block this change —
     that is the wanted notification the requirement describes — but it is filed as a new
     issue before merge. The run's URL and per-test outcome go in the PR.
-20. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
-    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 19 is
+21. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
+    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 20 is
     filed.
 
-Criteria 2–12 are the selftest's cases, so criterion 13 checks them on every commit.
-Criteria 19 and 20 are the only ones no local guardrail can reach. Criterion 19 deliberately
+Criteria 2–13 are the selftest's cases, so criterion 14 checks them on every commit.
+Criteria 20 and 21 are the only ones no local guardrail can reach. Criterion 20 deliberately
 does not ask for a green run: #491 makes that unobtainable until PR #498 merges, and demanding
 it would either block this fix behind an unrelated one or invite reading a red run as this
 change's failure.
@@ -536,7 +543,7 @@ change's failure.
 - Manual `workflow_dispatch` of `chaos-e2e` on the branch, read per-test rather than by its
   conclusion (see "The dispatch run is confounded" above). This is the only end-to-end
   evidence that the resolved asset downloads, extracts, satisfies the floor, and carries the
-  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 19
+  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 20
   defines what blocks and what does not.
 
 ## Related
