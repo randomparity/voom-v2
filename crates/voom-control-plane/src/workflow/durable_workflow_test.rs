@@ -919,13 +919,16 @@ impl DurableWorkflowFixture {
         class: FailureClass,
     ) -> TestResult<()> {
         let count = self.failure_class_count(job_id, operation, class).await?;
-        expect(
-            &format!(
-                "expected failed {operation:?} ticket with class {}",
-                failure_class_name(class)
-            ),
-            count > 0,
-        )?;
+        if count == 0 {
+            // Report what the job actually recorded. Without this the message
+            // names only the expectation, so a CI-only occurrence says nothing
+            // about which class won and forces a fresh investigation.
+            return Err(io_error(format!(
+                "expected failed {operation:?} ticket with class {}; job recorded {}",
+                failure_class_name(class),
+                self.describe_ticket_outcomes(job_id).await?
+            )));
+        }
         let durable_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) \
              FROM tickets t \
@@ -997,6 +1000,40 @@ impl DurableWorkflowFixture {
         .bind(failure_class_name(class))
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    /// Every ticket in the job as `operation=state[class,...]`, for a failed
+    /// class assertion to quote. A wrong class and a branch that never reached
+    /// the fault produce the same bare count, so the message has to carry both
+    /// the states and the classes to tell them apart.
+    async fn describe_ticket_outcomes(&self, job_id: JobId) -> TestResult<String> {
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT json_extract(t.payload, '$.operation'), t.state, \
+                    group_concat(DISTINCT json_extract(e.payload, '$.class')) \
+             FROM tickets t \
+             LEFT JOIN events e \
+               ON e.subject_type = 'ticket' AND e.subject_id = t.id \
+              AND e.kind IN ('ticket.failed_terminal', 'ticket.failed_retriable') \
+             WHERE t.job_id = ? \
+             GROUP BY t.id \
+             ORDER BY t.id",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok("no tickets".to_owned());
+        }
+        Ok(rows
+            .iter()
+            .map(|(operation, state, classes)| {
+                classes.as_ref().map_or_else(
+                    || format!("{operation}={state}"),
+                    |classes| format!("{operation}={state}[{classes}]"),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "))
     }
 
     async fn assert_no_success_for_operation(
