@@ -71,14 +71,23 @@ jobs:
           version_output=$("$install_dir/bin/ffmpeg" -version)
           installed_version=${version_output%%$'\n'*}
           echo "Installed: $installed_version"
-          # Assign outside the `if` so `set -e` governs the arithmetic. Inside an
-          # `if` condition after `||` it does not, and an arithmetic error there
-          # returns 1 -- skipping the error branch and accepting a below-floor build.
+          # Check the match first. The earlier shape put the arithmetic inside an
+          # `if` condition after `||`, where an error returned 1, skipped the error
+          # branch, and accepted a below-floor build outright.
           if [[ ! $installed_version =~ ^ffmpeg\ version\ n?([[:digit:]]+)\. ]]; then
             echo "::error::could not parse an ffmpeg major version from: $installed_version"
             exit 1
           fi
           installed_major=$((10#${BASH_REMATCH[1]}))
+          # Validate the result rather than the assignment's status. Neither `set -e`
+          # nor `||` catches a failing arithmetic expansion in an assignment: under
+          # `bash -e` it prints its error, leaves the name empty, and returns 0. The
+          # `[[:digit:]]` match above is the real guarantee that only ASCII digits
+          # reach `10#`; this is the check that holds if that ever stops being true.
+          if [[ ! $installed_major =~ ^[[:digit:]]+$ ]]; then
+            echo "::error::could not evaluate the major version in: $installed_version"
+            exit 1
+          fi
           if ((installed_major < FFMPEG_MAJOR_FLOOR)); then
             echo "::error::expected ffmpeg >= $FFMPEG_MAJOR_FLOOR, got: $installed_version"
             exit 1
