@@ -99,7 +99,11 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
 // timeout), MalformedWorkerResult, ProgressTimeout, and the missed-heartbeat
 // watchdog. WorkerCrash / MalformedResult / missed-heartbeat run the in-house
 // `chaos-worker` fake out-of-process so the crash and stall modes have real-process
-// fidelity. Dispatch timeout and progress timeout use deterministic in-process
+// fidelity. The branches *around* the fault differ: missed-heartbeat runs them
+// in-process because its watchdog budget is deliberately tight and a subprocess
+// round-trip could miss it, while the other two keep out-of-process healthy
+// branches under a generous budget. Dispatch timeout and progress timeout use
+// deterministic in-process
 // fault boundaries: one never returns from dispatch, and one emits a progress
 // frame followed by a typed ProgressTimeout terminal signal. The latter preserves
 // lease-heartbeat evidence without depending on a short wall-clock deadline.
@@ -535,12 +539,10 @@ impl DurableWorkflowFixture {
         fixture.enable_owner_node_emulation().await?;
         fixture.executor_options = options;
         fixture.deadline_fixture = deadline_fixture;
-        if healthy == HealthyProviderMode::Process {
-            fixture.assert_watchdog_budget_is_generous()?;
-        }
         let setup = async {
             match healthy {
                 HealthyProviderMode::Process => {
+                    fixture.assert_watchdog_budget_is_generous()?;
                     fixture
                         .register_process_providers_except(operation, 4)
                         .await
