@@ -297,8 +297,11 @@ Three details are deliberate:
   — a latent flake for no benefit. Bash's `${var%%$'\n'*}` takes the first line with no pipe
   at all, and `[[ =~ ]]` extracts the major version for the same reason.
 
-`10#` forces base-10 on the captured digits so a hypothetical `08` series cannot be read as
-an invalid octal literal.
+`10#` forces base-10 wherever captured digits reach arithmetic — in the script's
+`(major, minor)` comparison as much as in this assertion — so a hypothetical `08` series
+cannot be read as an invalid octal literal. Dropping it from the script passes every other
+selftest case and then fails with `08: value too great for base` on a zero-padded series,
+selecting nothing even when a qualifying asset was on stdin. Criterion 10 pins it.
 
 ### Assertion
 
@@ -403,18 +406,25 @@ neither more nor less trusted.
 
 ## Documentation
 
-`docs/operations/chaos-e2e.md` currently states:
+`docs/operations/chaos-e2e.md` lines 26-28 are a two-sentence paragraph, and **the whole
+paragraph is replaced** — not just the second sentence:
 
-> The workflow therefore installs ffmpeg/ffprobe from a pinned 7.x archive and
+> The Ubuntu runner's apt ffmpeg package may lag Chaos Librarian's minimum. The
+> workflow therefore installs ffmpeg/ffprobe from a pinned 7.x archive and
 > verifies its checksum before running the suite.
 
-Both halves have been false since `359ba425`, which removed the checksum verification and
-the 7.x pin's stability. It is replaced with:
+Both halves of the second sentence have been false since `359ba425`, which removed the
+checksum verification and the 7.x pin's stability. The replacement paragraph is:
 
 > The Ubuntu runner's apt ffmpeg package lags Chaos Librarian's minimum. The workflow
 > therefore resolves the oldest BtbN release series meeting the 7.0+ floor at run time and
 > asserts the installed binary's major version against that floor; neither the version nor its
 > bytes are pinned. See `docs/adr/0078-runtime-resolved-ffmpeg-series.md`.
+
+Replacing only the quoted second sentence would leave the paragraph opening with two
+near-duplicate sentences that disagree on strength ("may lag" then "lags"), and criterion 16
+as originally written would have passed on that outcome — which is why it now counts the
+phrase.
 
 Line 10 of that file — "ffmpeg/ffprobe 7.0+" — stays exactly as it is. It is still true, and a
 reader told the file is wrong may otherwise over-correct it.
@@ -429,7 +439,7 @@ than invented by the implementer.
    output. (Not a list of today's series names — that check would decay exactly as the pin
    did.)
 
-Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–10):
+Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–11):
 
 2. Given the **full 49-name catalogue** on stdin and floor `7`, prints
    `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz`, exit `0`. The fixture is the complete output
@@ -441,8 +451,10 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–10):
    selected.
 3. Given that catalogue with the `n8.1` and `n9.0` linux64-gpl entries removed, exit `1` with
    a diagnostic on stderr naming the floor and the number of non-blank input lines considered.
-   ("Considered" means lines read, not lines matching the ERE — that count is zero by
-   construction whenever exit `1` fires.)
+   ("Considered" means every non-blank line read, not only the lines matching the ERE: a line
+   can match the ERE and still be rejected by the capture-agreement check or by the floor, so
+   the two counts differ. Assert the literal count for the stated fixture so the selftest pins
+   the semantics rather than leaving them to prose.)
 4. Given `ffmpeg-n10.0-latest-linux64-gpl-10.0.tar.xz` and
    `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz`, prints the `n9.0` asset — numeric major
    comparison, not lexical.
@@ -461,23 +473,28 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–10):
    the one rule whose purpose is to notice an upstream naming drift with no coverage at all.
 9. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
    `7.0`, and two arguments.
-10. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
+10. Given `ffmpeg-n08.1-latest-linux64-gpl-08.1.tar.xz` and
+    `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz` with floor `7`, prints the `n08.1` asset,
+    exit `0` — captured digits reach arithmetic in base 10, not octal.
+11. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
     message naming the release read rather than the floor.
 
-11. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
-12. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
+12. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
+13. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
     delegates to the `just` recipe, matching the five existing guard-script pairs, and
     `prek run --all-files` passes. Only the selftest hook is wanted: the selection script
     reads no repository file, so a non-selftest hook would have nothing to check.
-13. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
-14. `just ci` passes.
-15. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
+14. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
+15. `just ci` passes.
+16. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
     `rg -n 'pinned 7\.x|verifies its checksum' docs/operations/chaos-e2e.md` produces no
-    output, and the replacement sentence from the Documentation section is present. Line 10's
-    "ffmpeg/ffprobe 7.0+" is unchanged.
-16. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
+    output; the replacement paragraph from the Documentation section is present; and
+    `rg -c 'apt ffmpeg package' docs/operations/chaos-e2e.md` reports exactly `1`, so a
+    partial replacement leaving a duplicated sentence fails the gate rather than a reader.
+    Line 10's "ffmpeg/ffprobe 7.0+" is unchanged.
+17. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
     (`just check-adr-index` passes).
-17. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
+18. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
     with **the asset the script resolves from the live catalogue** installed — `n8.1` as of
     2026-08-25; a different series is a pass, not a failure, since resolving a different
     series is the design working. Blocking conditions: the install step,
@@ -489,12 +506,12 @@ Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–10):
     Any **additional** test failure under the newer ffmpeg does **not** block this change —
     that is the wanted notification the requirement describes — but it is filed as a new
     issue before merge. The run's URL and per-test outcome go in the PR.
-18. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
-    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 17 is
+19. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
+    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 18 is
     filed.
 
-Criteria 2–10 are the selftest's cases, so criterion 11 checks them on every commit.
-Criterion 17 is the only one no local guardrail can reach, and it deliberately does not ask
+Criteria 2–11 are the selftest's cases, so criterion 12 checks them on every commit.
+Criterion 18 is the only one no local guardrail can reach, and it deliberately does not ask
 for a green run: #491 makes that unobtainable until PR #498 merges, and demanding it would
 either block this fix behind an unrelated one or invite reading a red run as this change's
 failure.
@@ -511,7 +528,7 @@ failure.
 - Manual `workflow_dispatch` of `chaos-e2e` on the branch, read per-test rather than by its
   conclusion (see "The dispatch run is confounded" above). This is the only end-to-end
   evidence that the resolved asset downloads, extracts, satisfies the floor, and carries the
-  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 17
+  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 18
   defines what blocks and what does not.
 
 ## Related
