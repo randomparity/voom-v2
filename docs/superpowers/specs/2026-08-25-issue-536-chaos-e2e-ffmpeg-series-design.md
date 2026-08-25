@@ -36,7 +36,7 @@ pinned URL went with it.
 | Commit | Approach | Outcome |
 |---|---|---|
 | `0d0c0ce1` | Pin a dated `autobuild-*` tag + SHA-256 | Green at merge; 404 once BtbN pruned the tag (run 27394271913, 2026-06-12) |
-| `7212262f` | Re-pin to a newer dated tag + SHA-256 | Green (run 27394705387); superseded 17 minutes later by `359ba425`, never pruned |
+| `7212262f` | Re-pin to a newer dated tag + SHA-256 | Green (run 27394705387); superseded 16 minutes later by `359ba425`, never pruned |
 | `359ba425` | Rolling `latest` asset, pinned to series `n7.1` | Green for two months; 404 once BtbN retired `n7.1` (run 32696142015, 2026-08-24) |
 
 Two failures, not three — `7212262f`'s pin was replaced pre-emptively rather than breaking.
@@ -126,7 +126,7 @@ notification the project asked for.
 (2026-08-10) and 32000334810 (2026-08-17) both failed in `Run Chaos Librarian E2E`, where
 `transcode_required_executes_real_worker_and_commits_hevc_mkv` panics with "artifact commit
 path escaped storage root" (11 passed / 1 failed). That defect is owned by **issue #491** and
-fixed by **PR #498**, which is open and unmerged.
+fixed by **PR #498**, which is open and currently `CONFLICTING`.
 
 Two consequences for this work, both of which it must state rather than discover:
 
@@ -139,15 +139,20 @@ Two consequences for this work, both of which it must state rather than discover
    ffmpeg 7.1; the same 11 passing on 8.1 is the evidence the residual can get before #498
    merges. That comparison, not a green checkmark, is what this design reads.
 
-**What that comparison cannot cover.** The masked test,
-`transcode_required_executes_real_worker_and_commits_hevc_mkv`, is the suite's *only* real
-ffmpeg encode — `TranscodeWorkerLaunch` appears exactly once in
-`crates/voom-cli/tests/chaos_librarian_e2e.rs`, inside it. The other eleven exercise scan,
-probe, policy and plan paths. So the dispatch characterises ffmpeg 8 everywhere except the
-encoder, which is the surface a major version is likeliest to move (libx265 into HEVC/MKV).
-For that one test the first run after #498 lands carries two new variables at once. Anyone
-triaging a transcode failure that Monday must rule out ffmpeg 8 before concluding #498
-regressed.
+**What that comparison covers, and what it does not.** Encoding *is* covered. Chaos
+Librarian's materializer shells out to ffmpeg for every scenario it builds, and
+`transcode_noop_does_not_schedule_worker_mutation` materializes `voom-ci/hevc-noop.yaml`,
+whose `codec: hevc` maps to `libx265` via
+`third_party/chaos-librarian/src/chaos_librarian/media_matrix.py:47`. That test is inside the
+passing eleven, so the dispatch exercises ffmpeg 8's libx265 encode.
+
+The gap is narrower than "the encoder". `TranscodeWorkerLaunch` appears exactly once in
+`crates/voom-cli/tests/chaos_librarian_e2e.rs`, inside
+`transcode_required_executes_real_worker_and_commits_hevc_mkv` — the test #491 masks. So what
+stays uncharacterised is **voom's own `voom-ffmpeg-worker` invocation and the artifact-commit
+path around it**, not ffmpeg 8's encoding as such. For that one test the first run after #498
+lands carries two new variables at once, and anyone triaging a failure there must rule out
+ffmpeg 8 before concluding #498 regressed.
 
 ## Goal
 
@@ -181,13 +186,20 @@ stated requirement, so the suite does not silently start exercising a brand-new 
 the moment BtbN publishes one. And it is stable: the selection only moves when BtbN retires
 the series in use, which is precisely the event this design exists to absorb.
 
-Candidate assets must match, as a whole line:
+Candidate assets must match this exact ERE, as a whole line — **the dots are escaped, and
+that is load-bearing, not cosmetic**:
 
 ```text
-^ffmpeg-n(MAJOR).(MINOR)-latest-linux64-gpl-(MAJOR).(MINOR).tar.xz$
+^ffmpeg-n([0-9]+)\.([0-9]+)-latest-linux64-gpl-([0-9]+)\.([0-9]+)\.tar\.xz$
 ```
 
-with the trailing `MAJOR.MINOR` equal to the one in the `n` prefix.
+Unescaped, `.` matches any character including `/`, so
+`ffmpeg-n8/1-latest-linux64-gpl-8/1.tar.xz` would match and, interpolated as
+`"$FFMPEG_RELEASE_BASE_URL/$asset"`, would leave the release path entirely — defeating the one
+control the threat model calls load-bearing. A selftest case pins the escaping.
+
+ERE has no back-references, so the prefix/suffix agreement **cannot** be expressed in the
+pattern. Compare captures 1==3 and 2==4 as a separate post-match check.
 
 **Write no separate exclusion rules.** Being whole-line anchored, this pattern already admits
 neither `ffmpeg-master-latest-linux64-gpl.tar.xz` (`master` is not `n<digits>.<digits>`) nor
@@ -312,16 +324,31 @@ would put them exactly where the "keep it inline" argument says logic must not g
 | Exit | Condition | Response |
 |---|---|---|
 | `0` | An asset was selected | — |
-| `1` | Names arrived, none qualifying | BtbN retired every usable series; a human decides |
+| `1` | At least one non-blank line arrived, none qualifying | BtbN retired every usable series; a human decides |
 | `2` | Malformed floor argument | Caller error |
-| `3` | No names at all on stdin | Release-read failure — API outage, rate limit, token, changed field; retry |
+| `3` | No non-blank line on stdin | Release-read failure — API outage, rate limit, token, changed field; retry |
 
 Reserving `2` for caller error matches `scripts/check-adr-index.sh`.
 
-Collapsing `1` and `3` would reintroduce the defect this change is about, one layer up: an
-operator handed "no qualifying asset" during a GitHub API incident would go looking at BtbN's
-release page and find nothing wrong. The `1` message names the floor and how many candidates
-it considered; the `3` message says the read returned nothing.
+**Input grammar.** Exactly one argument, matching `^[0-9]+$`. Anything else exits `2`: no
+argument, the empty string, two arguments, `abc`, `-1`, and — deliberately — `7.0`. The
+project states its floor as "7.0+", so a caller passing `7.0` verbatim is plausible; rejecting
+it loudly beats truncating it silently, and the workflow passes `7` literally.
+
+**Blank lines are ignored**, and each line is trimmed of surrounding whitespace before
+matching. The exit `1` / exit `3` split turns on non-blank lines, not on byte length: a
+degraded read that emits a lone newline must reach `3`, not `1`.
+
+That split is the whole point. Collapsing them would reintroduce the defect this change is
+about, one layer up: an operator handed "no qualifying asset" during a GitHub API incident
+would go looking at BtbN's release page and find nothing wrong. The `1` message names the
+floor and how many candidates it considered; the `3` message says the read returned nothing.
+
+**One 404 remains possible and is not this bug returning.** BtbN republishes `latest`'s assets
+on every rebuild, so a download can 404 seconds after a successful catalogue read. That is
+transient — a re-run resolves it — and it is not the series pin rotting. Nothing is engineered
+around it; it is named here so the next operator to see `curl: (22)` does not reopen a solved
+problem.
 
 **One branch cannot move.** The post-install assertion that the extracted binary reports a
 major version at or above the floor needs the binary itself, so it cannot sit behind the
@@ -364,9 +391,13 @@ neither more nor less trusted.
   ADR 0078 — including a month-end pin that could carry a digest, declined because holding a
   specific older version in place is maintenance the project does not want. The accepted
   consequence is bounded by the blast radius above.
-- *API response truncation.* Not a correctness hazard: a partial list either still contains a
-  qualifying series, in which case the floor is still enforced, or contains none, in which
-  case selection fails loudly. BtbN's `latest` carries 49 assets as of 2026-08-25.
+- *API response truncation.* Three outcomes, none a hazard. A partial list still containing
+  the lowest qualifying series behaves normally; a list containing none fails loudly; and a
+  list that drops the lowest but keeps a higher one yields a higher-but-still-qualifying
+  selection with no diagnostic. That third case does violate the lowest-wins rule — worth
+  naming, since a two-outcome framing would look complete — but it is accepted rather than
+  engineered around, because any qualifying version is sufficient by decision. BtbN's `latest`
+  carries 49 assets as of 2026-08-25 and returns them unpaginated.
 - *Supply-chain review of `gh` itself.* Preinstalled on GitHub-hosted runners and already
   relied on by the `notify-failure` job in this same workflow.
 
@@ -378,41 +409,77 @@ neither more nor less trusted.
 > verifies its checksum before running the suite.
 
 Both halves have been false since `359ba425`, which removed the checksum verification and
-the 7.x pin's stability. The sentence is corrected to describe the runtime resolution.
+the 7.x pin's stability. It is replaced with:
+
+> The Ubuntu runner's apt ffmpeg package lags Chaos Librarian's minimum. The workflow
+> therefore resolves the oldest BtbN release series meeting the 7.0+ floor at run time and
+> asserts the installed binary's major version against that floor; neither the version nor its
+> bytes are pinned. See `docs/adr/0078-runtime-resolved-ffmpeg-series.md`.
+
+Line 10 of that file — "ffmpeg/ffprobe 7.0+" — stays exactly as it is. It is still true, and a
+reader told the file is wrong may otherwise over-correct it.
 
 ## Acceptance criteria
 
-1. `.github/workflows/chaos-e2e.yml` contains no ffmpeg version series in any URL or
-   filename. `rg -n 'n7\.1|n8\.1|n9\.0' .github/workflows/chaos-e2e.yml` produces no output.
-2. `scripts/select-ffmpeg-asset.sh`, given the 2026-08-25 asset list on stdin and floor `7`,
-   prints `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz` and exits 0.
-3. Given the same list with the `n8.1` and `n9.0` entries removed, it exits non-zero and
-   prints a diagnostic naming the floor on stderr.
-4. Given a list containing `ffmpeg-n10.0-latest-linux64-gpl-10.0.tar.xz` and
-   `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz`, it prints the `n9.0` asset — numeric
-   comparison, not lexical.
-5. Given only `master` and `-shared-` assets, it exits non-zero — neither family is a
-   candidate.
-6. Given a malformed floor argument, it exits `2`, distinct from the `1` in criteria 3 and 5.
-7. Given empty stdin it exits `3`, distinct from `1`, with a message naming the release read
-   rather than the floor.
-8. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
-9. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
-10. `just ci` passes.
-11. `docs/operations/chaos-e2e.md` describes what the workflow does.
-12. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
-    (`just check-adr-index` passes).
-13. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
-    with the resolved `n8.1` asset installed — proving the selection, download, extraction,
-    floor assertion, and Chaos Librarian's own tool gate all pass on ffmpeg 8.1 — and its
-    per-test results match the ffmpeg 7.1 baseline of 11 passed / 1 failed, with the single
-    failure being issue #491's `transcode_required_executes_real_worker_and_commits_hevc_mkv`
-    and no other. The run's URL and per-test outcome are recorded in the PR.
-14. Issues #499 and #500 are closed as resolved by this work, and #493 closed as stale with
-    the `0f146f4b` evidence in its closing comment.
+Every selftest criterion names its input, so the case list is derivable from this spec rather
+than invented by the implementer.
 
-Criteria 2–7 are the selftest's cases, so they are checked by criterion 8 on every commit.
-Criterion 13 is the only one no local guardrail can reach. It deliberately does **not** ask
+1. `.github/workflows/chaos-e2e.yml` contains no ffmpeg version series in any URL or
+   filename. Check: `rg -n 'ffmpeg-n[0-9]' .github/workflows/chaos-e2e.yml` produces no
+   output. (Not a list of today's series names — that check would decay exactly as the pin
+   did.)
+
+Selftest cases for `scripts/select-ffmpeg-asset.sh` (criteria 2–9):
+
+2. Given the 2026-08-25 catalogue on stdin and floor `7`, prints
+   `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz`, exit `0`.
+3. Given that catalogue with the `n8.1` and `n9.0` entries removed, exit `1` with a
+   diagnostic on stderr naming the floor and the candidate count.
+4. Given `ffmpeg-n10.0-latest-linux64-gpl-10.0.tar.xz` and
+   `ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz`, prints the `n9.0` asset — numeric major
+   comparison, not lexical.
+5. Given `ffmpeg-n8.10-latest-linux64-gpl-8.10.tar.xz` and
+   `ffmpeg-n8.9-latest-linux64-gpl-8.9.tar.xz`, prints the `n8.9` asset — the minor is
+   compared numerically too. An implementation that parses the major as an integer and the
+   minor as a string passes criterion 4 and fails this one.
+6. Given only `master` and `-shared-` assets, exit `1`. Neither family is a candidate, and
+   neither is excluded by a rule the script implements — the anchored pattern admits neither.
+7. Given `ffmpeg-n8/1-latest-linux64-gpl-8/1.tar.xz`, exit `1`. This pins the escaped dots:
+   an unescaped `.` matches `/`, and the resulting name would leave the release path when
+   interpolated into the download URL.
+8. Floor-argument grammar, each exiting `2`: no argument, the empty string, `abc`, `-1`,
+   `7.0`, and two arguments.
+9. Given stdin that is empty, and again given stdin holding only a newline, exit `3` with a
+   message naming the release read rather than the floor.
+
+10. `just select-ffmpeg-asset-selftest` exits 0 and is reached by `just ci`.
+11. `.pre-commit-config.yaml` carries a `select-ffmpeg-asset-selftest` hook whose `entry:`
+    delegates to the `just` recipe, matching the five existing guard-script pairs, and
+    `prek run --all-files` passes. Only the selftest hook is wanted: the selection script
+    reads no repository file, so a non-selftest hook would have nothing to check.
+12. `actionlint` reports no finding on `.github/workflows/chaos-e2e.yml`.
+13. `just ci` passes.
+14. `docs/operations/chaos-e2e.md` no longer claims a pin or a checksum:
+    `rg -n 'pinned 7\.x|verifies its checksum' docs/operations/chaos-e2e.md` produces no
+    output, and the replacement sentence from the Documentation section is present. Line 10's
+    "ffmpeg/ffprobe 7.0+" is unchanged.
+15. ADR 0078 exists and has exactly one row in `docs/adr/README.md`
+    (`just check-adr-index` passes).
+16. A `workflow_dispatch` run of `chaos-e2e` on the branch reaches `Run Chaos Librarian E2E`
+    with **the asset the script resolves from the live catalogue** installed — `n8.1` as of
+    2026-08-25; a different series is a pass, not a failure, since resolving a different
+    series is the design working. The blocking conditions are that the install step,
+    `Verify external tools`, and Chaos Librarian's capability gate all pass, and that #491's
+    `transcode_required_executes_real_worker_and_commits_hevc_mkv` is among the failures.
+    Any **additional** test failure under the newer ffmpeg does **not** block this change —
+    that is the wanted notification the requirement describes — but it is filed as a new
+    issue before merge. The run's URL and per-test outcome go in the PR.
+17. Issues #499 and #500 are closed as resolved by this work; #493 closed as stale with the
+    `0f146f4b` evidence in its closing comment; and any new issue required by criterion 16 is
+    filed.
+
+Criteria 2–9 are the selftest's cases, so criterion 10 checks them on every commit.
+Criterion 16 is the only one no local guardrail can reach, and it deliberately does not ask
 for a green run: #491 makes that unobtainable until PR #498 merges, and demanding it would
 either block this fix behind an unrelated one or invite reading a red run as this change's
 failure.
@@ -421,6 +488,7 @@ failure.
 
 - `just select-ffmpeg-asset-selftest`
 - `just check-adr-index && just check-adr-index-selftest`
+- `prek run --all-files`
 - `actionlint`
 - `zizmor .github/workflows/chaos-e2e.yml`
 - `shellcheck scripts/select-ffmpeg-asset.sh scripts/select-ffmpeg-asset-selftest.sh`
@@ -428,8 +496,8 @@ failure.
 - Manual `workflow_dispatch` of `chaos-e2e` on the branch, read per-test rather than by its
   conclusion (see "The dispatch run is confounded" above). This is the only end-to-end
   evidence that the resolved asset downloads, extracts, satisfies the floor, and carries the
-  suite through the ffmpeg 7.1 → 8.1 bump. No local
-  guardrail contacts BtbN.
+  suite through the ffmpeg 7.1 → 8.1 bump. No local guardrail contacts BtbN. Criterion 16
+  defines what blocks and what does not.
 
 ## Related
 

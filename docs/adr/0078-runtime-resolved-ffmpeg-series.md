@@ -111,14 +111,17 @@ at or above the same floor.
   rather than a known break. Dispatching the workflow on this branch **now**, while #498 is
   still open, characterises most of that remainder ahead of merge — the install step, Chaos
   Librarian's capability gate, and the eleven tests that pass today — so those carry one new
-  variable rather than two. **One arm it cannot reach**, and it is the most exposed one:
-  `transcode_required_executes_real_worker_and_commits_hevc_mkv` is the suite's only real
-  ffmpeg *encode* (the single `TranscodeWorkerLaunch` in
-  `crates/voom-cli/tests/chaos_librarian_e2e.rs`), and it is precisely the test #491 masks. For
-  that one test the first Monday after #498 lands is both the first run of #498's fix and the
-  first time ffmpeg 8's encoder meets the suite — libx265 into HEVC/MKV, the arm a major
-  version is likeliest to move. A failure there must not be read as #498 regressing without
-  ruling out ffmpeg 8 first.
+  variable rather than two. Encoding is covered: Chaos Librarian's materializer shells out to
+  ffmpeg on every scenario, and `transcode_noop_does_not_schedule_worker_mutation` materializes
+  `voom-ci/hevc-noop.yaml` (`codec: hevc`, which `media_matrix.py` maps to `libx265`), so the
+  dispatch does exercise ffmpeg 8's libx265 encode inside the passing eleven. **What it cannot
+  reach** is narrower: voom's own `voom-ffmpeg-worker` invocation and the artifact-commit path
+  around it, exercised only by
+  `transcode_required_executes_real_worker_and_commits_hevc_mkv` — the single
+  `TranscodeWorkerLaunch` in `crates/voom-cli/tests/chaos_librarian_e2e.rs`, and precisely the
+  test #491 masks. For that one test the first Monday after #498 lands carries both new
+  variables, so a failure there must not be read as #498 regressing without ruling out
+  ffmpeg 8 first.
 - **The series pin is replaced by a pin on BtbN's filename grammar and on the `latest` tag.**
   That grammar is not stable across BtbN's own history: the autobuild assets `0d0c0ce1` and
   `7212262f` pinned had a different shape
