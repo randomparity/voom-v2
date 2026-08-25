@@ -25,7 +25,8 @@ ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-s
     check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
-    check-adr-index check-adr-index-selftest test doc deny audit
+    check-adr-index check-adr-index-selftest select-ffmpeg-asset-selftest \
+    test doc deny audit
     @echo "==> All CI checks passed"
 
 # Individual checks (also called by `ci`)
@@ -109,6 +110,10 @@ check-adr-index:
 # Self-test for the ADR index guard
 check-adr-index-selftest:
     ./scripts/check-adr-index-selftest.sh
+
+# Self-test for the ffmpeg asset selector (keeps its pattern, floor and ordering honest)
+select-ffmpeg-asset-selftest:
+    ./scripts/select-ffmpeg-asset-selftest.sh
 
 # Run the CLI binary
 run *ARGS:
