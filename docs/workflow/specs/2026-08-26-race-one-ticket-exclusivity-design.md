@@ -82,16 +82,22 @@ corrects:
 `SchedulerReasonCode::NoReadyTicket` cannot discriminate either: it is produced
 both by the empty-snapshot elimination (`crates/voom-scheduler/src/lib.rs:178-183`)
 and by `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`, reached at
-`:529`). `decision_kind = Idle` is the discriminator: its sole producer is the
-empty-candidate branch at `acquire.rs:229`.
+`:529`). `decision_kind = Idle` is the discriminator: `decision_from_score` has
+three call sites (`acquire.rs:226`, `:248`, `:585`) and only `:226` can carry
+`ScoreOutcome::Idle` — `:245-247` turns an Idle score on non-empty candidates into
+a `VoomError::Internal`, and `:585` is the Selected path. The kind itself is
+assigned by the `ScoreOutcome::Idle` arm at `acquire.rs:1021-1026`.
 
 ### What each remote assertion detects
 
-| weakening | `held` | remote loser | Test B |
+Derived by code trace, not observed — R9 is what converts these predictions into
+observations.
+
+| weakening | `held` | 5 losers | Test B |
 |---|---|---|---|
-| CAS `state = 'ready'` alone | 1 | `Idle` | green — undetected |
-| snapshot `state = 'ready'` alone | 1 | `NoCandidate` | red, on the loser assertion |
-| both | 2 | `NoCandidate` | red, on safety and the loser assertion |
+| CAS `state = 'ready'` alone | 1 | 5× `Idle` | green — undetected |
+| snapshot `state = 'ready'` alone | 1 | 5× `NoCandidate` | red, on the loser assertion (R6) |
+| both | 2 | 1× `Leased`, 4× `Idle` | red, on R3 and R5 — *not* R6 |
 
 The middle row is the reason R6 is load-bearing rather than hygiene. Remove
 `state = 'ready'` from the snapshot only: a loser's transaction — which begins
@@ -103,10 +109,34 @@ The CAS then correctly rejects, and the outcome is `NoCandidate`
 (`acquire.rs:543`). Exactly one lease is still held and `attempt` still reads one
 more than before — safety is intact, and only the loser assertion notices.
 
+In the bottom row, claimer 2's CAS succeeds and it becomes a **second winner**;
+claimers 3–6 are then stopped by `attempt < max_attempts`, which both the snapshot
+and the CAS still carry, so they return `Idle`. `held` there is
+`min(claimers, max_attempts)` in general — it reads 2 only because the raced
+ticket has `max_attempts = 2`. Note that this row reddens on R3 and R5, not R6:
+every genuine loser is still `Idle`, and it is `attempt` reading 2 that catches it.
+That is the row where R5 earns its place.
+
 R6 is therefore not a safety assertion; it binds current control flow. A future
 change that legitimately widens the snapshot while leaving the CAS authoritative
 will redden Test B for a non-safety reason. That is the intended tripwire: update
 this spec and ADR 0085 rather than delete the assertion.
+
+**R6's tripwire has a precondition the test must assert.** The snapshot carries
+five predicates and the reasoning above concerns `state = 'ready'` alone. If the
+raced ticket had `max_attempts = 1`, then after the winner's CAS the snapshot
+would be emptied by `attempt < max_attempts` instead, every loser would return
+`Idle` whether or not the `state` predicate is present, and the middle row would
+go green — the detector disarmed by a one-character fixture edit with nothing to
+signal it. **Both tests therefore assert `max_attempts >= 2` on the raced ticket
+explicitly**, with a comment naming what lowering it would disarm, rather than
+relying on the fixture's current value.
+
+`decision_kind = Idle` proves only that the snapshot came back empty, not which
+predicate emptied it. That is enough to exclude a capacity or eligibility
+elimination — those route through the scorer to `NoCandidate`
+(`acquire.rs:1021-1026`) — so R7 is satisfied, but it is strictly weaker than the
+local path's `TicketNotReady`, which names the CAS itself.
 
 Test B cannot detect a CAS-only regression. Test A can, and both paths call the
 same `acquire_guarded`, so the pair covers the CAS.
@@ -293,7 +323,7 @@ time rather than after the fact.
 | R1–R7 | `cargo test -p voom-control-plane --all-features at_one_ticket_leases_exactly_once` |
 | R8 | Neither test carries `#[ignore]`; both are reached by `just test` |
 | R9 (Test A) | Delete `AND state = 'ready'` from the CAS in `leases.rs`, run Test A, observe failure, restore, observe pass |
-| R9 (Test B) | Three runs matching the table in *Background*: (i) CAS predicate deleted alone — expected green; (ii) snapshot `state = 'ready'` deleted alone — expected red on the loser assertion, with `held` still 1; (iii) both deleted — expected red on safety and the loser assertion, `held == 2`. Restore and re-run |
+| R9 (Test B) | Three runs matching the table in *Background*: (i) CAS predicate deleted alone — expected green; (ii) snapshot `state = 'ready'` deleted alone — expected red on R6, `held` still 1; (iii) both deleted — expected red on R3 and R5, `held == 2`, with one loser observed as `Leased` and four as `Idle`. Restore and re-run |
 | R10 | `just test-repeat voom-control-plane at_one_ticket_leases_exactly_once 25`, then `just test-serial` and `just test-parallel` |
 | R11 | `just ci` |
 
@@ -304,8 +334,12 @@ claimer's weakened `UPDATE` still matches zero rows. `held == 1` reddens at two.
 All three arms are the evidence for ADR 0085's central consequence, and each must
 be recorded — not only the final red. Arm (i) staying green is what shows the CAS
 is not the remote path's load-bearing gate; arm (ii) going red *while `held`
-stays 1* is what shows the loser assertion detects a regression the safety
-assertion cannot.
+stays 1* is what shows R6 detects a regression the safety assertion cannot; arm
+(iii) is what shows R5 catches the case R6 does not.
+
+The table's rows are predictions derived by code trace. If an arm does not
+reproduce, the finding is against this spec and ADR 0085 — correct them, do not
+adjust the test to match.
 
 ## Risks
 

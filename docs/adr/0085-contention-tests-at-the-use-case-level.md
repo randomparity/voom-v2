@@ -81,20 +81,55 @@ pooled connection simultaneously (`max_connections = 8`,
 ## Consequences
 
 - **The remote assertions detect different regressions, and only together.**
+  The table below is **derived by code trace, not observed** — the tests did not
+  exist when this record was written. Criterion 6 of the issue's verification is
+  what converts these predictions into observations; a row that does not
+  reproduce is a finding against this record, not against the test.
 
-  | weakening | `held` | remote loser | Test B |
+  | weakening | `held` | 5 remote losers | Test B |
   |---|---|---|---|
-  | CAS `state = 'ready'` alone | 1 | `Idle` | green — undetected |
-  | snapshot `state = 'ready'` alone | 1 | `NoCandidate` | red, on assertion 3 |
-  | both | 2 | `NoCandidate` | red, on assertions 1 and 3 |
+  | CAS `state = 'ready'` alone | 1 | 5× `Idle` | green — undetected |
+  | snapshot `state = 'ready'` alone | 1 | 5× `NoCandidate` | red, on assertion 3 |
+  | both | 2 | 1× `Leased`, 4× `Idle` | red, on assertions 1 and 2 |
 
-  The middle row is why assertion 3 is load-bearing on the remote path rather
-  than hygiene: it is the *only* detector of a snapshot regression, since
-  exclusivity survives that weakening intact. It is also not a safety assertion —
-  it binds current control flow, so a future change that legitimately widens the
-  snapshot while leaving the CAS authoritative reddens the test for a non-safety
-  reason. That is the intended tripwire, and a reader reaching it should update
-  this record rather than delete the assertion.
+  Row 1: the snapshot's surviving `state = 'ready'` empties the loser's candidate
+  set (`tickets.rs:1119-1128`), so it returns `Idle` at `acquire.rs:229`. Row 2:
+  the snapshot returns the leased ticket, scoring selects it, and the CAS rejects
+  it (`leases.rs:414-434`), surfacing as `NoCandidate` at `acquire.rs:543`.
+  Row 3: with neither predicate present, claimer 2's CAS succeeds and it becomes a
+  second winner; claimers 3–6 are then stopped by `attempt < max_attempts`, which
+  both the snapshot and the CAS still carry, so their snapshot is empty and they
+  return `Idle`.
+
+  **Row 3's `held` is `min(claimers, max_attempts)`, not 2.** It reads 2 only
+  because the raced ticket has `max_attempts = 2`. Note also that row 3 reddens on
+  assertions 1 and 2 — *not* 3: every genuine loser there is still `Idle`, and it
+  is the `attempt` count, reading 2, that catches it. That is the row where
+  assertion 2 earns its place.
+
+  The middle row is why assertion 3 is load-bearing on the remote path rather than
+  hygiene: it is the only detector of a snapshot regression, since exclusivity
+  survives that weakening intact. It is not a safety assertion — it binds current
+  control flow, so a future change that legitimately widens the snapshot while
+  leaving the CAS authoritative reddens the test for a non-safety reason. That is
+  the intended tripwire; a reader reaching it should update this record rather
+  than delete the assertion.
+- **That tripwire has a precondition, and the test must assert it.** The snapshot
+  carries five predicates (`tickets.rs:1119-1128`), and the reasoning above is
+  about `state = 'ready'` alone. If the raced ticket had `max_attempts = 1`, then
+  after the winner's CAS the snapshot would be emptied by `attempt < max_attempts`
+  instead, every loser would return `Idle` **whether or not** the snapshot's
+  `state` predicate is present, and the middle row would go green — the detector
+  disarmed by a one-character fixture edit, with nothing to signal it. The raced
+  ticket therefore requires `max_attempts >= 2`, and the test asserts that
+  explicitly rather than relying on the fixture's current value.
+
+  Relatedly, `decision_kind = Idle` proves only that the snapshot came back empty;
+  it cannot say *which* predicate emptied it. That is sufficient to exclude a
+  capacity or eligibility elimination — those route through the scorer to
+  `NoCandidate` (`acquire.rs:1021-1026`) — so it satisfies the anti-vacuity
+  requirement, but it is strictly weaker than the local path's `TicketNotReady`,
+  which names the CAS itself.
 - **A remote test cannot detect a CAS-only regression.** The local test can, and
   both paths call the same `acquire_guarded`, so the pair covers the CAS even
   though neither path covers it twice.
@@ -126,10 +161,27 @@ pooled connection simultaneously (`max_connections = 8`,
   multi-process transport is #581.
 - **Assert only the held-lease count.** judgment: satisfied by a run in which no
   claimer ever contended for the ticket, which is the failure this record exists
-  to prevent — and, per the table above, blind to a snapshot regression.
+  to prevent. The table above additionally predicts it is blind to a snapshot
+  regression; that prediction is a code trace, not a run, and criterion 6 is what
+  settles it.
+- **Drive the six claims sequentially instead of concurrently.** judgment: every
+  assertion the Decision lists is satisfied identically by six sequential calls,
+  which cannot flake and need no barrier — and per Context the claimers serialize
+  anyway, so the concurrency is not what makes the gate reject. Two things keep it:
+  #578 asks for a race in those words, and concurrent submission additionally
+  proves that `BEGIN IMMEDIATE` plus the 30s `busy_timeout` (`pool.rs:41`) yields
+  zero errors rather than a leaked `SQLITE_BUSY` under a genuinely contended write
+  lock — the property the existing remote test was written for
+  (`.../remote_execution/mod_test.rs:759-813`, comment at `:764-769`). The
+  concurrency is load-bearing for that and for nothing else; a later reader
+  weighing the flake budget should weigh it against exactly that.
 - **Assert the loser's `SchedulerReasonCode` rather than `decision_kind` on the
-  remote path.** verified: `decision_kind = Idle` has a single producer, the
-  empty-candidate branch at `acquire.rs:229`, so it is strictly stronger. The
+  remote path.** verified: `decision_kind = Idle` has a single producer.
+  `decision_from_score` has three call sites (`acquire.rs:226`, `:248`, `:585`);
+  only `:226` can carry `ScoreOutcome::Idle`, because `:245-247` turns an Idle
+  score on non-empty candidates into a `VoomError::Internal` and `:585` is the
+  Selected path. The kind is assigned by the `ScoreOutcome::Idle` arm at
+  `acquire.rs:1021-1026`. So it is strictly stronger. The
   reason code is not: `NoReadyTicket` is emitted both there (via
   `crates/voom-scheduler/src/lib.rs:178-183`) and by
   `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`, reached at
