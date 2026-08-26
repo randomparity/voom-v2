@@ -391,6 +391,49 @@ async fn supervisor_owned_run_local_providers_do_not_satisfy_owned_targets() {
     );
 }
 
+/// An owner node that can vouch for no worker says so, ahead of the backend
+/// line, for a policy that names no tool token.
+///
+/// Tool observation reports a node's readiness problem once per required tool
+/// token. A policy whose only owner-scoped requirement is the video backend
+/// observes an empty tool list, so that reason had nowhere to go and the
+/// operator was left with "run a node agent with an unbound ffmpeg worker" —
+/// unactionable when the agent is already running but has no workers bound to
+/// its active incarnation. Order is asserted because the cause is what the
+/// operator needs first; the backend line only says which worker to bind.
+#[tokio::test]
+async fn an_unready_owner_reports_its_own_reason_before_the_missing_backend() {
+    let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "owner-without-media-workers",
+        &[("scanner", &[OperationKind::ScanLibrary])],
+    )
+    .await;
+    remove_node_workers(&cp, owner.node_id).await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+
+    let error = cp
+        .preflight_policy_tools(
+            &mut software_transcode_policy(),
+            &one_target(file_version_id),
+        )
+        .await
+        .unwrap_err();
+
+    let message = error.to_string();
+    let reason = message
+        .find(
+            "owner node \"owner-without-media-workers\" can vouch for no worker: no \
+             agent-supervised workers are registered",
+        )
+        .unwrap_or_else(|| panic!("the node's own reason is missing: {message}"));
+    let backend = message
+        .find("software transcode profiles require an unbound ffmpeg worker")
+        .unwrap_or_else(|| panic!("the missing backend is no longer named: {message}"));
+    assert!(reason < backend, "the reason must lead: {message}");
+}
+
 /// Acceptance criterion 3, stale/retired leg: dead rows bound to the active
 /// incarnation are named as such instead of silently failing dispatch later.
 #[tokio::test]
@@ -1439,6 +1482,7 @@ async fn preflight_video_hardware_for_test(
         super::OwnerWorkerSet {
             node_name: "hardware-test-owner".to_owned(),
             live_worker_ids,
+            unready_reason: None,
         },
     )]);
     let requirements = super::policy_video_backend_requirements(policy)?;

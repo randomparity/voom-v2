@@ -49,6 +49,11 @@ enum TargetOwner {
 struct OwnerWorkerSet {
     node_name: String,
     live_worker_ids: BTreeSet<WorkerId>,
+    /// Why the owner node can vouch for no worker at all, when that is the
+    /// case. Tool observation reports this once per required tool token, so a
+    /// policy that requires no token but does require a video backend would
+    /// otherwise drop it and blame the backend for an unready node.
+    unready_reason: Option<String>,
 }
 
 /// Why the node itself cannot vouch for any worker right now.
@@ -212,12 +217,14 @@ impl ControlPlane {
             return Ok(OwnerWorkerSet {
                 node_name: node.name,
                 live_worker_ids: BTreeSet::new(),
+                unready_reason: Some(reason),
             });
         }
         let Some(active_incarnation) = node.active_incarnation_id.as_ref() else {
             return Ok(OwnerWorkerSet {
                 node_name: node.name,
                 live_worker_ids: BTreeSet::new(),
+                unready_reason: Some("owner node has no active agent incarnation".to_owned()),
             });
         };
         let workers = self.workers.list_by_node(node_id).await?;
@@ -247,6 +254,7 @@ impl ControlPlane {
             return Ok(OwnerWorkerSet {
                 node_name: node.name,
                 live_worker_ids: BTreeSet::new(),
+                unready_reason: Some(reason),
             });
         }
         for tool in tools {
@@ -268,6 +276,7 @@ impl ControlPlane {
         Ok(OwnerWorkerSet {
             node_name: node.name,
             live_worker_ids: live.iter().map(|worker| worker.id).collect(),
+            unready_reason: None,
         })
     }
 
@@ -288,11 +297,20 @@ impl ControlPlane {
         for owner in owner_workers.values() {
             let availability =
                 backend_availability(&candidates, &owner.live_worker_ids, requirements);
-            missing.extend(missing_backend_workers(
-                requirements,
-                &availability,
-                &owner.node_name,
-            ));
+            let backends = missing_backend_workers(requirements, &availability, &owner.node_name);
+            if backends.is_empty() {
+                continue;
+            }
+            // Lead with the node's own reason when it has one: "run a node
+            // agent with an ffmpeg worker" is unactionable advice for an
+            // operator whose agent is already running but unbound or stale.
+            if let Some(reason) = &owner.unready_reason {
+                missing.push(format!(
+                    "owner node \"{}\" can vouch for no worker: {reason}",
+                    owner.node_name
+                ));
+            }
+            missing.extend(backends);
         }
         if missing.is_empty() {
             return Ok(());
