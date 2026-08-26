@@ -327,6 +327,7 @@ async fn verified_fixture(cp: &ControlPlane, db: &Db, dir: &Path, name: &str) ->
             locator: &locator,
             path: &source_path,
             probe_snapshot: basic_mp4_probe_snapshot(),
+            sidecars: Vec::new(),
         }],
     )
     .await

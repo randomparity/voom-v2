@@ -277,6 +277,7 @@ impl ScenarioRun {
                     locator,
                     path,
                     probe_snapshot: snapshot.clone(),
+                    sidecars: Vec::new(),
                 })
                 .collect::<Vec<_>>();
             let cp = ControlPlane::open(&self.url)

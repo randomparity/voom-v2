@@ -324,12 +324,25 @@ async fn durable_sidecars_by_bundle(
     {
         let location = Path::new(&provider_locator).join(provider_relative_locator);
         let relative_path = library_relative_path(library_root, &location)?;
-        by_bundle.entry(bundle_id).or_default().push(json!({
-            "observed_ref": format!("file_asset_{file_asset_id}"),
-            "kind": "subtitle",
-            "path": relative_path,
-            "content_hash": sha256_to_observed_hash(&content_hash)?,
-        }));
+        let mut sidecar = serde_json::Map::from_iter([
+            (
+                "observed_ref".to_owned(),
+                Value::String(format!("file_asset_{file_asset_id}")),
+            ),
+            ("kind".to_owned(), Value::String("subtitle".to_owned())),
+            ("path".to_owned(), Value::String(relative_path)),
+        ]);
+        // Voom records blake3 digests, which the oracle's sha256-shaped field
+        // cannot carry; omitting it leaves the sidecar compared on path and
+        // kind, exactly as primary assets are. Reporting the digest would
+        // require re-hashing bytes voom never hashed that way.
+        if let Some(hash) = maybe_sha256_to_observed_hash(&content_hash)? {
+            sidecar.insert("content_hash".to_owned(), Value::String(hash));
+        }
+        by_bundle
+            .entry(bundle_id)
+            .or_default()
+            .push(Value::Object(sidecar));
     }
     Ok(by_bundle)
 }

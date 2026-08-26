@@ -16,7 +16,8 @@ use support::observed_state::{
 };
 use support::policy_seed::seed_transcode_policy;
 use support::voom_cli::{VoomTestDb, run_voom};
-use voom_test_support::scan_seed::{SeedFile, SeededSource, seed_scanned_files};
+use voom_scan_worker::walk::{WalkOutcome, scan_root};
+use voom_test_support::scan_seed::{SeedFile, SeedSidecar, SeededSource, seed_scanned_files};
 
 struct SeededChaosRun {
     run: ChaosRun,
@@ -353,8 +354,8 @@ async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
     // The first seeding publishes the original bytes' identity at the live
     // rooted address.
     let cp = db.control_plane().await.unwrap();
-    let (mut files, mut locators) = (Vec::new(), Vec::new());
-    let seeds = media_seeds_for_library(&library_path, &mut files, &mut locators);
+    let walk = LibraryWalk::discover(&library_path);
+    let seeds = walk.seed_files(&library_path);
     seed_scanned_files(&cp, &db.url, root_id, &seeds)
         .await
         .unwrap();
@@ -495,32 +496,6 @@ fn ready_chaos() -> ChaosLibrarian {
     chaos
 }
 
-/// Media extensions the chaos scenarios materialize.
-const MEDIA_EXTENSIONS: [&str; 6] = ["mp4", "mkv", "mov", "avi", "webm", "m4v"];
-
-fn is_media_file(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|extension| MEDIA_EXTENSIONS.contains(&extension))
-}
-
-fn collect_media_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    entries.sort();
-    for entry in entries {
-        if entry.is_dir() {
-            collect_media_files(&entry, out);
-        } else if is_media_file(&entry) {
-            out.push(entry);
-        }
-    }
-}
-
 /// Normalized probe snapshot for a materialized media file, taken with the real
 /// `ffprobe` this suite already requires.
 ///
@@ -580,38 +555,64 @@ fn probe_media_file(path: &Path) -> serde_json::Value {
     })
 }
 
-/// Build `SeedFile`s for every media file under the materialized library.
-fn media_seeds_for_library<'a>(
-    library_path: &Path,
-    files: &'a mut Vec<std::path::PathBuf>,
-    locators: &'a mut Vec<String>,
-) -> Vec<SeedFile<'a>> {
-    files.clear();
-    collect_media_files(library_path, files);
-    assert!(
-        !files.is_empty(),
-        "the scenario must materialize media files under {}",
-        library_path.display()
-    );
-    *locators = files
-        .iter()
-        .map(|path| {
-            path.strip_prefix(library_path)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .replace(std::path::MAIN_SEPARATOR, "/")
-        })
-        .collect();
-    files
-        .iter()
-        .zip(locators.iter())
-        .map(|(path, locator)| SeedFile {
-            locator,
-            path,
-            probe_snapshot: probe_media_file(path),
-        })
-        .collect()
+/// What the production scan walker found under a materialized library: one
+/// entry per primary media file, each carrying the sidecars grouped onto it.
+///
+/// Discovery runs through `voom_scan_worker::walk` rather than a second
+/// extension table maintained here. The private table this replaces listed only
+/// containers, so `.srt` subtitle sidecars were never seeded, no bundle
+/// membership was ever published, and the observed-state export had no sidecar
+/// to attach to its primary (#551).
+struct LibraryWalk {
+    outcome: WalkOutcome,
+    /// Absolute path of each primary, parallel to `outcome.candidates`.
+    primary_paths: Vec<std::path::PathBuf>,
+}
+
+impl LibraryWalk {
+    fn discover(library_path: &Path) -> Self {
+        let outcome = scan_root(library_path, &[]).unwrap();
+        assert!(
+            !outcome.candidates.is_empty(),
+            "the scenario must materialize media files under {}",
+            library_path.display()
+        );
+        let primary_paths = outcome
+            .candidates
+            .iter()
+            .map(|candidate| library_path.join(candidate.primary.locator.as_str()))
+            .collect();
+        Self {
+            outcome,
+            primary_paths,
+        }
+    }
+
+    /// Build `SeedFile`s the seeder publishes through the real scan-session
+    /// chain, probing each primary and hashing each sidecar off disk.
+    fn seed_files(&self, library_path: &Path) -> Vec<SeedFile<'_>> {
+        self.outcome
+            .candidates
+            .iter()
+            .zip(&self.primary_paths)
+            .map(|(candidate, path)| SeedFile {
+                locator: candidate.primary.locator.as_str(),
+                path,
+                probe_snapshot: probe_media_file(path),
+                sidecars: candidate
+                    .sidecars
+                    .iter()
+                    .map(|sidecar| SeedSidecar {
+                        locator: sidecar.locator.as_str().to_owned(),
+                        // The walker sets a role on every file it files as a
+                        // sidecar; `None` is reserved for primaries.
+                        role: sidecar.kind.unwrap().to_owned(),
+                        path: library_path.join(sidecar.locator.as_str()),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
 }
 
 /// Materialize a chaos scenario and publish every media file's identity rows
@@ -623,9 +624,8 @@ async fn seed_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> 
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
     let root_id = db.configure_local_root(&library_path).await.unwrap();
-    let mut files = Vec::new();
-    let mut locators = Vec::new();
-    let seeds = media_seeds_for_library(&library_path, &mut files, &mut locators);
+    let walk = LibraryWalk::discover(&library_path);
+    let seeds = walk.seed_files(&library_path);
     let cp = db.control_plane().await.unwrap();
     let seeded = seed_scanned_files(&cp, &db.url, root_id, &seeds)
         .await

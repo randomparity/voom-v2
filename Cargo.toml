@@ -46,6 +46,7 @@ voom-plan = { version = "0.1.0-dev", path = "crates/voom-plan" }
 voom-policy = { version = "0.1.0-dev", path = "crates/voom-policy" }
 voom-scheduler = { version = "0.1.0-dev", path = "crates/voom-scheduler" }
 voom-ffprobe-worker = { version = "0.1.0-dev", path = "crates/voom-ffprobe-worker" }
+voom-scan-worker = { version = "0.1.0-dev", path = "crates/voom-scan-worker" }
 voom-store = { version = "0.1.0-dev", path = "crates/voom-store" }
 voom-artifact = { version = "0.1.0-dev", path = "crates/voom-artifact" }
 voom-control-plane = { version = "0.1.0-dev", path = "crates/voom-control-plane" }

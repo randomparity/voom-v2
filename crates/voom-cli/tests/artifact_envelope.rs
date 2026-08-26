@@ -356,6 +356,7 @@ async fn seed() -> Seeded {
             locator: "tiny.source",
             path: &media,
             probe_snapshot: basic_mp4_probe_snapshot(),
+            sidecars: Vec::new(),
         }],
     )
     .await

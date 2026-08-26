@@ -53,5 +53,6 @@ time = { workspace = true }
 tokio = { workspace = true }
 voom-store = { workspace = true, features = ["test"] }
 voom-ffprobe-worker.workspace = true
+voom-scan-worker.workspace = true
 voom-test-support = { workspace = true }
 voom-worker-protocol.workspace = true

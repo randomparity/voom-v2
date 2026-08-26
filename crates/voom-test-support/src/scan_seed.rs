@@ -20,8 +20,8 @@ use voom_control_plane::scan::{
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_core::{
     ArtifactAccessMode, FileKeyFacts, MediaSnapshotId, NodeId, NodeIncarnationId, NodeKind,
-    OperationKind, ProviderRelativeLocator, ScanObservationEvidence, ScanSessionId, StorageRootId,
-    WorkerReadiness,
+    OperationKind, ProviderRelativeLocator, ScanObservationEvidence, ScanSessionId,
+    ScanSidecarEvidence, StorageRootId, WorkerReadiness,
 };
 use voom_store::repo::scan::sessions::ScanObservation;
 
@@ -42,6 +42,21 @@ pub struct SeedFile<'a> {
     pub path: &'a Path,
     /// Normalized probe snapshot recorded verbatim into `media_snapshots`.
     pub probe_snapshot: JsonValue,
+    /// Sidecars grouped onto this primary, published as bundle membership.
+    pub sidecars: Vec<SeedSidecar>,
+}
+
+/// One sidecar an owner-node scan worker hashed alongside its primary. The
+/// control plane turns each into a bundle member of the primary's bundle, so a
+/// fixture that omits them publishes a primary with no sidecars at all.
+#[derive(Debug, Clone)]
+pub struct SeedSidecar {
+    /// Root-relative `/`-joined locator; must match the fixture's name on disk.
+    pub locator: String,
+    /// Sidecar role: `external_subtitle`, `nfo`, `poster`, or `trailer`.
+    pub role: String,
+    /// Absolute path of the sidecar on disk (hashed for evidence).
+    pub path: std::path::PathBuf,
 }
 
 /// Distinguishes seeder nodes when one test seeds the same root repeatedly.
@@ -225,7 +240,7 @@ async fn submit_batch(
                     .map_err(|error| format!("fixture size fits u64: {error}"))?,
                 modified_at: modified.clone(),
                 file_key,
-                sidecars: Vec::new(),
+                sidecars: sidecar_evidence(&file.sidecars)?,
                 probe_snapshot: file.probe_snapshot.clone(),
             }),
         });
@@ -242,6 +257,26 @@ async fn submit_batch(
     })
     .await?;
     Ok(())
+}
+
+/// Hash each sidecar off disk into the strict evidence shape the publication
+/// path validates, mirroring the owner-node hash worker's per-sidecar leg.
+fn sidecar_evidence(
+    sidecars: &[SeedSidecar],
+) -> Result<Vec<ScanSidecarEvidence>, Box<dyn std::error::Error>> {
+    sidecars
+        .iter()
+        .map(|sidecar| {
+            let bytes = std::fs::read(&sidecar.path)?;
+            Ok(ScanSidecarEvidence {
+                provider_relative_locator: sidecar.locator.clone(),
+                role: sidecar.role.clone(),
+                blake3_hex: blake3_hash(&bytes),
+                size_bytes: u64::try_from(bytes.len())
+                    .map_err(|error| format!("fixture sidecar size fits u64: {error}"))?,
+            })
+        })
+        .collect()
 }
 
 async fn complete_session(

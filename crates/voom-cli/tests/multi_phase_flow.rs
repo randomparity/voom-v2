@@ -299,6 +299,7 @@ async fn scan_one(cp: &ControlPlane, url: &str, root: &Path, source: &Path) -> S
                     "disposition": { "default": true, "forced": false, "commentary": false },
                 }],
             }),
+            sidecars: Vec::new(),
         }],
     )
     .await

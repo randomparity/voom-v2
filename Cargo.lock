@@ -3165,6 +3165,7 @@ dependencies = [
  "voom-ffprobe-worker",
  "voom-plan",
  "voom-policy",
+ "voom-scan-worker",
  "voom-store",
  "voom-test-support",
  "voom-worker-protocol",
