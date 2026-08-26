@@ -84,3 +84,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0078](0078-runtime-resolved-ffmpeg-series.md) | chaos-e2e resolves its ffmpeg release series at runtime |
 | [0079](0079-deterministic-test-temp-root.md) | Deterministic test temp root |
 | [0083](0083-read-then-write-transactions-begin-immediate.md) | Read-then-write transactions begin immediate |
+| [0085](0085-contention-tests-at-the-use-case-level.md) | Contention tests race at the control-plane use-case level |
