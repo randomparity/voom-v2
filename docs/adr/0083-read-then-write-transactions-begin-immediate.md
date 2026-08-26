@@ -61,10 +61,30 @@ Converted under this rule in the change that recorded it:
 - `ControlPlane::record_pre_lease_ticket_failure` — reads the ticket and checks
   for a held lease, then writes the failure.
 
-Sites matching the shape but with no production caller (`SqliteLeaseRepo::fail`,
-`SqliteLeaseRepo::force_release`, `SqliteTicketRepo::mark_ready_if_unblocked`,
-`ControlPlane::force_release_lease`) are left deferred and tracked in #552
-rather than converted speculatively.
+The media-side `expire_due` pair named in #546 — `SqliteUseLeaseRepo::expire_due`
+and `ControlPlane::expire_due_use_leases` — is **not** an instance. Its `_in_tx`
+opens with the bulk `UPDATE ... WHERE id IN (SELECT ...)`, so it takes the write
+lock at its first statement and already honours `busy_timeout`.
+
+Four more wrappers do match the shape and stay deferred, tracked in #552 rather
+than converted speculatively. `SqliteLeaseRepo::fail` and
+`SqliteTicketRepo::mark_ready_if_unblocked` are test-only entry points whose
+production counterparts (`ControlPlane::fail_lease`,
+`ControlPlane::mark_ready_if_unblocked`) already begin immediate, so nothing in
+production reaches their deferred `BEGIN`. `SqliteLeaseRepo::force_release` and
+`ControlPlane::force_release_lease` have no caller outside tests at all.
+
+`SqliteLeaseRepo::expire_due` is in that same position — the control plane calls
+`expire_due_in_tx`, not the wrapper — and is converted anyway. It is the entry
+point #546 names, it is where the repo-layer regression test can hold the line,
+and two `expire_due` wrappers disagreeing about their own transaction mode is
+how this defect stayed invisible.
+
+The audit behind those lists covered the lease, ticket, node, worker, and
+use-lease transaction families — the ones on the execution path that failed. The
+remaining deferred `pool.begin()` sites (media identity and artifacts, bundles,
+policy, scan, config, workflow) were not classified one at a time; #552 covers
+auditing them mechanically instead.
 
 ## Consequences
 
@@ -91,10 +111,10 @@ rather than converted speculatively.
 - **Retry the transaction on `SQLITE_BUSY`.** judgment: re-runs the read half
   against a newer snapshot, so it changes the outcome rather than the timing,
   and it reintroduces the deadlock `SQLite` refuses the wait to avoid.
-- **Convert every deferred `pool.begin()` in the workspace.** judgment: ~90
-  sites, most read-only or write-first, where the change is either a no-op or
-  needless lock-hold. A rule that fires everywhere carries no information about
-  where the hazard is.
+- **Convert every deferred `pool.begin()` in the workspace.** judgment: roughly
+  90 sites, the ones sampled during this audit being read-only or write-first,
+  where the change is either a no-op or a needless lock-hold. A rule that fires
+  everywhere carries no information about where the hazard is.
 - **Add a shared `begin_immediate` helper to `voom-store`.** judgment: the
   crate already has three spellings of this transaction (a private helper in
   `policies.rs` and inline `begin_with` elsewhere); a fourth entry point would
