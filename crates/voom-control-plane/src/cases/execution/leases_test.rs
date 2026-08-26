@@ -2272,3 +2272,110 @@ async fn force_release_without_requeue_opens_terminal_failure_issue() {
         ]
     );
 }
+
+/// Six workers race one ready ticket on the local claim path.
+///
+/// `concurrent_local_acquire_never_exceeds_worker_operation_capacity` above
+/// races N claimers over N *distinct* tickets under a capacity limit, so it
+/// proves "at most one lease per worker" and stays green if the ticket CAS
+/// loses its `state = 'ready'` predicate. Here every claimer targets the same
+/// ticket and every claimer has spare capacity, so the CAS is the only thing
+/// that can reject them and a weakened predicate produces a second lease
+/// instead of a clean loss. See `docs/adr/0085`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
+    const CLAIMERS: usize = 6;
+
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::new("noop").unwrap();
+
+    let created = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(created.id, T0).await.unwrap();
+    let before = cp.tickets().get(created.id).await.unwrap().unwrap();
+
+    // Load-bearing precondition, not a sanity check. The ready-ticket snapshot
+    // and the CAS share `attempt < max_attempts`; with max_attempts = 1 a loser
+    // is rejected by the attempt budget rather than by `state = 'ready'`, which
+    // is the predicate this test exists to pin.
+    assert!(
+        before.max_attempts >= 2,
+        "raced ticket needs max_attempts >= 2, got {}",
+        before.max_attempts
+    );
+
+    let mut workers = Vec::with_capacity(CLAIMERS);
+    for index in 0..CLAIMERS {
+        let worker = eligible_worker(&cp, &format!("one-ticket-{index}"), &operation).await;
+        // Every claimer has room for this single ticket, so none can be turned
+        // away for capacity. That forces each one to the CAS, and keeps a
+        // rolled-back savepoint from hiding a second transition behind an
+        // unchanged `attempt`.
+        grant_capacity(&cp, &worker, &operation, 1).await;
+        workers.push(worker);
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(CLAIMERS));
+    let mut handles = Vec::with_capacity(CLAIMERS);
+    for worker in &workers {
+        let cp = cp.clone();
+        let barrier = barrier.clone();
+        let input = NewLease {
+            ticket_id: created.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        };
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cp.try_acquire_lease(input).await
+        }));
+    }
+
+    let mut acquired = Vec::new();
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(LeaseAcquireOutcome::Acquired(lease)) => acquired.push(lease),
+            Ok(LeaseAcquireOutcome::TicketNotReady { ticket_id }) => {
+                assert_eq!(ticket_id, created.id, "loser named the wrong ticket");
+            }
+            Ok(other) => panic!(
+                "every loser must lose at the ticket CAS; a capacity or \
+                 eligibility rejection means the claimer never reached it: {other:?}"
+            ),
+            Err(error) => panic!("no claimer may error under contention: {error:?}"),
+        }
+    }
+
+    assert_eq!(acquired.len(), 1, "exactly one claimer may acquire");
+
+    let held: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT id, worker_id FROM leases WHERE state = 'held'")
+            .fetch_all(&cp.pool)
+            .await
+            .unwrap();
+    assert_eq!(held.len(), 1, "exactly one held lease expected");
+    assert_eq!(
+        u64::try_from(held[0].1).unwrap(),
+        acquired[0].worker_id.0,
+        "the held lease belongs to a different worker than the winner"
+    );
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        total, 1,
+        "a rejected claimer must leave no lease row behind"
+    );
+
+    let after = cp.tickets().get(created.id).await.unwrap().unwrap();
+    assert_eq!(after.state, TicketState::Leased);
+    assert_eq!(
+        after.attempt,
+        before.attempt + 1,
+        "the ticket transition must have happened exactly once"
+    );
+    assert_eq!(after.epoch, before.epoch + 1);
+
+    assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 1);
+}
