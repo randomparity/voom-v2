@@ -391,6 +391,72 @@ async fn supervisor_owned_run_local_providers_do_not_satisfy_owned_targets() {
     );
 }
 
+/// A policy that names no tool token still routes through the owner node, so a
+/// worker registered without agent supervision is invisible to it. This is the
+/// exact shape a fixture reaches for when it starts a worker process and
+/// registers it directly (issue #549); the video backend is the only
+/// requirement, so the node's own reason has to ride along or the operator is
+/// told to start an agent that is already running.
+#[tokio::test]
+async fn an_unsupervised_worker_is_invisible_to_token_free_video_preflight() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    register_transcode_worker(
+        &cp,
+        "local-ffmpeg-unsupervised",
+        &operation,
+        Vec::new(),
+        json!({}),
+        1,
+    )
+    .await;
+    let owner = activate_owner_node(
+        &cp,
+        "owner-without-media-workers",
+        &[("scanner", &[OperationKind::ScanLibrary])],
+    )
+    .await;
+    remove_node_workers(&cp, owner.node_id).await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+
+    let error = cp
+        .preflight_policy_tools(&mut software_video_policy(), &one_target(file_version_id))
+        .await
+        .unwrap_err();
+
+    let message = error.to_string();
+    assert!(
+        message.contains(
+            "owner node \"owner-without-media-workers\" can vouch for no worker: no \
+             agent-supervised workers are registered"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains("software transcode profiles require an unbound ffmpeg worker"),
+        "{message}"
+    );
+}
+
+/// The positive control for the test above: the same token-free policy passes
+/// once an unbound ffmpeg worker is bound to the owner node's active
+/// incarnation, which is the shape a node agent produces.
+#[tokio::test]
+async fn an_owner_bound_unbound_ffmpeg_worker_satisfies_token_free_video_preflight() {
+    let (cp, _tmp) = cp().await;
+    let owner = activate_owner_node(
+        &cp,
+        "owner-with-media-workers",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let file_version_id = owned_root_with_file(&cp, owner.node_id).await;
+
+    cp.preflight_policy_tools(&mut software_video_policy(), &one_target(file_version_id))
+        .await
+        .unwrap();
+}
+
 /// Acceptance criterion 3, stale/retired leg: dead rows bound to the active
 /// incarnation are named as such instead of silently failing dispatch later.
 #[tokio::test]
@@ -1268,6 +1334,18 @@ async fn nvidia_decode_profile_requires_an_advertised_cuvid_decoder() {
     );
 }
 
+/// A software transcode policy that names no `requires_tools` token, so the
+/// video backend is its only owner-scoped requirement.
+fn software_video_policy() -> CompiledPolicy {
+    compile_policy(
+        "policy \"software-video\" { \
+         phase encode { transcode video to hevc { \
+         encoder: libx265 crf: 23 preset: medium } } }",
+    )
+    .unwrap()
+    .policy
+}
+
 fn vaapi_policy(extra_settings: &str) -> CompiledPolicy {
     compile_policy(&format!(
         "policy \"vaapi\" {{ \
@@ -1332,6 +1410,7 @@ async fn preflight_video_hardware_for_test(
         super::OwnerWorkerSet {
             node_name: "hardware-test-owner".to_owned(),
             live_worker_ids,
+            unready_reason: None,
         },
     )]);
     let requirements = super::policy_video_backend_requirements(policy)?;
