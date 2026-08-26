@@ -1,8 +1,0 @@
-[mcp_servers.repowise]
-command = "repowise"
-args = ["mcp"]
-cwd = "/Volumes/Source Code Volume/src/voom-v2"
-startup_timeout_sec = 20
-
-[features]
-hooks = true
