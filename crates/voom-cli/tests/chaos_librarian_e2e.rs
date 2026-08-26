@@ -13,6 +13,7 @@ use support::observed_state::{
 };
 use support::policy_seed::seed_transcode_policy;
 use support::voom_cli::{VoomTestDb, run_voom};
+use voom_ffprobe_worker::{FfprobeConfig, normalize_ffprobe_json, run_ffprobe_json};
 use voom_test_support::scan_seed::{SeedFile, SeededSource, seed_scanned_files};
 
 struct SeededChaosRun {
@@ -175,7 +176,7 @@ async fn policy_seed_creates_durable_ids_from_seeded_source() {
     let ids = seed_transcode_policy(
         &cp,
         "seed-test",
-        "mp4",
+        "mkv",
         "h264",
         seeded[0].file_version_id,
         Some(seeded[0].media_snapshot_id),
@@ -210,7 +211,7 @@ async fn transcode_required_commits_hevc_mkv_through_the_owner_node() {
     let ids = seed_transcode_policy(
         &cp,
         "chaos-h264",
-        "mp4",
+        "mkv",
         "h264",
         seeded[0].file_version_id,
         Some(seeded[0].media_snapshot_id),
@@ -239,10 +240,11 @@ async fn transcode_required_commits_hevc_mkv_through_the_owner_node() {
     );
 
     let _owner = support::owner_node::OwnerNodeEmulator::spawn(&db.url);
-    // Both directories live inside the configured storage root: the commit
-    // target must be contained by it (ADR 0055), and promotion reads the
-    // operator's output dir back out of the same tree.
-    let stage = run.scan_root().join("voom-stage");
+    // The staging flag is the storage-root path itself: the coordinator's
+    // promotion plan pairs `<staging>/.committed/<operation>` working dirs
+    // with the operator output dir, and the commit target must be contained by
+    // a configured root (ADR 0055).
+    let stage = run.scan_root();
     let out = run.scan_root().join("voom-output");
     let execute = run_voom(
         &db.url,
@@ -269,10 +271,22 @@ async fn transcode_required_commits_hevc_mkv_through_the_owner_node() {
         execute.stderr
     );
     let transcode_summary = &execute.json["data"]["summary"]["per_operation"]["transcode_video"];
-    assert_eq!(transcode_summary["success_count"], 1);
-    assert_eq!(transcode_summary["failure_count"], 0);
+    assert_eq!(
+        transcode_summary["success_count"], 1,
+        "envelope: {}",
+        execute.json
+    );
+    assert_eq!(
+        transcode_summary["failure_count"], 0,
+        "envelope: {}",
+        execute.json
+    );
     let file_phase = &execute.json["data"]["file_phases"][0];
-    assert_eq!(file_phase["outcome"], "committed");
+    assert_eq!(
+        file_phase["outcome"], "committed",
+        "envelope: {}",
+        execute.json
+    );
     assert!(!file_phase["ticket_ids"].as_array().unwrap().is_empty());
     assert!(file_phase["produced_file_version_id"].as_u64().unwrap() > 0);
     assert!(file_phase["reprobe_snapshot_id"].as_u64().unwrap() > 0);
@@ -348,8 +362,27 @@ async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
     // The first seeding publishes the original bytes' identity at the live
     // rooted address.
     let cp = db.control_plane().await.unwrap();
-    let (mut files, mut locators) = (Vec::new(), Vec::new());
-    let seeds = media_seeds_for_library(&library_path, &mut files, &mut locators);
+    let mut files = Vec::new();
+    collect_media_files(&library_path, &mut files);
+    let locators: Vec<String> = files
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&library_path)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        })
+        .collect();
+    let seeds: Vec<SeedFile<'_>> = files
+        .iter()
+        .zip(locators.iter())
+        .map(|(path, locator)| SeedFile {
+            locator,
+            path,
+            probe_snapshot: placeholder_probe_snapshot(),
+        })
+        .collect();
     seed_scanned_files(&cp, &db.url, root_id, &seeds)
         .await
         .unwrap();
@@ -516,60 +549,68 @@ fn collect_media_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Canned normalized probe snapshot for a media file; the codec follows the
-/// container family the scenario materialized (mp4-family h264, mkv-family
-/// hevc), matching what each downstream policy assertion assumes.
-fn probe_for_extension(path: &Path) -> serde_json::Value {
-    let extension = path.extension().and_then(|value| value.to_str());
-    let codec = match extension {
-        Some("mkv" | "webm") => "hevc",
-        _ => "h264",
-    };
+/// A placeholder snapshot for a library the scenario is still mutating.
+///
+/// Probing a churning library races the mutations that are the subject under
+/// test, and the cases that use this one assert on identity rather than on
+/// media facts. Cases that plan against media facts seed real probes through
+/// [`media_seeds_for_library`] instead.
+fn placeholder_probe_snapshot() -> serde_json::Value {
     serde_json::json!({
         "format": "sprint10-v1",
-        "container": { "format_name": "application/octet-stream" },
+        "container": { "format_name": "matroska,webm" },
         "streams": [{
             "index": 0,
             "kind": "video",
-            "codec_name": codec,
+            "codec_name": "h264",
             "width": 320,
             "height": 180,
         }],
     })
 }
 
-/// Build `SeedFile`s for every media file under the materialized library.
-fn media_seeds_for_library<'a>(
-    library_path: &Path,
-    files: &'a mut Vec<std::path::PathBuf>,
-    locators: &'a mut Vec<String>,
-) -> Vec<SeedFile<'a>> {
-    files.clear();
-    collect_media_files(library_path, files);
+/// One media file's published identity inputs.
+struct MediaSeed {
+    path: std::path::PathBuf,
+    locator: String,
+    probe_snapshot: serde_json::Value,
+}
+
+/// Every media file under a settled library, each carrying the normalized
+/// snapshot real `ffprobe` reports for it.
+///
+/// The snapshot is produced by the same probe and normalization the owner-node
+/// ffprobe worker runs, so what a policy plans against is what the scenario
+/// actually materialized. A canned snapshot keyed on the file extension is how
+/// an h264 file in a Matroska container came to be published as `hevc` with an
+/// unresolvable container.
+async fn media_seeds_for_library(library_path: &Path) -> Vec<MediaSeed> {
+    let mut files = Vec::new();
+    collect_media_files(library_path, &mut files);
     assert!(
         !files.is_empty(),
         "the scenario must materialize media files under {}",
         library_path.display()
     );
-    *locators = files
-        .iter()
-        .map(|path| {
-            path.strip_prefix(library_path)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .replace(std::path::MAIN_SEPARATOR, "/")
-        })
-        .collect();
-    files
-        .iter()
-        .zip(locators.iter())
-        .map(|(path, locator)| SeedFile {
-            locator,
+    let config = FfprobeConfig::from_process_env().unwrap();
+    let mut seeds = Vec::with_capacity(files.len());
+    for path in files {
+        let raw = run_ffprobe_json(&path, &config).await.unwrap();
+        let probe_snapshot =
+            normalize_ffprobe_json(raw, "ffprobe", "1970-01-01T00:00:00Z").unwrap();
+        let locator = path
+            .strip_prefix(library_path)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        seeds.push(MediaSeed {
             path,
-            probe_snapshot: probe_for_extension(path),
-        })
-        .collect()
+            locator,
+            probe_snapshot,
+        });
+    }
+    seeds
 }
 
 /// Materialize a chaos scenario and publish every media file's identity rows
@@ -581,9 +622,15 @@ async fn seed_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> 
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
     let root_id = db.configure_local_root(&library_path).await.unwrap();
-    let mut files = Vec::new();
-    let mut locators = Vec::new();
-    let seeds = media_seeds_for_library(&library_path, &mut files, &mut locators);
+    let media = media_seeds_for_library(&library_path).await;
+    let seeds: Vec<SeedFile<'_>> = media
+        .iter()
+        .map(|seed| SeedFile {
+            locator: &seed.locator,
+            path: &seed.path,
+            probe_snapshot: seed.probe_snapshot.clone(),
+        })
+        .collect();
     let cp = db.control_plane().await.unwrap();
     let seeded = seed_scanned_files(&cp, &db.url, root_id, &seeds)
         .await
