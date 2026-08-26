@@ -101,6 +101,7 @@ async fn manual_lock_blocks_commit_and_force_release_unblocks_it() {
             locator: "tiny.mp4",
             path: &source,
             probe_snapshot: basic_mp4_probe_snapshot(),
+            sidecars: Vec::new(),
         }],
     )
     .await

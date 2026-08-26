@@ -66,6 +66,7 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
             locator: "committed-source.mp4",
             path: &media,
             probe_snapshot: basic_mp4_probe_snapshot(),
+            sidecars: Vec::new(),
         }],
     )
     .await
@@ -136,6 +137,7 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
             locator,
             path,
             probe_snapshot: basic_mp4_probe_snapshot(),
+            sidecars: Vec::new(),
         })
         .collect::<Vec<_>>();
     let seeded = seed_scanned_files(

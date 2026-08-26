@@ -398,6 +398,7 @@ async fn seed_one_media_file(seeded: &Seeded) -> voom_test_support::scan_seed::S
             locator: "tiny.mp4",
             path: &media,
             probe_snapshot: basic_mp4_probe_snapshot(),
+            sidecars: Vec::new(),
         }],
     )
     .await

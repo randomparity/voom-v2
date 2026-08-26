@@ -134,6 +134,7 @@ async fn create_library_policy(cp: &ControlPlane, url: &str, library: &Path) -> 
                     "disposition": { "default": true, "forced": false, "commentary": false },
                 }],
             }),
+            sidecars: Vec::new(),
         }],
     )
     .await
