@@ -3155,6 +3155,16 @@ impl MultiNodeFixture {
     /// helper, and extracting one would edit a method twenty-odd existing
     /// tests depend on. It takes `max_attempts` because this test's precondition
     /// is a value the other fixture hardcodes.
+    ///
+    /// **The payload shape is load-bearing: it must not parse as a
+    /// `WorkflowTicketPayload`.** `parse_ticket` requires `operation` and
+    /// `rendered_payload.operation` (`workflow/plan/ticket_payload.rs:118-152`),
+    /// which this payload deliberately omits, so
+    /// `resolve_ticket_owner_locality_in_tx` classifies the ticket
+    /// `NoDeclaration` (`acquire.rs:643-653`) and the owner-local gate lets every
+    /// node through. Add an `operation`/`rendered_payload` pair here and five of
+    /// six claimers are eliminated at that gate instead of at ticket readiness —
+    /// the decision-count assertion catches it, but the race is gone.
     async fn ready_ticket(&self, kind: &str, max_attempts: u32) -> TicketId {
         let ticket = self
             .cp
@@ -3496,7 +3506,10 @@ async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_onc
     assert_eq!(
         decisions,
         i64::try_from(CLAIMERS).unwrap(),
-        "expected exactly one scheduler decision per claimer; {observed}"
+        "expected exactly one scheduler decision per claimer. A higher count means \
+         claimers were eliminated by the owner-local gate, which writes a rejection \
+         decision of its own before the idle one — check whether the raced payload \
+         now parses as a WorkflowTicketPayload; {observed}"
     );
 
     assert_eq!(after.state, TicketState::Leased, "{observed}");
