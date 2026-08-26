@@ -83,3 +83,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0077](0077-owner-node-scan-execution.md) | Owner-node scan execution |
 | [0078](0078-runtime-resolved-ffmpeg-series.md) | chaos-e2e resolves its ffmpeg release series at runtime |
 | [0079](0079-deterministic-test-temp-root.md) | Deterministic test temp root |
+| [0083](0083-read-then-write-transactions-begin-immediate.md) | Read-then-write transactions begin immediate |

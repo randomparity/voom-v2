@@ -886,11 +886,18 @@ impl SqliteLeaseRepo {
     /// Returns the errors documented by [`Self::expire_due_in_tx`], or
     /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
+        // `BEGIN IMMEDIATE`, not a deferred `BEGIN`: `expire_due_in_tx` scans
+        // candidates before it updates them, and a deferred transaction only
+        // requests the write lock at that first UPDATE. `SQLite` refuses such a
+        // lock upgrade with `SQLITE_BUSY` *without* invoking the busy handler,
+        // so `busy_timeout` is never consulted and a concurrent writer fails the
+        // call outright. Taking the lock at `BEGIN` lets `busy_timeout`
+        // serialize the writers instead.
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+            .map_err(|e| VoomError::database_context("lease expire begin immediate", e))?;
         let out = self.expire_due_in_tx(&mut tx, now).await?;
         tx.commit()
             .await
