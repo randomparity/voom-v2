@@ -188,3 +188,52 @@ async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_oper
          ADR 0069 declaration gate stopped rejecting a payload with no declaration"
     );
 }
+
+#[test]
+fn merge_invocation_accumulates_per_operation_successes_across_phases() {
+    // Issue #545: the phase-barrier coordinator merges one run summary per
+    // phase invocation, so `per_operation` is accumulated, never replaced. The
+    // field-by-field asymmetry is deliberate and load-bearing: `dispatch_count`
+    // and `success_count` are in-memory per-invocation counters and add, while
+    // `ticket_count`, `retry_count` and `failure_count` are recomputed
+    // job-cumulatively from durable rows by `refresh_counts`, so merging them
+    // takes the maximum instead of double-counting the earlier phase.
+    let mut accumulated = WorkflowRunSummary::empty(JobId(1), Duration::from_secs(1));
+    accumulated.record_success(OperationKind::Remux);
+    accumulated.ticket_count = 1;
+    accumulated
+        .per_operation
+        .entry(OperationKind::Remux)
+        .or_default()
+        .ticket_count = 1;
+
+    // The transcode phase's own `refresh_counts` sees both phases' durable
+    // tickets, so it reports the remux operation again — with a zero success
+    // count, because that success belongs to the earlier invocation.
+    let mut transcode_phase = WorkflowRunSummary::empty(JobId(1), Duration::from_secs(2));
+    transcode_phase.record_success(OperationKind::TranscodeVideo);
+    transcode_phase.ticket_count = 2;
+    transcode_phase
+        .per_operation
+        .entry(OperationKind::Remux)
+        .or_default()
+        .ticket_count = 1;
+    transcode_phase
+        .per_operation
+        .entry(OperationKind::TranscodeVideo)
+        .or_default()
+        .ticket_count = 1;
+
+    accumulated.merge_invocation(transcode_phase);
+
+    assert_eq!(accumulated.operation_count(OperationKind::Remux), 1);
+    assert_eq!(
+        accumulated.operation_count(OperationKind::TranscodeVideo),
+        1
+    );
+    assert_eq!(accumulated.ticket_count, 2);
+    assert_eq!(
+        accumulated.per_operation[&OperationKind::Remux].ticket_count,
+        1
+    );
+}

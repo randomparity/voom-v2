@@ -231,12 +231,16 @@ impl WorkflowExecutor {
     /// agent drives the fenced remote-lease flow, so their completion is
     /// observed here rather than arriving through a dispatch task. A succeeded
     /// ticket expands exactly as a locally dispatched one would; a failed one
-    /// keeps its recorded failure class and follows the run's failure mode;
+    /// keeps its recorded failure class and follows the run's failure mode.
+    ///
+    /// Returns whether the pass folded at least one newly terminal ticket into
+    /// the run, so the caller can re-evaluate a `workflow_finished` read the
+    /// settlement may have invalidated by expanding one.
     pub(super) async fn settle_node_local_completions(
         &self,
         state: &mut RunLoopState,
         invocation: &RunInvocation<'_>,
-    ) -> Result<(), VoomError> {
+    ) -> Result<bool, VoomError> {
         // Settlement is driven off durable state, not just the outstanding
         // map: an agent can complete a ticket between observation windows —
         // before the executor ever observed it `ready` — and its expansion
@@ -254,6 +258,7 @@ impl WorkflowExecutor {
             candidate_ids.insert(ticket_id);
         }
 
+        let mut settled_any = false;
         for ticket_id in candidate_ids {
             if state.node_local_settled.contains(&ticket_id) {
                 continue;
@@ -271,6 +276,7 @@ impl WorkflowExecutor {
                 None => parse_payload(&ticket)?.operation,
             };
             state.node_local_settled.insert(ticket_id);
+            settled_any = true;
             match ticket.state {
                 TicketState::Succeeded => {
                     state.summary.record_success(operation);
@@ -297,7 +303,7 @@ impl WorkflowExecutor {
                 TicketState::Pending | TicketState::Ready | TicketState::Leased => {}
             }
         }
-        Ok(())
+        Ok(settled_any)
     }
 
     fn dispatch_runtime(

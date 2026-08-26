@@ -87,6 +87,8 @@ pub struct WorkflowExecutorOptions {
     pub chaos: WorkflowChaosOptions,
     #[cfg(test)]
     pub(crate) capacity_deferred_sync: Option<CapacityDeferredTestSync>,
+    #[cfg(test)]
+    pub(crate) node_local_settle_sync: Option<NodeLocalSettleTestSync>,
 }
 
 #[cfg(test)]
@@ -94,6 +96,17 @@ pub struct WorkflowExecutorOptions {
 pub(crate) struct CapacityDeferredTestSync {
     pub(crate) observed: std::sync::Arc<tokio::sync::Notify>,
     pub(crate) resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// Holds the run loop once, between its node-local settlement pass and its
+/// `workflow_finished` read, so a test can land an owner-node completion in
+/// exactly that window (issue #545).
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct NodeLocalSettleTestSync {
+    pub(crate) observed: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) resume: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) held: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(test)]
@@ -123,6 +136,7 @@ impl WorkflowExecutorOptions {
             queue: WorkflowQueueOptions::for_tests(),
             chaos: WorkflowChaosOptions::default(),
             capacity_deferred_sync: None,
+            node_local_settle_sync: None,
         }
     }
 }
@@ -638,19 +652,82 @@ impl WorkflowExecutor {
     }
 
     /// One run-loop pass of node-local completion settlement (ADR 0075),
-    /// failing the job when the durable poll itself errors.
+    /// failing the job when the durable poll itself errors. Reports whether the
+    /// pass folded at least one newly terminal ticket into the run.
     async fn settle_node_local_step(
         &self,
         state: &mut RunLoopState,
         invocation: &RunInvocation<'_>,
         started: Instant,
-    ) -> Result<(), WorkflowRunError> {
-        if let Err(source) = self.settle_node_local_completions(state, invocation).await {
-            return Err(state
+    ) -> Result<bool, WorkflowRunError> {
+        match self.settle_node_local_completions(state, invocation).await {
+            Ok(settled) => Ok(settled),
+            Err(source) => Err(state
                 .fail_job(&self.control_plane, invocation.job_id, source, started)
-                .await);
+                .await),
         }
-        Ok(())
+    }
+
+    /// Conclude a run whose tickets are all terminal and whose dispatches have
+    /// all joined, or report `None` when the run must re-enter its loop.
+    ///
+    /// ADR 0075 tickets are observed, not joined: their storage owner's agent
+    /// can settle one between the loop's settlement pass and its
+    /// `workflow_finished` read. Concluding on that read alone drops the
+    /// ticket's success or failure from the run summary and skips its
+    /// expansion (issue #545), so settle once more first. The caller's
+    /// `finished` proves every ticket was terminal, so that pass observes all
+    /// of them; it may also expand one, which invalidates `finished` — hence
+    /// the re-entry rather than a conclusion against a stale read.
+    async fn conclude_run(
+        &self,
+        state: &mut RunLoopState,
+        invocation: &RunInvocation<'_>,
+        started: Instant,
+    ) -> Result<Option<WorkflowRunSummary>, WorkflowRunError> {
+        let control = &self.control_plane;
+        let job_id = invocation.job_id;
+        if self
+            .settle_node_local_step(state, invocation, started)
+            .await?
+        {
+            return Ok(None);
+        }
+        match self
+            .first_failed_ticket_error(job_id, invocation.workflow_id)
+            .await
+        {
+            Ok(None) => match state.finish_success(control, job_id, started).await {
+                Ok(summary) => Ok(Some(summary)),
+                Err(source) => Err(state.fail_job(control, job_id, source, started).await),
+            },
+            Ok(Some(source)) => {
+                let source = state.take_isolated_error().unwrap_or(source);
+                match invocation.failure_mode {
+                    RunFailureMode::AbortJob => {
+                        Err(state.fail_job(control, job_id, source, started).await)
+                    }
+                    RunFailureMode::ContinueIndependent => Err(state
+                        .finish_isolated_failure(control, job_id, source, started)
+                        .await),
+                }
+            }
+            Err(source) => Err(state.fail_job(control, job_id, source, started).await),
+        }
+    }
+
+    /// Test-only hold between the settlement pass and the `workflow_finished`
+    /// read, so a test can drive the issue-#545 window deterministically.
+    #[cfg(test)]
+    async fn hold_after_node_local_settle(&self) {
+        let Some(sync) = &self.options.node_local_settle_sync else {
+            return;
+        };
+        if sync.held.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        sync.observed.notify_one();
+        sync.resume.notified().await;
     }
 
     async fn capacity_wait_outcome(
@@ -1111,6 +1188,8 @@ impl WorkflowExecutor {
             state.process_completed_dispatches(self, &invocation).await;
             self.settle_node_local_step(&mut state, &invocation, started)
                 .await?;
+            #[cfg(test)]
+            self.hold_after_node_local_settle().await;
 
             if let Err(source) = state.refresh(control, job_id, started).await {
                 return Err(state.fail_job(control, job_id, source, started).await);
@@ -1126,29 +1205,11 @@ impl WorkflowExecutor {
                     return Err(state.fail_job(control, job_id, source, started).await);
                 }
             };
-            if state.active_is_empty() && finished {
-                match self.first_failed_ticket_error(job_id, workflow_id).await {
-                    Ok(None) => match state.finish_success(control, job_id, started).await {
-                        Ok(summary) => return Ok(summary),
-                        Err(source) => {
-                            return Err(state.fail_job(control, job_id, source, started).await);
-                        }
-                    },
-                    Ok(Some(source)) => {
-                        let source = state.take_isolated_error().unwrap_or(source);
-                        return match failure_mode {
-                            RunFailureMode::AbortJob => {
-                                Err(state.fail_job(control, job_id, source, started).await)
-                            }
-                            RunFailureMode::ContinueIndependent => Err(state
-                                .finish_isolated_failure(control, job_id, source, started)
-                                .await),
-                        };
-                    }
-                    Err(source) => {
-                        return Err(state.fail_job(control, job_id, source, started).await);
-                    }
-                }
+            if state.active_is_empty()
+                && finished
+                && let Some(summary) = self.conclude_run(&mut state, &invocation, started).await?
+            {
+                return Ok(summary);
             }
 
             let dispatch = self.dispatch_ready_tickets(&mut state, &invocation).await;

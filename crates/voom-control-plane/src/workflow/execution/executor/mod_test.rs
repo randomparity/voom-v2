@@ -32,8 +32,9 @@ use voom_worker_protocol::{
 
 use super::super::leases::retry_on_database_locked;
 use super::{
-    CapacityDeferredTestSync, DispatchIdentity, DispatchReadyOutcome, RunInvocation, RunLoopState,
-    SpawnOutcome, WorkflowFailureDisposition, WorkflowIdleState, workflow_failure_source,
+    CapacityDeferredTestSync, DispatchIdentity, DispatchReadyOutcome, NodeLocalSettleTestSync,
+    RunInvocation, RunLoopState, SpawnOutcome, WorkflowFailureDisposition, WorkflowIdleState,
+    workflow_failure_source,
 };
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
@@ -3867,6 +3868,97 @@ async fn envelope_bearing_media_tickets_route_to_owner_node_execution() {
         .await
         .unwrap();
     assert_eq!(idle, WorkflowIdleState::Leased);
+}
+
+#[tokio::test]
+async fn owner_node_success_landing_before_the_finished_check_is_counted() {
+    // Issue #545. ADR 0075 media tickets are observed by polling rather than
+    // joined as dispatch tasks, so the storage owner's agent can succeed one
+    // between the run loop's settlement pass and its `workflow_finished` read.
+    // Concluding on that read alone loses the operation's success, leaving a
+    // run summary that contradicts the very ticket the run committed — and the
+    // phase-barrier coordinator then accumulates that zero across phases.
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (file_version_id, _location_id) = fixture.seed_local_source().await;
+    let snapshot_id = fixture.record_source_snapshot(file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture.seed_default_staging_root().await;
+    let agent_worker_id = fixture
+        .register_worker(
+            "owner-node-agent",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+
+    let observed = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.node_local_settle_sync = Some(NodeLocalSettleTestSync {
+        observed: Arc::clone(&observed),
+        resume: Arc::clone(&resume),
+        held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let executor = fixture.executor_with_options(options);
+    let job_id = fixture.open_workflow_job().await;
+    let plan = fixture.plan.clone();
+    let run = tokio::spawn(async move {
+        executor
+            .submit_and_run_invocation_in_job(
+                job_id,
+                "phase-0",
+                plan,
+                super::RunFailureMode::ContinueIndependent,
+            )
+            .await
+    });
+
+    // The loop has finished one settlement pass and is holding before its
+    // finished check: land the owner node's completion in exactly that window.
+    // Both waits are bounded so a run that never reaches the hold, or never
+    // concludes, fails the test instead of hanging the suite.
+    tokio::time::timeout(Duration::from_secs(5), observed.notified())
+        .await
+        .unwrap_or_else(|_| panic!("the run loop must reach its settlement hold"));
+    let ticket = fixture.first_workflow_ticket().await;
+    let lease = fixture
+        .cp
+        .acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id: agent_worker_id,
+            ttl: time::Duration::seconds(5),
+            now: fixture.cp.clock().now(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .release_lease(lease.id, json!({}), fixture.cp.clock().now())
+        .await
+        .unwrap();
+    resume.notify_one();
+
+    let summary = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("the run must conclude once its ticket is terminal"))
+        .unwrap()
+        .unwrap_or_else(|error| panic!("the remux run must succeed: {}", error.source));
+    assert_eq!(
+        fixture.ticket_state(ticket.id).await,
+        "succeeded",
+        "the owner node's completion must be durably recorded"
+    );
+    assert_eq!(
+        summary.operation_count(OperationKind::Remux),
+        1,
+        "a success settled after the finished check must still reach the run summary"
+    );
 }
 
 #[tokio::test]
