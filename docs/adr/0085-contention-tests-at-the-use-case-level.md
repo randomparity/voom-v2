@@ -13,121 +13,139 @@ claimers over N *distinct* tickets against a capacity limit
 `crates/voom-control-plane/src/cases/execution/remote_execution/mod_test.rs:759-813`),
 so no ticket is ever contended (#578, and finding 1 of epic #577).
 
-Writing the first such test surfaced an asymmetry the epic's framing missed.
-Readiness is enforced **once** on the node-local path and **twice** on the
-remote path:
+Both claim paths open `BEGIN IMMEDIATE` per ADR 0083 —
+`ControlPlane::try_acquire_lease` at
+`crates/voom-control-plane/src/cases/execution/leases.rs:50-58` and
+`ControlPlane::remote_acquire` at
+`.../remote_execution/acquire.rs:59`, both through `begin_immediate_tx`
+(`crates/voom-control-plane/src/cases/mod.rs:52-58`). So claimers do not execute
+a readiness gate concurrently on either path: SQLite's single write lock
+serializes them, and each claimer's transaction begins only after the previous
+one commits. What a contention test proves is therefore that the gate rejects a
+ticket another transaction has **already committed** as leased — which is the
+exclusivity property that matters, but is not a concurrent execution of the gate.
 
-- Local: `SqliteLeaseRepo::acquire_guarded` reads the ticket only to check its
-  `kind` (`crates/voom-store/src/repo/execution/leases.rs:399-413`), then runs
-  the CAS at `:415-424`. The CAS is the sole readiness gate, and it runs
-  *before* the worker-eligibility (`:441`) and capacity (`:452`) checks, so a
-  loser reaches it and receives `TicketNotReady`.
-- Remote: `ControlPlane::remote_acquire` opens one `BEGIN IMMEDIATE`
-  transaction (`.../remote_execution/acquire.rs:59`) spanning both the
-  ready-ticket snapshot and the CAS. The snapshot
-  (`crates/voom-store/src/repo/execution/tickets.rs:1114-1136`) carries the
-  same four predicates as the CAS — `state = 'ready'`, `next_eligible_at <=`,
-  `attempt < max_attempts`, job-open. The write lock is held from `BEGIN`, so
-  nothing commits between a loser's snapshot and its own CAS: the loser finds
-  the snapshot empty, takes the `tickets.is_empty()` branch (`acquire.rs:215-233`)
-  and returns `Idle`, never executing the CAS.
+The two paths differ in how many times readiness is checked, and that alone
+decides what each test can detect:
 
-That asymmetry decides what each test can prove, and a record was needed
-because the obvious assertion set is satisfied by a test that proves nothing:
-`COUNT(*) FROM leases WHERE state = 'held' == 1` is also what a run observes
-when every loser was turned away by capacity or eligibility and never contended
-for the ticket at all.
+- **Local — once.** `SqliteLeaseRepo::acquire_guarded` reads the ticket only to
+  check its `kind` (`crates/voom-store/src/repo/execution/leases.rs:399-413`),
+  then runs the compare-and-swap at `:415-424`, and only *then* checks worker
+  eligibility (`:442`) and capacity (`:452`). There is no readiness pre-filter,
+  so a loser executes the CAS and receives `TicketNotReady`.
+- **Remote — twice.** `remote_acquire`'s ready-ticket snapshot
+  (`crates/voom-store/src/repo/execution/tickets.rs:1114-1136`) carries the same
+  four predicates as the CAS: `state = 'ready'`, `next_eligible_at <=`,
+  `attempt < max_attempts`, job-open. A loser's snapshot is empty, so it takes
+  the `tickets.is_empty()` branch (`acquire.rs:215-233`) and returns `Idle`
+  without executing the CAS.
+
+A record was needed because the obvious assertion set is satisfied by a test that
+proves nothing: `COUNT(*) FROM leases WHERE state = 'held' == 1` is also what a
+run observes when every loser was turned away by capacity or eligibility and
+never contended for the ticket at all.
 
 ## Decision
 
 Contention tests for ticket claiming live at the control-plane use-case level,
 against a real on-disk WAL SQLite database, driven by the use case a caller
-really invokes — `ControlPlane::try_acquire_lease` locally,
-`ControlPlane::remote_acquire` remotely. Claimers are released together by a
-`tokio::sync::Barrier` on a multi-threaded tokio runtime.
+really invokes. Claimers are released together by a `tokio::sync::Barrier` on a
+multi-threaded tokio runtime.
 
 Each test asserts three things, not one:
 
 1. **Safety** — exactly one claimer acquires, and `COUNT(*) FROM leases WHERE
    state = 'held'` is 1.
-2. **The CAS's own side effect** — the ticket's `attempt` incremented exactly
-   once, asserted relative to a pre-race read. Nothing else in the acquire flow
-   increments `attempt` and `epoch` (`leases.rs:415-417`), which makes this the
-   only observation unique to the transition itself; it reads 2 the instant a
-   second transition is admitted.
+2. **The transition's own side effect** — the ticket's `attempt` incremented
+   exactly once, relative to a pre-race read. `attempt = attempt + 1` has exactly
+   one production site (`leases.rs:417`), so this is the observation unique to the
+   transition. It detects a second transition that **commits**; a CAS that
+   succeeds and is then rejected on a later gate rolls its savepoint back
+   (`leases.rs:346`, `:359-370`) and leaves `attempt` unchanged. The fixture
+   therefore grants every claimer capacity, so no later gate can fire and mask a
+   second transition.
 3. **Why each loser lost** — by the outcome the losing path actually produces,
-   never by elimination. This differs per path, and the difference is the
-   record's substance:
+   never by elimination:
 
    | path | loser outcome | discriminator |
    |---|---|---|
    | local | `LeaseAcquireOutcome::TicketNotReady` | the outcome itself |
    | remote | `RemoteAcquireOutcome::Idle` | the decision's `decision_kind = Idle` |
 
-   The remote discriminator is `decision_kind`, **not** the reason code.
-   `SchedulerReasonCode::NoReadyTicket` has two producers — the empty-snapshot
-   elimination (`crates/voom-scheduler/src/lib.rs:178-183`) and
-   `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`) — so asserting
-   the reason alone cannot tell a CAS loss from an elimination. A loser observed
-   with a capacity or eligibility reason fails the test outright.
+   A loser observed with a capacity or eligibility reason fails the test outright.
 
-Concurrent claimers stay at or below the pool's `max_connections`
-(`crates/voom-store/src/pool.rs:62`); this ADR uses 6 against 8. Claimers beyond
-that queue for a connection rather than contending, so they add wall-clock
-without adding contention.
+Concurrent claimers are a fixed count — 6 — chosen so every claimer holds a
+pooled connection simultaneously (`max_connections = 8`,
+`crates/voom-store/src/pool.rs:62`) and the runtime stays bounded.
 
 ## Consequences
 
-- **The two paths bite differently, and a test author must know which.** On the
-  local path, deleting `state = 'ready'` from the CAS admits a second claimer
-  and the test reddens. On the remote path it does **not**: the snapshot's
-  identical filter still holds, so a bite check there must weaken *both* layers.
-  A remote test is a composite exclusivity test, not a CAS test.
-- The loser-reason assertion is what keeps a passing test meaningful, and it is
-  the part a later edit is most likely to drop as redundant. It is written here
-  so its removal is a visible decision.
+- **The remote assertions detect different regressions, and only together.**
+
+  | weakening | `held` | remote loser | Test B |
+  |---|---|---|---|
+  | CAS `state = 'ready'` alone | 1 | `Idle` | green — undetected |
+  | snapshot `state = 'ready'` alone | 1 | `NoCandidate` | red, on assertion 3 |
+  | both | 2 | `NoCandidate` | red, on assertions 1 and 3 |
+
+  The middle row is why assertion 3 is load-bearing on the remote path rather
+  than hygiene: it is the *only* detector of a snapshot regression, since
+  exclusivity survives that weakening intact. It is also not a safety assertion —
+  it binds current control flow, so a future change that legitimately widens the
+  snapshot while leaving the CAS authoritative reddens the test for a non-safety
+  reason. That is the intended tripwire, and a reader reaching it should update
+  this record rather than delete the assertion.
+- **A remote test cannot detect a CAS-only regression.** The local test can, and
+  both paths call the same `acquire_guarded`, so the pair covers the CAS even
+  though neither path covers it twice.
 - **Reachability depends on transaction mode, which #552 is about to change en
   masse.** `remote_acquire`'s window closed when the M6 fix converted it to
-  `BEGIN IMMEDIATE` (see `.../remote_execution/mod_test.rs:764-769`); ADR 0072's
-  changed-gate branch presumably predates that. #552 converts further
-  read-then-write sites, shrinking what is raceable. #580 and #581 both assume
-  two transactions can interleave on the same rows and should check each target
-  path's `BEGIN` mode before the test is designed.
-- These tests are not pool-saturation coverage. Exceeding the pool is a
-  different failure mode with a different expected outcome (#580).
-- Nothing enforces the claimer bound or the assertion set mechanically. Both are
-  prose plus a comment naming the pool.
+  `BEGIN IMMEDIATE` (see `.../remote_execution/mod_test.rs:764-769`). #552
+  converts further read-then-write sites, shrinking what is raceable. #580 and
+  #581 both assume two transactions can interleave on the same rows and should
+  check each target path's `BEGIN` mode before the test is designed — including,
+  per Context, the local path, whose mode is also `BEGIN IMMEDIATE`.
+- These tests are not pool-saturation coverage. Exceeding the pool is a different
+  failure mode with a different expected outcome (#580).
+- Nothing enforces the claimer count or the assertion set mechanically. Both are
+  prose.
 
 ## Considered & rejected
 
 - **Race at the `voom-store` repository level, calling `try_acquire_in_tx`
   directly.** verified: the caller owns the transaction there — it takes
   `&mut Transaction` and opens only a savepoint (`leases.rs:334-350`) — so the
-  test would supply its own `BEGIN`, making the transaction mode the test's
-  choice rather than the code's. Given the consequence above, transaction mode
-  is exactly what a contention test must not get to pick.
-- **Race through the HTTP surface in `voom-api`.** verified: the densest
-  protocol tests there are in-process `tower::oneshot` with no socket
-  (`crates/voom-api/tests/remote_execution_route.rs`, `oneshot` at lines
-  90/96/171/489/883; no `TcpListener`/`reqwest`/`serve(` hits), so transport adds
-  no contention the use-case level lacks. Real multi-process transport is #581.
+  test would supply its own `BEGIN`. Given that transaction mode is what decides
+  whether a gate is reachable at all, it is exactly what a contention test must
+  not get to pick.
+- **Race through the HTTP surface in `voom-api`.** verified: the densest protocol
+  tests there are in-process `tower::oneshot` with no socket —
+  `rg -n 'oneshot' crates/voom-api/tests/remote_execution_route.rs` hits
+  90/96/171/489/883, and `rg -n 'TcpListener|reqwest|serve\('` on the same file
+  exits 1. Transport adds no contention the use-case level lacks. Real
+  multi-process transport is #581.
 - **Assert only the held-lease count.** judgment: satisfied by a run in which no
   claimer ever contended for the ticket, which is the failure this record exists
-  to prevent.
+  to prevent — and, per the table above, blind to a snapshot regression.
 - **Assert the loser's `SchedulerReasonCode` rather than `decision_kind` on the
-  remote path.** verified: `NoReadyTicket` is emitted by both the empty-snapshot
-  path (`crates/voom-scheduler/src/lib.rs:178-183`, surfaced at
-  `acquire.rs:215-233`) and the changed-gate path (`acquire.rs:1367-1369`), so the
-  assertion would pass in the case it is meant to exclude.
+  remote path.** verified: `decision_kind = Idle` has a single producer, the
+  empty-candidate branch at `acquire.rs:229`, so it is strictly stronger. The
+  reason code is not: `NoReadyTicket` is emitted both there (via
+  `crates/voom-scheduler/src/lib.rs:178-183`) and by
+  `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`, reached at
+  `:529`), so it cannot separate an empty-snapshot elimination from a changed-gate
+  rejection — which is precisely the distinction the middle row of the table turns
+  on. It *would* exclude the capacity case, whose codes differ
+  (`first_rejection_reason`, `crates/voom-scheduler/src/lib.rs:274-280`); that is
+  not the case it fails at.
 - **Use a deterministic concurrency harness (loom, turmoil, madsim).** verified:
   `rg -n '^name = "(loom|turmoil|madsim)"' Cargo.lock` returns no match, and epic
   #577 records deterministic distributed simulation as a non-goal until the
-  harness and CI lane exist. The question is SQLite transaction semantics, which
-  a simulated scheduler does not execute.
-- **Set the claimer count from the host's CPU count.** judgment: the binding
-  constraint is the connection pool, a fixed 8 regardless of host, and a
-  host-varying count makes a flake unreproducible on the machine that saw it.
-- **Do nothing and rely on the existing concurrent tests.** verified: they race
-  N claimers over N distinct tickets under a capacity limit (the two ranges cited
-  in Context) and assert at most one lease per worker, so no ticket is ever
+  harness and CI lane exist. The question is SQLite transaction semantics, which a
+  simulated scheduler does not execute.
+- **Set the claimer count from the host's CPU count.** judgment: a host-varying
+  count makes a flake unreproducible on the machine that saw it.
+- **Do nothing and rely on the existing concurrent tests.** verified: they race N
+  claimers over N distinct tickets under a capacity limit (the two ranges cited in
+  Context) and assert at most one lease per worker, so no ticket is ever
   contended.

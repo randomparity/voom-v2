@@ -23,6 +23,19 @@ This asymmetry, established while designing this change and reported on #578 and
 #577, decides what each test can prove. ADR 0085 records the decision that
 follows from it.
 
+**Both paths open `BEGIN IMMEDIATE`** per ADR 0083 — `try_acquire_lease` at
+`crates/voom-control-plane/src/cases/execution/leases.rs:50-58` and
+`remote_acquire` at `.../remote_execution/acquire.rs:59`, both via
+`begin_immediate_tx` (`crates/voom-control-plane/src/cases/mod.rs:52-58`). So
+neither test executes a readiness gate concurrently: SQLite's single write lock
+serializes all six claimers, and each transaction begins only after the previous
+commits. What these tests prove is that the gate rejects a ticket another
+transaction has **already committed** as leased. That is the exclusivity property
+that matters; it is not concurrent execution of the gate, and neither test should
+be described as racing the CAS in that sense.
+
+The difference between the paths is solely how many times readiness is checked.
+
 The compare-and-swap in `SqliteLeaseRepo::acquire_guarded`
 (`crates/voom-store/src/repo/execution/leases.rs:415-424`) is:
 
@@ -68,8 +81,35 @@ corrects:
 
 `SchedulerReasonCode::NoReadyTicket` cannot discriminate either: it is produced
 both by the empty-snapshot elimination (`crates/voom-scheduler/src/lib.rs:178-183`)
-and by `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`). The
-decision's `decision_kind` is the discriminator.
+and by `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`, reached at
+`:529`). `decision_kind = Idle` is the discriminator: its sole producer is the
+empty-candidate branch at `acquire.rs:229`.
+
+### What each remote assertion detects
+
+| weakening | `held` | remote loser | Test B |
+|---|---|---|---|
+| CAS `state = 'ready'` alone | 1 | `Idle` | green — undetected |
+| snapshot `state = 'ready'` alone | 1 | `NoCandidate` | red, on the loser assertion |
+| both | 2 | `NoCandidate` | red, on safety and the loser assertion |
+
+The middle row is the reason R6 is load-bearing rather than hygiene. Remove
+`state = 'ready'` from the snapshot only: a loser's transaction — which begins
+after the winner commits — now sees the ticket in `leased`, so
+`tickets.is_empty()` is false, the `Idle` return at `acquire.rs:229` is never
+reached, candidates are non-empty, and because Test B uses six distinct workers
+on six nodes the loser's own worker has capacity, so scoring returns `Selected`.
+The CAS then correctly rejects, and the outcome is `NoCandidate`
+(`acquire.rs:543`). Exactly one lease is still held and `attempt` still reads one
+more than before — safety is intact, and only the loser assertion notices.
+
+R6 is therefore not a safety assertion; it binds current control flow. A future
+change that legitimately widens the snapshot while leaving the CAS authoritative
+will redden Test B for a non-safety reason. That is the intended tripwire: update
+this spec and ADR 0085 rather than delete the assertion.
+
+Test B cannot detect a CAS-only regression. Test A can, and both paths call the
+same `acquire_guarded`, so the pair covers the CAS.
 
 ## Requirements
 
@@ -83,7 +123,7 @@ decision's `decision_kind` is the discriminator.
 | R6 | Test A asserts every loser is `LeaseAcquireOutcome::TicketNotReady`. Test B asserts every loser is `RemoteAcquireOutcome::Idle` whose scheduler decision has `decision_kind = Idle`. | #578 Change, corrected by the asymmetry above; operator decision 2026-08-26 |
 | R7 | Each test fails if any loser was eliminated on capacity or eligibility rather than ticket readiness. | Necessary consequence of R3–R6 (see below) |
 | R8 | Both tests run in the default `just test` suite with no `#[ignore]`. | #578 Acceptance |
-| R9 | Test A is verified to bite by weakening the CAS alone. Test B is verified to bite by weakening **both** the snapshot filter and the CAS; each alone is confirmed to leave it green. | #578 Acceptance, amended by operator decision 2026-08-26 |
+| R9 | Test A is verified to bite by weakening the CAS alone. Test B is verified against all three arms of the table above, with the observed result matching each row. | #578 Acceptance, amended by operator decision 2026-08-26 and corrected by review |
 | R10 | Both tests stable under `just test-repeat` at `COUNT=25` and under both `just test-serial` and `just test-parallel`. | #578 Acceptance |
 | R11 | `just ci` is green. | `AGENTS.md` § Commands |
 
@@ -145,6 +185,14 @@ Setup:
 3. `grant_capacity(&cp, &worker, &operation, 1)` on each. One is enough for this
    single ticket, so **no worker can be turned away for capacity** — which is
    what forces every claimer to the CAS and is what R7 then asserts.
+
+   The capacity grant is load-bearing for R5 as well, not only R7. The CAS runs
+   inside a savepoint that `try_acquire_in_tx` rolls back on every non-`Acquired`
+   outcome (`.../leases.rs:346`, `:359-370`), and the CAS runs *before* the
+   eligibility (`:442`) and capacity (`:452`) checks. So a claimer whose CAS
+   succeeds but which is then rejected on capacity leaves `attempt` back where it
+   started — the increment assertion would read 1 while the CAS was broken.
+   Granting every worker capacity removes that masking path.
 
 Race: `tokio::sync::Barrier::new(6)`, one `tokio::spawn` per worker, each awaiting
 the barrier then calling
@@ -245,7 +293,7 @@ time rather than after the fact.
 | R1–R7 | `cargo test -p voom-control-plane --all-features at_one_ticket_leases_exactly_once` |
 | R8 | Neither test carries `#[ignore]`; both are reached by `just test` |
 | R9 (Test A) | Delete `AND state = 'ready'` from the CAS in `leases.rs`, run Test A, observe failure, restore, observe pass |
-| R9 (Test B) | Three runs: (i) CAS predicate deleted alone — expected still green; (ii) snapshot `state = 'ready'` deleted alone — expected still green; (iii) both deleted — expected red. Restore and re-run |
+| R9 (Test B) | Three runs matching the table in *Background*: (i) CAS predicate deleted alone — expected green; (ii) snapshot `state = 'ready'` deleted alone — expected red on the loser assertion, with `held` still 1; (iii) both deleted — expected red on safety and the loser assertion, `held == 2`. Restore and re-run |
 | R10 | `just test-repeat voom-control-plane at_one_ticket_leases_exactly_once 25`, then `just test-serial` and `just test-parallel` |
 | R11 | `just ci` |
 
@@ -253,9 +301,11 @@ R9's expected magnitude on Test A is two held leases, not six: the CAS retains
 `attempt < max_attempts` and the raced ticket has `max_attempts = 2`, so a third
 claimer's weakened `UPDATE` still matches zero rows. `held == 1` reddens at two.
 
-R9(ii) and R9(iii) are the evidence for ADR 0085's central consequence. Recording
-the intermediate results, not only the final red, is the point: (i) and (ii)
-staying green is what proves the two layers are independent.
+All three arms are the evidence for ADR 0085's central consequence, and each must
+be recorded — not only the final red. Arm (i) staying green is what shows the CAS
+is not the remote path's load-bearing gate; arm (ii) going red *while `held`
+stays 1* is what shows the loser assertion detects a regression the safety
+assertion cannot.
 
 ## Risks
 
