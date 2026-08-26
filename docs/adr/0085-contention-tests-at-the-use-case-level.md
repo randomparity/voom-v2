@@ -187,8 +187,14 @@ pooled connection simultaneously (`max_connections = 8`,
   Even so the remote discriminator remains weaker than the local path's
   `TicketNotReady`, which names the CAS itself rather than the emptiness of a set.
 - **A remote test cannot detect a CAS-only regression.** The local test can, and
-  both paths call the same `acquire_guarded`, so the pair covers the CAS even
-  though neither path covers it twice.
+  both paths call the same `acquire_guarded`, so the pair covers the CAS's
+  `state = 'ready'` predicate — the exclusivity gate — even though neither path
+  covers it twice. It covers only that one of the CAS's four predicates. Deleting
+  `attempt < max_attempts`, `next_eligible_at <= ?`, or the job-open `EXISTS`
+  leaves both tests green: the surviving `state` predicate still rejects every
+  loser, and the raced ticket's `job_id` is `NULL`, which makes the third clause
+  inert in this fixture regardless. That is the right scope for a record about
+  exclusivity, but it is not coverage of the statement.
 - **Reachability depends on transaction mode, which #552 is about to change en
   masse.** `remote_acquire`'s window closed when the M6 fix converted it to
   `BEGIN IMMEDIATE` (see `.../remote_execution/mod_test.rs:761-769`). #552
@@ -220,9 +226,8 @@ pooled connection simultaneously (`max_connections = 8`,
   multi-process transport is #581.
 - **Assert only the held-lease count.** judgment: satisfied by a run in which no
   claimer ever contended for the ticket, which is the failure this record exists
-  to prevent. The table above additionally predicts it is blind to a snapshot
-  regression; that prediction is a code trace, not a run, and criterion 6 is what
-  settles it.
+  to prevent. The table above additionally shows it is blind to a snapshot
+  regression; that row was run on 2026-08-26 and reproduced.
 - **Drive the six claims sequentially instead of concurrently.** judgment: every
   assertion the Decision lists is satisfied identically by six sequential calls,
   which cannot flake and need no barrier — and per Context the claimers serialize

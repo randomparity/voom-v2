@@ -85,12 +85,12 @@ CAS itself rather than the emptiness of a set.
 | R1 | A test races 6 workers on one node at one ready ticket via `ControlPlane::try_acquire_lease`. | #578 Change (1) |
 | R2 | A test races 6 workers across 6 registered nodes at one ready ticket via `ControlPlane::remote_acquire`. | #578 Change (2) |
 | R3 | Each test asserts exactly one claimer acquires, with zero errors. | #578 Change |
-| R4 | Each test asserts `COUNT(*) FROM leases WHERE state = 'held' == 1`, and that the one held row is the lease the winning claimer was handed — Test A by worker, Test B by lease id and worker. | #578 Change; tie added by review |
+| R4 | Each test asserts `COUNT(*) FROM leases WHERE state = 'held' == 1`, and that the one held row is the lease the winning claimer was handed — both tests by lease id and worker. | #578 Change; tie added by review |
 | R5 | Each test asserts the ticket's `attempt` incremented exactly once, relative to a pre-race read. | #578 Change; ADR 0085 Decision (2) |
 | R6 | Test A asserts every loser is `LeaseAcquireOutcome::TicketNotReady`. Test B asserts every loser is `RemoteAcquireOutcome::Idle` whose scheduler decision has `decision_kind = Idle`, whose explanation's `operation_set` contains the raced operation, and with exactly one scheduler decision per claimer. | #578 Change, corrected by the asymmetry above; operator decision 2026-08-26; anti-vacuity clauses added by review |
 | R7 | Each test fails if any loser was eliminated on capacity or eligibility rather than ticket readiness. | Necessary consequence of R3–R6 (see below) |
 | R8 | Both tests run in the default `just test` suite with no `#[ignore]`. | #578 Acceptance |
-| R9 | Test A is verified to bite by weakening the CAS alone. Test B is verified against all three arms of the table above, with the observed result matching each row. | #578 Acceptance, amended by operator decision 2026-08-26 and corrected by review |
+| R9 | Test A is verified to bite by weakening the CAS alone. Test B is verified against all three arms of the table in ADR 0085 § Consequences, with the observed result matching each row. | #578 Acceptance, amended by operator decision 2026-08-26 and corrected by review |
 | R10 | Both tests stable under `just test-repeat` at `COUNT=25` and under both `just test-serial` and `just test-parallel`. | #578 Acceptance |
 | R11 | `just ci` is green. | `AGENTS.md` § Commands |
 
@@ -215,7 +215,8 @@ Assertions:
   outcome fails with a message saying the claimer never reached the CAS.
 - Zero `Err`.
 - `SELECT COUNT(*) FROM leases` is 1 and `... WHERE state = 'held'` is 1.
-- The single lease's `worker_id` equals the winner's.
+- The single held row's `id` and `worker_id` are the lease id and worker the
+  winning claimer was handed.
 - Ticket `state = 'leased'`, `attempt == attempt_before + 1`, and
   `epoch == epoch_before + 1`. The relative form states the property meant, and
   avoids depending on the absolute values — `mark_ready_if_unblocked` already
@@ -313,7 +314,7 @@ time rather than after the fact.
 | R1–R7 | `cargo test -p voom-control-plane --all-features at_one_ticket_leases_exactly_once` |
 | R8 | Neither test carries `#[ignore]`; both are reached by `just test` |
 | R9 (Test A) | Delete `AND state = 'ready'` from the CAS in `leases.rs`, run Test A, observe failure, restore, observe pass |
-| R9 (Test B) | Three runs matching the table in *Background*: (i) CAS predicate deleted alone — green; (ii) snapshot `state = 'ready'` deleted alone — red on R6, `held` still 1; (iii) both deleted — red on R3, `held == 2`, one loser observed as `Leased` and four as `Idle`. Restore and re-run. All three ran and matched |
+| R9 (Test B) | Three runs matching the table in ADR 0085 § Consequences: (i) CAS predicate deleted alone — green; (ii) snapshot `state = 'ready'` deleted alone — red on R6, `held` still 1; (iii) both deleted — red on R3, `held == 2`, one loser observed as `Leased` and four as `Idle`. Restore and re-run. All three ran and matched |
 | R10 | `just test-repeat voom-control-plane at_one_ticket_leases_exactly_once 25`, then `just test-serial` and `just test-parallel` |
 | R11 | `just ci` |
 
