@@ -11,9 +11,20 @@ ticket — on the node-local claim path and on the multi-node remote claim path.
 
 ## Background
 
-Claim exclusivity rests on one compare-and-swap in
-`SqliteLeaseRepo::acquire_guarded`
-(`crates/voom-store/src/repo/execution/leases.rs:415-424`):
+No test races two claimers at one ticket. The existing concurrent tests
+(`crates/voom-control-plane/src/cases/execution/leases_test.rs:1246-1290`,
+`crates/voom-control-plane/src/cases/execution/remote_execution/mod_test.rs:759-813`)
+race N claimers over N *distinct* tickets under a capacity limit and assert "at
+most one lease per worker", so no ticket is ever contended.
+
+### Readiness is enforced once locally and twice remotely
+
+This asymmetry, established while designing this change and reported on #578 and
+#577, decides what each test can prove. ADR 0085 records the decision that
+follows from it.
+
+The compare-and-swap in `SqliteLeaseRepo::acquire_guarded`
+(`crates/voom-store/src/repo/execution/leases.rs:415-424`) is:
 
 ```sql
 UPDATE tickets
@@ -26,17 +37,39 @@ UPDATE tickets
                                   AND jobs.state = 'open'))
 ```
 
-`rows_affected() == 0` returns `LeaseAcquireOutcome::TicketNotReady`. The
-statement runs inside the savepoint `try_acquire_in_tx` opens
-(`leases.rs:334-350`); every non-`Acquired` outcome rolls that savepoint back, so
-a claimer that loses must leave `attempt` and `epoch` untouched.
+`rows_affected() == 0` yields `LeaseAcquireOutcome::TicketNotReady`. It runs
+inside the savepoint `try_acquire_in_tx` opens (`leases.rs:334-350`); every
+non-`Acquired` outcome rolls that savepoint back, so a loser leaves `attempt` and
+`epoch` untouched.
 
-No test races two claimers at one ticket. The existing concurrent tests
-(`crates/voom-control-plane/src/cases/execution/leases_test.rs:1246-1290`,
-`crates/voom-control-plane/src/cases/execution/remote_execution/mod_test.rs:759-813`)
-race N claimers over N *distinct* tickets under a capacity limit and assert "at
-most one lease per worker". Dropping `state = 'ready'` from the CAS would not
-redden any of them.
+**Local path — the CAS is the only readiness gate.** `acquire_guarded` reads the
+ticket only to check its `kind` (`leases.rs:399-413`), then runs the CAS, and only
+*then* checks worker eligibility (`:441`) and capacity (`:452`). A concurrent
+loser reaches the CAS and receives `TicketNotReady`.
+
+**Remote path — the CAS is unreachable as a race.**
+`ControlPlane::remote_acquire` opens a single `BEGIN IMMEDIATE` transaction
+(`.../remote_execution/acquire.rs:59`) spanning both the ready-ticket snapshot
+and the CAS. The snapshot
+(`crates/voom-store/src/repo/execution/tickets.rs:1114-1136`) filters on the same
+four predicates as the CAS: `state = 'ready'`, `next_eligible_at <=`,
+`attempt < max_attempts`, job-open. The write lock is held from `BEGIN`, so
+nothing commits between a loser's snapshot and its own CAS. With one contended
+ticket the loser's snapshot is **empty**, it takes the `tickets.is_empty()`
+branch (`acquire.rs:215-233`), and returns `RemoteAcquireOutcome::Idle` without
+executing the CAS.
+
+Two things follow that #578's original Change section got wrong, and this spec
+corrects:
+
+- a remote loser settles as `Idle`, not `NoCandidate`; and
+- weakening the CAS alone does **not** redden a multi-node test, because the
+  snapshot's identical filter still holds.
+
+`SchedulerReasonCode::NoReadyTicket` cannot discriminate either: it is produced
+both by the empty-snapshot elimination (`crates/voom-scheduler/src/lib.rs:178-183`)
+and by `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`). The
+decision's `decision_kind` is the discriminator.
 
 ## Requirements
 
@@ -44,57 +77,51 @@ redden any of them.
 |---|---|---|
 | R1 | A test races 6 workers on one node at one ready ticket via `ControlPlane::try_acquire_lease`. | #578 Change (1) |
 | R2 | A test races 6 workers across 6 registered nodes at one ready ticket via `ControlPlane::remote_acquire`. | #578 Change (2) |
-| R3 | Each test asserts exactly one claimer acquires. | #578 Change |
-| R4 | Each test asserts every loser settles cleanly with zero errors. | #578 Change |
-| R5 | Each test asserts `COUNT(*) FROM leases WHERE state = 'held' == 1`. | #578 Change |
-| R6 | Each test asserts the ticket's `attempt` incremented exactly once. | #578 Change |
-| R7 | Each test asserts every loser lost **at the CAS**, not at an earlier gate. | ADR 0085; necessary consequence of R3–R6 (see *Why R7 is necessary*) |
+| R3 | Each test asserts exactly one claimer acquires, with zero errors. | #578 Change |
+| R4 | Each test asserts `COUNT(*) FROM leases WHERE state = 'held' == 1`. | #578 Change |
+| R5 | Each test asserts the ticket's `attempt` incremented exactly once, relative to a pre-race read. | #578 Change; ADR 0085 Decision (2) |
+| R6 | Test A asserts every loser is `LeaseAcquireOutcome::TicketNotReady`. Test B asserts every loser is `RemoteAcquireOutcome::Idle` whose scheduler decision has `decision_kind = Idle`. | #578 Change, corrected by the asymmetry above; operator decision 2026-08-26 |
+| R7 | Each test fails if any loser was eliminated on capacity or eligibility rather than ticket readiness. | Necessary consequence of R3–R6 (see below) |
 | R8 | Both tests run in the default `just test` suite with no `#[ignore]`. | #578 Acceptance |
-| R9 | Both tests are verified to bite: weaken the CAS locally, observe failure, revert. | #578 Acceptance |
-| R10 | Both tests are stable under `just test-repeat` at `COUNT=25` and under both `just test-serial` and `just test-parallel`. | #578 Acceptance |
+| R9 | Test A is verified to bite by weakening the CAS alone. Test B is verified to bite by weakening **both** the snapshot filter and the CAS; each alone is confirmed to leave it green. | #578 Acceptance, amended by operator decision 2026-08-26 |
+| R10 | Both tests stable under `just test-repeat` at `COUNT=25` and under both `just test-serial` and `just test-parallel`. | #578 Acceptance |
 | R11 | `just ci` is green. | `AGENTS.md` § Commands |
 
 ### Why R7 is necessary
 
-R3–R6 are all satisfied by a run in which every loser was rejected by a
-capacity or eligibility gate and never executed the CAS at all: one claimer
-acquires, the rest settle cleanly, one lease is held, `attempt` is 1. Such a run
-proves nothing about exclusivity while being indistinguishable from one that
-does. No reasonable implementation of R3–R6 proves what #578 asks for without
-R7, which is what makes it a necessary consequence of the sourced criteria
-rather than an added promise.
+R3–R5 are all satisfied by a run in which every loser was rejected by a capacity
+or eligibility gate and never contended for the ticket: one claimer acquires, one
+lease is held, `attempt` is 1. Such a run proves nothing while being
+indistinguishable from one that does. No reasonable implementation of R3–R5
+proves what #578 asks for without R7.
 
 ## Non-goals
 
-Owned elsewhere and deliberately not addressed here: concurrent
-same-idempotency-key delivery (#579); pool saturation beyond `max_connections`
-(#580); a multi-runner × multi-node stress harness, ticket-conservation
-assertions, and socket-level or multi-process transport (#581); a scheduled
-constrained-resource CI lane (#582); ENOSPC coverage (#583); a property-based
-state-machine suite (#584). Deterministic distributed simulation and performance
-budgets are epic #577 non-goals.
+Owned elsewhere: concurrent same-idempotency-key delivery (#579); pool saturation
+beyond `max_connections` (#580); a multi-runner × multi-node stress harness,
+ticket-conservation assertions, and socket-level or multi-process transport
+(#581); a scheduled constrained-resource CI lane (#582); ENOSPC coverage (#583);
+a property-based state-machine suite (#584). Enforcing or extending
+`BEGIN IMMEDIATE` coverage is #552. Whether ADR 0072's changed-gate branch is now
+dead code is flagged, not audited here. Deterministic distributed simulation and
+performance budgets are epic #577 non-goals.
 
 ## Global constraints
 
 - **Claimer count is 6**, against the pool's `max_connections = 8`
-  (`crates/voom-store/src/pool.rs:62,67`). Per ADR 0083 the acquire paths open
-  `BEGIN IMMEDIATE` and hold their pooled connection across the whole write-lock
-  wait, so a count above the pool measures `acquire_timeout` (45s,
-  `pool.rs:76`) instead of the CAS.
-- **`busy_timeout` is 30s** (`pool.rs:41`); a serialized claimer waits, it does
-  not fail.
+  (`crates/voom-store/src/pool.rs:62,67`). Claimers beyond the pool queue for a
+  connection rather than contending, adding wall-clock without adding contention.
+- **`busy_timeout` is 30s** (`pool.rs:41`), `acquire_timeout` 45s (`pool.rs:76`);
+  a serialized claimer waits, it does not fail.
 - **No `tokio::time::pause`/`advance` in either test file.** ADR 0012, enforced
   by `just check-paused-time-db`. Domain time comes from the caller-supplied
   `now` and from the fixture clock.
-- **Sibling test layout.** ADR 0004, enforced by `just check-test-layout`. Both
-  target files already exist and are already linked by `#[path]`; no new
-  linkage is needed.
-- **Tests run on the pinned `.test-tmp/` root.** ADR 0079. `TempDatabase`
-  handles this; no test may name its own temp directory.
-- **Clippy runs `--all-targets --all-features -- -D warnings`**, and
-  `[workspace.lints]` denies `panic`/`unwrap`/`expect` in production code. Test
-  code in these files already uses `.unwrap()` freely; match the surrounding
-  style.
+- **Sibling test layout.** ADR 0004, `just check-test-layout`. Both target files
+  already exist and are already `#[path]`-linked; no new linkage is needed.
+- **Tests run on the pinned `.test-tmp/` root.** ADR 0079; `TempDatabase` handles
+  it. No test names its own temp directory.
+- **Clippy runs `--all-targets --all-features -- -D warnings`.** Test code in
+  these files already uses `.unwrap()` freely; match the surrounding style.
 
 ## Design
 
@@ -103,46 +130,45 @@ budgets are epic #577 non-goals.
 File: `crates/voom-control-plane/src/cases/execution/leases_test.rs`
 Name: `concurrent_local_acquire_at_one_ticket_leases_exactly_once`
 
-Fixture: the existing `cp()` helper (`crates/voom-control-plane/src/cases/mod_test.rs:22`),
-which builds a real on-disk WAL database via `TempDatabase` and a `SystemClock`.
-Domain time is supplied per call as `T0` (`OffsetDateTime::UNIX_EPOCH`), matching
-every other test in the file.
+Fixture: the existing `cp()` helper (`crates/voom-control-plane/src/cases/mod_test.rs:22`) —
+a real on-disk WAL database via `TempDatabase`, with a `SystemClock`. Domain time
+is supplied per call as `T0` (`OffsetDateTime::UNIX_EPOCH`), as elsewhere in the
+file.
 
 Setup:
 
 1. One ticket from the file's `ticket("noop", 2)` helper, then
-   `mark_ready_if_unblocked(id, T0)`.
-2. Six workers from the file's `eligible_worker(&cp, name, &operation)` helper —
-   distinct workers, each with the capability and grant for the operation.
+   `mark_ready_if_unblocked(id, T0)`. Read its `attempt` and `epoch` before the
+   race.
+2. Six workers from `eligible_worker(&cp, name, &operation)` — distinct workers,
+   each with the capability and grant.
 3. `grant_capacity(&cp, &worker, &operation, 1)` on each. One is enough for this
-   single ticket, so **no worker can be turned away for capacity**; that is what
-   forces every claimer to reach the CAS and is what R7 then asserts.
+   single ticket, so **no worker can be turned away for capacity** — which is
+   what forces every claimer to the CAS and is what R7 then asserts.
 
-Race: `tokio::sync::Barrier::new(6)`, one `tokio::spawn` per worker, each
-awaiting the barrier and then calling
+Race: `tokio::sync::Barrier::new(6)`, one `tokio::spawn` per worker, each awaiting
+the barrier then calling
 `cp.try_acquire_lease(NewLease { ticket_id, worker_id, ttl: 60s, now: T0 })`.
 
 `try_acquire_lease` rather than `acquire_lease`: it returns the typed
-`LeaseAcquireOutcome`, so a loser is an `Ok` value that can be *classified*.
-`acquire_lease` maps the same outcome through `into_lease_result()` into an
-error, which erases the distinction R7 depends on.
+`LeaseAcquireOutcome`, so a loser is an `Ok` value that can be classified.
+`acquire_lease` maps the same outcome through `into_lease_result()` into an error,
+erasing the distinction R6 and R7 depend on.
 
 Assertions:
 
 - Exactly one `LeaseAcquireOutcome::Acquired`.
 - Every other outcome is `TicketNotReady { ticket_id }` carrying the raced
-  ticket's id — **R7 for this path**. A `CapacityFull` or `WorkerIneligible`
-  outcome fails the test with a message saying the claimer never reached the
-  CAS.
+  ticket's id — R6 and R7 for this path. A `CapacityFull` or `WorkerIneligible`
+  outcome fails with a message saying the claimer never reached the CAS.
 - Zero `Err`.
 - `SELECT COUNT(*) FROM leases` is 1 and `... WHERE state = 'held'` is 1.
 - The single lease's `worker_id` equals the winner's.
-- Ticket `state = 'leased'` and `attempt = 1`. Epoch is asserted relative to a
-  pre-race read — `epoch_after == epoch_before + 1` — because the absolute value
-  is 2, not 1: `mark_ready_if_unblocked` already bumps epoch from its `DEFAULT 0`
-  (`crates/voom-store/src/repo/execution/tickets.rs:570`,
-  `migrations/0001_schema.sql:61`). The relative form also states the property
-  the test means, which is "incremented exactly once".
+- Ticket `state = 'leased'`, `attempt == attempt_before + 1`, and
+  `epoch == epoch_before + 1`. The relative form states the property meant, and
+  avoids depending on the absolute values — `mark_ready_if_unblocked` already
+  bumps epoch from its `DEFAULT 0` (`.../tickets.rs:570`,
+  `migrations/0001_schema.sql:61`).
 - Exactly one `lease.acquired` event, via the file's `count()` helper.
 
 ### Test B — remote claimers across nodes
@@ -150,27 +176,30 @@ Assertions:
 File: `crates/voom-control-plane/src/cases/execution/remote_execution/mod_test.rs`
 Name: `concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_once`
 
+This test proves **multi-node exclusivity**, not the CAS. Per the asymmetry above
+the CAS is unreachable as a race here; exclusivity is held by two layers and the
+test proves the composite.
+
 The existing `fixture_with_options` (`mod_test.rs:2102`) registers exactly one
 node and one worker and hard-codes a single incarnation id, so it cannot express
 this race. A new file-local helper `multi_node_remote_fixture(node_count)` builds
 `node_count` independent nodes, each with its own registration token, its own
-active incarnation, and one ready remote worker holding the capability and grant
-for the raced operation.
-
-Incarnation ids are 32 hex characters and must differ per node; they are derived
-from the node index so the fixture stays deterministic.
+active incarnation, and one ready remote worker holding the capability and grant.
+Incarnation ids are 32 lowercase hex characters
+(`crates/voom-core/src/taxonomy/ids.rs:109-122`) and are derived from the node
+index so the fixture stays deterministic.
 
 The helper lives in `mod_test.rs` rather than `voom-test-support` because it has
 exactly one caller. #581 builds the real multi-node harness and can promote it
 then (`AGENTS.md` Rule 3).
 
-Setup: one ready ticket via the existing `RemoteFixture`-shaped payload. That
-payload does not parse as a `WorkflowTicketPayload` — `parse_ticket` requires
-`operation` and `rendered_payload` fields it does not carry
+Setup: one ready ticket with the existing `RemoteFixture::ready_ticket` payload
+shape. That payload does not parse as a `WorkflowTicketPayload` — `parse_ticket`
+requires `operation` and `rendered_payload` fields it does not carry
 (`crates/voom-control-plane/src/workflow/plan/ticket_payload.rs:118-152`) — so
 `resolve_ticket_owner_locality_in_tx` classifies it `NoDeclaration` and the
-owner-local gate does not reject non-owner nodes. Without that, five of six
-nodes would be gated out before reaching the CAS and the race would not happen.
+owner-local gate does not reject non-owner nodes. Without that, five of six nodes
+would be gated out before contending at all.
 
 Race: `tokio::sync::Barrier::new(6)`, one task per node, each calling
 `cp.remote_acquire(...)` with a per-node idempotency key and request hash.
@@ -178,22 +207,20 @@ Race: `tokio::sync::Barrier::new(6)`, one task per node, each calling
 Assertions:
 
 - Exactly one `RemoteAcquireOutcome::Leased`.
-- The other five are `RemoteAcquireOutcome::NoCandidate`; zero `Idle`.
+- The other five are `RemoteAcquireOutcome::Idle`; zero `NoCandidate`.
+- Each loser's scheduler decision, fetched by the `scheduler_decision_id` the
+  `Idle` outcome carries, has `decision_kind = SchedulerDecisionKind::Idle` —
+  R6 and R7 for this path. A `NoCandidate` decision, or any decision carrying
+  `WorkerCapacityFull` or `NodeCapacityFull`, fails the test: it would mean the
+  loser was eliminated on capacity rather than ticket readiness.
 - Zero `Err`.
-- Each losing `NoCandidate`'s durable scheduler decision carries
-  `SchedulerReasonCode::NoReadyTicket` — **R7 for this path**. That reason is
-  produced only by `outcome_reason_code(TicketNotReady)`
-  (`remote_execution/acquire.rs:1369`), so it is direct evidence the claimer
-  executed the CAS and lost. A `WorkerCapacityFull` or `NodeCapacityFull` reason
-  fails the test.
 - `SELECT COUNT(*) FROM leases` is 1 and `... WHERE state = 'held'` is 1.
-- Ticket `state = 'leased'`, `attempt = 1`.
+- Ticket `state = 'leased'` and `attempt == attempt_before + 1`.
 
-Each node has its own limit (default 1, `scheduler_node_limits.node_limit_in_tx`
-returns 1 for an absent row) and its own `active_count_for_node`, so the winner's
-lease does not consume any loser's node capacity. The capacity recheck in
-`recheck_selected_remote_capacity_in_tx` therefore passes for every loser and
-they all reach the CAS.
+Each node has its own limit (default 1 —
+`scheduler_node_limits.node_limit_in_tx` returns 1 for an absent row) and its own
+`active_count_for_node`, so the winner's lease consumes no loser's node capacity
+and no capacity gate fires before the readiness check.
 
 ## Failure handling
 
@@ -201,37 +228,44 @@ These tests are written after the code they cover, so a red assertion is a
 finding about the code until proven otherwise. If either test fails:
 
 1. Do not adjust the assertion. Run `$detect-curse` and establish the cause.
-2. If the cause is a defect in the production path, fix the production path —
-   `crates/voom-store/src/repo/execution/leases.rs` or the control-plane
-   execution cases — within the surface the charter permits.
-3. If the cause is a defect in the test's own setup, fix the setup and record
-   what the wrong setup made the test appear to prove.
+2. If the cause is a production defect, fix the production path — within the
+   surface the charter permits.
+3. If the cause is the test's own setup, fix the setup and record what the wrong
+   setup made the test appear to prove.
 
 Softening an assertion to match observed behaviour is the failure mode this
-section exists to prevent: it converts a test that found a bug into a test that
-documents one.
+section exists to prevent: it turns a test that found a bug into one that
+documents it. The asymmetry in *Background* was found exactly this way, at design
+time rather than after the fact.
 
 ## Verification
 
 | Requirement | How it is verified |
 |---|---|
-| R1–R7 | `cargo test -p voom-control-plane concurrent_local_acquire_at_one_ticket_leases_exactly_once` and `... concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_once` |
+| R1–R7 | `cargo test -p voom-control-plane --all-features at_one_ticket_leases_exactly_once` |
 | R8 | Neither test carries `#[ignore]`; both are reached by `just test` |
-| R9 | Delete `AND state = 'ready'` from the CAS in `leases.rs`, run both tests, observe both fail on `held == 2`, restore the predicate, observe both pass |
-| R10 | `just test-repeat voom-control-plane at_one_ticket 25`, then `just test-serial` and `just test-parallel` scoped to `voom-control-plane` |
+| R9 (Test A) | Delete `AND state = 'ready'` from the CAS in `leases.rs`, run Test A, observe failure, restore, observe pass |
+| R9 (Test B) | Three runs: (i) CAS predicate deleted alone — expected still green; (ii) snapshot `state = 'ready'` deleted alone — expected still green; (iii) both deleted — expected red. Restore and re-run |
+| R10 | `just test-repeat voom-control-plane at_one_ticket_leases_exactly_once 25`, then `just test-serial` and `just test-parallel` |
 | R11 | `just ci` |
 
-R9's expected magnitude is two held leases, not six: the CAS retains
-`attempt < max_attempts` and the raced ticket has `max_attempts = 2`, so the
-third claimer's weakened UPDATE still matches zero rows. `held == 1` reddens at
-two, which satisfies the criterion.
+R9's expected magnitude on Test A is two held leases, not six: the CAS retains
+`attempt < max_attempts` and the raced ticket has `max_attempts = 2`, so a third
+claimer's weakened `UPDATE` still matches zero rows. `held == 1` reddens at two.
+
+R9(ii) and R9(iii) are the evidence for ADR 0085's central consequence. Recording
+the intermediate results, not only the final red, is the point: (i) and (ii)
+staying green is what proves the two layers are independent.
 
 ## Risks
 
-- **A new contention test is itself a flake risk.** R10 is the mitigation, and
-  it is the acceptance criterion most likely to fail first.
-- **Six serialized `BEGIN IMMEDIATE` transactions per test** add wall-clock to
-  `just test`. Both tests are short, but the coverage job runs
-  `--test-threads=1` and pays them serially.
-- **The remote fixture duplicates registration logic** already present in
-  `fixture_with_options`. Accepted for now; #581 is where the two converge.
+- **A new contention test is itself a flake risk.** R10 is the mitigation and the
+  criterion most likely to fail first.
+- **Six serialized `BEGIN IMMEDIATE` transactions per test** add wall-clock; the
+  coverage job runs `--test-threads=1` and pays them serially. Measured baseline
+  on this host: the existing `concurrent_` tests run in 1.7s prebuilt.
+- **Test B's value shrinks if #552 converts more paths.** Its assertions describe
+  the current two-layer structure; a future change to either layer should update
+  this spec and ADR 0085 rather than silently weaken the test.
+- **The remote fixture duplicates registration logic** already in
+  `fixture_with_options`. Accepted; #581 is where the two converge.
