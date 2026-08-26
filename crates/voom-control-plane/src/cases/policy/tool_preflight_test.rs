@@ -1017,6 +1017,113 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
     );
 }
 
+/// The owner-node worker-visibility fact behind issue #549, at unit speed
+/// rather than through the `workflow_dispatch`-only chaos-e2e suite.
+///
+/// A policy with no `requires_tools` metadata observes an empty tool list, so
+/// `observe_node_tools` pushes no unavailability and the *only* signal that the
+/// owner has no usable ffmpeg is the empty `live_worker_ids` reaching
+/// `preflight_video_hardware`. A transcode-capable worker sitting on the owner
+/// node but never bound to its active incarnation — what a bare
+/// `register_worker` fixture produces — must therefore fail the software
+/// backend, and the same worker bound through activation must satisfy it.
+#[tokio::test]
+async fn only_incarnation_bound_owner_workers_satisfy_software_preflight() {
+    let (cp, _tmp) = cp().await;
+
+    // Bound: activation binds the declared ffmpeg worker to the node's active
+    // incarnation, so it reaches the hardware preflight as a software backend.
+    let bound = activate_owner_node(
+        &cp,
+        "chaos-owner-bound",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    let bound_file = owned_root_with_file(&cp, bound.node_id).await;
+
+    cp.preflight_policy_tools(&mut software_transcode_policy(), &one_target(bound_file))
+        .await
+        .unwrap();
+
+    // Unbound: same node, same capability and grant, but no incarnation
+    // binding. `list_by_node` still returns it; preflight must still refuse.
+    let unbound = activate_owner_node(
+        &cp,
+        "chaos-owner-unbound",
+        &[("ffmpeg", &[OperationKind::TranscodeVideo])],
+    )
+    .await;
+    remove_node_workers(&cp, unbound.node_id).await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    // Exactly how the chaos-e2e fixture registered its worker: a plain
+    // `register_worker`, then attached to the owner node without ever adopting
+    // that node's active incarnation.
+    let stray = cp
+        .register_worker(crate::workers::RegisterWorkerInput {
+            name: "chaos-librarian-ffmpeg".to_owned(),
+            kind: voom_core::WorkerKind::Synthetic,
+        })
+        .await
+        .unwrap();
+    attach_worker_to_node(&cp, stray.id, unbound.node_id).await;
+    cp.record_capability(NewCapability {
+        worker_id: stray.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra: json!({}),
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: stray.id,
+        can_execute: vec![operation],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: json!({"transcode_video": 1}),
+    })
+    .await
+    .unwrap();
+    let unbound_file = owned_root_with_file(&cp, unbound.node_id).await;
+
+    let error = cp
+        .preflight_policy_tools(&mut software_transcode_policy(), &one_target(unbound_file))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "POLICY_EXECUTION_ERROR");
+    assert!(
+        error
+            .to_string()
+            .contains("software transcode profiles require an unbound ffmpeg worker"),
+        "{error}"
+    );
+}
+
+/// Place a worker on a node without binding it to that node's active
+/// incarnation — the state a non-agent registration leaves behind.
+async fn attach_worker_to_node(cp: &crate::ControlPlane, worker_id: WorkerId, node_id: NodeId) {
+    sqlx::query("UPDATE workers SET node_id = ?2, node_incarnation_id = NULL WHERE id = ?1")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .bind(i64::try_from(node_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
+/// A software HEVC policy carrying no `requires_tools` metadata — the shape
+/// `seed_transcode_policy` builds for the chaos-e2e suite.
+fn software_transcode_policy() -> CompiledPolicy {
+    compile_policy(
+        "policy \"software-hevc\" { phase encode { transcode video to hevc { \
+         encoder: libx265 crf: 23 preset: medium } } }",
+    )
+    .unwrap()
+    .policy
+}
+
 /// A VAAPI profile needs a live device that probed `hevc_vaapi`.
 /// A software worker cannot substitute — that is the fallback issue #409 forbids —
 /// and neither can a VAAPI device whose driver build never proved the encoder, which

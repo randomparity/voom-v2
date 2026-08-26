@@ -5,6 +5,9 @@
 
 mod support;
 
+#[path = "support/owner_node.rs"]
+mod owner_node;
+
 use std::path::Path;
 
 use support::chaos_librarian::{ChaosLibrarian, ChaosRun};
@@ -187,15 +190,26 @@ async fn policy_seed_creates_durable_ids_from_seeded_source() {
     assert!(ids.input_set_id > 0);
 }
 
+/// ADR 0075 routes every byte-touching media ticket through its storage
+/// owner's agent: the bundled executor never leases such a ticket, so a bare
+/// `register_worker` worker can neither satisfy tool preflight nor execute the
+/// transcode. The owner-node emulator stands in for that agent — the same path
+/// `operator_execution_e2e` and `multi_phase_flow` already use.
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
+async fn transcode_required_settles_through_owner_node_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
     let SeededChaosRun { run, db, seeded } = seed_materialized_scenario(
         &chaos,
         &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
     .await;
+
+    // Storage-owner stand-ins: fenced commit-intent driver + media settlement.
+    // Its activated manifest is what makes the owner node's ffmpeg worker
+    // visible to the software-transcode hardware preflight.
+    let _emulator = owner_node::OwnerNodeEmulator::spawn(&db.url);
+    owner_node::wait_for_owner_tooling(&db.url).await.unwrap();
 
     let cp = db.control_plane().await.unwrap();
     let ids = seed_transcode_policy(
@@ -229,11 +243,12 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
             .any(|node| node["operation_kind"] == "transcode_video")
     );
 
-    let mut worker = support::voom_cli::TranscodeWorkerLaunch::start(&cp)
-        .await
-        .unwrap();
-    let stage = run.run_dir.join("voom-stage");
-    let out = run.run_dir.join("voom-output");
+    // The staging flag mirrors the storage-root path (the library): the
+    // coordinator's promotion plan pairs `<staging>/.committed/<op>` working
+    // dirs with the operator output dir, and a staging root outside the storage
+    // root makes the commit path escape it.
+    let stage = run.scan_root();
+    let out = stage.join("voom-output");
     let execute = run_voom(
         &db.url,
         [
@@ -250,7 +265,6 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
         ],
     )
     .unwrap();
-    worker.shutdown().unwrap();
 
     assert_eq!(
         execute.status_code,
@@ -507,25 +521,62 @@ fn collect_media_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Canned normalized probe snapshot for a media file; the codec follows the
-/// container family the scenario materialized (mp4-family h264, mkv-family
-/// hevc), matching what each downstream policy assertion assumes.
-fn probe_for_extension(path: &Path) -> serde_json::Value {
-    let extension = path.extension().and_then(|value| value.to_str());
-    let codec = match extension {
-        Some("mkv" | "webm") => "hevc",
-        _ => "h264",
-    };
+/// Normalized probe snapshot for a materialized media file, taken with the real
+/// `ffprobe` this suite already requires.
+///
+/// Deriving these facts from the file extension instead — as this fixture used
+/// to — got both of them wrong. It reported the container as
+/// `application/octet-stream`, which the planner cannot classify, so every node
+/// planned `blocked` with `insufficient_snapshot_facts: snapshot container is
+/// unknown`. It also guessed the video codec from the container family, which
+/// mislabels this scenario's h264-in-MKV candidate as HEVC — the very transcode
+/// the policy is meant to require.
+fn probe_media_file(path: &Path) -> serde_json::Value {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ffprobe failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let probed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let container = probed["format"]["format_name"].as_str().unwrap();
+    let streams: Vec<serde_json::Value> = probed["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|stream| stream["codec_type"] == "video")
+        .enumerate()
+        .map(|(index, stream)| {
+            serde_json::json!({
+                "index": index,
+                "kind": "video",
+                "codec_name": stream["codec_name"],
+                "width": stream["width"],
+                "height": stream["height"],
+            })
+        })
+        .collect();
+    assert!(
+        !streams.is_empty(),
+        "{} carries no video stream",
+        path.display()
+    );
     serde_json::json!({
         "format": "sprint10-v1",
-        "container": { "format_name": "application/octet-stream" },
-        "streams": [{
-            "index": 0,
-            "kind": "video",
-            "codec_name": codec,
-            "width": 320,
-            "height": 180,
-        }],
+        "container": { "format_name": container },
+        "streams": streams,
     })
 }
 
@@ -558,7 +609,7 @@ fn media_seeds_for_library<'a>(
         .map(|(path, locator)| SeedFile {
             locator,
             path,
-            probe_snapshot: probe_for_extension(path),
+            probe_snapshot: probe_media_file(path),
         })
         .collect()
 }
