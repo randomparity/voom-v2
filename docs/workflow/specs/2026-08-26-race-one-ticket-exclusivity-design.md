@@ -90,14 +90,27 @@ assigned by the `ScoreOutcome::Idle` arm at `acquire.rs:1021-1026`.
 
 ### What each remote assertion detects
 
-Derived by code trace, not observed — R9 is what converts these predictions into
-observations.
+Predicted by code trace, then **observed** — all three arms were run on
+2026-08-26 against the committed tests and every cell reproduced.
 
 | weakening | `held` | 5 losers | Test B |
 |---|---|---|---|
 | CAS `state = 'ready'` alone | 1 | 5× `Idle` | green — undetected |
 | snapshot `state = 'ready'` alone | 1 | 5× `NoCandidate` | red, on the loser assertion (R6) |
 | both | 2 | 1× `Leased`, 4× `Idle` | red, on R3 and R5 — *not* R6 |
+
+Observed messages, verbatim:
+
+- **CAS alone** — `test result: ok. 1 passed`. The same edit, unchanged, fails
+  Test A with `acquired=2 held=2 leases=2 state=Leased attempt=0->2 epoch=1->3
+  events=2`. One production edit, opposite verdicts on the two paths.
+- **Snapshot alone** — `a loser reached the post-selection gate, which means the
+  ready-ticket snapshot admitted a ticket the CAS then refused: [3, 5, 4, 6, 2];
+  leased=1 idle=0 no_candidate=5 errors=0 held=1 leases=1 decisions=6
+  state=Leased attempt=0->1 epoch=1->2`. Exclusivity intact; only the loser
+  assertion notices, exactly as the middle row predicts.
+- **Both** — `exactly one claimer may acquire; leased=2 idle=4 no_candidate=0
+  errors=0 held=2 leases=2 decisions=6 state=Leased attempt=0->2 epoch=1->3`.
 
 The middle row is the reason R6 is load-bearing rather than hygiene. Remove
 `state = 'ready'` from the snapshot only: a loser's transaction — which begins
@@ -163,7 +176,7 @@ same `acquire_guarded`, so the pair covers the CAS.
 | R1 | A test races 6 workers on one node at one ready ticket via `ControlPlane::try_acquire_lease`. | #578 Change (1) |
 | R2 | A test races 6 workers across 6 registered nodes at one ready ticket via `ControlPlane::remote_acquire`. | #578 Change (2) |
 | R3 | Each test asserts exactly one claimer acquires, with zero errors. | #578 Change |
-| R4 | Each test asserts `COUNT(*) FROM leases WHERE state = 'held' == 1`. | #578 Change |
+| R4 | Each test asserts `COUNT(*) FROM leases WHERE state = 'held' == 1`, and that the one held row is the lease the winning claimer was handed — Test A by worker, Test B by lease id and worker. | #578 Change; tie added by review |
 | R5 | Each test asserts the ticket's `attempt` incremented exactly once, relative to a pre-race read. | #578 Change; ADR 0085 Decision (2) |
 | R6 | Test A asserts every loser is `LeaseAcquireOutcome::TicketNotReady`. Test B asserts every loser is `RemoteAcquireOutcome::Idle` whose scheduler decision has `decision_kind = Idle`, whose explanation's `operation_set` contains the raced operation, and with exactly one scheduler decision per claimer. | #578 Change, corrected by the asymmetry above; operator decision 2026-08-26; anti-vacuity clauses added by review |
 | R7 | Each test fails if any loser was eliminated on capacity or eligibility rather than ticket readiness. | Necessary consequence of R3–R6 (see below) |
@@ -174,11 +187,33 @@ same `acquire_guarded`, so the pair covers the CAS.
 
 ### Why R7 is necessary
 
-R3–R5 are all satisfied by a run in which every loser was rejected by a capacity
-or eligibility gate and never contended for the ticket: one claimer acquires, one
-lease is held, `attempt` is 1. Such a run proves nothing while being
-indistinguishable from one that does. No reasonable implementation of R3–R5
-proves what #578 asks for without R7.
+R3–R5 are all satisfied by a run in which every loser was rejected before it ever
+contended for the ticket: one claimer acquires, one lease is held, `attempt` is 1.
+Such a run proves nothing while being indistinguishable from one that does.
+
+**That vacuous run is reachable on the remote path and not on the local one, and
+R7 earns its place differently on each.**
+
+On the remote path it is live. `remote_acquire` derives the worker's candidate
+operations first and `ready_for_operations_in_tx` returns early on an empty list
+(`tickets.rs:1110`), so a claimer whose worker has no capability for the raced
+operation never looks at a ticket at all — and settles `Idle`, the same outcome a
+genuine loser produces. Six misconfigured workers would give Test B the exact
+`1 Leased / 5 Idle` shape it asserts while nothing contended. Here R7 is the only
+thing standing between a green test and no test, which is why Test B pins the
+`operation_set` and the decision count rather than `decision_kind` alone.
+
+On the local path it is not. `acquire_guarded` runs the ticket CAS *before* the
+eligibility and capacity checks (`leases.rs:415-424` ahead of `:442` and `:452`),
+so a local claimer cannot be eliminated ahead of the CAS: every loser reaches it
+and receives `TicketNotReady`, which names the CAS itself rather than the
+emptiness of a set. R7 on Test A is therefore a guard against that ordering being
+changed, not against a hazard the current code presents — and Test A's assertion
+for it is a match arm that is unreachable today, marked as such in the test.
+
+No reasonable implementation of R3–R5 proves what #578 asks for without R7 on the
+remote path; on the local path R7 is cheap insurance against the reordering that
+would make Test A vacuous the way Test B could be.
 
 ## Non-goals
 
@@ -198,6 +233,16 @@ performance budgets are epic #577 non-goals.
   connection rather than contending, adding wall-clock without adding contention.
 - **`busy_timeout` is 30s** (`pool.rs:41`), `acquire_timeout` 45s (`pool.rs:76`);
   a serialized claimer waits, it does not fail.
+- **Both tests declare `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`.**
+  The default `#[tokio::test]` is a current-thread runtime, on which the spawned
+  claimers interleave at await points but never execute simultaneously — the
+  `tokio::sync::Barrier` would still release them together, and the tests would
+  still pass, while testing far less than they claim. Four worker threads against
+  six claimers is the shape the two existing contention tests in
+  `remote_execution/mod_test.rs` already use.
+- **A `tokio::sync::Barrier` releases the claimers**, not a sleep or a timestamp.
+  Every claimer awaits it as its first act inside the spawned task, so the
+  contention window does not depend on task spawn order or on wall-clock timing.
 - **No `tokio::time::pause`/`advance` in either test file.** ADR 0012, enforced
   by `just check-paused-time-db`. Domain time comes from the caller-supplied
   `now` and from the fixture clock.
@@ -306,9 +351,21 @@ Assertions:
   R6 and R7 for this path. A `NoCandidate` decision, or any decision carrying
   `WorkerCapacityFull` or `NodeCapacityFull`, fails the test: it would mean the
   loser was eliminated on capacity rather than ticket readiness.
+- Each loser's decision explanation carries the raced operation in its
+  `operation_set`, and `SELECT COUNT(*) FROM scheduler_decisions` equals the
+  claimer count. Without these, `decision_kind = Idle` admits the two vacuous
+  runs described under *Why R7 is necessary*.
 - Zero `Err`.
-- `SELECT COUNT(*) FROM leases` is 1 and `... WHERE state = 'held'` is 1.
+- `SELECT COUNT(*) FROM leases` is 1 and `... WHERE state = 'held'` is 1, and
+  that held row's `id` and `worker_id` are the `lease_id` and `worker_id` the
+  winning claimer was handed. A count alone would accept a held lease belonging
+  to a claimer that never reported success.
 - Ticket `state = 'leased'` and `attempt == attempt_before + 1`.
+
+All observations are gathered into one summary string before the first assertion
+runs. A Rust test aborts at its first failed assertion, so asserting as each fact
+is read would make the arm-(ii) evidence — red on the loser assertion *while*
+`held` is still 1 — unobservable in a single run.
 
 Each node has its own limit (default 1 —
 `scheduler_node_limits.node_limit_in_tx` returns 1 for an absent row) and its own
@@ -338,7 +395,7 @@ time rather than after the fact.
 | R1–R7 | `cargo test -p voom-control-plane --all-features at_one_ticket_leases_exactly_once` |
 | R8 | Neither test carries `#[ignore]`; both are reached by `just test` |
 | R9 (Test A) | Delete `AND state = 'ready'` from the CAS in `leases.rs`, run Test A, observe failure, restore, observe pass |
-| R9 (Test B) | Three runs matching the table in *Background*: (i) CAS predicate deleted alone — expected green; (ii) snapshot `state = 'ready'` deleted alone — expected red on R6, `held` still 1; (iii) both deleted — expected red on R3 and R5, `held == 2`, with one loser observed as `Leased` and four as `Idle`. Restore and re-run |
+| R9 (Test B) | Three runs matching the table in *Background*: (i) CAS predicate deleted alone — green; (ii) snapshot `state = 'ready'` deleted alone — red on R6, `held` still 1; (iii) both deleted — red on R3, `held == 2`, one loser observed as `Leased` and four as `Idle`. Restore and re-run. All three ran and matched |
 | R10 | `just test-repeat voom-control-plane at_one_ticket_leases_exactly_once 25`, then `just test-serial` and `just test-parallel` |
 | R11 | `just ci` |
 
@@ -352,9 +409,11 @@ is not the remote path's load-bearing gate; arm (ii) going red *while `held`
 stays 1* is what shows R6 detects a regression the safety assertion cannot; arm
 (iii) is what shows R5 catches the case R6 does not.
 
-The table's rows are predictions derived by code trace. If an arm does not
-reproduce, the finding is against this spec and ADR 0085 — correct them, do not
-adjust the test to match.
+**All arms were run on 2026-08-26 and every cell reproduced**; the observed
+messages are recorded under *What each remote assertion detects*. The rule that
+produced them still stands for any future re-run: if an arm stops reproducing,
+the finding is against this spec and ADR 0085 — correct them, do not adjust the
+test to match.
 
 ## Risks
 

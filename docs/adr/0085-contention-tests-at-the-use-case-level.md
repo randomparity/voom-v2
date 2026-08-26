@@ -83,16 +83,22 @@ pooled connection simultaneously (`max_connections = 8`,
 ## Consequences
 
 - **The remote assertions detect different regressions, and only together.**
-  The table below is **derived by code trace, not observed** — the tests did not
-  exist when this record was written. Criterion 6 of the issue's verification is
-  what converts these predictions into observations; a row that does not
-  reproduce is a finding against this record, not against the test.
+  The table below was predicted by code trace and is now **observed**: all three
+  arms were run on 2026-08-26 against the committed tests, and every cell
+  reproduced.
 
   | weakening | `held` | 5 remote losers | Test B |
   |---|---|---|---|
   | CAS `state = 'ready'` alone | 1 | 5× `Idle` | green — undetected |
   | snapshot `state = 'ready'` alone | 1 | 5× `NoCandidate` | red, on assertion 3 |
   | both | 2 | 1× `Leased`, 4× `Idle` | red, on assertions 1 and 2 |
+
+  The first row is the load-bearing one, and it is the one a prediction could
+  most easily have got wrong, so it was checked against its contrapositive: with
+  the CAS predicate deleted and nothing else changed, Test B passes while the
+  node-local Test A fails on `acquired=2 held=2 leases=2 attempt=0->2`. One
+  production edit, two tests, opposite verdicts — that is the two-layer structure
+  this record asserts, observed rather than argued.
 
   Row 1: the snapshot's surviving `state = 'ready'` empties the loser's candidate
   set (`tickets.rs:1119-1128`), so it returns `Idle` at `acquire.rs:229`. Row 2:
@@ -110,9 +116,20 @@ pooled connection simultaneously (`max_connections = 8`,
   `Leased`. Its value is that it reads the ticket row directly, so it still fires
   if a future change stops surfacing a second acquisition as `Leased`.
 
-  The spec carries this same table. That copy is the one corrected when the arms
-  actually run, so if the two ever disagree, the spec is the later observation and
-  this record is the superseded prediction.
+  The spec carries this same table, now also marked observed.
+
+- **Both tests gather every observation before asserting any of them.** A Rust
+  test aborts at its first failed assertion, so a test that asserts as it reads
+  can only ever show one violated fact. The rows above are conclusions about
+  *pairs* of facts — row 2 is "the loser assertion fired **while** exactly one
+  lease was still held", row 3 is "a second claimer leased **and** `attempt`
+  moved twice" — and neither is obtainable from a test that stops at the first
+  one. So each test collects the outcome tallies, the lease rows, the decision
+  count and the ticket's before/after state into one summary string, and
+  interpolates it into every assertion message. Row 3's observed line reads
+  `leased=2 idle=4 no_candidate=0 errors=0 held=2 leases=2 decisions=6
+  state=Leased attempt=0->2 epoch=1->3`: assertion 1 is what fires, and
+  assertion 2's violation is visible in the same message without being reached.
 
   The middle row is why assertion 3 is load-bearing on the remote path rather than
   hygiene: it is the only detector of a snapshot regression, since exclusivity
