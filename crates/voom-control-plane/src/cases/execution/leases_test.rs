@@ -2285,6 +2285,11 @@ async fn force_release_without_requeue_opens_terminal_failure_issue() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
     const CLAIMERS: usize = 6;
+    // A race needs someone to lose. Every assertion below is satisfied by a
+    // single-claimer run that never contends, so trimming this count — the
+    // obvious response to wall-clock pressure — would leave both tests green
+    // and vacuous. Compile-time, so it fires where the trim would be made.
+    const _: () = assert!(CLAIMERS >= 2, "a race needs at least two claimers");
 
     let (cp, _tmp) = cp().await;
     let operation = TicketOperation::new("noop").unwrap();
@@ -2296,7 +2301,7 @@ async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
     // Load-bearing precondition, not a sanity check — and load-bearing here for
     // a different reason than in the remote sibling, so do not copy that one's
     // rationale onto this line. The local path has no ready-ticket snapshot; it
-    // is the CAS's own `attempt < max_attempts` (voom-store leases.rs:419) that
+    // is the CAS's own `attempt < max_attempts` (voom-store leases.rs:420) that
     // matters. Lower this to 1 and the winner's increment closes that predicate,
     // so the bite experiment this test is verified against — deleting
     // `AND state = 'ready'` from the CAS — leaves claimer 2's UPDATE matching

@@ -3383,6 +3383,17 @@ async fn assert_losers_lost_on_readiness(
             SchedulerDecisionKind::Idle,
             "loser decision {decision_id} is not an idle elimination; {observed}"
         );
+        // Redundant with the kind today — the `ScoreOutcome::Idle` arm is the only
+        // producer of an Idle decision and its reason comes from scoring an empty
+        // candidate slice, which is unconditionally `NoReadyTicket`
+        // (voom-scheduler/src/lib.rs:178-183). That redundancy is control-flow
+        // dependent, and this half of the outcome is what #578 and #577 were told
+        // the remote path produces, so it gets its own guard.
+        assert_eq!(
+            decision.reason_code,
+            SchedulerReasonCode::NoReadyTicket,
+            "loser decision {decision_id} did not lose on ticket readiness; {observed}"
+        );
         let operations = decision
             .explanation
             .get("operation_set")
@@ -3412,6 +3423,11 @@ async fn assert_losers_lost_on_readiness(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_once() {
     const CLAIMERS: usize = 6;
+    // A race needs someone to lose. Every assertion below is satisfied by a
+    // single-claimer run that never contends, so trimming this count — the
+    // obvious response to wall-clock pressure — would leave both tests green
+    // and vacuous. Compile-time, so it fires where the trim would be made.
+    const _: () = assert!(CLAIMERS >= 2, "a race needs at least two claimers");
 
     let fixture = multi_node_remote_fixture(CLAIMERS, OP).await;
     let ticket_id = fixture.ready_ticket(OP, 2).await;
@@ -3469,8 +3485,10 @@ async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_onc
     );
     assert!(
         outcomes.no_candidate_decisions.is_empty(),
-        "a loser reached the post-selection gate, which means the ready-ticket \
-         snapshot admitted a ticket the CAS then refused: {:?}; {observed}",
+        "a loser reached the post-selection gate: either the ready-ticket snapshot \
+         admitted a ticket the CAS then refused (acquire.rs:529), or scoring \
+         eliminated it on capacity or grant before the CAS ran (acquire.rs:243) — \
+         fetch the decision's reason_code to tell them apart: {:?}; {observed}",
         outcomes.no_candidate_decisions
     );
     assert_eq!(
