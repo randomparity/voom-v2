@@ -521,25 +521,62 @@ fn collect_media_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Canned normalized probe snapshot for a media file; the codec follows the
-/// container family the scenario materialized (mp4-family h264, mkv-family
-/// hevc), matching what each downstream policy assertion assumes.
-fn probe_for_extension(path: &Path) -> serde_json::Value {
-    let extension = path.extension().and_then(|value| value.to_str());
-    let codec = match extension {
-        Some("mkv" | "webm") => "hevc",
-        _ => "h264",
-    };
+/// Normalized probe snapshot for a materialized media file, taken with the real
+/// `ffprobe` this suite already requires.
+///
+/// Deriving these facts from the file extension instead — as this fixture used
+/// to — got both of them wrong. It reported the container as
+/// `application/octet-stream`, which the planner cannot classify, so every node
+/// planned `blocked` with `insufficient_snapshot_facts: snapshot container is
+/// unknown`. It also guessed the video codec from the container family, which
+/// mislabels this scenario's h264-in-MKV candidate as HEVC — the very transcode
+/// the policy is meant to require.
+fn probe_media_file(path: &Path) -> serde_json::Value {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ffprobe failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let probed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let container = probed["format"]["format_name"].as_str().unwrap();
+    let streams: Vec<serde_json::Value> = probed["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|stream| stream["codec_type"] == "video")
+        .enumerate()
+        .map(|(index, stream)| {
+            serde_json::json!({
+                "index": index,
+                "kind": "video",
+                "codec_name": stream["codec_name"],
+                "width": stream["width"],
+                "height": stream["height"],
+            })
+        })
+        .collect();
+    assert!(
+        !streams.is_empty(),
+        "{} carries no video stream",
+        path.display()
+    );
     serde_json::json!({
         "format": "sprint10-v1",
-        "container": { "format_name": "application/octet-stream" },
-        "streams": [{
-            "index": 0,
-            "kind": "video",
-            "codec_name": codec,
-            "width": 320,
-            "height": 180,
-        }],
+        "container": { "format_name": container },
+        "streams": streams,
     })
 }
 
@@ -572,7 +609,7 @@ fn media_seeds_for_library<'a>(
         .map(|(path, locator)| SeedFile {
             locator,
             path,
-            probe_snapshot: probe_for_extension(path),
+            probe_snapshot: probe_media_file(path),
         })
         .collect()
 }
