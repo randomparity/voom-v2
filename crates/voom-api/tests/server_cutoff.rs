@@ -15,7 +15,7 @@ use hyper_util::service::TowerToHyperService;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
-use tokio::io::{AsyncWriteExt, DuplexStream};
+use tokio::io::{AsyncWriteExt, Join, ReadHalf, SimplexStream, WriteHalf};
 use tower::ServiceExt;
 use voom_api::router_with_control_plane;
 use voom_api::server::DeadlineStream;
@@ -77,9 +77,18 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
         registered.token.expose_secret(),
         request_body.len()
     );
-    let (server_io, mut client_io) = tokio::io::duplex(1);
-    let server_task = spawn_one_connection(router, server_io);
-    client_io.write_all(request_bytes.as_bytes()).await?;
+    // The two directions are sized independently on purpose. The request pipe holds the
+    // whole request, so `write_all` below completes in one poll without the server reading
+    // a byte, and so cannot race the connection deadline. The response pipe is one byte and
+    // is never drained: that is what makes the server block partway through writing its
+    // response until the deadline cuts the connection, which is the committed-response loss
+    // under test. `_response_reader` stays bound for the rest of the test because dropping
+    // the read half would fail the server's write immediately instead of blocking it.
+    let (request_reader, mut request_writer) = tokio::io::simplex(request_bytes.len());
+    let (_response_reader, response_writer) = tokio::io::simplex(1);
+    let server_task =
+        spawn_one_connection(router, tokio::io::join(request_reader, response_writer));
+    request_writer.write_all(request_bytes.as_bytes()).await?;
 
     let stored =
         wait_for_committed_result(&pool, registered.node.id, &path, &stored_idempotency_key)
@@ -120,7 +129,7 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
 
 fn spawn_one_connection(
     router: axum::Router,
-    stream: DuplexStream,
+    stream: Join<ReadHalf<SimplexStream>, WriteHalf<SimplexStream>>,
 ) -> tokio::task::JoinHandle<Result<Result<(), hyper::Error>, tokio::time::error::Elapsed>> {
     tokio::spawn(async move {
         let bounded = DeadlineStream::new(stream, Duration::from_millis(250));
