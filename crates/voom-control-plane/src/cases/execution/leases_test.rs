@@ -2272,3 +2272,153 @@ async fn force_release_without_requeue_opens_terminal_failure_issue() {
         ]
     );
 }
+
+/// Six workers race one ready ticket on the local claim path.
+///
+/// `concurrent_local_acquire_never_exceeds_worker_operation_capacity` above
+/// races N claimers over N *distinct* tickets under a capacity limit, so it
+/// proves "at most one lease per worker" and stays green if the ticket CAS
+/// loses its `state = 'ready'` predicate. Here every claimer targets the same
+/// ticket and every claimer has spare capacity, so the CAS is the only thing
+/// that can reject them and a weakened predicate produces a second lease
+/// instead of a clean loss. See `docs/adr/0085`.
+// Not the default `#[tokio::test]` on purpose: the multi-threaded runtime makes
+// the six submissions genuinely concurrent, and matches the two existing
+// contention tests in this crate. Per ADR 0085 the claimers serialize on
+// SQLite's single write lock either way, so this is about submitting
+// concurrently, not about what the assertions prove.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
+    const CLAIMERS: usize = 6;
+    // A race needs someone to lose. Every assertion below is satisfied by a
+    // single-claimer run that never contends, so trimming this count — the
+    // obvious response to wall-clock pressure — would leave both tests green
+    // and vacuous. Compile-time, so it fires where the trim would be made.
+    const _: () = assert!(CLAIMERS >= 2, "a race needs at least two claimers");
+
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::new("noop").unwrap();
+
+    let created = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(created.id, T0).await.unwrap();
+    let before = cp.tickets().get(created.id).await.unwrap().unwrap();
+
+    // Load-bearing precondition, not a sanity check — and load-bearing here for
+    // a different reason than in the remote sibling, so do not copy that one's
+    // rationale onto this line. The local path has no ready-ticket snapshot; it
+    // is the CAS's own `attempt < max_attempts` (voom-store leases.rs:420) that
+    // matters. Lower this to 1 and the winner's increment closes that predicate,
+    // so the bite experiment this test is verified against — deleting
+    // `AND state = 'ready'` from the CAS — leaves claimer 2's UPDATE matching
+    // zero rows, every loser still returns TicketNotReady, and the test stays
+    // green while detecting nothing. `held` under that weakening is
+    // min(CLAIMERS, max_attempts), which is why 2 is the floor.
+    assert!(
+        before.max_attempts >= 2,
+        "raced ticket needs max_attempts >= 2, got {}",
+        before.max_attempts
+    );
+
+    let mut workers = Vec::with_capacity(CLAIMERS);
+    for index in 0..CLAIMERS {
+        let worker = eligible_worker(&cp, &format!("one-ticket-{index}"), &operation).await;
+        // Every claimer has room for this single ticket, so none can be turned
+        // away for capacity. That forces each one to the CAS, and keeps a
+        // rolled-back savepoint from hiding a second transition behind an
+        // unchanged `attempt`.
+        grant_capacity(&cp, &worker, &operation, 1).await;
+        workers.push(worker);
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(CLAIMERS));
+    let mut handles = Vec::with_capacity(CLAIMERS);
+    for worker in &workers {
+        let cp = cp.clone();
+        let barrier = barrier.clone();
+        let input = NewLease {
+            ticket_id: created.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        };
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cp.try_acquire_lease(input).await
+        }));
+    }
+
+    let mut acquired = Vec::new();
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(LeaseAcquireOutcome::Acquired(lease)) => acquired.push(lease),
+            Ok(LeaseAcquireOutcome::TicketNotReady { ticket_id }) => {
+                assert_eq!(ticket_id, created.id, "loser named the wrong ticket");
+            }
+            // Defensive: `acquire_guarded` runs the CAS before the eligibility
+            // and capacity checks, so a loser here cannot be eliminated ahead
+            // of it and this arm is unreachable today. It guards a reordering
+            // of those checks, which would make this test vacuous the way the
+            // remote path can be.
+            Ok(other) => panic!(
+                "every loser must lose at the ticket CAS; a capacity or \
+                 eligibility rejection means the claimer never reached it: {other:?}"
+            ),
+            Err(error) => panic!("no claimer may error under contention: {error:?}"),
+        }
+    }
+
+    // Gather every observation before asserting any of them. A Rust test
+    // aborts at its first failed assertion, so asserting as we go would hide
+    // the rest of the evidence — and "the loser assertion fired while exactly
+    // one lease was still held" is a conclusion that needs both halves.
+    let held: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT id, worker_id FROM leases WHERE state = 'held'")
+            .fetch_all(&cp.pool)
+            .await
+            .unwrap();
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    let after = cp.tickets().get(created.id).await.unwrap().unwrap();
+    let lease_events = count(&cp, EventKind::LeaseAcquired).await;
+    let observed = format!(
+        "acquired={} held={} leases={total} state={:?} attempt={}->{} epoch={}->{} events={lease_events}",
+        acquired.len(),
+        held.len(),
+        after.state,
+        before.attempt,
+        after.attempt,
+        before.epoch,
+        after.epoch,
+    );
+
+    assert_eq!(
+        acquired.len(),
+        1,
+        "exactly one claimer may acquire; {observed}"
+    );
+    assert_eq!(held.len(), 1, "exactly one held lease expected; {observed}");
+    assert_eq!(
+        u64::try_from(held[0].0).unwrap(),
+        acquired[0].id.0,
+        "the held lease is not the one the winner was handed; {observed}"
+    );
+    assert_eq!(
+        u64::try_from(held[0].1).unwrap(),
+        acquired[0].worker_id.0,
+        "the held lease belongs to a different worker than the winner; {observed}"
+    );
+    assert_eq!(
+        total, 1,
+        "a rejected claimer must leave no lease row behind; {observed}"
+    );
+    assert_eq!(after.state, TicketState::Leased, "{observed}");
+    assert_eq!(
+        after.attempt,
+        before.attempt + 1,
+        "the ticket transition must have happened exactly once; {observed}"
+    );
+    assert_eq!(after.epoch, before.epoch + 1, "{observed}");
+    assert_eq!(lease_events, 1, "{observed}");
+}

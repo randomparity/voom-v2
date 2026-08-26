@@ -16,7 +16,7 @@ use voom_store::repo::execution::node_incarnations::NewNodeIncarnation;
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 use voom_store::repo::execution::scheduler_decisions::{
-    SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerReasonCode,
+    SchedulerDecisionFilter, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerReasonCode,
 };
 use voom_store::repo::execution::tickets::{NewTicket, TicketState};
 use voom_store::repo::execution::workers::WorkerKind;
@@ -3125,4 +3125,424 @@ async fn remote_fail_never_claims_consumption() {
         .unwrap();
     assert_ne!(plan.status, ArtifactAccessPlanStatus::Consumed);
     assert_ne!(plan.status, ArtifactAccessPlanStatus::Selected);
+}
+
+// --- Issue #578: exclusivity when several nodes race one ready ticket ---
+
+/// One registered node with its own token, incarnation, and ready remote worker.
+struct RacingNode {
+    node_id: NodeId,
+    token: secrecy::SecretString,
+    incarnation_id: NodeIncarnationId,
+    worker_id: voom_core::WorkerId,
+}
+
+/// Several independent nodes against one control plane.
+///
+/// `fixture_with_options` registers exactly one node and hardcodes a single
+/// incarnation id, so it cannot express a race between nodes.
+struct MultiNodeFixture {
+    cp: crate::ControlPlane,
+    _tmp: voom_test_support::TempDatabase,
+    nodes: Vec<RacingNode>,
+}
+
+impl MultiNodeFixture {
+    /// A ready ticket every node's worker is eligible for.
+    ///
+    /// This repeats `RemoteFixture::ready_ticket_with_priority` rather than
+    /// sharing it: two copies is not yet the third repetition that earns a
+    /// helper, and extracting one would edit a method twenty-odd existing
+    /// tests depend on. It takes `max_attempts` because this test's precondition
+    /// is a value the other fixture hardcodes.
+    ///
+    /// **The payload shape is load-bearing: it must not parse as a
+    /// `WorkflowTicketPayload`.** `parse_ticket` requires `operation` and
+    /// `rendered_payload.operation` (`workflow/plan/ticket_payload.rs:118-152`),
+    /// which this payload deliberately omits, so
+    /// `resolve_ticket_owner_locality_in_tx` classifies the ticket
+    /// `NoDeclaration` (`acquire.rs:643-653`) and the owner-local gate lets every
+    /// node through. Add an `operation`/`rendered_payload` pair here and five of
+    /// six claimers are eliminated at that gate instead of at ticket readiness —
+    /// the decision-count assertion catches it, but the race is gone.
+    async fn ready_ticket(&self, kind: &str, max_attempts: u32) -> TicketId {
+        let ticket = self
+            .cp
+            .create_ticket(NewTicket {
+                job_id: None,
+                kind: ticket_op(kind),
+                priority: 0,
+                payload: json!({
+                    "dispatch": {"kind": kind},
+                    "artifact_access": {
+                        "inputs": ["handle:input:test"],
+                        "outputs": ["handle:output:test"]
+                    }
+                }),
+                max_attempts,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        self.cp
+            .mark_ready_if_unblocked(ticket.id, T0)
+            .await
+            .unwrap();
+        ticket.id
+    }
+
+    fn acquire_input(
+        &self,
+        index: usize,
+        idempotency_key: &str,
+        request_hash: &str,
+    ) -> RemoteAcquireInput {
+        let node = &self.nodes[index];
+        RemoteAcquireInput {
+            node_id: node.node_id,
+            token: node.token.clone(),
+            incarnation_id: node.incarnation_id,
+            worker_id: node.worker_id,
+            idempotency_key: idempotency_key.to_owned(),
+            request_hash: request_hash.to_owned(),
+            lease_ttl_seconds: 60,
+        }
+    }
+}
+
+async fn multi_node_remote_fixture(node_count: usize, operation: &str) -> MultiNodeFixture {
+    let (cp, tmp) = cp_at(T0).await;
+    let mut nodes = Vec::with_capacity(node_count);
+
+    for index in 0..node_count {
+        let registered = cp
+            .register_node(node_input(
+                &format!("racing-node-{index}"),
+                NodeKind::Remote,
+            ))
+            .await
+            .unwrap();
+        let worker = cp
+            .register_worker_for_node(RegisterWorkerForNodeInput {
+                node_id: registered.node.id,
+                token: registered.token.clone(),
+                name: format!("racing-worker-{index}"),
+                kind: WorkerKind::Remote,
+                capabilities: vec![NewWorkerCapabilityDraft {
+                    operation: ticket_op(operation),
+                    codecs: vec!["json".to_owned()],
+                    hardware: Vec::new(),
+                    artifact_access: vec!["shared_mount".to_owned()],
+                    extra: json!({}),
+                }],
+                grants: vec![NewWorkerGrantDraft {
+                    can_execute: vec![ticket_op(operation)],
+                    can_access_read: Vec::new(),
+                    can_access_write: Vec::new(),
+                    denies: Vec::new(),
+                    max_parallel: json!({"*": 1}),
+                }],
+            })
+            .await
+            .unwrap();
+
+        // Exactly 32 lowercase hex characters, distinct per node and
+        // deterministic across runs.
+        let incarnation_id: NodeIncarnationId =
+            format!("{:032x}", 0x0123_4567_89ab_cdef_u128 + index as u128)
+                .parse()
+                .unwrap();
+
+        let mut tx = cp.pool_for_test().begin().await.unwrap();
+        cp.node_incarnations
+            .insert_in_tx(
+                &mut tx,
+                NewNodeIncarnation {
+                    id: incarnation_id,
+                    node_id: registered.node.id,
+                    started_at: T0,
+                },
+            )
+            .await
+            .unwrap();
+        cp.nodes
+            .activate_incarnation_in_tx(&mut tx, registered.node.id, None, incarnation_id, T0)
+            .await
+            .unwrap();
+        cp.workers
+            .bind_incarnation_in_tx(&mut tx, worker.id, registered.node.id, incarnation_id)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        cp.remote_worker_readiness(RemoteWorkerReadinessInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            incarnation_id,
+            worker_id: worker.id,
+            readiness: WorkerReadiness::Ready,
+        })
+        .await
+        .unwrap();
+
+        nodes.push(RacingNode {
+            node_id: registered.node.id,
+            token: registered.token,
+            incarnation_id,
+            worker_id: worker.id,
+        });
+    }
+
+    MultiNodeFixture {
+        cp,
+        _tmp: tmp,
+        nodes,
+    }
+}
+
+/// What every claimer in a race returned, classified but not yet judged.
+struct RaceOutcomes {
+    leased: Vec<RemoteLeaseDispatch>,
+    idle_decisions: Vec<u64>,
+    no_candidate_decisions: Vec<u64>,
+    errors: Vec<VoomError>,
+}
+
+/// Release `claimers` remote acquires at once and classify what came back.
+///
+/// Nothing is asserted here. A Rust test aborts at its first failed assertion,
+/// so the bite arms this fixture is verified against need every observation
+/// gathered before any of them is judged — "a loser reached the CAS *while*
+/// exactly one lease was still held" is a conclusion that needs both halves.
+async fn race_remote_acquire(fixture: &MultiNodeFixture, claimers: usize) -> RaceOutcomes {
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(claimers));
+    let mut handles = Vec::with_capacity(claimers);
+    for index in 0..claimers {
+        let cp = fixture.cp.clone();
+        let barrier = barrier.clone();
+        let input = fixture.acquire_input(
+            index,
+            &format!("one-ticket-{index}"),
+            &format!("hash-one-ticket-{index}"),
+        );
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cp.remote_acquire(input).await
+        }));
+    }
+
+    let mut outcomes = RaceOutcomes {
+        leased: Vec::new(),
+        idle_decisions: Vec::new(),
+        no_candidate_decisions: Vec::new(),
+        errors: Vec::new(),
+    };
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(RemoteAcquireOutcome::Leased(dispatch)) => outcomes.leased.push(dispatch),
+            Ok(RemoteAcquireOutcome::Idle {
+                scheduler_decision_id,
+                ..
+            }) => outcomes.idle_decisions.push(scheduler_decision_id),
+            Ok(RemoteAcquireOutcome::NoCandidate {
+                scheduler_decision_id,
+                ..
+            }) => outcomes.no_candidate_decisions.push(scheduler_decision_id),
+            Err(error) => outcomes.errors.push(error),
+        }
+    }
+    outcomes
+}
+
+/// Assert every loser was eliminated on ticket readiness, not on eligibility.
+///
+/// `decision_kind = Idle` alone is not enough: it means only that the candidate
+/// set came back empty, and three different things empty it. A worker with no
+/// candidate operations short-circuits the snapshot query outright
+/// (`ready_for_operations_in_tx` returns early on an empty operation list,
+/// tickets.rs:1110), so misconfigured claimers would produce exactly the
+/// one-Leased/rest-Idle shape the caller asserts while nothing ever contended.
+/// The idle branch stamps the worker's own operation set into the decision's
+/// explanation (acquire.rs:221), so that is what separates "the ticket was
+/// taken" from "this worker could never have taken it".
+async fn assert_losers_lost_on_readiness(
+    cp: &crate::ControlPlane,
+    decision_ids: &[u64],
+    operation: &str,
+    observed: &str,
+) {
+    for decision_id in decision_ids {
+        let decision = cp
+            .scheduler_decisions
+            .get(*decision_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decision.decision_kind,
+            SchedulerDecisionKind::Idle,
+            "loser decision {decision_id} is not an idle elimination; {observed}"
+        );
+        // Redundant with the kind today — the `ScoreOutcome::Idle` arm is the only
+        // producer of an Idle decision and its reason comes from scoring an empty
+        // candidate slice, which is unconditionally `NoReadyTicket`
+        // (voom-scheduler/src/lib.rs:178-183). That redundancy is control-flow
+        // dependent, and this half of the outcome is what #578 and #577 were told
+        // the remote path produces, so it gets its own guard.
+        assert_eq!(
+            decision.reason_code,
+            SchedulerReasonCode::NoReadyTicket,
+            "loser decision {decision_id} did not lose on ticket readiness; {observed}"
+        );
+        let operations = decision
+            .explanation
+            .get("operation_set")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| {
+                panic!("loser decision {decision_id} carries no operation_set; {observed}")
+            });
+        assert!(
+            operations
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(operation)),
+            "loser decision {decision_id} shows the worker was never eligible for \
+             {operation}, so it did not lose a race: {operations:?}; {observed}"
+        );
+    }
+}
+
+/// Six workers on six different nodes race one ready ticket.
+///
+/// Per ADR 0085 this proves multi-node exclusivity, not the CAS: the
+/// ready-ticket snapshot and the CAS carry the same predicates inside one
+/// `BEGIN IMMEDIATE` transaction, so a loser is eliminated at the snapshot and
+/// returns `Idle` without reaching the CAS. Verified 2026-08-26: deleting
+/// `state = 'ready'` from the CAS alone leaves this test green while it reddens
+/// the node-local sibling in `leases_test.rs`; deleting it from the snapshot
+/// reddens the loser assertion below with one lease still held.
+// Not the default `#[tokio::test]` on purpose: the multi-threaded runtime makes
+// the six submissions genuinely concurrent, and matches the two existing
+// contention tests in this crate. Per ADR 0085 the claimers serialize on
+// SQLite's single write lock either way, so this is about submitting
+// concurrently, not about what the assertions prove.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_once() {
+    const CLAIMERS: usize = 6;
+    // A race needs someone to lose. Every assertion below is satisfied by a
+    // single-claimer run that never contends, so trimming this count — the
+    // obvious response to wall-clock pressure — would leave both tests green
+    // and vacuous. Compile-time, so it fires where the trim would be made.
+    const _: () = assert!(CLAIMERS >= 2, "a race needs at least two claimers");
+
+    let fixture = multi_node_remote_fixture(CLAIMERS, OP).await;
+    let ticket_id = fixture.ready_ticket(OP, 2).await;
+    let before = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
+
+    // See the identical assertion in the node-local sibling and ADR 0085: with
+    // max_attempts = 1 every loser's snapshot is emptied by the attempt budget
+    // instead of by `state = 'ready'`, and the loser assertion below stops
+    // detecting a snapshot regression.
+    assert!(
+        before.max_attempts >= 2,
+        "raced ticket needs max_attempts >= 2, got {}",
+        before.max_attempts
+    );
+
+    let outcomes = race_remote_acquire(&fixture, CLAIMERS).await;
+
+    let held: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT id, worker_id FROM leases WHERE state = 'held'")
+            .fetch_all(fixture.cp.pool_for_test())
+            .await
+            .unwrap();
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    // The third way to empty the candidate set is an owner-local gate that
+    // rejects every ready ticket, which leaves one `UnsupportedArtifactAccess`
+    // decision per rejected ticket behind (acquire.rs:200-210). Exactly one
+    // decision per claimer means no such rejection happened.
+    let decisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_decisions")
+        .fetch_one(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    let after = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
+    let observed = format!(
+        "leased={} idle={} no_candidate={} errors={} held={} leases={total} \
+         decisions={decisions} state={:?} attempt={}->{} epoch={}->{}",
+        outcomes.leased.len(),
+        outcomes.idle_decisions.len(),
+        outcomes.no_candidate_decisions.len(),
+        outcomes.errors.len(),
+        held.len(),
+        after.state,
+        before.attempt,
+        after.attempt,
+        before.epoch,
+        after.epoch,
+    );
+
+    assert!(
+        outcomes.errors.is_empty(),
+        "no claimer may error under contention: {:?}; {observed}",
+        outcomes.errors
+    );
+    assert!(
+        outcomes.no_candidate_decisions.is_empty(),
+        "a loser reached the post-selection gate: either the ready-ticket snapshot \
+         admitted a ticket the CAS then refused (acquire.rs:529), or scoring \
+         eliminated it on capacity or grant before the CAS ran (acquire.rs:243) — \
+         fetch the decision's reason_code to tell them apart: {:?}; {observed}",
+        outcomes.no_candidate_decisions
+    );
+    assert_eq!(
+        outcomes.leased.len(),
+        1,
+        "exactly one claimer may acquire; {observed}"
+    );
+    assert_eq!(
+        outcomes.idle_decisions.len(),
+        CLAIMERS - 1,
+        "every loser must settle idle; {observed}"
+    );
+    assert_eq!(
+        outcomes.leased[0].ticket_id, ticket_id,
+        "the winner leased a different ticket; {observed}"
+    );
+
+    assert_eq!(held.len(), 1, "exactly one held lease expected; {observed}");
+    assert_eq!(
+        u64::try_from(held[0].0).unwrap(),
+        outcomes.leased[0].lease_id.0,
+        "the held lease is not the one the winner was handed; {observed}"
+    );
+    assert_eq!(
+        u64::try_from(held[0].1).unwrap(),
+        outcomes.leased[0].worker_id.0,
+        "the held lease belongs to a different worker than the winner; {observed}"
+    );
+    assert_eq!(
+        total, 1,
+        "a rejected claimer must leave no lease row behind; {observed}"
+    );
+    assert_eq!(
+        decisions,
+        i64::try_from(CLAIMERS).unwrap(),
+        "expected exactly one scheduler decision per claimer. This counts the whole \
+         table, so a higher count means something wrote an extra decision. The \
+         expected cause is the owner-local gate, which writes a rejection of its own \
+         before the idle one — check whether the raced payload now parses as a \
+         WorkflowTicketPayload. It is not the only cause: any path the fixture \
+         exercises that starts emitting decisions lands here too; {observed}"
+    );
+
+    assert_eq!(after.state, TicketState::Leased, "{observed}");
+    assert_eq!(
+        after.attempt,
+        before.attempt + 1,
+        "the ticket transition must have happened exactly once; {observed}"
+    );
+
+    assert_losers_lost_on_readiness(&fixture.cp, &outcomes.idle_decisions, OP, &observed).await;
 }
