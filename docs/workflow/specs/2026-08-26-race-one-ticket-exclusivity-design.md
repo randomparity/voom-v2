@@ -60,9 +60,12 @@ binds a requirement.
   safety assertion; it binds current control flow, and a change that legitimately
   widens the snapshot while leaving the CAS authoritative will redden Test B for a
   non-safety reason. Update ADR 0085 then, rather than deleting the assertion.
-- **Both predicates** — where R5 earns its place. A second claimer leases and it
-  is `attempt` reading two that catches it; every genuine loser is still `Idle`,
-  so R6 does not fire.
+- **Both predicates** — **R3 is what fires**: a second claimer leases and the
+  exactly-one-`Leased` assertion aborts first. R5 corroborates in the same
+  message rather than catching it alone, and earns its own place by reading the
+  ticket row directly, so it still fires if a future change stops surfacing a
+  second acquisition as `Leased`. Every genuine loser is still `Idle`, so R6 does
+  not fire.
 - **CAS predicate alone** — undetected here by design; consequence 2 above.
 
 **R6's tripwire has a precondition the tests must assert.** Both raced tickets
@@ -326,7 +329,8 @@ All three arms are the evidence for ADR 0085's central consequence, and each mus
 be recorded — not only the final red. Arm (i) staying green is what shows the CAS
 is not the remote path's load-bearing gate; arm (ii) going red *while `held`
 stays 1* is what shows R6 detects a regression the safety assertion cannot; arm
-(iii) is what shows R5 catches the case R6 does not.
+(iii) is what shows R3 catches the case R6 does not, with R5 corroborating it in
+the same message.
 
 **All arms were run on 2026-08-26 and every cell reproduced**; the observed
 messages are recorded in ADR 0085 § Consequences, which owns them. The rule that

@@ -119,7 +119,7 @@ pooled connection simultaneously (`max_connections = 8`,
 
   The spec points at this table rather than repeating it.
 
-- **Both tests gather every observation before asserting any of them.** A Rust
+- **Both tests gather every observation before asserting on the race.** A Rust
   test aborts at its first failed assertion, so a test that asserts as it reads
   can only ever show one violated fact. The rows above are conclusions about
   *pairs* of facts — row 2 is "the loser assertion fired **while** exactly one
@@ -131,6 +131,13 @@ pooled connection simultaneously (`max_connections = 8`,
   `leased=2 idle=4 no_candidate=0 errors=0 held=2 leases=2 decisions=6
   state=Leased attempt=0->2 epoch=1->3`: assertion 1 is what fires, and
   assertion 2's violation is visible in the same message without being reached.
+
+  This governs the **race** observations. The node-local test still classifies
+  outcomes eagerly, asserting inside its collection loop when a claimer errors
+  or is eliminated somewhere other than the CAS — those are setup failures
+  rather than contention results, and the durable observations do not exist
+  yet when they fire. Such a run therefore reports a bare message with no
+  lease count or attempt delta; it still fails, which is what matters here.
 
   The middle row is why assertion 3 is load-bearing on the remote path rather than
   hygiene: it is the only detector of a snapshot regression, since exclusivity
