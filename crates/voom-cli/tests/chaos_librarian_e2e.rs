@@ -5,6 +5,9 @@
 
 mod support;
 
+#[path = "support/owner_node.rs"]
+mod owner_node;
+
 use std::path::Path;
 
 use support::chaos_librarian::{ChaosLibrarian, ChaosRun};
@@ -187,15 +190,26 @@ async fn policy_seed_creates_durable_ids_from_seeded_source() {
     assert!(ids.input_set_id > 0);
 }
 
+/// ADR 0075 routes every byte-touching media ticket through its storage
+/// owner's agent: the bundled executor never leases such a ticket, so a bare
+/// `register_worker` worker can neither satisfy tool preflight nor execute the
+/// transcode. The owner-node emulator stands in for that agent — the same path
+/// `operator_execution_e2e` and `multi_phase_flow` already use.
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
+async fn transcode_required_settles_through_owner_node_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
     let SeededChaosRun { run, db, seeded } = seed_materialized_scenario(
         &chaos,
         &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
     .await;
+
+    // Storage-owner stand-ins: fenced commit-intent driver + media settlement.
+    // Its activated manifest is what makes the owner node's ffmpeg worker
+    // visible to the software-transcode hardware preflight.
+    let _emulator = owner_node::OwnerNodeEmulator::spawn(&db.url);
+    owner_node::wait_for_owner_tooling(&db.url).await.unwrap();
 
     let cp = db.control_plane().await.unwrap();
     let ids = seed_transcode_policy(
@@ -229,11 +243,12 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
             .any(|node| node["operation_kind"] == "transcode_video")
     );
 
-    let mut worker = support::voom_cli::TranscodeWorkerLaunch::start(&cp)
-        .await
-        .unwrap();
-    let stage = run.run_dir.join("voom-stage");
-    let out = run.run_dir.join("voom-output");
+    // The staging flag mirrors the storage-root path (the library): the
+    // coordinator's promotion plan pairs `<staging>/.committed/<op>` working
+    // dirs with the operator output dir, and a staging root outside the storage
+    // root makes the commit path escape it.
+    let stage = run.scan_root();
+    let out = stage.join("voom-output");
     let execute = run_voom(
         &db.url,
         [
@@ -250,7 +265,6 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
         ],
     )
     .unwrap();
-    worker.shutdown().unwrap();
 
     assert_eq!(
         execute.status_code,

@@ -20,6 +20,11 @@
 //! bytes on disk, real no-replace promotion. Only the child media process is
 //! synthetic — exactly the surface the deleted bundled pipeline used to own.
 
+#![allow(
+    dead_code,
+    reason = "this module is #[path]-included by several e2e binaries; not \
+              every one of them needs the readiness helper"
+)]
 #![expect(
     clippy::unwrap_used,
     reason = "background emulator threads cannot propagate Results; a failed \
@@ -37,11 +42,11 @@ use std::path::{Path, PathBuf};
 use voom_control_plane::artifact::VerifyArtifactInput;
 use voom_control_plane::artifact_commit::CommitArtifactInput;
 use voom_control_plane::{ControlPlane, workers::RegisterWorkerInput};
-use voom_core::VoomError;
 use voom_core::ids::{
     ArtifactCommitRecordId, ArtifactHandleId, ArtifactLocationId, ArtifactVerificationId,
     FileLocationId, FileVersionId, MediaSnapshotId,
 };
+use voom_core::{OperationKind, VoomError};
 use voom_store::repo::media::artifacts::{
     ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactHandle, NewArtifactLocation,
     SqliteArtifactRepo,
@@ -55,6 +60,29 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The worker row the emulator records its released settlement leases against.
 const EMULATOR_WORKER_NAME: &str = "owner-node-media-emulator";
+
+/// The media tools [`activate_owner_media_workers`] declares, and the
+/// operations each one serves. Readiness waits for exactly this many workers to
+/// bind to the owner node's active incarnation.
+const OWNER_MEDIA_TOOLS: [(&str, &[OperationKind]); 3] = [
+    (
+        "ffmpeg",
+        &[
+            OperationKind::TranscodeVideo,
+            OperationKind::TranscodeAudio,
+            OperationKind::ExtractAudio,
+        ],
+    ),
+    ("mkvtoolnix", &[OperationKind::Remux]),
+    ("ffprobe", &[OperationKind::ProbeFile]),
+];
+
+/// How many owner-bound workers a fully activated manifest produces.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "a three-element const array length cannot wrap an i64"
+)]
+const OWNER_MEDIA_WORKER_COUNT: i64 = OWNER_MEDIA_TOOLS.len() as i64;
 
 /// A running pair of background threads (commit-intent driver + media
 /// settlement). Kept alive for the test's duration.
@@ -120,6 +148,46 @@ impl OwnerNodeEmulator {
     }
 }
 
+/// Block until the emulator's owner principal has activated its media-tool
+/// manifest, so the first compliance execute observes a ready storage owner.
+///
+/// The readiness query is the invariant `observe_node_tools` enforces during
+/// tool preflight: a worker only counts when it is bound to its node's *active*
+/// incarnation. Registering a worker without that binding — as a bare
+/// `register_worker` does — leaves preflight with an empty live-worker set.
+///
+/// # Errors
+/// Returns an error when the pool cannot be opened or the manifest has not
+/// activated within 30 seconds.
+pub async fn wait_for_owner_tooling(url: &str) -> std::io::Result<()> {
+    let pool = voom_store::connect(url)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let node_id = i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let live_workers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workers w \
+             JOIN nodes n ON n.active_incarnation_id = w.node_incarnation_id \
+             WHERE n.id = ? AND w.status IN ('registered', 'active')",
+        )
+        .bind(node_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if live_workers >= OWNER_MEDIA_WORKER_COUNT {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(std::io::Error::other(
+                "owner node media workers never became ready",
+            ));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 /// Poll for and settle ready envelope-bearing media tickets until the process
 /// ends.
 async fn run_media_settlement(url: String) {
@@ -182,28 +250,17 @@ async fn activate_owner_media_workers(
     use voom_control_plane::execution::{
         RemoteActivateInput, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
     };
-    use voom_core::{ArtifactAccessMode, OperationKind, WorkerReadiness};
-    let declarations = [
-        (
-            "ffmpeg",
-            vec![
-                OperationKind::TranscodeVideo,
-                OperationKind::TranscodeAudio,
-                OperationKind::ExtractAudio,
-            ],
-        ),
-        ("mkvtoolnix", vec![OperationKind::Remux]),
-        ("ffprobe", vec![OperationKind::ProbeFile]),
-    ]
-    .into_iter()
-    .map(|(logical_name, operations)| RemoteWorkerDeclaration {
-        logical_name: logical_name.to_owned(),
-        operations,
-        artifact_access: vec![ArtifactAccessMode::SharedMount],
-        accelerator: None,
-        max_parallel: 2,
-    })
-    .collect();
+    use voom_core::{ArtifactAccessMode, WorkerReadiness};
+    let declarations = OWNER_MEDIA_TOOLS
+        .into_iter()
+        .map(|(logical_name, operations)| RemoteWorkerDeclaration {
+            logical_name: logical_name.to_owned(),
+            operations: operations.to_vec(),
+            artifact_access: vec![ArtifactAccessMode::SharedMount],
+            accelerator: None,
+            max_parallel: 2,
+        })
+        .collect();
     // One authenticated agent incarnation both supervises these workers and
     // drives the commit-intent protocol below. Activating a second incarnation
     // would supersede the principal used by `drive_pending_commit`.

@@ -411,35 +411,7 @@ fn wait_for_owner_tooling(url: &str) -> io::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
-        let pool = voom_store::connect(url)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            let live_workers: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM workers w \
-                 JOIN nodes n ON n.active_incarnation_id = w.node_incarnation_id \
-                 WHERE n.id = ? AND w.status IN ('registered', 'active')",
-            )
-            .bind(
-                i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0)
-                    .map_err(|error| io::Error::other(error.to_string()))?,
-            )
-            .fetch_one(&pool)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-            if live_workers >= 3 {
-                return Ok(());
-            }
-            if std::time::Instant::now() > deadline {
-                return Err(io::Error::other(
-                    "owner node media workers never became ready",
-                ));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+    runtime.block_on(owner_node::wait_for_owner_tooling(url))
 }
 
 // --- shared execution-shape assertions ---
