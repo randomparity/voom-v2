@@ -2338,6 +2338,11 @@ async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
             Ok(LeaseAcquireOutcome::TicketNotReady { ticket_id }) => {
                 assert_eq!(ticket_id, created.id, "loser named the wrong ticket");
             }
+            // Defensive: `acquire_guarded` runs the CAS before the eligibility
+            // and capacity checks, so a loser here cannot be eliminated ahead
+            // of it and this arm is unreachable today. It guards a reordering
+            // of those checks, which would make this test vacuous the way the
+            // remote path can be.
             Ok(other) => panic!(
                 "every loser must lose at the ticket CAS; a capacity or \
                  eligibility rejection means the claimer never reached it: {other:?}"
@@ -2346,36 +2351,53 @@ async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
         }
     }
 
-    assert_eq!(acquired.len(), 1, "exactly one claimer may acquire");
-
+    // Gather every observation before asserting any of them. A Rust test
+    // aborts at its first failed assertion, so asserting as we go would hide
+    // the rest of the evidence — and "the loser assertion fired while exactly
+    // one lease was still held" is a conclusion that needs both halves.
     let held: Vec<(i64, i64)> =
         sqlx::query_as("SELECT id, worker_id FROM leases WHERE state = 'held'")
             .fetch_all(&cp.pool)
             .await
             .unwrap();
-    assert_eq!(held.len(), 1, "exactly one held lease expected");
-    assert_eq!(
-        u64::try_from(held[0].1).unwrap(),
-        acquired[0].worker_id.0,
-        "the held lease belongs to a different worker than the winner"
-    );
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
         .fetch_one(&cp.pool)
         .await
         .unwrap();
-    assert_eq!(
-        total, 1,
-        "a rejected claimer must leave no lease row behind"
+    let after = cp.tickets().get(created.id).await.unwrap().unwrap();
+    let lease_events = count(&cp, EventKind::LeaseAcquired).await;
+    let observed = format!(
+        "acquired={} held={} leases={total} state={:?} attempt={}->{} epoch={}->{} events={lease_events}",
+        acquired.len(),
+        held.len(),
+        after.state,
+        before.attempt,
+        after.attempt,
+        before.epoch,
+        after.epoch,
     );
 
-    let after = cp.tickets().get(created.id).await.unwrap().unwrap();
-    assert_eq!(after.state, TicketState::Leased);
+    assert_eq!(
+        acquired.len(),
+        1,
+        "exactly one claimer may acquire; {observed}"
+    );
+    assert_eq!(held.len(), 1, "exactly one held lease expected; {observed}");
+    assert_eq!(
+        u64::try_from(held[0].1).unwrap(),
+        acquired[0].worker_id.0,
+        "the held lease belongs to a different worker than the winner; {observed}"
+    );
+    assert_eq!(
+        total, 1,
+        "a rejected claimer must leave no lease row behind; {observed}"
+    );
+    assert_eq!(after.state, TicketState::Leased, "{observed}");
     assert_eq!(
         after.attempt,
         before.attempt + 1,
-        "the ticket transition must have happened exactly once"
+        "the ticket transition must have happened exactly once; {observed}"
     );
-    assert_eq!(after.epoch, before.epoch + 1);
-
-    assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 1);
+    assert_eq!(after.epoch, before.epoch + 1, "{observed}");
+    assert_eq!(lease_events, 1, "{observed}");
 }
