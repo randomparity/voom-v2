@@ -31,8 +31,3 @@ __pycache__/
 *.swp
 .idea/
 .vscode/
-
-# Repowise
-.claude/CLAUDE.md
-.mcp.json
-.repowise/
