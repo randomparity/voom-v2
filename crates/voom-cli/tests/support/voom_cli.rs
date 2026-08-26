@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use voom_control_plane::ControlPlane;
 use voom_test_support::TempDatabase;
-use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, target_debug_binary};
+use voom_test_support::worker::target_debug_binary;
 
 pub struct VoomTestDb {
     _file: TempDatabase,
@@ -21,10 +21,6 @@ pub struct VoomOutput {
     pub status_code: Option<i32>,
     pub json: Value,
     pub stderr: String,
-}
-
-pub struct TranscodeWorkerLaunch {
-    inner: TestWorkerLaunch,
 }
 
 impl VoomTestDb {
@@ -39,6 +35,13 @@ impl VoomTestDb {
         Ok(ControlPlane::open(&self.url).await?)
     }
 
+    /// Seed the shared test storage root at `path` and make it its own
+    /// staging and backup destination.
+    ///
+    /// Envelope destinations render from the library root's staging and backup
+    /// defaults (ADR 0075), and every commit target must be contained by a
+    /// configured root (ADR 0055). A root that leaves both unset renders no
+    /// destination a media envelope can name.
     pub async fn configure_local_root(
         &self,
         path: &Path,
@@ -46,6 +49,13 @@ impl VoomTestDb {
         let pool = voom_store::connect(&self.url).await?;
         let root_id = voom_store::test_support::seed_test_storage_root(&pool).await?;
         voom_store::test_support::set_test_storage_root_path(&pool, path).await?;
+        sqlx::query(
+            "UPDATE library_roots SET default_staging_root_id = id, \
+             default_backup_root_id = id WHERE id = ?",
+        )
+        .bind(i64::try_from(root_id.0)?)
+        .execute(&pool)
+        .await?;
         Ok(root_id)
     }
 }
@@ -90,25 +100,4 @@ pub fn output_to_envelope(output: Output) -> Result<VoomOutput, Box<dyn std::err
         json,
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
-}
-
-impl TranscodeWorkerLaunch {
-    pub async fn start(cp: &ControlPlane) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
-            inner: TestWorkerLaunch::start(
-                cp,
-                TestWorkerConfig::synthetic(
-                    target_debug_binary("voom-ffmpeg-worker"),
-                    "chaos-librarian-ffmpeg",
-                    "chaos-librarian-transcode-e2e-secret",
-                    "transcode_video",
-                ),
-            )
-            .await?,
-        })
-    }
-
-    pub fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.inner.shutdown()
-    }
 }

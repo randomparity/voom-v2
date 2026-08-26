@@ -114,10 +114,58 @@ impl OwnerNodeEmulator {
                 .unwrap();
             runtime.block_on(run_media_settlement(media_url));
         });
+        // The owner principal activates one declared worker per media tool
+        // (ADR 0076). Preflight reads those durable rows, so a suite that
+        // executes before activation lands sees an owner node that can vouch
+        // for no worker. Block here so no caller has to know that.
+        wait_for_owner_tooling(url);
         Self {
             _handles: vec![commit_handle, media_handle],
         }
     }
+}
+
+/// Block until the owner node's declared media workers are bound to its active
+/// incarnation and ready.
+///
+/// The wait owns a dedicated thread and runtime because callers include
+/// `#[tokio::test]` cases, where a nested `block_on` panics. Blocking the
+/// caller is safe: the activation this waits on runs on the emulator's own
+/// threads.
+fn wait_for_owner_tooling(url: &str) {
+    let url = url.to_owned();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let pool = voom_store::connect(&url).await.unwrap();
+            let owner_id = i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let live_workers: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM workers w \
+                     JOIN nodes n ON n.active_incarnation_id = w.node_incarnation_id \
+                     WHERE n.id = ? AND w.status IN ('registered', 'active')",
+                )
+                .bind(owner_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if live_workers >= 3 {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() <= deadline,
+                    "owner node media workers never became ready"
+                );
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        });
+    })
+    .join()
+    .unwrap();
 }
 
 /// Poll for and settle ready envelope-bearing media tickets until the process

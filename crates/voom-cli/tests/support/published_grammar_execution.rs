@@ -227,12 +227,10 @@ impl ScenarioRun {
         })?;
 
         // Storage-owner stand-ins settle envelope media tickets and drive
-        // fenced commit intents (ADR 0075).
+        // fenced commit intents (ADR 0075). Spawning blocks until the owner
+        // principal's declared media workers are ready, so the first
+        // compliance execute observes a ready storage owner.
         let emulator = OwnerNodeEmulator::spawn(&url);
-        // The emulator's owner principal activates one declared worker per
-        // media tool (ADR 0076); its remote workers satisfy the owner-scoped
-        // `requires_tools` preflight exactly as a real node agent would.
-        wait_for_owner_tooling(&url)?;
 
         Ok(Self {
             _db: db,
@@ -403,43 +401,6 @@ impl ScenarioRun {
         let output = run_cli(&self.url, args)?;
         assert_ok_envelope(&output, command, what)
     }
-}
-
-/// Block until the emulator's owner principal has activated its media-tool
-/// manifest so the first compliance execute observes a ready storage owner.
-fn wait_for_owner_tooling(url: &str) -> io::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        let pool = voom_store::connect(url)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            let live_workers: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM workers w \
-                 JOIN nodes n ON n.active_incarnation_id = w.node_incarnation_id \
-                 WHERE n.id = ? AND w.status IN ('registered', 'active')",
-            )
-            .bind(
-                i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0)
-                    .map_err(|error| io::Error::other(error.to_string()))?,
-            )
-            .fetch_one(&pool)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-            if live_workers >= 3 {
-                return Ok(());
-            }
-            if std::time::Instant::now() > deadline {
-                return Err(io::Error::other(
-                    "owner node media workers never became ready",
-                ));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
 }
 
 // --- shared execution-shape assertions ---

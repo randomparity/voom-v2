@@ -187,9 +187,18 @@ async fn policy_seed_creates_durable_ids_from_seeded_source() {
     assert!(ids.input_set_id > 0);
 }
 
+/// A required transcode over real Chaos Librarian media runs to a committed
+/// hevc artifact through the owner node.
+///
+/// Issue-scoped media execution is owner-node work (ADR 0075): the control
+/// plane renders an envelope and the storage owner's agent settles it. The
+/// emulator stands in for that agent here, as it does in every other CLI media
+/// suite; output byte signatures belong to the real ffmpeg worker's own suite.
+/// What this case still proves end to end is that a real materialized library
+/// plans, dispatches, commits, and promotes.
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
+async fn transcode_required_commits_hevc_mkv_through_the_owner_node() {
     let chaos = ready_chaos();
     let SeededChaosRun { run, db, seeded } = seed_materialized_scenario(
         &chaos,
@@ -229,11 +238,12 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
             .any(|node| node["operation_kind"] == "transcode_video")
     );
 
-    let mut worker = support::voom_cli::TranscodeWorkerLaunch::start(&cp)
-        .await
-        .unwrap();
-    let stage = run.run_dir.join("voom-stage");
-    let out = run.run_dir.join("voom-output");
+    let _owner = support::owner_node::OwnerNodeEmulator::spawn(&db.url);
+    // Both directories live inside the configured storage root: the commit
+    // target must be contained by it (ADR 0055), and promotion reads the
+    // operator's output dir back out of the same tree.
+    let stage = run.scan_root().join("voom-stage");
+    let out = run.scan_root().join("voom-output");
     let execute = run_voom(
         &db.url,
         [
@@ -250,7 +260,6 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
         ],
     )
     .unwrap();
-    worker.shutdown().unwrap();
 
     assert_eq!(
         execute.status_code,
