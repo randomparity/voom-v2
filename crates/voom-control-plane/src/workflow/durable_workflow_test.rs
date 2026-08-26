@@ -99,7 +99,11 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
 // timeout), MalformedWorkerResult, ProgressTimeout, and the missed-heartbeat
 // watchdog. WorkerCrash / MalformedResult / missed-heartbeat run the in-house
 // `chaos-worker` fake out-of-process so the crash and stall modes have real-process
-// fidelity. Dispatch timeout and progress timeout use deterministic in-process
+// fidelity. The branches *around* the fault differ: missed-heartbeat runs them
+// in-process because its watchdog budget is deliberately tight and a subprocess
+// round-trip could miss it, while the other two keep out-of-process healthy
+// branches under a generous budget. Dispatch timeout and progress timeout use
+// deterministic in-process
 // fault boundaries: one never returns from dispatch, and one emits a progress
 // frame followed by a typed ProgressTimeout terminal signal. The latter preserves
 // lease-heartbeat evidence without depending on a short wall-clock deadline.
@@ -118,7 +122,6 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
         ChaosWorkerMode::Crash,
     )
     .await?;
-    fixture.assert_watchdog_budget_is_generous()?;
     let result = async {
         let summary = fixture
             .executor()
@@ -190,7 +193,6 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
         ChaosWorkerMode::MalformedResult,
     )
     .await?;
-    fixture.assert_watchdog_budget_is_generous()?;
     let result = async {
         let summary = fixture
             .executor()
@@ -477,9 +479,22 @@ impl DurableWorkflowFixture {
         options.timing.heartbeat_interval = Duration::from_millis(20);
         options.timing.heartbeat_timeout = Duration::from_secs(2);
         options.timing.progress_idle_timeout = Duration::from_secs(2);
-        Self::start_with_chaos_override_and_executor_options(operation, mode, options, None).await
+        Self::start_with_chaos_override_and_executor_options(
+            operation,
+            mode,
+            HealthyProviderMode::Process,
+            options,
+            None,
+        )
+        .await
     }
 
+    /// Chaos fixture for a fault whose detection *is* a deadline. The caller's
+    /// deadlines are the behaviour under test and cannot be relaxed the way
+    /// issue #541 relaxed the immediate-fault fixtures, so the healthy branches
+    /// run in-process instead: fake providers that answer in microseconds do not
+    /// miss a sub-second watchdog the way a subprocess round-trip can, while the
+    /// chaos worker keeps its own process (issue #543).
     async fn start_with_chaos_override_and_options(
         operation: OperationKind,
         mode: ChaosWorkerMode,
@@ -497,15 +512,23 @@ impl DurableWorkflowFixture {
         Self::start_with_chaos_override_and_executor_options(
             operation,
             mode,
+            HealthyProviderMode::InProcess,
             options,
             Some(deadlines),
         )
         .await
     }
 
+    /// Shared chaos-fixture setup. The chaos worker is always out-of-process so
+    /// its stall and crash modes keep real-process fidelity; `healthy` chooses
+    /// how the branches around it run. Out-of-process healthy branches race the
+    /// watchdog on a loaded runner (issue #541), so this constructor enforces a
+    /// generous budget for them and leaves the tight-deadline fixtures to run
+    /// theirs in-process.
     async fn start_with_chaos_override_and_executor_options(
         operation: OperationKind,
         mode: ChaosWorkerMode,
+        healthy: HealthyProviderMode,
         mut options: WorkflowExecutorOptions,
         deadline_fixture: Option<DeadlineFixture>,
     ) -> TestResult<Self> {
@@ -517,9 +540,19 @@ impl DurableWorkflowFixture {
         fixture.executor_options = options;
         fixture.deadline_fixture = deadline_fixture;
         let setup = async {
-            fixture
-                .register_process_providers_except(operation, 4)
-                .await?;
+            match healthy {
+                HealthyProviderMode::Process => {
+                    fixture.assert_watchdog_budget_is_generous()?;
+                    fixture
+                        .register_process_providers_except(operation, 4)
+                        .await
+                }
+                HealthyProviderMode::InProcess => {
+                    fixture
+                        .register_in_process_providers_except(operation, 4)
+                        .await
+                }
+            }?;
             fixture.register_chaos_provider(operation, mode).await
         }
         .await;
@@ -1180,17 +1213,16 @@ impl DurableWorkflowFixture {
         Ok(())
     }
 
-    /// Guard for the fixtures whose fault is immediate and whose healthy
-    /// branches run out-of-process. Their watchdog exists only as an outer
-    /// bound, so re-tightening it buys nothing and reintroduces issue #541.
-    /// One second is a floor against that edit, not a measured cliff -- the
-    /// observed failure ran under 500ms, and how much slack a shared runner
-    /// needs is not a number this suite can pin.
+    /// Guard for the chaos fixtures whose healthy branches run out-of-process.
+    /// Their watchdog exists only as an outer bound, so tightening it buys
+    /// nothing and reintroduces issue #541. One second is a floor against that
+    /// edit, not a measured cliff -- the observed failure ran under 500ms, and
+    /// how much slack a shared runner needs is not a number this suite can pin.
     ///
-    /// Deliberately not called from the fixture constructor:
-    /// `chaos_missed_heartbeat_uses_executor_watchdog` shares that constructor
-    /// and sets a tight heartbeat deadline on purpose, because there the
-    /// watchdog is the behaviour under test.
+    /// Enforced from `start_with_chaos_override_and_executor_options` for
+    /// `HealthyProviderMode::Process` only, which is what pairs the two halves
+    /// of the invariant: a fixture that wants a tight deadline must move its
+    /// healthy branches in-process to get one (issue #543).
     fn assert_watchdog_budget_is_generous(&self) -> TestResult<()> {
         let floor = Duration::from_secs(1);
         expect(
@@ -1257,6 +1289,17 @@ impl ChaosWorkerMode {
             Self::Stall => "stall",
         }
     }
+}
+
+/// How a chaos fixture runs the branches that are *not* the injected fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthyProviderMode {
+    /// Real subprocesses over HTTP. Faithful, but a dispatch can take tens of
+    /// milliseconds on a loaded runner, so it demands a generous watchdog.
+    Process,
+    /// In-process fakes answering in microseconds, for fixtures whose watchdog
+    /// budget is deliberately tight.
+    InProcess,
 }
 
 #[derive(Debug, Clone, Copy)]
