@@ -58,6 +58,22 @@ repos:
         files: "^(crates/voom-control-plane/src/.*\\.rs|\
           scripts/check-control-plane-sql-boundary.*\\.sh|justfile)$"
 
+      - id: check-check-constraint-bypass
+        name: just check-check-constraint-bypass
+        entry: just check-check-constraint-bypass
+        language: system
+        pass_filenames: false
+        files: "^(crates/.*\\.rs|\
+          scripts/check-check-constraint-bypass.*\\.sh|justfile)$"
+
+      - id: check-check-constraint-bypass-selftest
+        name: just check-check-constraint-bypass-selftest
+        entry: just check-check-constraint-bypass-selftest
+        language: system
+        pass_filenames: false
+        files: "^(crates/.*\\.rs|\
+          scripts/check-check-constraint-bypass.*\\.sh|justfile)$"
+
       - id: check-payload-deny-unknown
         name: just check-payload-deny-unknown
         entry: just check-payload-deny-unknown
