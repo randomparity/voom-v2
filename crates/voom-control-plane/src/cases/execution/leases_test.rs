@@ -2282,6 +2282,11 @@ async fn force_release_without_requeue_opens_terminal_failure_issue() {
 /// ticket and every claimer has spare capacity, so the CAS is the only thing
 /// that can reject them and a weakened predicate produces a second lease
 /// instead of a clean loss. See `docs/adr/0085`.
+// Not the default `#[tokio::test]` on purpose: the multi-threaded runtime makes
+// the six submissions genuinely concurrent, and matches the two existing
+// contention tests in this crate. Per ADR 0085 the claimers serialize on
+// SQLite's single write lock either way, so this is about submitting
+// concurrently, not about what the assertions prove.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
     const CLAIMERS: usize = 6;
@@ -2394,6 +2399,11 @@ async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
         "exactly one claimer may acquire; {observed}"
     );
     assert_eq!(held.len(), 1, "exactly one held lease expected; {observed}");
+    assert_eq!(
+        u64::try_from(held[0].0).unwrap(),
+        acquired[0].id.0,
+        "the held lease is not the one the winner was handed; {observed}"
+    );
     assert_eq!(
         u64::try_from(held[0].1).unwrap(),
         acquired[0].worker_id.0,

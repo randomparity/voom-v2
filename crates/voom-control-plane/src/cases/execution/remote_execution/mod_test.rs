@@ -3420,6 +3420,11 @@ async fn assert_losers_lost_on_readiness(
 /// `state = 'ready'` from the CAS alone leaves this test green while it reddens
 /// the node-local sibling in `leases_test.rs`; deleting it from the snapshot
 /// reddens the loser assertion below with one lease still held.
+// Not the default `#[tokio::test]` on purpose: the multi-threaded runtime makes
+// the six submissions genuinely concurrent, and matches the two existing
+// contention tests in this crate. Per ADR 0085 the claimers serialize on
+// SQLite's single write lock either way, so this is about submitting
+// concurrently, not about what the assertions prove.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_once() {
     const CLAIMERS: usize = 6;
@@ -3524,10 +3529,12 @@ async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_onc
     assert_eq!(
         decisions,
         i64::try_from(CLAIMERS).unwrap(),
-        "expected exactly one scheduler decision per claimer. A higher count means \
-         claimers were eliminated by the owner-local gate, which writes a rejection \
-         decision of its own before the idle one — check whether the raced payload \
-         now parses as a WorkflowTicketPayload; {observed}"
+        "expected exactly one scheduler decision per claimer. This counts the whole \
+         table, so a higher count means something wrote an extra decision. The \
+         expected cause is the owner-local gate, which writes a rejection of its own \
+         before the idle one — check whether the raced payload now parses as a \
+         WorkflowTicketPayload. It is not the only cause: any path the fixture \
+         exercises that starts emitting decisions lands here too; {observed}"
     );
 
     assert_eq!(after.state, TicketState::Leased, "{observed}");
