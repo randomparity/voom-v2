@@ -947,6 +947,44 @@ async fn expire_due_second_call_is_a_no_op() {
     assert!(second.requeued_tickets.is_empty());
 }
 
+/// `expire_due` scans candidates and then updates them, so its transaction
+/// must take the write lock at `BEGIN`. Under a deferred `BEGIN` the lock is
+/// only requested at the first UPDATE, and `SQLite` refuses that lock upgrade
+/// with `SQLITE_BUSY` *without* consulting `busy_timeout` (upgrading would
+/// deadlock the two readers), so a concurrent writer made the whole call fail
+/// instead of waiting its turn. Regression for the `database is locked` flake
+/// in `voom-node-agent`'s `delayed_acquire_replay_never_dispatches`.
+#[tokio::test]
+async fn expire_due_waits_out_a_concurrent_writer() {
+    let (pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(10),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    // Hold the write lock for long enough that `expire_due` cannot reach its
+    // first UPDATE before the lock is contended.
+    let competing_writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let release_writer = async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        competing_writer.commit().await.unwrap();
+    };
+
+    let (expired, ()) = tokio::join!(lrepo.expire_due(T0 + Duration::seconds(11)), release_writer);
+
+    let report = expired.expect("expire_due must wait out the writer, not fail with SQLITE_BUSY");
+    assert_eq!(report.expired_leases, vec![lease.id]);
+    assert_eq!(report.requeued_tickets, vec![tid]);
+    assert_eq!(
+        trepo.get(tid).await.unwrap().unwrap().state,
+        TicketState::Ready
+    );
+}
+
 #[tokio::test]
 async fn expire_due_fails_terminal_when_no_retries_remain() {
     let (_pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;

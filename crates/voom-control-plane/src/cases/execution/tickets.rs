@@ -147,7 +147,11 @@ impl ControlPlane {
         now: OffsetDateTime,
     ) -> Result<PreLeaseFailureOutcome, VoomError> {
         let reason = pre_lease_failure_reason(class)?;
-        let mut tx = begin_tx(&self.pool).await?;
+        // Read-then-write: the ticket read and held-lease check below precede
+        // the failure write, so the transaction must take the write lock at
+        // `BEGIN`. See [`begin_immediate_tx`] for why a deferred `BEGIN`
+        // bypasses `busy_timeout` on the upgrade and fails under contention.
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let ticket = self
             .tickets
             .get_in_tx(&mut tx, ticket_id)

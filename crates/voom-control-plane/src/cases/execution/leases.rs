@@ -424,7 +424,11 @@ impl ControlPlane {
     /// Propagates repo and event-append errors. The transaction aborts on
     /// any error and no events are persisted.
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        // Read-then-write: `expire_due_in_tx` scans candidates before updating
+        // them, so the transaction must take the write lock at `BEGIN`. See
+        // [`begin_immediate_tx`] for why a deferred `BEGIN` bypasses
+        // `busy_timeout` on the upgrade and fails under contention.
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let report = self.leases.expire_due_in_tx(&mut tx, now).await?;
         for &(lease_id, ticket_id) in &report.pairs {
             self.emit_expire_pair(&mut tx, lease_id, ticket_id, &report, now)

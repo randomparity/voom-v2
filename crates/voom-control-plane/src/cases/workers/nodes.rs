@@ -93,7 +93,12 @@ impl ControlPlane {
     /// propagates repository and event-append errors.
     pub async fn heartbeat_node(&self, node_id: NodeId, token: &str) -> Result<Node, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        // Read-then-write: the token/status check reads before the heartbeat
+        // write, so the transaction must take the write lock at `BEGIN`. Node
+        // heartbeats run on every agent's timer alongside `remote_recover`'s
+        // writes to the same table. See [`begin_immediate_tx`] for why a
+        // deferred `BEGIN` bypasses `busy_timeout` on the upgrade.
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
             .nodes
             .auth_record_in_tx(&mut tx, node_id)
