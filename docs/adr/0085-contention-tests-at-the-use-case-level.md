@@ -124,12 +124,30 @@ pooled connection simultaneously (`max_connections = 8`,
   ticket therefore requires `max_attempts >= 2`, and the test asserts that
   explicitly rather than relying on the fixture's current value.
 
-  Relatedly, `decision_kind = Idle` proves only that the snapshot came back empty;
-  it cannot say *which* predicate emptied it. That is sufficient to exclude a
-  capacity or eligibility elimination — those route through the scorer to
-  `NoCandidate` (`acquire.rs:1021-1026`) — so it satisfies the anti-vacuity
-  requirement, but it is strictly weaker than the local path's `TicketNotReady`,
-  which names the CAS itself.
+- **`decision_kind = Idle` is not by itself an anti-vacuity assertion.** It says
+  only that the candidate set came back empty, and three different things empty
+  it:
+
+  1. the ticket is no longer ready — the case the test means;
+  2. the worker has no candidate operations at all, which short-circuits the
+     snapshot query before it looks at any ticket
+     (`ready_for_operations_in_tx` returns early on an empty operation list,
+     `tickets.rs:1110-1112`); or
+  3. an owner-local gate rejected every ready ticket, leaving `gated` empty
+     (`acquire.rs:194-214`).
+
+  Case 2 is the dangerous one: misconfigure five of six claimers and the run
+  still shows one `Leased` and five `Idle`, one held lease, and `attempt`
+  incremented once — the vacuous pass this record exists to prevent, wearing the
+  right outcome. A remote contention test therefore pins two further facts: each
+  loser's decision explanation carries the raced operation in its `operation_set`
+  (the Idle branch stamps the worker's own operations there, `acquire.rs:221`),
+  which excludes case 2; and the total scheduler-decision count equals the
+  claimer count, which excludes case 3 by the absence of its
+  `UnsupportedArtifactAccess` rows.
+
+  Even so the remote discriminator remains weaker than the local path's
+  `TicketNotReady`, which names the CAS itself rather than the emptiness of a set.
 - **A remote test cannot detect a CAS-only regression.** The local test can, and
   both paths call the same `acquire_guarded`, so the pair covers the CAS even
   though neither path covers it twice.

@@ -587,10 +587,18 @@ async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_onc
     assert_eq!(idle_decisions.len(), CLAIMERS - 1);
     assert_eq!(leased[0].ticket_id, ticket_id);
 
-    // Every loser must have been eliminated on ticket readiness. `Idle` is
-    // produced only by the empty-candidate branch, so a capacity or
-    // eligibility rejection would arrive as `NoCandidate` and has already
-    // panicked above; this pins the durable record as well as the outcome.
+    // Every loser must have been eliminated on ticket readiness.
+    //
+    // `decision_kind = Idle` alone is not enough: it means only that the
+    // candidate set came back empty, and three different things empty it. A
+    // worker with no candidate operations short-circuits the snapshot query
+    // outright (`ready_for_operations_in_tx` returns early on an empty
+    // operation list, tickets.rs:1110), so five misconfigured claimers would
+    // produce exactly the 1-Leased/5-Idle shape this test is asserting while
+    // nothing ever contended. The Idle branch stamps the worker's own
+    // operation set into the decision's explanation (acquire.rs:221), so that
+    // is what separates "the ticket was taken" from "this worker could never
+    // have taken it".
     for decision_id in idle_decisions {
         let decision = fixture
             .cp
@@ -604,7 +612,33 @@ async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_onc
             SchedulerDecisionKind::Idle,
             "loser decision {decision_id} is not an idle elimination"
         );
+        let operation_set = decision
+            .explanation
+            .get("operation_set")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("decision {decision_id} carries no operation_set"));
+        assert!(
+            operation_set
+                .iter()
+                .any(|operation| operation.as_str() == Some(OP)),
+            "loser decision {decision_id} shows the worker was never eligible \
+             for {OP}, so it did not lose a race: {operation_set:?}"
+        );
     }
+
+    // The third way to empty the candidate set is an owner-local gate that
+    // rejects every ready ticket, which leaves one UnsupportedArtifactAccess
+    // decision per rejected ticket behind (acquire.rs:200-210). Exactly one
+    // decision per claimer means no such rejection happened.
+    let decisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_decisions")
+        .fetch_one(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        decisions,
+        i64::try_from(CLAIMERS).unwrap(),
+        "expected exactly one scheduler decision per claimer, found {decisions}"
+    );
 
     let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 'held'")
         .fetch_one(fixture.cp.pool_for_test())

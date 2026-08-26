@@ -132,11 +132,26 @@ signal it. **Both tests therefore assert `max_attempts >= 2` on the raced ticket
 explicitly**, with a comment naming what lowering it would disarm, rather than
 relying on the fixture's current value.
 
-`decision_kind = Idle` proves only that the snapshot came back empty, not which
-predicate emptied it. That is enough to exclude a capacity or eligibility
-elimination — those route through the scorer to `NoCandidate`
-(`acquire.rs:1021-1026`) — so R7 is satisfied, but it is strictly weaker than the
-local path's `TicketNotReady`, which names the CAS itself.
+**`decision_kind = Idle` is not on its own enough for R7.** It says only that the
+candidate set came back empty, and three things empty it: the ticket is no longer
+ready (the case meant); the worker has no candidate operations at all, which
+short-circuits the snapshot query before it looks at any ticket
+(`tickets.rs:1110-1112`); or an owner-local gate rejected every ready ticket
+(`acquire.rs:194-214`). The second is the dangerous one — misconfigure five of six
+claimers and the run still shows one `Leased`, five `Idle`, one held lease and
+`attempt` incremented once, which is precisely the vacuous pass R7 exists to
+exclude.
+
+Test B therefore pins two further facts:
+
+- each loser's decision explanation carries the raced operation in its
+  `operation_set` — the Idle branch stamps the worker's own operations there
+  (`acquire.rs:221`) — which excludes the no-capability case; and
+- the total scheduler-decision count equals the claimer count, which excludes the
+  owner-local gate case by the absence of its `UnsupportedArtifactAccess` rows.
+
+Even with both, the remote discriminator is weaker than the local path's
+`TicketNotReady`, which names the CAS itself rather than the emptiness of a set.
 
 Test B cannot detect a CAS-only regression. Test A can, and both paths call the
 same `acquire_guarded`, so the pair covers the CAS.
@@ -150,7 +165,7 @@ same `acquire_guarded`, so the pair covers the CAS.
 | R3 | Each test asserts exactly one claimer acquires, with zero errors. | #578 Change |
 | R4 | Each test asserts `COUNT(*) FROM leases WHERE state = 'held' == 1`. | #578 Change |
 | R5 | Each test asserts the ticket's `attempt` incremented exactly once, relative to a pre-race read. | #578 Change; ADR 0085 Decision (2) |
-| R6 | Test A asserts every loser is `LeaseAcquireOutcome::TicketNotReady`. Test B asserts every loser is `RemoteAcquireOutcome::Idle` whose scheduler decision has `decision_kind = Idle`. | #578 Change, corrected by the asymmetry above; operator decision 2026-08-26 |
+| R6 | Test A asserts every loser is `LeaseAcquireOutcome::TicketNotReady`. Test B asserts every loser is `RemoteAcquireOutcome::Idle` whose scheduler decision has `decision_kind = Idle`, whose explanation's `operation_set` contains the raced operation, and with exactly one scheduler decision per claimer. | #578 Change, corrected by the asymmetry above; operator decision 2026-08-26; anti-vacuity clauses added by review |
 | R7 | Each test fails if any loser was eliminated on capacity or eligibility rather than ticket readiness. | Necessary consequence of R3–R6 (see below) |
 | R8 | Both tests run in the default `just test` suite with no `#[ignore]`. | #578 Acceptance |
 | R9 | Test A is verified to bite by weakening the CAS alone. Test B is verified against all three arms of the table above, with the observed result matching each row. | #578 Acceptance, amended by operator decision 2026-08-26 and corrected by review |
