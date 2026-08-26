@@ -84,35 +84,20 @@ both by the empty-snapshot elimination (`crates/voom-scheduler/src/lib.rs:178-18
 and by `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`, reached at
 `:529`). `decision_kind = Idle` is the discriminator: `decision_from_score` has
 three call sites (`acquire.rs:226`, `:248`, `:585`) and only `:226` can carry
-`ScoreOutcome::Idle` — `:245-247` turns an Idle score on non-empty candidates into
+`ScoreOutcome::Idle` — `:240-242` turns an Idle score on non-empty candidates into
 a `VoomError::Internal`, and `:585` is the Selected path. The kind itself is
 assigned by the `ScoreOutcome::Idle` arm at `acquire.rs:1021-1026`.
 
 ### What each remote assertion detects
 
-Predicted by code trace, then **observed** — all three arms were run on
-2026-08-26 against the committed tests and every cell reproduced.
+**The table of what each weakening does, and the observed messages from running
+all three, live in ADR 0085 § Consequences — that record owns them.** Repeating
+them here would give one load-bearing claim two homes, and #552 will keep
+changing what is raceable; the record that must not drift is the one that is not
+edited. What follows is only why each row matters to a requirement.
 
-| weakening | `held` | 5 losers | Test B |
-|---|---|---|---|
-| CAS `state = 'ready'` alone | 1 | 5× `Idle` | green — undetected |
-| snapshot `state = 'ready'` alone | 1 | 5× `NoCandidate` | red, on the loser assertion (R6) |
-| both | 2 | 1× `Leased`, 4× `Idle` | red, on R3 and R5 — *not* R6 |
-
-Observed messages, verbatim:
-
-- **CAS alone** — `test result: ok. 1 passed`. The same edit, unchanged, fails
-  Test A with `acquired=2 held=2 leases=2 state=Leased attempt=0->2 epoch=1->3
-  events=2`. One production edit, opposite verdicts on the two paths.
-- **Snapshot alone** — `a loser reached the post-selection gate, which means the
-  ready-ticket snapshot admitted a ticket the CAS then refused: [3, 5, 4, 6, 2];
-  leased=1 idle=0 no_candidate=5 errors=0 held=1 leases=1 decisions=6
-  state=Leased attempt=0->1 epoch=1->2`. Exclusivity intact; only the loser
-  assertion notices, exactly as the middle row predicts.
-- **Both** — `exactly one claimer may acquire; leased=2 idle=4 no_candidate=0
-  errors=0 held=2 leases=2 decisions=6 state=Leased attempt=0->2 epoch=1->3`.
-
-The middle row is the reason R6 is load-bearing rather than hygiene. Remove
+The middle row — snapshot predicate deleted alone — is the reason R6 is
+load-bearing rather than hygiene. Remove
 `state = 'ready'` from the snapshot only: a loser's transaction — which begins
 after the winner commits — now sees the ticket in `leased`, so
 `tickets.is_empty()` is false, the `Idle` return at `acquire.rs:229` is never
