@@ -96,7 +96,8 @@ pooled connection simultaneously (`max_connections = 8`,
   The first row is the load-bearing one, and it is the one a prediction could
   most easily have got wrong, so it was checked against its contrapositive: with
   the CAS predicate deleted and nothing else changed, Test B passes while the
-  node-local Test A fails on `acquired=2 held=2 leases=2 attempt=0->2`. One
+  node-local Test A fails on `acquired=2 held=2 leases=2 state=Leased
+  attempt=0->2 epoch=1->3 events=2`. One
   production edit, two tests, opposite verdicts — that is the two-layer structure
   this record asserts, observed rather than argued.
 

@@ -23,136 +23,60 @@ This asymmetry, established while designing this change and reported on #578 and
 #577, decides what each test can prove. ADR 0085 records the decision that
 follows from it.
 
-**Both paths open `BEGIN IMMEDIATE`** per ADR 0083 — `try_acquire_lease` at
-`crates/voom-control-plane/src/cases/execution/leases.rs:50-58` and
-`remote_acquire` at `.../remote_execution/acquire.rs:59`, both via
-`begin_immediate_tx` (`crates/voom-control-plane/src/cases/mod.rs:52-58`). So
-neither test executes a readiness gate concurrently: SQLite's single write lock
-serializes all six claimers, and each transaction begins only after the previous
-commits. What these tests prove is that the gate rejects a ticket another
-transaction has **already committed** as leased. That is the exclusivity property
-that matters; it is not concurrent execution of the gate, and neither test should
-be described as racing the CAS in that sense.
+**ADR 0085 § Context owns the mechanism**: that both paths open `BEGIN IMMEDIATE`
+per ADR 0083 and therefore serialize on SQLite's single write lock; the CAS
+statement itself; the snapshot's matching predicates; the savepoint rollback that
+leaves a loser's `attempt` untouched; and the line citation for each. None of it
+is restated here. Every one of those is a claim about production code that #552 is
+expected to change, and a claim kept in two places drifts — the record that must
+not drift is the one that is not edited.
 
-The difference between the paths is solely how many times readiness is checked.
+What this spec needs from that analysis is three consequences, because they are
+what decide the requirements:
 
-The compare-and-swap in `SqliteLeaseRepo::acquire_guarded`
-(`crates/voom-store/src/repo/execution/leases.rs:415-424`) is:
-
-```sql
-UPDATE tickets
-   SET state = 'leased', state_changed_at = ?, attempt = attempt + 1,
-       epoch = epoch + 1
- WHERE id = ? AND state = 'ready' AND next_eligible_at <= ?
-       AND attempt < max_attempts
-       AND (job_id IS NULL OR EXISTS (
-             SELECT 1 FROM jobs WHERE jobs.id = tickets.job_id
-                                  AND jobs.state = 'open'))
-```
-
-`rows_affected() == 0` yields `LeaseAcquireOutcome::TicketNotReady`. It runs
-inside the savepoint `try_acquire_in_tx` opens (`leases.rs:334-350`); every
-non-`Acquired` outcome rolls that savepoint back, so a loser leaves `attempt` and
-`epoch` untouched.
-
-**Local path — the CAS is the only readiness gate.** `acquire_guarded` reads the
-ticket only to check its `kind` (`leases.rs:399-413`), then runs the CAS, and only
-*then* checks worker eligibility (`:442`) and capacity (`:452`). A concurrent
-loser reaches the CAS and receives `TicketNotReady`.
-
-**Remote path — the CAS is unreachable as a race.**
-`ControlPlane::remote_acquire` opens a single `BEGIN IMMEDIATE` transaction
-(`.../remote_execution/acquire.rs:59`) spanning both the ready-ticket snapshot
-and the CAS. The snapshot
-(`crates/voom-store/src/repo/execution/tickets.rs:1114-1136`) filters on the same
-four predicates as the CAS: `state = 'ready'`, `next_eligible_at <=`,
-`attempt < max_attempts`, job-open. The write lock is held from `BEGIN`, so
-nothing commits between a loser's snapshot and its own CAS. With one contended
-ticket the loser's snapshot is **empty**, it takes the `tickets.is_empty()`
-branch (`acquire.rs:215-233`), and returns `RemoteAcquireOutcome::Idle` without
-executing the CAS.
-
-Two things follow that #578's original Change section got wrong, and this spec
-corrects:
-
-- a remote loser settles as `Idle`, not `NoCandidate`; and
-- weakening the CAS alone does **not** redden a multi-node test, because the
-  snapshot's identical filter still holds.
-
-`SchedulerReasonCode::NoReadyTicket` cannot discriminate either: it is produced
-both by the empty-snapshot elimination (`crates/voom-scheduler/src/lib.rs:178-183`)
-and by `outcome_reason_code(TicketNotReady)` (`acquire.rs:1367-1369`, reached at
-`:529`). `decision_kind = Idle` is the discriminator: `decision_from_score` has
-three call sites (`acquire.rs:226`, `:248`, `:585`) and only `:226` can carry
-`ScoreOutcome::Idle` — `:240-242` turns an Idle score on non-empty candidates into
-a `VoomError::Internal`, and `:585` is the Selected path. The kind itself is
-assigned by the `ScoreOutcome::Idle` arm at `acquire.rs:1021-1026`.
+1. **A remote loser settles `Idle`, not `NoCandidate`.** Its snapshot is already
+   empty, so it never reaches the CAS. #578's Change section predicted
+   `TicketNotReady`/`NoCandidate`; that holds for the local path only, and R6
+   asserts what the code actually produces (criterion 3a).
+2. **Weakening the CAS alone does not redden a multi-node test**, because the
+   snapshot's identical filter still holds. R9 is therefore stated per layer, and
+   Test B is not credited with covering the CAS. Test A is, and both paths call
+   the same `acquire_guarded`, so the pair covers it.
+3. **`SchedulerReasonCode::NoReadyTicket` cannot discriminate.** It has two
+   producers (`crates/voom-scheduler/src/lib.rs:178-183` and
+   `acquire.rs:1367-1369`, reached at `:529`), so R6 names `decision_kind` rather
+   than the reason code — and pins the reason code additionally, as a guard on
+   control flow that may change.
 
 ### What each remote assertion detects
 
-**The table of what each weakening does, and the observed messages from running
-all three, live in ADR 0085 § Consequences — that record owns them.** Repeating
-them here would give one load-bearing claim two homes, and #552 will keep
-changing what is raceable; the record that must not drift is the one that is not
-edited. What follows is only why each row matters to a requirement.
+**ADR 0085 § Consequences owns the table of what each weakening does, and the
+observed messages from running all three.** What follows is only how each row
+binds a requirement.
 
-The middle row — snapshot predicate deleted alone — is the reason R6 is
-load-bearing rather than hygiene. Remove
-`state = 'ready'` from the snapshot only: a loser's transaction — which begins
-after the winner commits — now sees the ticket in `leased`, so
-`tickets.is_empty()` is false, the `Idle` return at `acquire.rs:229` is never
-reached, candidates are non-empty, and because Test B uses six distinct workers
-on six nodes the loser's own worker has capacity, so scoring returns `Selected`.
-The CAS then correctly rejects, and the outcome is `NoCandidate`
-(`acquire.rs:543`). Exactly one lease is still held and `attempt` still reads one
-more than before — safety is intact, and only the loser assertion notices.
+- **Snapshot predicate alone** — why R6 is load-bearing rather than hygiene.
+  Exclusivity survives that weakening intact: one lease held, `attempt` up by one,
+  every safety assertion green. Only the loser assertion notices. So R6 is not a
+  safety assertion; it binds current control flow, and a change that legitimately
+  widens the snapshot while leaving the CAS authoritative will redden Test B for a
+  non-safety reason. Update ADR 0085 then, rather than deleting the assertion.
+- **Both predicates** — where R5 earns its place. A second claimer leases and it
+  is `attempt` reading two that catches it; every genuine loser is still `Idle`,
+  so R6 does not fire.
+- **CAS predicate alone** — undetected here by design; consequence 2 above.
 
-In the bottom row, claimer 2's CAS succeeds and it becomes a **second winner**;
-claimers 3–6 are then stopped by `attempt < max_attempts`, which both the snapshot
-and the CAS still carry, so they return `Idle`. `held` there is
-`min(claimers, max_attempts)` in general — it reads 2 only because the raced
-ticket has `max_attempts = 2`. Note that this row reddens on R3 and R5, not R6:
-every genuine loser is still `Idle`, and it is `attempt` reading 2 that catches it.
-That is the row where R5 earns its place.
-
-R6 is therefore not a safety assertion; it binds current control flow. A future
-change that legitimately widens the snapshot while leaving the CAS authoritative
-will redden Test B for a non-safety reason. That is the intended tripwire: update
-this spec and ADR 0085 rather than delete the assertion.
-
-**R6's tripwire has a precondition the test must assert.** The snapshot carries
-five predicates and the reasoning above concerns `state = 'ready'` alone. If the
-raced ticket had `max_attempts = 1`, then after the winner's CAS the snapshot
-would be emptied by `attempt < max_attempts` instead, every loser would return
-`Idle` whether or not the `state` predicate is present, and the middle row would
-go green — the detector disarmed by a one-character fixture edit with nothing to
-signal it. **Both tests therefore assert `max_attempts >= 2` on the raced ticket
-explicitly**, with a comment naming what lowering it would disarm, rather than
-relying on the fixture's current value.
+**R6's tripwire has a precondition the tests must assert.** Both raced tickets
+require `max_attempts >= 2`, asserted explicitly rather than left to the fixture's
+current value. The two tests need that floor for *different* reasons, which
+ADR 0085 § Consequences records together with a warning against conflating them.
 
 **`decision_kind = Idle` is not on its own enough for R7.** It says only that the
-candidate set came back empty, and three things empty it: the ticket is no longer
-ready (the case meant); the worker has no candidate operations at all, which
-short-circuits the snapshot query before it looks at any ticket
-(`tickets.rs:1110-1112`); or an owner-local gate rejected every ready ticket
-(`acquire.rs:194-214`). The second is the dangerous one — misconfigure five of six
-claimers and the run still shows one `Leased`, five `Idle`, one held lease and
-`attempt` incremented once, which is precisely the vacuous pass R7 exists to
-exclude.
-
-Test B therefore pins two further facts:
-
-- each loser's decision explanation carries the raced operation in its
-  `operation_set` — the Idle branch stamps the worker's own operations there
-  (`acquire.rs:221`) — which excludes the no-capability case; and
-- the total scheduler-decision count equals the claimer count, which excludes the
-  owner-local gate case by the absence of its `UnsupportedArtifactAccess` rows.
-
-Even with both, the remote discriminator is weaker than the local path's
-`TicketNotReady`, which names the CAS itself rather than the emptiness of a set.
-
-Test B cannot detect a CAS-only regression. Test A can, and both paths call the
-same `acquire_guarded`, so the pair covers the CAS.
+candidate set came back empty, and ADR 0085 § Consequences enumerates the three
+things that empty it — one of which yields a fully vacuous pass wearing the right
+outcome. Test B therefore also pins each loser's `operation_set` and the total
+scheduler-decision count, which exclude the other two. Even with both, the remote
+discriminator is weaker than the local path's `TicketNotReady`, which names the
+CAS itself rather than the emptiness of a set.
 
 ## Requirements
 
@@ -223,12 +147,13 @@ performance budgets are epic #577 non-goals.
 - **`busy_timeout` is 30s** (`pool.rs:41`), `acquire_timeout` 45s (`pool.rs:76`);
   a serialized claimer waits, it does not fail.
 - **Both tests declare `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`.**
-  The default `#[tokio::test]` is a current-thread runtime, on which the spawned
-  claimers interleave at await points but never execute simultaneously — the
-  `tokio::sync::Barrier` would still release them together, and the tests would
-  still pass, while testing far less than they claim. Four worker threads against
-  six claimers is the shape the two existing contention tests in
-  `remote_execution/mod_test.rs` already use.
+  This makes the six submissions genuinely concurrent, and matches the two
+  existing contention tests in `remote_execution/mod_test.rs`. It is **not** what
+  makes the assertions meaningful: per ADR 0085 § Context the claimers serialize
+  on SQLite's single write lock either way, so a current-thread runtime would
+  prove the same thing. Recorded here because it is the one precondition with no
+  mechanical guard — each test therefore carries a comment at the attribute
+  itself, where a wall-clock trim would be made.
 - **A `tokio::sync::Barrier` releases the claimers**, not a sleep or a timestamp.
   Every claimer awaits it as its first act inside the spawned task, so the
   contention window does not depend on task spawn order or on wall-clock timing.
