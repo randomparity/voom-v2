@@ -132,9 +132,9 @@ test-repeat PKG FILTER COUNT='25':
     #!/usr/bin/env bash
     set -uo pipefail
     for i in $(seq 1 {{ COUNT }}); do
-        if ! cargo test -p {{ PKG }} {{ FILTER }} >/dev/null 2>&1; then
+        if ! cargo test -p {{ PKG }} --all-features {{ FILTER }} >/dev/null 2>&1; then
             echo "FAILED on run $i of {{ COUNT }}; rerunning it with output:"
-            cargo test -p {{ PKG }} {{ FILTER }}
+            cargo test -p {{ PKG }} --all-features {{ FILTER }}
             exit 1
         fi
         printf '\rrun %s/%s ok' "$i" "{{ COUNT }}"
