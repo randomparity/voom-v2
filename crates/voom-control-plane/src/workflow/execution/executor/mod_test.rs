@@ -3921,7 +3921,11 @@ async fn owner_node_success_landing_before_the_finished_check_is_counted() {
 
     // The loop has finished one settlement pass and is holding before its
     // finished check: land the owner node's completion in exactly that window.
-    observed.notified().await;
+    // Both waits are bounded so a run that never reaches the hold, or never
+    // concludes, fails the test instead of hanging the suite.
+    tokio::time::timeout(Duration::from_secs(5), observed.notified())
+        .await
+        .unwrap_or_else(|_| panic!("the run loop must reach its settlement hold"));
     let ticket = fixture.first_workflow_ticket().await;
     let lease = fixture
         .cp
@@ -3940,8 +3944,9 @@ async fn owner_node_success_landing_before_the_finished_check_is_counted() {
         .unwrap();
     resume.notify_one();
 
-    let summary = run
+    let summary = tokio::time::timeout(Duration::from_secs(10), run)
         .await
+        .unwrap_or_else(|_| panic!("the run must conclude once its ticket is terminal"))
         .unwrap()
         .unwrap_or_else(|error| panic!("the remux run must succeed: {}", error.source));
     assert_eq!(
