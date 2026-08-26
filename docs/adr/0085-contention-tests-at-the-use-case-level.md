@@ -116,7 +116,7 @@ pooled connection simultaneously (`max_connections = 8`,
   `Leased`. Its value is that it reads the ticket row directly, so it still fires
   if a future change stops surfacing a second acquisition as `Leased`.
 
-  The spec carries this same table, now also marked observed.
+  The spec points at this table rather than repeating it.
 
 - **Both tests gather every observation before asserting any of them.** A Rust
   test aborts at its first failed assertion, so a test that asserts as it reads
@@ -151,7 +151,7 @@ pooled connection simultaneously (`max_connections = 8`,
 
   **The node-local test needs the same floor for an unrelated reason, and the two
   must not be conflated.** There is no snapshot on that path; what matters there
-  is the CAS's own `attempt < max_attempts` (`leases.rs:419`). At
+  is the CAS's own `attempt < max_attempts` (`leases.rs:420`). At
   `max_attempts = 1` the winner's increment closes that predicate, so a CAS
   stripped of `state = 'ready'` still matches zero rows for the second claimer,
   every loser still returns `TicketNotReady`, and the local test goes green while
@@ -190,15 +190,18 @@ pooled connection simultaneously (`max_connections = 8`,
   though neither path covers it twice.
 - **Reachability depends on transaction mode, which #552 is about to change en
   masse.** `remote_acquire`'s window closed when the M6 fix converted it to
-  `BEGIN IMMEDIATE` (see `.../remote_execution/mod_test.rs:764-769`). #552
+  `BEGIN IMMEDIATE` (see `.../remote_execution/mod_test.rs:761-769`). #552
   converts further read-then-write sites, shrinking what is raceable. #580 and
   #581 both assume two transactions can interleave on the same rows and should
   check each target path's `BEGIN` mode before the test is designed — including,
   per Context, the local path, whose mode is also `BEGIN IMMEDIATE`.
 - These tests are not pool-saturation coverage. Exceeding the pool is a different
   failure mode with a different expected outcome (#580).
-- Nothing enforces the claimer count or the assertion set mechanically. Both are
-  prose.
+- The assertion set is prose; nothing enforces it mechanically. The claimer
+  count is enforced: each test carries a `const _: () = assert!(CLAIMERS >= 2)`
+  beside its declaration, because every assertion in both tests is satisfied by
+  a single-claimer run that never contends, and trimming the count is the
+  obvious response to wall-clock pressure.
 
 ## Considered & rejected
 
@@ -228,7 +231,7 @@ pooled connection simultaneously (`max_connections = 8`,
   zero errors rather than a leaked `SQLITE_BUSY` under a genuinely contended write
   lock. That second ground is weak on its own: the existing remote test already
   covers it at N=8 (`.../remote_execution/mod_test.rs:759-813`, comment at
-  `:764-769`), which is higher concurrency than this one uses. So the honest
+  `:761-769`), which is higher concurrency than this one uses. So the honest
   ranking is that #578's wording is the reason and the error-freedom check is a
   by-product — a later reader weighing the flake budget against the value should
   know the concurrency here is doing less work than it appears to.

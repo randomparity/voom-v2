@@ -57,7 +57,7 @@ non-`Acquired` outcome rolls that savepoint back, so a loser leaves `attempt` an
 
 **Local path — the CAS is the only readiness gate.** `acquire_guarded` reads the
 ticket only to check its `kind` (`leases.rs:399-413`), then runs the CAS, and only
-*then* checks worker eligibility (`:441`) and capacity (`:452`). A concurrent
+*then* checks worker eligibility (`:442`) and capacity (`:452`). A concurrent
 loser reaches the CAS and receives `TicketNotReady`.
 
 **Remote path — the CAS is unreachable as a race.**
@@ -216,6 +216,10 @@ performance budgets are epic #577 non-goals.
 - **Claimer count is 6**, against the pool's `max_connections = 8`
   (`crates/voom-store/src/pool.rs:62,67`). Claimers beyond the pool queue for a
   connection rather than contending, adding wall-clock without adding contention.
+  Each test carries `const _: () = assert!(CLAIMERS >= 2)` beside the declaration:
+  every assertion in both tests is satisfied by a single-claimer run that never
+  contends, so trimming the count for wall-clock would leave them green and
+  vacuous. The floor is compile-time, so it fires where the trim would be made.
 - **`busy_timeout` is 30s** (`pool.rs:41`), `acquire_timeout` 45s (`pool.rs:76`);
   a serialized claimer waits, it does not fail.
 - **Both tests declare `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`.**
@@ -332,10 +336,14 @@ Assertions:
 - Exactly one `RemoteAcquireOutcome::Leased`.
 - The other five are `RemoteAcquireOutcome::Idle`; zero `NoCandidate`.
 - Each loser's scheduler decision, fetched by the `scheduler_decision_id` the
-  `Idle` outcome carries, has `decision_kind = SchedulerDecisionKind::Idle` —
-  R6 and R7 for this path. A `NoCandidate` decision, or any decision carrying
-  `WorkerCapacityFull` or `NodeCapacityFull`, fails the test: it would mean the
-  loser was eliminated on capacity rather than ticket readiness.
+  `Idle` outcome carries, has `decision_kind = SchedulerDecisionKind::Idle` **and**
+  `reason_code = SchedulerReasonCode::NoReadyTicket` — R6 and R7 for this path. A
+  `NoCandidate` outcome, or any other reason code, fails the test: it would mean
+  the loser was eliminated somewhere other than ticket readiness. Pinning the
+  reason code is redundant with the kind today (an `Idle` decision can only come
+  from scoring an empty candidate slice, which is unconditionally `NoReadyTicket`),
+  but it is the half of the outcome reported to #578 and #577, so it carries its
+  own guard rather than resting on control flow that may change.
 - Each loser's decision explanation carries the raced operation in its
   `operation_set`, and `SELECT COUNT(*) FROM scheduler_decisions` equals the
   claimer count. Without these, `decision_kind = Idle` admits the two vacuous
@@ -395,7 +403,7 @@ stays 1* is what shows R6 detects a regression the safety assertion cannot; arm
 (iii) is what shows R5 catches the case R6 does not.
 
 **All arms were run on 2026-08-26 and every cell reproduced**; the observed
-messages are recorded under *What each remote assertion detects*. The rule that
+messages are recorded in ADR 0085 § Consequences, which owns them. The rule that
 produced them still stands for any future re-run: if an arm stops reproducing,
 the finding is against this spec and ADR 0085 — correct them, do not adjust the
 test to match.
