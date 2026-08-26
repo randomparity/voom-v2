@@ -149,6 +149,18 @@ pooled connection simultaneously (`max_connections = 8`,
   ticket therefore requires `max_attempts >= 2`, and the test asserts that
   explicitly rather than relying on the fixture's current value.
 
+  **The node-local test needs the same floor for an unrelated reason, and the two
+  must not be conflated.** There is no snapshot on that path; what matters there
+  is the CAS's own `attempt < max_attempts` (`leases.rs:419`). At
+  `max_attempts = 1` the winner's increment closes that predicate, so a CAS
+  stripped of `state = 'ready'` still matches zero rows for the second claimer,
+  every loser still returns `TicketNotReady`, and the local test goes green while
+  detecting nothing. Under that weakening `held` is `min(claimers, max_attempts)`
+  in general — the observed 2 above is that formula, not a constant. A reader who
+  checks the remote rationale against the local test will find the snapshot
+  irrelevant there and may conclude the assertion was copied; it was not, and
+  each test states its own reason at the assertion.
+
 - **`decision_kind = Idle` is not by itself an anti-vacuity assertion.** It says
   only that the candidate set came back empty, and three different things empty
   it:

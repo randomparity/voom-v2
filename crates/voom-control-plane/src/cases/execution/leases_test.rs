@@ -2293,10 +2293,16 @@ async fn concurrent_local_acquire_at_one_ticket_leases_exactly_once() {
     cp.mark_ready_if_unblocked(created.id, T0).await.unwrap();
     let before = cp.tickets().get(created.id).await.unwrap().unwrap();
 
-    // Load-bearing precondition, not a sanity check. The ready-ticket snapshot
-    // and the CAS share `attempt < max_attempts`; with max_attempts = 1 a loser
-    // is rejected by the attempt budget rather than by `state = 'ready'`, which
-    // is the predicate this test exists to pin.
+    // Load-bearing precondition, not a sanity check — and load-bearing here for
+    // a different reason than in the remote sibling, so do not copy that one's
+    // rationale onto this line. The local path has no ready-ticket snapshot; it
+    // is the CAS's own `attempt < max_attempts` (voom-store leases.rs:419) that
+    // matters. Lower this to 1 and the winner's increment closes that predicate,
+    // so the bite experiment this test is verified against — deleting
+    // `AND state = 'ready'` from the CAS — leaves claimer 2's UPDATE matching
+    // zero rows, every loser still returns TicketNotReady, and the test stays
+    // green while detecting nothing. `held` under that weakening is
+    // min(CLAIMERS, max_attempts), which is why 2 is the floor.
     assert!(
         before.max_attempts >= 2,
         "raced ticket needs max_attempts >= 2, got {}",
