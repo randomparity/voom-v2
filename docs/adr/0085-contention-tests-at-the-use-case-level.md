@@ -70,9 +70,11 @@ Each test asserts three things, not one:
    | path | loser outcome | discriminator |
    |---|---|---|
    | local | `LeaseAcquireOutcome::TicketNotReady` | the outcome itself |
-   | remote | `RemoteAcquireOutcome::Idle` | the decision's `decision_kind = Idle` |
+   | remote | `RemoteAcquireOutcome::Idle` | `decision_kind = Idle`, **plus** the two clauses under Consequences |
 
    A loser observed with a capacity or eligibility reason fails the test outright.
+   `decision_kind` alone does not carry the remote path; see the anti-vacuity
+   consequence below for the two facts that must accompany it.
 
 Concurrent claimers are a fixed count — 6 — chosen so every claimer holds a
 pooled connection simultaneously (`max_connections = 8`,
@@ -102,10 +104,15 @@ pooled connection simultaneously (`max_connections = 8`,
   return `Idle`.
 
   **Row 3's `held` is `min(claimers, max_attempts)`, not 2.** It reads 2 only
-  because the raced ticket has `max_attempts = 2`. Note also that row 3 reddens on
-  assertions 1 and 2 — *not* 3: every genuine loser there is still `Idle`, and it
-  is the `attempt` count, reading 2, that catches it. That is the row where
-  assertion 2 earns its place.
+  because the raced ticket has `max_attempts = 2`. Row 3 reddens on assertions 1
+  and 2 — *not* 3, since every genuine loser there is still `Idle`. Assertion 2 is
+  corroborating rather than sole there: assertion 1 already fires on the second
+  `Leased`. Its value is that it reads the ticket row directly, so it still fires
+  if a future change stops surfacing a second acquisition as `Leased`.
+
+  The spec carries this same table. That copy is the one corrected when the arms
+  actually run, so if the two ever disagree, the spec is the later observation and
+  this record is the superseded prediction.
 
   The middle row is why assertion 3 is load-bearing on the remote path rather than
   hygiene: it is the only detector of a snapshot regression, since exclusivity
@@ -115,8 +122,9 @@ pooled connection simultaneously (`max_connections = 8`,
   the intended tripwire; a reader reaching it should update this record rather
   than delete the assertion.
 - **That tripwire has a precondition, and the test must assert it.** The snapshot
-  carries five predicates (`tickets.rs:1119-1128`), and the reasoning above is
-  about `state = 'ready'` alone. If the raced ticket had `max_attempts = 1`, then
+  carries five predicates (`tickets.rs:1119-1129` — the fifth, `kind IN (...)`,
+  begins at `:1129`), and the reasoning above is about `state = 'ready'` alone.
+  If the raced ticket had `max_attempts = 1`, then
   after the winner's CAS the snapshot would be emptied by `attempt < max_attempts`
   instead, every loser would return `Idle` **whether or not** the snapshot's
   `state` predicate is present, and the middle row would go green — the detector
@@ -189,14 +197,16 @@ pooled connection simultaneously (`max_connections = 8`,
   #578 asks for a race in those words, and concurrent submission additionally
   proves that `BEGIN IMMEDIATE` plus the 30s `busy_timeout` (`pool.rs:41`) yields
   zero errors rather than a leaked `SQLITE_BUSY` under a genuinely contended write
-  lock — the property the existing remote test was written for
-  (`.../remote_execution/mod_test.rs:759-813`, comment at `:764-769`). The
-  concurrency is load-bearing for that and for nothing else; a later reader
-  weighing the flake budget should weigh it against exactly that.
+  lock. That second ground is weak on its own: the existing remote test already
+  covers it at N=8 (`.../remote_execution/mod_test.rs:759-813`, comment at
+  `:764-769`), which is higher concurrency than this one uses. So the honest
+  ranking is that #578's wording is the reason and the error-freedom check is a
+  by-product — a later reader weighing the flake budget against the value should
+  know the concurrency here is doing less work than it appears to.
 - **Assert the loser's `SchedulerReasonCode` rather than `decision_kind` on the
   remote path.** verified: `decision_kind = Idle` has a single producer.
   `decision_from_score` has three call sites (`acquire.rs:226`, `:248`, `:585`);
-  only `:226` can carry `ScoreOutcome::Idle`, because `:245-247` turns an Idle
+  only `:226` can carry `ScoreOutcome::Idle`, because `:240-242` turns an Idle
   score on non-empty candidates into a `VoomError::Internal` and `:585` is the
   Selected path. The kind is assigned by the `ScoreOutcome::Idle` arm at
   `acquire.rs:1021-1026`. So it is strictly stronger. The
