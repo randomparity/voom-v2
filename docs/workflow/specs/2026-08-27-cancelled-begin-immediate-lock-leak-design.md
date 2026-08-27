@@ -33,10 +33,22 @@ connection that no value owns.
 
 `sqlx-core-0.8.6/src/pool/connection.rs:275-328` then returns that connection to
 the pool. It tests the connection with `ping()` at `:314`; it never inspects the
-transaction depth and never rolls back. The connection sits in the idle queue
-holding the write lock indefinitely. Every subsequent writer waits out the full
-30s `busy_timeout` and fails with `DB_UNREACHABLE` → 503, which is precisely the
-request log captured on the issue.
+transaction depth and never rolls back, and `test_before_acquire` is that same
+ping (`options.rs:149`), so nothing quarantines it either. The connection sits in
+the idle queue holding the write lock indefinitely.
+
+Writers then split three ways. On another connection: wait out the full 30s
+`busy_timeout`, fail with `DB_UNREACHABLE` → 503 — precisely the request log
+captured on the issue. Handed the poisoned connection, a `BEGIN IMMEDIATE` opener
+fails at once with `InvalidSavePointStatement`
+(`sqlx-sqlite-0.8.6/src/connection/worker.rs:210-222`). Handed it, a *deferred*
+opener succeeds — it opens `SAVEPOINT _sqlx_savepoint_1` inside the abandoned
+transaction and its commit issues `RELEASE SAVEPOINT`
+(`sqlx-core-0.8.6/src/transaction.rs:277-289`), so the caller is told the write
+committed while it stays inside a transaction nobody will ever commit. Closing
+that connection rolls it back. The defect is a stall **and** a silent-lost-write
+path — worth stating on the issue, because an operator who hit the hang may need
+to audit rather than just restart.
 
 The plain-`BEGIN` path does not leak: the worker thread detects that its
 acknowledgement could not be delivered and rolls back immediately
@@ -150,8 +162,15 @@ Two new error paths, both mapping to `VoomError::Database` exactly as the curren
 openers do:
 
 - the spawned task panics — surfaced through `JoinError`;
-- the spawn is attempted during runtime shutdown, so the task is cancelled before
-  it opens anything — also a `JoinError`, and no transaction to lose.
+- the spawn succeeds into a draining runtime and the task is cancelled before it
+  opens anything — also a `JoinError`, and no transaction to lose.
+
+`tokio::spawn` itself *panics* with no runtime context or during thread-local
+teardown (`tokio-1.53.1/src/task/spawn.rs:211-214`). That is not a new
+requirement: `PoolConnection::drop` already routes through
+`sqlx-core-0.8.6/src/rt/mod.rs:61-79`, which panics with "this functionality
+requires a Tokio context" when `Handle::try_current()` fails. It is a new place
+for it to bite, and the openers carry a doc note saying so.
 
 ## Testing
 

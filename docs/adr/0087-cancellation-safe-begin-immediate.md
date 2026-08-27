@@ -30,10 +30,24 @@ a connection that no value owns.
 The pool does not recover it. `sqlx-core-0.8.6/src/pool/connection.rs:275-328`
 returns a connection by testing it with `ping()` at `:314`; it never inspects the
 transaction depth and never rolls back. So the connection goes back into the idle
-queue holding the write lock, and stays there. Every later writer burns the full
-30s `busy_timeout` and fails; the node agent's `deactivate` exhausts its five
-attempts (`voom-node-agent/src/client.rs:25`) and the incarnation is never marked
-`Retired`.
+queue holding the write lock, and stays there — nothing quarantines it, because
+the `test_before_acquire` default is that same `ping`
+(`sqlx-core-0.8.6/src/pool/options.rs:149`).
+
+What later writers see then splits three ways. A writer on another connection
+waits out the full 30s `busy_timeout` and fails; that is the path the node
+agent's `deactivate` takes, exhausting its five attempts
+(`voom-node-agent/src/client.rs:25`) so the incarnation is never marked
+`Retired`. A writer *handed the poisoned connection* does not wait at all: a
+custom `BEGIN` at depth > 0 is refused with `InvalidSavePointStatement` without
+running any statements (`sqlx-sqlite-0.8.6/src/connection/worker.rs:210-222`), so
+the two `BEGIN IMMEDIATE` openers fail immediately. The deferred openers do not
+fail — they open `SAVEPOINT _sqlx_savepoint_1` inside the abandoned transaction
+(`sqlx-core-0.8.6/src/transaction.rs:277-283`), and their `commit` issues
+`RELEASE SAVEPOINT` (`:285-289`), which reports success while leaving the work
+uncommitted under a transaction no value owns. When that connection is finally
+closed, the outer transaction rolls back and an acknowledged write is gone. The
+exposure is a stall *and* a silent-lost-write path.
 
 Only the custom-statement path leaks. For a plain `BEGIN`, the acknowledgement is
 a rendezvous send (`sqlx-sqlite-0.8.6/src/connection/worker.rs:81,528-538`) that
@@ -86,25 +100,28 @@ crates` reports `OK (378 files)` with it present. This change routes it through
 anyway. Closing the guardrail's blind spot so a *future* site in that shape is
 caught is deferred: `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`.
 
-**The regression test carries its own positive control.** Cancelling the opener
-after exactly *N* wakeup-driven polls is deterministic, but which *N* lands
-between the two steps is a property of the pinned `sqlx`, `flume`, and `tokio`
-versions: measured here as 3 against the unfixed opener, one poll wide, and 2
-against the fixed one, where the first poll is spent on the spawn. So the test
-sweeps *N* from 1 to 8 twice — once through `begin_read_then_write`, which must
-leave an independent pool able to take the write lock at every *N*, and once
-through a bare `pool.begin_with("BEGIN IMMEDIATE")` written in the test itself,
-which must leak at some *N*.
+**The regression test carries its own positive control.** Cancelling after
+exactly *N* wakeup-driven polls is a deterministic *mechanism*; where it lands
+inside the open is not, and depends on the pinned `sqlx`, `flume`, and `tokio`.
+The test sweeps *N* from 1 to 8 twice — once through `begin_read_then_write`,
+which must leave an independent pool able to take the write lock at every *N*,
+and once through a bare `pool.begin_with("BEGIN IMMEDIATE")` written in the test
+itself, which must leak at some *N*.
 
-The second sweep is the part that keeps the first honest. Without it the test is
-green whether or not the sweep still straddles a vulnerable window, so a version
-bump that moved the window outside 1..=8 would leave an assertion that passes
-while proving nothing. With it, that bump fails the control and says so. An
-earlier draft used a cheaper proxy — assert the sweep brackets the point where
-the open completes — and it does not work: against the fixed opener that
-transition sits at *N* = 2, so the lower arm rests on the single sample *N* = 1
-and any run where the spawned task beats the caller's first poll turns a passing
-branch red for no reason.
+The two arms count different clocks, and the record is explicit about it rather
+than papering over it. The control cancels the inlined future, whose window sits
+at *N* = 3 here; the fixed arm cancels a `JoinHandle` await, which resolves at
+*N* = 2 because the first poll is spent on the spawn. So the fixed arm has
+exactly one non-trivial sample — *N* = 1, the only *N* at which the caller is
+cancelled before the handle resolves, and there the detached task's position is
+set by the scheduler rather than by *N*. At *N* >= 2 it asserts something milder:
+that a transaction which was returned and then dropped releases its lock.
+
+What the control buys is therefore not that the fixed arm's range still brackets
+anything. It is that the `sqlx` 0.8.6 window is still present in the bare shape —
+that the wrapper is still load-bearing rather than dead weight. A bump that reds
+the control is telling a maintainer to check whether upstream fixed the window,
+in which case the wrapper and the control both go.
 
 ## Consequences
 
@@ -114,19 +131,43 @@ database until the process restarts.
 
 A cancelled caller's detached task keeps its pooled connection until
 `BEGIN IMMEDIATE` returns — up to `LOCK_WAIT_BUDGET` under contention — and then
-releases it. That is not a regression, and it is not even a change: an isolated
-`sqlx` 0.8.6 program cancelling eight opens against an eight-connection pool
-whose write lock is held elsewhere behaves identically before and after
-(`size=8`, `idle=0`, a live request failing on `acquire_timeout`), because
-today's cancelled open cannot return its connection until the in-flight
-`BEGIN IMMEDIATE` finishes on the worker thread either.
+releases it. For a cancellation *inside* `BEGIN IMMEDIATE` that is not even a
+change: an isolated `sqlx` 0.8.6 program cancelling eight opens against an
+eight-connection pool whose write lock is held elsewhere behaves identically
+before and after (`size=8`, `idle=0`, a live request failing on
+`acquire_timeout`), because today's cancelled open cannot return its connection
+until the in-flight `BEGIN IMMEDIATE` finishes on the worker thread either.
+
+`Pool::begin_with` is two steps though (`sqlx-core-0.8.6/src/pool/mod.rs:391-400`),
+and the other one does change. A caller cancelled while still inside `acquire()`
+used to drop the acquire future, release its permit, and request nothing; now the
+detached task finishes the acquire and issues `BEGIN IMMEDIATE` on behalf of a
+caller that is gone, holding a pool slot for up to `LOCK_WAIT_BUDGET`. Under the
+contention this ADR targets, `acquire` is where a request spends its time, so a
+burst of client timeouts can fill the pool with doomed openers while live
+requests wait on `POOL_ACQUIRE_BUDGET` — degrading, not wedging, since each
+doomed open takes the lock and immediately gives it back. Spawning only after the
+caller holds the connection would remove it, and that needs `Transaction::begin`
+and `MaybePoolConnection` — the same `#[doc(hidden)]` surface the `after_release`
+bullets below decline to reach for.
 
 Every `begin_read_then_write` and `begin_serialized_read` now costs one task
 spawn on top of the channel round trip to the `sqlite` worker it already paid.
 `voom-store` gains `tokio`'s `rt` feature, and the openers now require a `tokio`
-runtime — every caller is already inside one, and a spawn attempted during
-runtime shutdown surfaces as `VoomError::Database` rather than a lost
-transaction.
+runtime. That requirement is not new to the pool: `PoolConnection::drop` already
+goes through `sqlx-core-0.8.6/src/rt/mod.rs:61-79`, which panics with "this
+functionality requires a Tokio context" when `Handle::try_current()` fails. What
+is new is where it bites — `tokio::spawn` itself panics both with no runtime and
+during thread-local teardown (`tokio-1.53.1/src/task/spawn.rs:211-214`,
+`runtime/context/current.rs:41-45`). What surfaces as `VoomError::Database` is the
+narrower case: a `JoinError` from a task cancelled after a successful spawn.
+
+The detach discharges the guarantee only while a runtime outlives the task. On a
+current-thread runtime whose `block_on` returns while the detached task sits
+between the two steps, the task is dropped there and the leak recurs. Several
+test harnesses run that shape (`crates/voom-test-support/src/commit_node.rs:349`,
+`crates/voom-cli/tests/support/owner_node.rs:102,139`); it is moot there because
+the pool dies with the runtime, but the condition belongs on the record.
 
 The deferred openers stay safe by way of `sqlx` worker behaviour this record
 cites but does not control. If that behaviour changed, a cancelled deferred open
@@ -203,5 +244,6 @@ that calls `pool.begin_with` itself is outside this invariant.
   `./scripts/run-constrained.sh --load 1 --write-bps 40M -- cargo llvm-cov
   --no-report -p voom-node-agent --test lifecycle --all-features -- --test-threads=1`
   — the same comment records that the `--write-bps` throttle is required and that
-  101 unthrottled runs did not reproduce. judgment: its cost is every writer
-  against that database until the process restarts.
+  101 unthrottled runs did not reproduce. judgment: its cost is not only stalled
+  writers until the process restarts but the silent-lost-write path in Context —
+  a deferred opener handed the poisoned connection is told its commit succeeded.
