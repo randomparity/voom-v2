@@ -1,7 +1,7 @@
 # Cancelled `BEGIN IMMEDIATE` leaks the write lock — design
 
 Issue: [#592](https://github.com/randomparity/voom-v2/issues/592)
-Decision record: [ADR 0087](../../adr/0087-pooled-connections-never-return-inside-a-transaction.md)
+Decision record: [ADR 0087](../../adr/0087-cancellation-safe-begin-immediate.md)
 
 ## Goal
 
@@ -31,8 +31,8 @@ The `Transaction` value, whose `Drop` queues the rollback, is constructed only
 after step 2. A future dropped between the two leaves the lock held by a
 connection that no value owns.
 
-`sqlx-core-0.8.6/src/pool/connection.rs:275-325` then returns that connection to
-the pool. It tests the connection with `ping()`; it never inspects the
+`sqlx-core-0.8.6/src/pool/connection.rs:275-328` then returns that connection to
+the pool. It tests the connection with `ping()` at `:314`; it never inspects the
 transaction depth and never rolls back. The connection sits in the idle queue
 holding the write lock indefinitely. Every subsequent writer waits out the full
 30s `busy_timeout` and fails with `DB_UNREACHABLE` → 503, which is precisely the
@@ -68,50 +68,73 @@ pool on the same file to write:
 | 3 | no | **blocked** |
 | 4 | yes | ok |
 
-Three polls lands in the window every time. No load, no throttle, no elapsed-time
-assertion.
+Three polls lands in the window, and it is the only value that does: two is
+before the write lock is taken, four is after the `Transaction` is constructed.
+No load, no throttle, no elapsed-time assertion. Measured on Fedora / Linux
+7.1.8 / rustc 1.95.0, identically in debug and `--release`; the count is a
+property of the pinned `sqlx` 0.8.6, `flume`, and `tokio` versions rather than a
+universal, which is why the regression test sweeps a range instead of pinning 3.
 
 ## Design
 
-One change, in the one place that constructs a pool.
+One change, in the two openers that can leak.
 
-`crates/voom-store/src/pool.rs` `connect_inner` gains an `after_release` hook.
-A connection whose `sqlx` transaction depth is non-zero when it is released is
-logged at `warn` and closed rather than returned to the idle queue. Closing
-releases the write lock; the pool refills on demand.
+`crates/voom-store/src/tx.rs` — `begin_read_then_write` and
+`begin_serialized_read` drive `pool.begin_with("BEGIN IMMEDIATE")` on a detached
+`tokio` task and await its `JoinHandle`:
 
 ```rust
-.after_release(|conn, _meta| {
-    Box::pin(async move {
-        let depth = <<Sqlite as Database>::TransactionManager as TransactionManager>
-            ::get_transaction_depth(conn);
-        if depth > 0 {
-            tracing::warn!(depth, "…");
-            return Ok(false); // close, do not reuse
-        }
-        Ok(true)
-    })
-})
+async fn begin_detached(
+    pool: &SqlitePool,
+    statement: &'static str,
+    context: &'static str,
+) -> Result<Transaction<'static, Sqlite>, VoomError> {
+    let pool = pool.clone();
+    tokio::spawn(async move { pool.begin_with(statement).await })
+        .await
+        .map_err(|e| VoomError::database_context(context, e))?
+        .map_err(|e| VoomError::database_context(context, e))
+}
 ```
 
-The invariant it states — **a connection may not re-enter the pool while a
-transaction is open on it** — lives at the pool boundary rather than at each
-opener, so it holds for all four of ADR 0086's helpers, for savepoints, and for
-any other `sqlx` path with a window not yet found. `connect_inner` is the only
-pool constructor in the workspace (`rg SqlitePoolOptions crates` returns one
-site), so the hook covers every pool: `ControlPlane`, `HealthPlane`, `init`, and
-every test fixture.
+Dropping a `JoinHandle` detaches the task rather than aborting it. A cancelled
+caller therefore leaves a task that still constructs the `Transaction` and then
+drops it — and `Transaction::drop` queues the `ROLLBACK` the leak was missing.
+`voom-store` gains `tokio`'s `rt` feature; every caller is already inside a
+runtime.
 
-Rejected alternatives, with the evidence that sank them, are in ADR 0087.
+`begin_write_first` and `begin_read_only` are unchanged. A deferred `BEGIN` takes
+no write lock, and the worker's rendezvous acknowledgement
+(`sqlx-sqlite-0.8.6/src/connection/worker.rs:81,528-538,234-252`) already rolls
+back a cancelled open, so there is no hazard there to wrap.
+
+**Why the openers and not the pool.** `scripts/check-transaction-openers.sh`
+already fails a build in which production code opens a pool-level transaction
+outside `voom-store/src/tx.rs`, so fixing the openers covers every production
+transaction — and it covers them whichever pool they run against. That last part
+matters: `rg -n 'SqlitePoolOptions' --type rust` finds five pool construction
+sites, four of them test modules, and
+`crates/voom-control-plane/src/cases/execution/leases_test.rs:223` hands its own
+pool to production `ControlPlane` code. A fix expressed as a pool option would
+miss it.
+
+Rejected alternatives — including the pool-level `after_release` guard this
+design originally proposed, and the evidence that it destroys `:memory:`
+databases — are in ADR 0087.
 
 ## Error handling
 
-Reaching the hook's non-zero branch means a cancellation landed inside the
-window. It is recovery, not a failure to propagate: there is no caller left to
-return an error to. The `warn` line is the report. Nothing else in the request
-path changes — a writer that was waiting on the leaked lock proceeds normally
-once it is released, and a writer that had already given up returns the same
-`DB_UNREACHABLE` it does today.
+A cancelled caller has nobody left to return an error to; the detached task's
+`Transaction` is simply dropped and rolled back. Nothing in the request path
+changes: a writer that was waiting on the leaked lock now proceeds, and a writer
+that had already given up returns the same `DB_UNREACHABLE` it does today.
+
+Two new error paths, both mapping to `VoomError::Database` exactly as the current
+openers do:
+
+- the spawned task panics — surfaced through `JoinError`;
+- the spawn is attempted during runtime shutdown, so the task is cancelled before
+  it opens anything — also a `JoinError`, and no transaction to lose.
 
 ## Testing
 
@@ -119,9 +142,9 @@ once it is released, and a writer that had already given up returns the same
 integration test, the regression proof.
 
 - A helper polls a future for exactly *N* wakeup-driven polls and then drops it.
-  It does not self-wake: each poll corresponds to one genuine step of progress,
-  which is what makes the count reproducible rather than a timing sweep.
-- For *N* in 1..=4 it cancels `begin_read_then_write` at that point, then asks a
+  It does not self-wake, so each poll corresponds to one genuine step of
+  progress; that is what makes the count reproducible rather than a timing sweep.
+- For *N* in 1..=8 it cancels `begin_read_then_write` at that point, then asks a
   second, independent pool on the same database file to execute a write, bounded
   by a short timeout.
 - Every *N* must leave the independent write succeeding. Against the unfixed
@@ -129,6 +152,11 @@ integration test, the regression proof.
 - The second pool is what makes the assertion honest: a write issued back through
   the *same* pool can be handed the leaked connection and silently join its open
   transaction.
+- **The sweep asserts that it brackets completion** — at least one *N* where the
+  open had not finished and at least one where it had. The window is one poll
+  wide and its position depends on the pinned `sqlx`, `flume`, and `tokio`
+  versions; the bracket is what turns a version bump that moves the window out of
+  range into a red test rather than a green test that proves nothing.
 
 The test is bounded by `tokio::time::timeout` only to fail fast; it asserts an
 observable state transition (a write lock that can be taken), not an elapsed
@@ -156,10 +184,10 @@ what the change does to that.
   malicious to trigger it: being fenced, or hitting its own 30s per-attempt
   timeout, is enough.
 - **Control.** Today: none — a disconnect inside the window wedges every writer
-  against that database until the process restarts, which is a durable
-  denial of service from a single well-timed connection drop. After this change:
-  the connection is discarded on release, so the cost is bounded at one
-  connection and one `warn` line.
+  against that database until the process restarts, which is a durable denial of
+  service from a single well-timed connection drop. After this change: the
+  transaction is opened and immediately rolled back, so the cost is bounded at
+  one pooled connection held for the duration of one lock wait.
 - **Out of scope.** Rate-limiting or authenticating disconnects, and any other
   cancellation-triggered resource exhaustion (file handles, worker processes,
   leases). Not addressed here and not claimed to be.
