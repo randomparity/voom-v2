@@ -220,10 +220,9 @@ A cancelled caller has nobody left to return an error to; the detached task's
 changes: a writer that was waiting on the leaked lock now proceeds, and a writer
 that had already given up returns the same `DB_UNREACHABLE` it does today.
 
-Two new error paths, both mapping to `VoomError::Database` exactly as the current
+One new error path, mapping to `VoomError::Database` exactly as the current
 openers do:
 
-- the spawned task panics — surfaced through `JoinError`;
 - the spawned task panics, or is dropped without sending — either way the sender
   drops, `receiver.await` yields `RecvError`, and `database_context` maps it. No
   transaction is lost: the same drop rolls one back if it exists. Note what this
@@ -239,6 +238,19 @@ holds no connection and is additionally bounded by `POOL_ACQUIRE_BUDGET`, so
 worst-case termination for a detached opener is `POOL_ACQUIRE_BUDGET +
 LOCK_WAIT_BUDGET` — 75s, not 30s. It degrades and drains rather than wedging;
 the drain is just slower than the first draft claimed.
+
+Against the real numbers: file pools carry `max_connections = 8`
+(`crates/voom-store/src/pool.rs:81`), and one node-agent call retries five times
+across a 153.75s budget (`crates/voom-node-agent/tests/budget_ladder.rs`), so a
+single `deactivate` under contention can leave up to five detached openers, and
+eight concurrent ones saturate the pool. A `:memory:` pool has one connection, so
+one detached opener blocks it for the window. That is accepted, on the ground
+that every detached opener terminates within its own budget with no unbounded
+wait in it, so occupancy decays regardless of arrival rate. No test asserts it:
+the property follows from two constants rather than from a race, and a test that
+tried to observe it would need sustained contention and a timing assertion —
+the shape this design exists to avoid. The `run-constrained.sh` acceptance sweep
+below is where real contention is exercised.
 
 ## Testing
 
@@ -262,13 +274,25 @@ integration test, the regression proof.
   that passes while proving nothing. Note what the control does *not* buy: the
   two arms count different clocks, so a red control means "check whether upstream
   closed the window", not "the fixed arm stopped covering".
+- **The fixed arm asserts that it cancelled.** After the fix the caller is a
+  spawn plus a `oneshot` await, so it resolves on its second poll and only
+  *N* = 1 drops the future while it is still pending; *N* >= 2 exercises an open
+  that completed and was dropped by the ordinary path. The poll helper already
+  returns whether it dropped a still-pending future, so the arm requires at least
+  one *N* in the sweep to have actually cancelled. Without that assertion a
+  dependency bump that let the receiver be `Ready` on its first poll would leave
+  the arm green while cancelling nothing — the vacuity the control guards against
+  on the other arm, which does not transfer to this one.
 - **Parallelism precondition.** Both arms are skipped, loudly, when
   `std::thread::available_parallelism()` reports fewer than 4. On one core the
   open collapses into one or two polls and the window frequently has no poll
   boundary in it at all (table above), which would make the control red on a
   1-vCPU container for a reason that has nothing to do with the defect — and
   would let the fixed arm pass vacuously. Four is the lowest parallelism measured
-  to reproduce deterministically, including with a busy loop per core. The skip
+  *sampled* to reproduce deterministically, including with a busy loop per core —
+  a sampled point, not a located boundary. The envelope was measured under
+  `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`, which the test
+  carries, so the gate and the measurement are about the same thing. The skip
   prints the observed parallelism and says the run proved nothing, so a host that
   silently stops covering says so. CI's `test (ubuntu-latest)` and `coverage`
   jobs clear the gate; a 3-vCPU `macos-latest` runner does not, and skips.
@@ -301,10 +325,19 @@ recipe, repeated:
   --all-features -- --test-threads=1
 ```
 
-at least 60 times — three times the upper end of the observed 1-in-20–30 rate, so
-a clean sweep is a meaningful negative rather than an unlucky one. Run it against
-the branch and report the count; if the pre-fix control is also run, report both.
-Anything less is reported as what it is, not as the criterion discharged.
+**at least 90 times.** 60 is not enough and the first draft's arithmetic read the
+range backwards: 1-in-30 is the *lower* failure probability, so a clean 60-run
+sweep still has probability (29/30)^60 = 0.13 of proving nothing. At 90 runs the
+worst case is (29/30)^90 = 0.047.
+
+**The pre-fix control gates the sweep.** Reproduction is configuration-sensitive,
+not merely rare — #592 records that 101 unthrottled runs did not reproduce and
+that the `--write-bps` throttle is required — so 90 green post-fix runs cannot be
+told apart from a host that would never have entered the window that day. Run the
+unfixed opener under the identical invocation on the same host until it
+reproduces at least once (expected ~25 runs). If it does not, criterion 5 is
+reported as **not discharged**, not as a green sweep. Report both counts either
+way; anything short of the full protocol is reported as what it is.
 
 **Unchanged:** `crates/voom-node-agent/tests/lifecycle.rs`. `HANG_GUARD` stays at
 30s. That test is the end-to-end signal for this defect and it stays tight, which
