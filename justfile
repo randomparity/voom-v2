@@ -25,6 +25,7 @@ ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-s
     check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
+    check-transaction-openers check-transaction-openers-selftest \
     check-adr-index check-adr-index-selftest select-ffmpeg-asset-selftest \
     run-constrained-selftest \
     test doc deny audit

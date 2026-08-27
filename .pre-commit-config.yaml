@@ -88,6 +88,21 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: check-transaction-openers
+        name: just check-transaction-openers
+        entry: just check-transaction-openers
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: check-transaction-openers-selftest
+        name: just check-transaction-openers-selftest
+        entry: just check-transaction-openers-selftest
+        language: system
+        pass_filenames: false
+        files: "^(crates/.*\\.rs|\
+          scripts/check-transaction-openers.*\\.sh|justfile)$"
+
       - id: check-adr-index
         name: just check-adr-index
         entry: just check-adr-index

@@ -97,7 +97,7 @@ All routine actions go through `just` (see `justfile`):
 Run a single test: `cargo test -p <crate> <test_name>` (e.g. `cargo test -p voom-cli version_envelope`).
 Tests inside the `voom-cli` integration suite use `insta` snapshots — review with `cargo insta review` after a deliberate change.
 
-Pre-commit hooks (installed by `just setup` via `prek install`) delegate to `just` recipes so they cannot drift from `just ci`: `fmt-check`, `check-test-layout`, `check-paused-time-db`(+selftest), `lint`, a light `cargo test --quiet`, `deny`, and `audit` on staged Rust / `Cargo.lock` / `Cargo.toml` / `deny.toml` changes. Two checks are deliberately CI-only because they are too slow per commit: `just doc` and the full `--all-features` test build (`just test`) — run `just ci` before pushing. Don't bypass the hooks; fix the underlying issue.
+Pre-commit hooks (installed by `just setup` via `prek install`) delegate to `just` recipes so they cannot drift from `just ci`: `fmt-check`, `check-test-layout`, `check-paused-time-db`(+selftest), `check-transaction-openers`(+selftest), `lint`, a light `cargo test --quiet`, `deny`, and `audit` on staged Rust / `Cargo.lock` / `Cargo.toml` / `deny.toml` changes. Two checks are deliberately CI-only because they are too slow per commit: `just doc` and the full `--all-features` test build (`just test`) — run `just ci` before pushing. Don't bypass the hooks; fix the underlying issue.
 
 ## Architecture
 
@@ -261,6 +261,33 @@ control *domain* time through the injected `Clock` (`ManualClock`).
 `just check-paused-time-db` (wired into `just ci`) enforces this: it fails when
 one test file references `SqlitePool`/`ControlPlane` and also calls
 `tokio::time::pause`/`advance`. See `docs/adr/0012-paused-time-db-pool-guard.md`.
+
+**Open every transaction through a `voom_store::tx` helper, never `pool.begin()`.**
+Which mode a transaction needs depends on what its *first* statement does —
+including statements inside the `*_in_tx` helpers it passes its handle to — and
+that is a fact only the author has. The four helpers record it:
+
+| helper | mode | when |
+|---|---|---|
+| `begin_read_then_write` | `BEGIN IMMEDIATE` | reads before it writes — ADR 0083's hazard |
+| `begin_write_first` | `BEGIN` | the first statement writes |
+| `begin_read_only` | `BEGIN` | never writes |
+| `begin_serialized_read` | `BEGIN IMMEDIATE` | never writes, but must not read a stale snapshot |
+
+A read-then-write transaction on a deferred `BEGIN` is refused at its first
+write *without* consulting `busy_timeout`, because `SQLite` will not upgrade a
+read lock — so it fails under contention instead of waiting. That is issue #546.
+Picking `begin_read_only` where WAL's snapshot semantics matter is the mirror
+defect: a plain `BEGIN` does not wait for an in-flight writer, so a guard can
+pass on state that is already stale.
+
+`just check-transaction-openers` (wired into `just ci` and the hooks) enforces
+the boundary: a bare `pool.begin()` or `pool.begin_with(…)` in production code
+is a violation. It proves deliberateness, not correctness — the name is a claim
+a reviewer can check against the body, which `begin_tx` never was. Test files
+may open raw; a competing writer that holds the lock without writing is not a
+shape any production helper describes. See `docs/adr/0083-…` and
+`docs/adr/0086-transaction-openers-are-named-helpers.md`.
 
 **Tests run on a pinned temp root, not the host's `/tmp`.**
 `.cargo/config.toml` forces `TMPDIR` to `.test-tmp/` in the workspace so every
