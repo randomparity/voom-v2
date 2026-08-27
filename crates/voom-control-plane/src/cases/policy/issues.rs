@@ -16,7 +16,8 @@ use voom_events::{Event, SubjectType};
 use voom_store::repo::issues::{IssueFilter, IssueListPage, IssueRecord};
 
 use crate::ControlPlane;
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
+use voom_store::tx::begin_write_first;
 
 impl ControlPlane {
     /// List issues, filtered and keyset-paginated by ascending id.
@@ -52,7 +53,7 @@ impl ControlPlane {
         priority_reason: Option<String>,
     ) -> Result<Option<IssueRecord>, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "issues: update_issue_priority").await?;
         let record = self
             .issues
             .update_priority_in_tx(&mut tx, id, priority, priority_reason.as_deref(), now)
@@ -71,7 +72,7 @@ impl ControlPlane {
     /// Propagates repo and event-append errors.
     pub async fn resolve_issue(&self, id: IssueId) -> Result<Option<IssueRecord>, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "issues: resolve_issue").await?;
         let record = self.issues.resolve_in_tx(&mut tx, id, now).await?;
         if let Some(record) = &record {
             self.emit_issue_event(&mut tx, record, true, now).await?;
@@ -92,7 +93,7 @@ impl ControlPlane {
     ) -> Result<Option<IssueRecord>, VoomError> {
         let now = self.clock().now();
         let until = now + Duration::days(i64::from(days));
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "issues: suppress_issue").await?;
         let record = self.issues.suppress_in_tx(&mut tx, id, until, now).await?;
         if let Some(record) = &record {
             self.emit_issue_event(&mut tx, record, false, now).await?;
@@ -108,7 +109,7 @@ impl ControlPlane {
     /// Propagates repo and event-append errors.
     pub async fn accept_issue(&self, id: IssueId) -> Result<Option<IssueRecord>, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "issues: accept_issue").await?;
         let record = self.issues.accept_in_tx(&mut tx, id, now).await?;
         if let Some(record) = &record {
             self.emit_issue_event(&mut tx, record, false, now).await?;

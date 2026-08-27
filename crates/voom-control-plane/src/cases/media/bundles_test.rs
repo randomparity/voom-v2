@@ -8,7 +8,8 @@ use voom_store::repo::media::identity::{
     NewMediaWork, ProducedBy,
 };
 
-use crate::cases::{begin_immediate_tx, commit_tx, count, cp};
+use crate::cases::{commit_tx, count, cp};
+use voom_store::tx::begin_read_then_write;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -221,7 +222,9 @@ async fn primary_bundle_for_exact_active_version_creates_once_and_reuses_without
         .await
         .unwrap();
 
-    let mut tx = begin_immediate_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_read_then_write(&cp.pool, "bundles_test: resolve_or_create_primary_bundle")
+        .await
+        .unwrap();
     let created = cp
         .resolve_or_create_primary_bundle_in_tx(
             &mut tx,
@@ -257,7 +260,9 @@ async fn primary_bundle_for_exact_active_version_creates_once_and_reuses_without
         .fetch_one(&cp.pool)
         .await
         .unwrap();
-    let mut tx = begin_immediate_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_read_then_write(&cp.pool, "bundles_test: resolve_or_create_primary_bundle")
+        .await
+        .unwrap();
     let reused = cp
         .resolve_or_create_primary_bundle_in_tx(
             &mut tx,
@@ -295,7 +300,9 @@ async fn primary_bundle_rejects_superseded_exact_version_without_rows_or_events(
         .unwrap();
     let before = durable_primary_bundle_counts(&cp).await;
 
-    let mut tx = begin_immediate_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_read_then_write(&cp.pool, "bundles_test: resolve_or_create_primary_bundle")
+        .await
+        .unwrap();
     let error = cp
         .resolve_or_create_primary_bundle_in_tx(
             &mut tx,
@@ -349,7 +356,9 @@ async fn primary_bundle_rejects_existing_non_primary_membership_without_rows_or_
         .unwrap();
     let before = durable_primary_bundle_counts(&cp).await;
 
-    let mut tx = begin_immediate_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_read_then_write(&cp.pool, "bundles_test: resolve_or_create_primary_bundle")
+        .await
+        .unwrap();
     let error = cp
         .resolve_or_create_primary_bundle_in_tx(
             &mut tx,

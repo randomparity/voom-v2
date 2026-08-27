@@ -11,6 +11,7 @@ use voom_core::{
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, u32_from_i64, u64_from_i64};
+use crate::tx::{begin_read_only, begin_read_then_write, begin_write_first};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioExtractOperationState {
@@ -252,9 +253,7 @@ impl SqliteAudioExtractOperationRepo {
         input: &NewAudioExtractOperation,
         outputs: &[NewAudioExtractOutput],
     ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
-        let mut tx = self.pool.begin().await.map_err(|error| {
-            VoomError::database_context("audio_extract_operations exact get begin", error)
-        })?;
+        let mut tx = begin_read_only(&self.pool, "audio_extract: get_exact_by_key").await?;
         let record = Self::get_exact_by_key_in_tx(&mut tx, input, outputs).await?;
         tx.commit().await.map_err(|error| {
             VoomError::database_context("audio_extract_operations exact get commit", error)
@@ -477,13 +476,7 @@ impl SqliteAudioExtractOperationRepo {
         outputs: &[NewAudioExtractOutput],
         now: OffsetDateTime,
     ) -> Result<AudioExtractOperationRecord, VoomError> {
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| {
-                VoomError::database_context("audio_extract_operations begin immediate", error)
-            })?;
+        let mut tx = begin_write_first(&self.pool, "audio_extract: create_planned").await?;
         let record = Self::create_planned_in_tx(&mut tx, &input, outputs, now).await?;
         tx.commit().await.map_err(|error| {
             VoomError::database_context("audio_extract_operations create commit", error)
@@ -674,13 +667,8 @@ impl SqliteAudioExtractOperationRepo {
         now: OffsetDateTime,
     ) -> Result<AudioExtractDispatchAttempt, VoomError> {
         validate_dispatch_attempt(&attempt)?;
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| {
-                VoomError::database_context("audio extract dispatch begin immediate", error)
-            })?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "audio_extract: record_dispatch_attempt").await?;
         let operation_id = require_live_planned_claim(&mut tx, claim, now).await?;
         let attempt_id =
             insert_dispatch_attempt(&mut tx, operation_id, claim, &attempt, now).await?;
@@ -713,9 +701,7 @@ impl SqliteAudioExtractOperationRepo {
         let Some(attempt_id) = attempt_id else {
             return Ok(None);
         };
-        let mut tx = self.pool.begin().await.map_err(|error| {
-            VoomError::database_context("audio extract dispatch attempt get begin", error)
-        })?;
+        let mut tx = begin_read_only(&self.pool, "audio_extract: get_dispatch_attempt").await?;
         let attempt = load_dispatch_attempt(&mut tx, attempt_id).await?;
         tx.commit().await.map_err(|error| {
             VoomError::database_context("audio extract dispatch attempt get commit", error)
@@ -857,13 +843,7 @@ impl SqliteAudioExtractOperationRepo {
         acknowledgement: &AudioExtractQuiescenceAcknowledgement,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| {
-                VoomError::database_context("audio extract quiescence begin", error)
-            })?;
+        let mut tx = begin_write_first(&self.pool, "audio_extract: acknowledge_quiescence").await?;
         Self::acknowledge_quiescence_in_tx(&mut tx, acknowledgement, now).await?;
         tx.commit()
             .await

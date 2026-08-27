@@ -767,14 +767,6 @@ pub(crate) async fn consult_scan_reconciliation_commit_lock_in_tx(
 ///
 /// Returns `VoomError::Database` if acquiring the pool connection or
 /// emitting `BEGIN IMMEDIATE` fails.
-pub(crate) async fn begin_gate_tx(
-    pool: &SqlitePool,
-) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    pool.begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|e| VoomError::database_context("gate tx begin IMMEDIATE", e))
-}
-
 mod abort_list;
 mod authorize;
 mod codecs;

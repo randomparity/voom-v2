@@ -20,7 +20,8 @@ use voom_store::repo::policy::safety_policies::{
 
 use crate::ControlPlane;
 use crate::cases::policy::compliance::plan_file_version_targets;
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
+use voom_store::tx::begin_read_then_write;
 
 /// One reason a safety policy blocks an execute run. `Serialize` so the CLI can
 /// surface the machine-readable reason set alongside the human message.
@@ -254,7 +255,8 @@ impl ControlPlane {
             .await?;
         let dedupe_key = safety_blocked_dedupe_key(slug, policy_version_id, input_set_id);
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "safety_gate: enforce_safety_policy").await?;
         if blocks.is_empty() {
             self.resolve_safety_issue(&mut tx, &dedupe_key, policy_version_id, now)
                 .await?;

@@ -14,7 +14,8 @@ use voom_store::repo::execution::nodes::{NewNode, Node, NodeKind, NodeStatus};
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;
 
-use super::{append_event, begin_immediate_tx, begin_tx, commit_tx};
+use super::{append_event, commit_tx};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 /// Inputs required to register a durable node.
 #[derive(Debug)]
@@ -48,7 +49,7 @@ impl ControlPlane {
         }
         let generated = self.generate_node_token();
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "nodes: register_node").await?;
         let node = self
             .nodes
             .register_in_tx(
@@ -93,12 +94,10 @@ impl ControlPlane {
     /// propagates repository and event-append errors.
     pub async fn heartbeat_node(&self, node_id: NodeId, token: &str) -> Result<Node, VoomError> {
         let now = self.clock().now();
-        // Read-then-write: the token/status check reads before the heartbeat
-        // write, so the transaction must take the write lock at `BEGIN`. Node
+        // The token/status check reads before the heartbeat write. Node
         // heartbeats run on every agent's timer alongside `remote_recover`'s
-        // writes to the same table. See [`begin_immediate_tx`] for why a
-        // deferred `BEGIN` bypasses `busy_timeout` on the upgrade.
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        // writes to the same table, so this contends in practice (ADR 0083).
+        let mut tx = begin_read_then_write(&self.pool, "nodes: heartbeat_node").await?;
         let auth = self
             .nodes
             .auth_record_in_tx(&mut tx, node_id)
@@ -156,7 +155,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates repository and event-append errors.
     pub async fn mark_stale_nodes(&self, now: OffsetDateTime) -> Result<Vec<Node>, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "nodes: mark_stale_nodes").await?;
         let candidates = self.nodes.stale_candidates_in_tx(&mut tx).await?;
         let mut changed = Vec::new();
         for candidate in candidates {
@@ -227,7 +226,7 @@ impl ControlPlane {
         expected_epoch: u64,
         now: OffsetDateTime,
     ) -> Result<Node, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "nodes: retire_node").await?;
         let current = self
             .nodes
             .active_context_in_tx(&mut tx, node_id)

@@ -36,7 +36,8 @@ use crate::cases::execution::remote_execution::{
     ReplaySlot, decode_replay, incarnation_replay_key, is_remote_replayable_error,
     validate_remote_node_live,
 };
-use crate::cases::{append_event, begin_immediate_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
+use voom_store::tx::{begin_read_then_write, begin_serialized_read};
 
 /// Supplemental-receipt reason written by the current owner's re-observation
 /// when the target is absent with no temp sibling: positive evidence that
@@ -277,7 +278,7 @@ async fn begin_intent_case<'a>(
     identity: &CaseIdentity<'_>,
     now: time::OffsetDateTime,
 ) -> Result<CaseReservation<'a>, VoomError> {
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx = begin_read_then_write(&cp.pool, "intent: begin_intent_case").await?;
     let auth = cp
         .require_remote_incarnation_fence_in_tx(&mut tx, node_id, token, incarnation_id, None)
         .await?;
@@ -447,7 +448,11 @@ impl ControlPlane {
                         // replay-stored: the reservation rolls back, but the
                         // fail-closed abort must persist.
                         drop(tx);
-                        let mut abort_tx = begin_immediate_tx(&self.pool).await?;
+                        let mut abort_tx = begin_read_then_write(
+                            &self.pool,
+                            "intent: remote_authorize_commit_intent",
+                        )
+                        .await?;
                         abort_pending_on_drift(self, &mut abort_tx, input.intent_id, now).await;
                         commit_tx(abort_tx).await?;
                         return Err(err);
@@ -717,7 +722,8 @@ impl ControlPlane {
         use voom_store::repo::media::identity::{FileLocationAddress, FileLocationRepo};
 
         let now = self.clock().now();
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx =
+            begin_serialized_read(&self.pool, "intent: remote_open_commit_intents").await?;
         let auth = self
             .require_remote_incarnation_fence_in_tx(
                 &mut tx,

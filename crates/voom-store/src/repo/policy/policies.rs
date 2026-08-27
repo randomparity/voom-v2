@@ -7,6 +7,7 @@ use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+use crate::tx::{begin_read_then_write, begin_write_first};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PolicyDocument {
@@ -83,7 +84,8 @@ impl SqlitePolicyRepo {
             .display_name
             .unwrap_or_else(|| compiled.policy.policy_name.clone());
 
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "policies: create_document_with_version").await?;
         let document_res = sqlx::query(
             "INSERT INTO policy_documents (slug, display_name, created_at) VALUES (?, ?, ?)",
         )
@@ -169,7 +171,7 @@ impl SqlitePolicyRepo {
         let compiled_json_text = serialize_json(&compiled_json, "policy_versions.compiled_json")?;
         let created_at = iso8601(created_at)?;
 
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "policies: add_version").await?;
         if let Some(existing) =
             get_version_by_document_and_hash_in_tx(&mut tx, document_id, &source_hash).await?
         {
@@ -320,14 +322,6 @@ const VERSION_SELECT_BY_ID: &str = "SELECT id, policy_document_id, version_numbe
 const VERSION_SELECT_BY_DOCUMENT_AND_HASH: &str = "SELECT id, policy_document_id, \
     version_number, source_text, source_hash, schema_version, compiled_json, created_at \
     FROM policy_versions WHERE policy_document_id = ? AND source_hash = ?";
-
-async fn begin_immediate(
-    pool: &SqlitePool,
-) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, VoomError> {
-    pool.begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|e| VoomError::database_context("policy registry begin IMMEDIATE", e))
-}
 
 struct NewVersionRow<'a> {
     document_id: PolicyDocumentId,

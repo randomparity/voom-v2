@@ -6,6 +6,7 @@ use voom_core::{JobId, VoomError};
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
+use crate::tx::begin_write_first;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
@@ -110,11 +111,7 @@ impl SqliteJobRepo {
     }
 
     pub async fn create(&self, input: NewJob) -> Result<Job, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "jobs: create").await?;
         let out = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -192,11 +189,7 @@ impl SqliteJobRepo {
     }
 
     pub async fn succeed(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "jobs: succeed").await?;
         let out = self.succeed_in_tx(&mut tx, id, now).await?;
         tx.commit()
             .await
@@ -214,11 +207,7 @@ impl SqliteJobRepo {
     }
 
     pub async fn fail(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "jobs: fail").await?;
         let out = self.fail_in_tx(&mut tx, id, now).await?;
         tx.commit()
             .await
@@ -236,11 +225,7 @@ impl SqliteJobRepo {
     }
 
     pub async fn cancel(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "jobs: cancel").await?;
         let out = self.cancel_in_tx(&mut tx, id, now).await?;
         tx.commit()
             .await

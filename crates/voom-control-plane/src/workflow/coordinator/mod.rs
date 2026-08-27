@@ -38,10 +38,10 @@ use voom_store::repo::execution::workflow_summaries::{
 use voom_store::repo::media::identity::{MediaSnapshot, MediaSnapshotRepo};
 
 use crate::ControlPlane;
+use crate::cases::commit_tx;
 use crate::cases::policy::compliance::{ComplianceExecutionOptions, PromotionPlan};
 use crate::cases::policy::plans::plan_compiled_policy_with_input;
 use crate::cases::policy::tool_preflight::PolicyToolTarget;
-use crate::cases::{begin_immediate_tx, begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{
@@ -64,6 +64,7 @@ use resume::{PreparedResumeSeed, ResumePreparation};
 
 #[cfg(test)]
 use planning::zero_phase_summary;
+use voom_store::tx::begin_write_first;
 
 /// A file the coordinator is advancing through phases. `version_id`/`snapshot`
 /// track the file's current chain tip and are refreshed after each commit.
@@ -1234,7 +1235,7 @@ impl ControlPlane {
         if !needs_verifier {
             return Ok(());
         }
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "coordinator: ensure_policy_verifier").await?;
         crate::artifact::bootstrap::ensure_builtin_verify_artifact_worker_in_tx(self, &mut tx)
             .await?;
         commit_tx(tx).await
@@ -1299,7 +1300,11 @@ impl ControlPlane {
         VoomError,
     > {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(
+            &self.pool,
+            "coordinator: open_sliding_file_job_with_terminal_progress",
+        )
+        .await?;
         let job = self
             .open_job_in_tx(
                 &mut tx,

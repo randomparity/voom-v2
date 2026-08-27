@@ -16,7 +16,8 @@ use voom_store::repo::media::artifacts::{
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, commit_tx};
+use voom_store::tx::begin_write_first;
 
 impl ControlPlane {
     /// Create an artifact handle and emit `artifact_handle.created`.
@@ -27,7 +28,7 @@ impl ControlPlane {
         &self,
         input: NewArtifactHandle,
     ) -> Result<ArtifactHandle, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "artifacts: create_artifact_handle").await?;
         let occurred = input.created_at;
         let handle = self.artifacts.create_handle_in_tx(&mut tx, input).await?;
         append_event(
@@ -56,7 +57,7 @@ impl ControlPlane {
         &self,
         input: NewArtifactLocation,
     ) -> Result<ArtifactLocation, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "artifacts: record_artifact_location").await?;
         let occurred = input.observed_at;
         let location = self.artifacts.record_location_in_tx(&mut tx, input).await?;
         append_event(
@@ -89,7 +90,7 @@ impl ControlPlane {
         id: ArtifactLocationId,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "artifacts: retire_artifact_location").await?;
         let handle_id = self
             .artifacts
             .retire_location_in_tx(&mut tx, id, now)
@@ -118,7 +119,7 @@ impl ControlPlane {
         &self,
         input: NewArtifactLineage,
     ) -> Result<ArtifactLineage, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "artifacts: record_artifact_lineage").await?;
         let occurred = input.recorded_at;
         let parent = input.parent_artifact_id.0;
         let child = input.child_artifact_id.0;

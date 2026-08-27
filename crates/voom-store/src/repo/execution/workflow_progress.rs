@@ -7,6 +7,7 @@ use voom_core::{JobId, MediaSnapshotId, VoomError};
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, parse_iso8601, u32_from_i64, u64_from_i64};
 use super::workflow_summaries::{FilePhaseSummary, NewFilePhaseSummary, SqliteWorkflowSummaryRepo};
+use crate::tx::begin_write_first;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFilePhaseEntry {
@@ -141,7 +142,7 @@ impl SqliteWorkflowProgressRepo {
                 "max_in_flight_files must be positive".to_owned(),
             ));
         }
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "workflow_progress: insert_file_window").await?;
         self.insert_file_window_in_tx(&mut tx, job_id, max_in_flight_files, &progress, now)
             .await?;
         commit(tx).await?;
@@ -239,11 +240,7 @@ impl SqliteWorkflowProgressRepo {
         job_id: JobId,
         now: OffsetDateTime,
     ) -> Result<Option<FileProgress>, VoomError> {
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| VoomError::database_context("file admission begin", error))?;
+        let mut tx = begin_write_first(&self.pool, "workflow_progress: admit_next_file").await?;
         let timestamp = iso8601(now)?;
         let sql = format!(
             "UPDATE workflow_file_progress SET state = 'active', admitted_at = ? \
@@ -324,7 +321,8 @@ impl SqliteWorkflowProgressRepo {
         expected_phase_ordinal: u32,
         next_phase_ordinal: u32,
     ) -> Result<bool, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "workflow_progress: advance_file_progress").await?;
         let advanced = advance_file_progress_in_tx(
             &mut tx,
             job_id,
@@ -344,7 +342,11 @@ impl SqliteWorkflowProgressRepo {
         next_phase_ordinal: u32,
         now: OffsetDateTime,
     ) -> Result<FilePhaseSummary, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(
+            &self.pool,
+            "workflow_progress: upsert_file_phase_summary_and_advance",
+        )
+        .await?;
         let summary_repo = SqliteWorkflowSummaryRepo::new(self.pool.clone());
         let row = summary_repo
             .upsert_file_phase_summary_in_tx(&mut tx, input, now)
@@ -671,12 +673,6 @@ fn decode_file_phase_entry(
         gate_admitted: row.4,
         created_at: parse_iso8601(&row.5)?,
     })
-}
-
-async fn begin(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    pool.begin()
-        .await
-        .map_err(|error| VoomError::database_context("begin workflow progress transaction", error))
 }
 
 async fn commit(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {

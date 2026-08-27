@@ -25,6 +25,7 @@ ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-s
     check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
+    check-transaction-openers check-transaction-openers-selftest \
     check-adr-index check-adr-index-selftest select-ffmpeg-asset-selftest \
     run-constrained-selftest \
     test doc deny audit
@@ -103,6 +104,14 @@ check-payload-deny-unknown:
 # Self-test for the payload contract guard (keeps its ast-grep rules honest)
 check-payload-deny-unknown-selftest:
     ./scripts/check-payload-deny-unknown-selftest.sh
+
+# Guard: every pool-level transaction is opened by a named voom_store::tx helper
+check-transaction-openers:
+    ./scripts/check-transaction-openers.sh
+
+# Self-test for the transaction-opener guard (keeps its ast-grep rule honest)
+check-transaction-openers-selftest:
+    ./scripts/check-transaction-openers-selftest.sh
 
 # Guard: every numbered ADR is listed in the ADR index and every index link exists
 check-adr-index:

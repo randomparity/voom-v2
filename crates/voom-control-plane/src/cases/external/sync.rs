@@ -15,7 +15,8 @@ use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 
 use crate::ControlPlane;
 
-use super::super::{append_event, begin_immediate_tx, commit_tx};
+use super::super::{append_event, commit_tx};
+use voom_store::tx::begin_read_then_write;
 
 /// Summary of an external-system sync. `last_*` fields describe the most recent
 /// run and are `None` when the system has never been synced.
@@ -53,7 +54,7 @@ impl ControlPlane {
         // Health refresh, link snapshot, and the run event commit in one
         // transaction so a crash never leaves a health change without its
         // corresponding sync run (or vice versa).
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "sync: sync_external_system").await?;
         let updated = self
             .record_probed_health_in_tx(&mut tx, id, probed, now)
             .await?;

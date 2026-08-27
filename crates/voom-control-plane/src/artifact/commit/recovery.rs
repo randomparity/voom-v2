@@ -26,7 +26,8 @@ use crate::ControlPlane;
 use crate::artifact::commit::intent::{RESOLVED_NOT_APPLIED_REASON, guard_intent_scope_in_tx};
 use crate::artifact::commit::prepare::evaluate_commit_safety_gate;
 use crate::artifact::commit::{CommitArtifactInput, CommitArtifactReport};
-use crate::cases::{begin_immediate_tx, begin_tx, commit_tx};
+use crate::cases::commit_tx;
+use voom_store::tx::{begin_read_only, begin_read_then_write, begin_write_first};
 
 pub(super) async fn recover_commit(
     cp: &ControlPlane,
@@ -48,7 +49,7 @@ pub(super) async fn recover_commit(
             ))
         })?;
     let intent = {
-        let mut tx = begin_tx(&cp.pool).await?;
+        let mut tx = begin_read_only(&cp.pool, "recovery: recover_commit").await?;
         let intent = cp
             .artifact_commit_intents
             .get_by_commit_record_in_tx(&mut tx, record.id)
@@ -76,7 +77,7 @@ pub(super) async fn recover_commit(
         ArtifactCommitIntentState::Authorized => {
             // A receipt-bearing authorized intent enters recovery_required
             // before classification (never silently on a timer).
-            let mut tx = begin_immediate_tx(&cp.pool).await?;
+            let mut tx = begin_write_first(&cp.pool, "recovery: recover_commit").await?;
             let now = cp.clock().now();
             cp.artifact_commit_intents
                 .mark_recovery_required_in_tx(&mut tx, intent.id, now)
@@ -143,7 +144,7 @@ async fn finalize_recovered(
     record: &ArtifactCommitRecord,
     intent: &ArtifactCommitIntent,
 ) -> Result<CommitArtifactReport, VoomError> {
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx = begin_read_then_write(&cp.pool, "recovery: finalize_recovered").await?;
     let now = cp.clock().now();
     guard_intent_scope_in_tx(cp, &mut tx, intent, intent.owner_node_id).await?;
     let source_asset_id =
@@ -193,7 +194,7 @@ pub(super) async fn abort_and_reprepare_report(
     classified_intent_epoch: u64,
 ) -> Result<CommitArtifactReport, VoomError> {
     let now: OffsetDateTime = cp.clock().now();
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx = begin_read_then_write(&cp.pool, "recovery: abort_and_reprepare_report").await?;
     let current = cp
         .artifact_commit_intents
         .require_intent_in_tx(&mut tx, intent.id)
@@ -289,7 +290,7 @@ pub(super) async fn abort_prepared_after_hook_failure(
     err: VoomError,
 ) -> Result<CommitArtifactReport, crate::artifact::commit::CommitArtifactCommandError> {
     let now = cp.clock().now();
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx = begin_write_first(&cp.pool, "recovery: abort_prepared_after_hook_failure").await?;
     let _ = cp
         .artifact_commit_intents
         .mark_aborted_in_tx(&mut tx, prepared.intent_id, now)

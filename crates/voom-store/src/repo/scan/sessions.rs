@@ -12,6 +12,7 @@ use super::super::common::{
 };
 use crate::repo::media::artifact_commit_intents::consult_scan_reconciliation_artifact_intent_lock_in_tx;
 use crate::repo::media::commit_safety_gate::consult_scan_reconciliation_commit_lock_in_tx;
+use crate::tx::begin_read_only;
 
 pub const MAX_SCAN_SESSION_OBSERVATIONS: u64 = 100_000;
 
@@ -622,9 +623,7 @@ impl SqliteScanSessionRepo {
         &self,
         query: ScanReconciliationQuery,
     ) -> Result<ScanReconciliationPage, VoomError> {
-        let mut tx = self.pool.begin().await.map_err(|error| {
-            VoomError::database_context("begin scan reconciliation transaction", error)
-        })?;
+        let mut tx = begin_read_only(&self.pool, "scan_sessions: reconciliation_page").await?;
         let page = self.reconciliation_page_in_tx(&mut tx, query).await?;
         tx.commit().await.map_err(|error| {
             VoomError::database_context("commit scan reconciliation transaction", error)

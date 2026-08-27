@@ -1022,7 +1022,11 @@ impl ControlPlane {
         &self,
         file: &PhaseFile,
     ) -> Result<(), VoomError> {
-        let mut tx = crate::cases::begin_tx(&self.pool).await?;
+        let mut tx = voom_store::tx::begin_read_only(
+            &self.pool,
+            "finalize: require_selected_version_still_active",
+        )
+        .await?;
         self.identity
             .require_active_file_versions_in_tx(&mut tx, &[(file.asset_id, file.version_id)])
             .await?;

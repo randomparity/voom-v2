@@ -137,7 +137,13 @@ async fn request_initializes_deadline_and_emits_only_a_session_fact() {
 #[tokio::test]
 async fn request_samples_clock_after_acquiring_the_writer_lock() {
     let fixture = fixture().await;
-    let holding_tx = crate::cases::begin_immediate_tx(fixture.cp.pool_for_test())
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let holding_tx = fixture
+        .cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .unwrap();
     let waiting_cp = fixture.cp.clone();

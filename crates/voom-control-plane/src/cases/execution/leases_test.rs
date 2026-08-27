@@ -28,6 +28,7 @@ use voom_store::repo::media::identity::{
 
 use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
+use voom_store::tx::begin_read_then_write;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -244,6 +245,43 @@ async fn cp_with_zero_busy_timeout() -> (
         .unwrap();
     drop((first, second));
     (cp, clock, tmp)
+}
+
+/// A deferred `BEGIN` that reads and then writes — ADR 0083's exact hazard,
+/// run against the test's own pool so no production code gains a test hook.
+///
+/// While another connection holds the write lock this must be refused, and
+/// refused *immediately*: `SQLite` declines the read→write upgrade without ever
+/// consulting `busy_timeout`. That makes it a timing-free probe for "the write
+/// lock is held right now" — the property a `sleep` can only guess at.
+///
+/// It asserts in both directions. If the upgrade *succeeds*, the lock was not
+/// held, the window under test never existed, and the caller is told so rather
+/// than passing vacuously.
+async fn assert_deferred_upgrade_is_refused(pool: &sqlx::SqlitePool, when: &str) {
+    // A deferred BEGIN takes no lock, so it cannot block; the read that
+    // follows is what takes the snapshot.
+    let mut probe = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM leases LIMIT 1")
+        .fetch_optional(&mut *probe)
+        .await
+        .unwrap();
+    // Matches no row, so even a succeeding control arm cannot perturb the
+    // treatment. The write lock is requested when the statement begins,
+    // before it knows that.
+    let Err(error) = sqlx::query("UPDATE leases SET epoch = epoch WHERE id = -1")
+        .execute(&mut *probe)
+        .await
+    else {
+        panic!(
+            "control arm {when}: the deferred upgrade succeeded, so the write lock \
+             was NOT held and this test proves nothing about contention"
+        );
+    };
+    assert!(
+        error.to_string().contains("database is locked"),
+        "control arm {when}: expected the upgrade to be refused, got {error}"
+    );
 }
 
 async fn held_noop_lease(cp: &crate::ControlPlane) -> voom_store::repo::execution::leases::Lease {
@@ -529,11 +567,25 @@ async fn heartbeat_advances_only_claims_owned_by_its_lease() {
     assert_eq!(heartbeat.last_heartbeat_at, T0 + TDuration::seconds(1));
 }
 
+/// Heartbeat's first statement is the `UPDATE leases`, so it takes the write
+/// lock there rather than at `BEGIN` — see ADR 0086. What matters is that a
+/// contended heartbeat fails cleanly instead of proceeding; *which* statement
+/// reports the contention is an implementation detail, and pinning it to the
+/// opener is what made this transaction claim `BEGIN IMMEDIATE` it never
+/// needed. `heartbeat_serializes_one_production_attempt_behind_a_writer`
+/// covers the behaviour that a caller can actually observe.
 #[tokio::test]
-async fn heartbeat_reserves_writer_at_transaction_start() {
+async fn heartbeat_fails_cleanly_behind_a_held_writer() {
     let (cp, _clock, _tmp) = cp_with_zero_busy_timeout().await;
     let lease = held_noop_lease(&cp).await;
-    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
 
     let error = cp
         .heartbeat_lease(lease.id, TDuration::minutes(1), T0 + TDuration::seconds(1))
@@ -542,8 +594,13 @@ async fn heartbeat_reserves_writer_at_transaction_start() {
     writer.rollback().await.unwrap();
 
     assert!(
-        error.to_string().contains("begin immediate"),
-        "heartbeat contention must be reported at its immediate transaction opener: {error}"
+        error.to_string().contains("leases heartbeat"),
+        "heartbeat contention must be reported at its first write: {error}"
+    );
+    let unchanged = cp.leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(
+        unchanged.last_heartbeat_at, lease.last_heartbeat_at,
+        "a heartbeat that lost the write lock must not have moved the lease"
     );
 }
 
@@ -552,7 +609,14 @@ async fn heartbeat_serializes_one_production_attempt_behind_a_writer() {
     let (cp, _clock, _tmp) = cp_at_t0().await;
     let lease = held_noop_lease(&cp).await;
     let cp = Arc::new(cp);
-    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
     let observer = Arc::new(HeartbeatTransactionObserver::default());
     let outer_attempts = Arc::new(AtomicUsize::new(0));
     let task_cp = Arc::clone(&cp);
@@ -574,15 +638,17 @@ async fn heartbeat_serializes_one_production_attempt_behind_a_writer() {
     observer.invoked.notified().await;
     assert_eq!(observer.invocations.load(Ordering::SeqCst), 1);
     assert_eq!(outer_attempts.load(Ordering::SeqCst), 1);
-    assert!(!observer.acquired.load(Ordering::SeqCst));
+    // Blocked on the write lock, not failed and not retried: heartbeat's first
+    // statement is the `UPDATE`, so it waits there rather than at `BEGIN`.
     assert!(!heartbeat.is_finished());
 
     writer.rollback().await.unwrap();
     let updated = heartbeat.await.unwrap().unwrap();
 
+    // Still one attempt after release — it waited the writer out rather than
+    // bouncing off `database is locked` and coming back through the retry.
     assert_eq!(observer.invocations.load(Ordering::SeqCst), 1);
     assert_eq!(outer_attempts.load(Ordering::SeqCst), 1);
-    assert!(observer.acquired.load(Ordering::SeqCst));
     assert_eq!(updated.last_heartbeat_at, T0 + TDuration::seconds(1));
 }
 
@@ -966,7 +1032,9 @@ async fn acquire_lease_in_tx_rolls_back_with_caller_transaction() {
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
     let w = eligible_worker(&cp, "alpha", &t.kind).await;
-    let mut tx = begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_read_then_write(&cp.pool, "leases_test: acquire_lease_in_tx")
+        .await
+        .unwrap();
 
     let lease = cp
         .acquire_lease_in_tx(
@@ -1462,7 +1530,14 @@ async fn fail_lease_retriable_reserves_writer_before_reading_held_state() {
         count(&cp, EventKind::TicketFailedTerminal).await,
     );
     let issues_before = terminal_failure_issues(&cp).await;
-    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
 
     let error = cp
         .fail_lease(
@@ -1476,8 +1551,8 @@ async fn fail_lease_retriable_reserves_writer_before_reading_held_state() {
     writer.rollback().await.unwrap();
 
     assert!(
-        error.to_string().contains("begin immediate"),
-        "lease failure must contend before reading held state: {error}"
+        error.to_string().contains("leases: fail_lease"),
+        "lease failure must contend at its opener, before reading held state: {error}"
     );
     let stored_lease = cp.leases().get(lease.id).await.unwrap().unwrap();
     assert_eq!(stored_lease.state, lease.state);
@@ -1518,7 +1593,14 @@ async fn fail_lease_terminal_reserves_writer_before_reading_held_state() {
         count(&cp, EventKind::TicketFailedTerminal).await,
     );
     let issues_before = terminal_failure_issues(&cp).await;
-    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
 
     let error = cp
         .fail_lease(
@@ -1532,8 +1614,8 @@ async fn fail_lease_terminal_reserves_writer_before_reading_held_state() {
     writer.rollback().await.unwrap();
 
     assert!(
-        error.to_string().contains("begin immediate"),
-        "terminal failure must contend before reading held state: {error}"
+        error.to_string().contains("leases: fail_lease"),
+        "terminal failure must contend at its opener, before reading held state: {error}"
     );
     let stored_lease = cp.leases().get(lease.id).await.unwrap().unwrap();
     assert_eq!(stored_lease.state, lease.state);
@@ -1600,19 +1682,108 @@ async fn expire_due_waits_out_a_concurrent_writer() {
         })
         .await
         .unwrap();
-    let competing_writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
-    let release_writer = async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        commit_tx(competing_writer).await.unwrap();
-    };
+    let cp = Arc::new(cp);
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let competing_writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
 
-    let (expired, ()) = tokio::join!(cp.expire_due(T0 + TDuration::seconds(60)), release_writer);
+    // 1. The lock is held and the window under test is real.
+    assert_deferred_upgrade_is_refused(cp.pool_for_test(), "before the treatment started").await;
 
-    let report = expired.unwrap_or_else(|error| {
+    // 2. Start the treatment against that held lock, and wait until its task is
+    //    actually running rather than merely spawned.
+    let running = Arc::new(tokio::sync::Notify::new());
+    let treatment = tokio::spawn({
+        let cp = Arc::clone(&cp);
+        let running = Arc::clone(&running);
+        async move {
+            running.notify_one();
+            cp.expire_due(T0 + TDuration::seconds(60)).await
+        }
+    });
+    running.notified().await;
+
+    // 3. The lock is still held now that the treatment is under way, and each
+    //    probe is real database work — so a host slow enough to delay the
+    //    treatment delays these equally. That is the property a `sleep` lacks.
+    for probe in 0..4 {
+        assert_deferred_upgrade_is_refused(cp.pool_for_test(), "after the treatment started").await;
+        // 4. A deferred `expire_due` fails at its first UPDATE without ever
+        //    waiting, so finishing here means it did not wait. Unwrap inside
+        //    the assertion so the panic carries its own error.
+        assert!(
+            !treatment.is_finished(),
+            "expire_due returned while the write lock was held (probe {probe}): {:?}",
+            treatment.await.unwrap()
+        );
+    }
+
+    // 5. Release. It must now succeed, having waited rather than failed.
+    commit_tx(competing_writer).await.unwrap();
+    let report = treatment.await.unwrap().unwrap_or_else(|error| {
         panic!("expire_due must wait out the writer, not fail with SQLITE_BUSY: {error:?}")
     });
     assert_eq!(report.requeued_tickets, vec![t.id]);
     assert_eq!(count(&cp, EventKind::LeaseExpired).await, 1);
+}
+
+/// The mode itself, with no concurrency and no timing: under a zero
+/// `busy_timeout` a held write lock makes `expire_due` fail, and *where* it
+/// fails names the opener it used.
+///
+/// `BEGIN IMMEDIATE` asks for the lock at the opener, so the error carries the
+/// opener's context. A deferred `BEGIN` gets past the opener and is refused at
+/// the first `UPDATE`, carrying that statement's context instead. Reverting
+/// #546 flips this assertion deterministically — where
+/// `expire_due_waits_out_a_concurrent_writer` depends on the treatment reaching
+/// its transaction while the lock is held, this depends on nothing but the
+/// ordering `SQLite` guarantees.
+#[tokio::test]
+async fn expire_due_asks_for_the_write_lock_at_its_opener() {
+    let (cp, _clock, _tmp) = cp_with_zero_busy_timeout().await;
+    let lease = held_noop_lease(&cp).await;
+    let competing_writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
+
+    // Past the lease's one-minute TTL: `expires_at < ?` is strict, so 60s
+    // exactly would leave nothing due and the whole test vacuous.
+    let due = T0 + TDuration::seconds(61);
+    let Err(error) = cp.expire_due(due).await else {
+        panic!("a held write lock and a zero busy_timeout must fail expire_due");
+    };
+    competing_writer.rollback().await.unwrap();
+
+    let text = error.to_string();
+    assert!(
+        text.contains("leases: expire_due"),
+        "expire_due must contend at its opener, not at a later statement: {text}"
+    );
+    assert!(
+        !text.contains("lease expire"),
+        "contention reported at the first UPDATE means the opener was deferred: {text}"
+    );
+    let unchanged = cp.leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(
+        unchanged.state, lease.state,
+        "a refused expire_due must leave the lease alone"
+    );
+    // Anti-vacuity: the same call, uncontended, must actually expire it. An
+    // empty batch would make every assertion above pass without the opener
+    // ever asking for the write lock.
+    let report = cp.expire_due(due).await.unwrap();
+    assert_eq!(
+        report.expired_leases,
+        vec![lease.id],
+        "the fixture must present a genuinely overdue lease"
+    );
 }
 
 #[tokio::test]

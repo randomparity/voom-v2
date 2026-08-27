@@ -12,7 +12,8 @@ use voom_store::repo::execution::jobs::{Job, NewJob};
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx, require_audit_field};
+use super::{append_event, commit_tx, require_audit_field};
+use voom_store::tx::begin_write_first;
 
 impl ControlPlane {
     /// Open a job and append its audit event in the caller's transaction.
@@ -46,7 +47,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates `SqliteJobRepo::create_in_tx` and `EventRepo::append_in_tx` errors.
     pub async fn open_job(&self, input: NewJob) -> Result<Job, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "jobs: open_job").await?;
         let job = self.open_job_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(job)
@@ -57,7 +58,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates `SqliteJobRepo::succeed_in_tx` and event-append errors.
     pub async fn succeed_job(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "jobs: succeed_job").await?;
         let job = self.jobs.succeed_in_tx(&mut tx, id, now).await?;
         append_event(
             &self.events,
@@ -84,7 +85,7 @@ impl ControlPlane {
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
         require_audit_field("reason", &reason)?;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "jobs: fail_job").await?;
         let job = self.jobs.fail_in_tx(&mut tx, id, now).await?;
         append_event(
             &self.events,
@@ -110,7 +111,7 @@ impl ControlPlane {
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
         require_audit_field("reason", &reason)?;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "jobs: cancel_job").await?;
         let job = self.jobs.cancel_in_tx(&mut tx, id, now).await?;
         append_event(
             &self.events,

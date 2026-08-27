@@ -15,6 +15,7 @@ use super::common::{
 };
 use super::tickets::SqliteTicketRepo;
 use super::workers::{SqliteWorkerRepo, WorkerKind, WorkerOperationEligibility, WorkerStatus};
+use crate::tx::{begin_read_only, begin_read_then_write, begin_write_first};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -504,11 +505,7 @@ impl SqliteLeaseRepo {
     /// Returns the errors documented by [`Self::acquire_in_tx`], or
     /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError> {
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|e| VoomError::database_context("lease acquire begin immediate", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "leases: acquire").await?;
         let out = self.acquire_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -594,11 +591,7 @@ impl SqliteLeaseRepo {
         ttl: Duration,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "leases: heartbeat").await?;
         let out = self.heartbeat_in_tx(&mut tx, lease_id, ttl, now).await?;
         tx.commit()
             .await
@@ -690,11 +683,7 @@ impl SqliteLeaseRepo {
         result: JsonValue,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "leases: release").await?;
         let out = self.release_in_tx(&mut tx, lease_id, result, now).await?;
         tx.commit()
             .await
@@ -821,11 +810,7 @@ impl SqliteLeaseRepo {
         now: OffsetDateTime,
         rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "leases: fail").await?;
         let out = self.fail_in_tx(&mut tx, lease_id, class, now, rng).await?;
         tx.commit()
             .await
@@ -886,18 +871,8 @@ impl SqliteLeaseRepo {
     /// Returns the errors documented by [`Self::expire_due_in_tx`], or
     /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
-        // `BEGIN IMMEDIATE`, not a deferred `BEGIN`: `expire_due_in_tx` scans
-        // candidates before it updates them, and a deferred transaction only
-        // requests the write lock at that first UPDATE. `SQLite` refuses such a
-        // lock upgrade with `SQLITE_BUSY` *without* invoking the busy handler,
-        // so `busy_timeout` is never consulted and a concurrent writer fails the
-        // call outright. Taking the lock at `BEGIN` lets `busy_timeout`
-        // serialize the writers instead.
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|e| VoomError::database_context("lease expire begin immediate", e))?;
+        // `expire_due_in_tx` scans candidates before it updates them.
+        let mut tx = begin_read_then_write(&self.pool, "leases: expire_due").await?;
         let out = self.expire_due_in_tx(&mut tx, now).await?;
         tx.commit()
             .await
@@ -1019,11 +994,7 @@ impl SqliteLeaseRepo {
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<ForceReleaseOutcome, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "leases: force_release").await?;
         let out = self
             .force_release_in_tx(&mut tx, lease_id, also_requeue, now)
             .await?;
@@ -1075,11 +1046,7 @@ impl SqliteLeaseRepo {
         lease_id: LeaseId,
         worker_id: WorkerId,
     ) -> Result<Lease, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_only(&self.pool, "leases: get_held_for_worker").await?;
         let out = self
             .get_held_for_worker_in_tx(&mut tx, lease_id, worker_id)
             .await?;

@@ -10,6 +10,7 @@ use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::execution::nodes::{Node, NodeKind, NodeStatus};
 
 use crate::node_auth::hash_node_token;
+use voom_store::tx::begin_write_first;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -92,7 +93,9 @@ async fn nodes_heartbeat_in_tx_rolls_back_with_caller_transaction() {
         .register_node(register_input("synthetic-a"))
         .await
         .unwrap();
-    let mut tx = begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_write_first(&cp.pool, "nodes_test: heartbeat_node_in_tx")
+        .await
+        .unwrap();
 
     let node = cp
         .heartbeat_node_in_tx(&mut tx, registered.node.id, now)

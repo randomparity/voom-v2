@@ -14,6 +14,7 @@ use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::nodes::{NodeKind, NodeStatus};
+use crate::tx::{begin_read_only, begin_read_then_write, begin_write_first};
 
 #[derive(Debug, Clone)]
 pub struct NewWorker {
@@ -378,11 +379,7 @@ impl SqliteWorkerRepo {
     /// Returns the errors documented by [`Self::register_in_tx`], or
     /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn register(&self, input: NewWorker) -> Result<Worker, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "workers: register").await?;
         let out = self.register_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -699,11 +696,7 @@ impl SqliteWorkerRepo {
     /// Returns the errors documented by [`Self::record_capability_in_tx`], or
     /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "workers: record_capability").await?;
         let out = self.record_capability_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -760,11 +753,7 @@ impl SqliteWorkerRepo {
     /// Returns the errors documented by [`Self::record_grant_in_tx`], or
     /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "workers: record_grant").await?;
         let out = self.record_grant_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -855,11 +844,7 @@ impl SqliteWorkerRepo {
         expected_epoch: u64,
         now: OffsetDateTime,
     ) -> Result<Worker, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "workers: retire").await?;
         let out = self.retire_in_tx(&mut tx, id, expected_epoch, now).await?;
         tx.commit()
             .await
@@ -911,11 +896,7 @@ impl SqliteWorkerRepo {
     /// Returns [`VoomError::Database`] if the transaction, query, or row
     /// decoding fails.
     pub async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_only(&self.pool, "workers: get_by_name").await?;
         let out = self.get_by_name_in_tx(&mut tx, name).await?;
         tx.commit()
             .await
@@ -1186,11 +1167,7 @@ impl SqliteWorkerRepo {
         worker_id: WorkerId,
         operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_only(&self.pool, "workers: operation_eligibility").await?;
         let out = self
             .operation_eligibility_in_tx(&mut tx, worker_id, operation)
             .await?;
@@ -1341,11 +1318,7 @@ impl SqliteWorkerRepo {
         &self,
         operation: &TicketOperation,
     ) -> Result<Vec<WorkerOperationCandidate>, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_only(&self.pool, "workers: operation_candidates").await?;
         let out = self.operation_candidates_in_tx(&mut tx, operation).await?;
         tx.commit()
             .await

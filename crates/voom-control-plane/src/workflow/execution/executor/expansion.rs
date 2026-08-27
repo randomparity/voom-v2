@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use voom_core::{JobId, TicketId, VoomError};
 use voom_store::repo::execution::tickets::Ticket;
 
-use crate::cases::{begin_tx, commit_tx};
+use crate::cases::commit_tx;
 use crate::workflow::execution::executor::tickets::{
     all_dependencies_succeeded, depends_on_node, parse_payload,
 };
@@ -19,6 +19,7 @@ use crate::workflow::plan::expansion::{
 use crate::workflow::plan::model::WorkflowPlan;
 use crate::workflow::plan::policy_bridge::is_policy_workflow_node_id;
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
+use voom_store::tx::begin_read_only;
 
 impl WorkflowExecutor {
     pub(super) async fn expand_successful_ticket(
@@ -128,7 +129,8 @@ impl WorkflowExecutor {
         workflow_id: &str,
         node_id: &str,
     ) -> Result<bool, VoomError> {
-        let mut tx = begin_tx(&self.control_plane.pool).await?;
+        let mut tx =
+            begin_read_only(&self.control_plane.pool, "expansion: node_ticket_exists").await?;
         let exists = self
             .control_plane
             .tickets

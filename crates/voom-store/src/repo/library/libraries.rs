@@ -6,7 +6,8 @@ use time::OffsetDateTime;
 use voom_core::{LibraryId, VoomError};
 
 use super::super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
-use super::{SqliteLibraryRepo, begin, commit};
+use super::{SqliteLibraryRepo, commit};
+use crate::tx::{begin_read_then_write, begin_write_first};
 
 /// Expected media kind of a library. Mirrors the `libraries.media_kind` CHECK
 /// and the existing `media_works.kind` vocabulary.
@@ -73,7 +74,7 @@ impl SqliteLibraryRepo {
         now: OffsetDateTime,
     ) -> Result<Library, VoomError> {
         let timestamp = iso8601(now)?;
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "library: create_library").await?;
         let res = sqlx::query(
             "INSERT INTO libraries \
              (slug, display_name, media_kind, description, enabled, created_at, updated_at) \
@@ -164,7 +165,7 @@ impl SqliteLibraryRepo {
         now: OffsetDateTime,
     ) -> Result<Library, VoomError> {
         let timestamp = iso8601(now)?;
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "library: update_library").await?;
         let res = sqlx::query(
             "UPDATE libraries SET \
                  display_name = COALESCE(?, display_name), \
@@ -204,7 +205,7 @@ impl SqliteLibraryRepo {
         now: OffsetDateTime,
     ) -> Result<Library, VoomError> {
         let timestamp = iso8601(now)?;
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "library: set_library_enabled").await?;
         let res = sqlx::query("UPDATE libraries SET enabled = ?, updated_at = ? WHERE id = ?")
             .bind(i64::from(enabled))
             .bind(&timestamp)
@@ -237,7 +238,7 @@ impl SqliteLibraryRepo {
         now: OffsetDateTime,
     ) -> Result<Library, VoomError> {
         let timestamp = iso8601(now)?;
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "library: set_default_scoring_profile").await?;
         let res = sqlx::query(
             "UPDATE libraries SET default_scoring_profile_name = ?, updated_at = ? WHERE id = ?",
         )
@@ -265,7 +266,7 @@ impl SqliteLibraryRepo {
     /// # Errors
     /// Propagates database errors.
     pub async fn delete_library(&self, id: LibraryId) -> Result<bool, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "library: delete_library").await?;
         let id_value = i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?;
         let has_durable_roots: i64 =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM library_roots WHERE library_id = ?)")

@@ -3,9 +3,10 @@ use super::codecs::{decode_closure, decode_target};
 use super::finalize::emit_aborted_pre_mutation_event;
 use super::{
     AbortReason, CommitId, CommitIntentState, EventRepo, EvidenceId, OffsetDateTime,
-    PendingCommitIntent, Row, SqlitePool, VoomError, begin_gate_tx, i64_from_u64, iso8601,
-    parse_iso8601, u64_from_i64,
+    PendingCommitIntent, Row, SqlitePool, VoomError, i64_from_u64, iso8601, parse_iso8601,
+    u64_from_i64,
 };
+use crate::tx::begin_read_then_write;
 
 /// Outcome of `abort_destructive_commit`. Carries the now-aborted
 /// `commit_id` and the post-update `epoch` for callers that want to
@@ -58,7 +59,8 @@ pub async fn abort_destructive_commit(
 ) -> Result<AbortOutcome, VoomError> {
     let reason_str = caller_abort_reason_str(&reason)?;
 
-    let mut tx = begin_gate_tx(pool).await?;
+    let mut tx =
+        begin_read_then_write(pool, "commit_safety_gate: abort_destructive_commit").await?;
 
     let row = read_pending_intent_in_tx(&mut tx, commit_id).await?;
 

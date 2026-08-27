@@ -47,6 +47,15 @@ async fn setup() -> (
     let trepo = SqliteTicketRepo::new(pool.clone());
     let wrepo = SqliteWorkerRepo::new(pool.clone());
     let lrepo = SqliteLeaseRepo::new(pool.clone());
+    let (tid, wid) = seed_ticket_and_worker(&trepo, &wrepo).await;
+    (pool, trepo, wrepo, lrepo, tid, wid, tmp)
+}
+
+/// Seed one ready `noop` ticket and one worker eligible to run it.
+async fn seed_ticket_and_worker(
+    trepo: &SqliteTicketRepo,
+    wrepo: &SqliteWorkerRepo,
+) -> (TicketId, WorkerId) {
     let t = trepo
         .create(NewTicket {
             job_id: None,
@@ -68,8 +77,8 @@ async fn setup() -> (
         })
         .await
         .unwrap();
-    make_worker_eligible(&wrepo, w.id, ticket_op("noop")).await;
-    (pool, trepo, wrepo, lrepo, t.id, w.id, tmp)
+    make_worker_eligible(wrepo, w.id, ticket_op("noop")).await;
+    (t.id, w.id)
 }
 
 async fn make_worker_eligible(
@@ -947,6 +956,42 @@ async fn expire_due_second_call_is_a_no_op() {
     assert!(second.requeued_tickets.is_empty());
 }
 
+/// A deferred `BEGIN` that reads and then writes — ADR 0083's exact hazard,
+/// run against the test's own pool so no production code gains a test hook.
+///
+/// While another connection holds the write lock this must be refused, and
+/// refused *immediately*: `SQLite` declines the read→write upgrade without ever
+/// consulting `busy_timeout`. That makes it a timing-free probe for "the write
+/// lock is held right now" — the property a `sleep` can only guess at.
+///
+/// It is an assertion in both directions. If the upgrade *succeeds*, the lock
+/// was not held, the window under test never existed, and the caller is told so
+/// rather than passing vacuously.
+async fn assert_deferred_upgrade_is_refused(pool: &sqlx::SqlitePool, when: &str) {
+    let mut probe = pool
+        .begin()
+        .await
+        .expect("a deferred BEGIN takes no lock, so it cannot block");
+    sqlx::query("SELECT id FROM leases LIMIT 1")
+        .fetch_optional(&mut *probe)
+        .await
+        .expect("the control read must succeed — it is what takes the read snapshot");
+    // Matches no row, so even a succeeding control arm cannot perturb the
+    // treatment's assertions. The write lock is requested when the statement
+    // begins, before it knows that.
+    let outcome = sqlx::query("UPDATE leases SET epoch = epoch WHERE id = -1")
+        .execute(&mut *probe)
+        .await;
+    let error = outcome.expect_err(&format!(
+        "control arm {when}: the deferred upgrade succeeded, so the write lock was \
+         NOT held and this test proves nothing about contention"
+    ));
+    assert!(
+        error.to_string().contains("database is locked"),
+        "control arm {when}: expected the upgrade to be refused, got {error}"
+    );
+}
+
 /// `expire_due` scans candidates and then updates them, so its transaction
 /// must take the write lock at `BEGIN`. Under a deferred `BEGIN` the lock is
 /// only requested at the first UPDATE, and `SQLite` refuses that lock upgrade
@@ -954,7 +999,18 @@ async fn expire_due_second_call_is_a_no_op() {
 /// deadlock the two readers), so a concurrent writer made the whole call fail
 /// instead of waiting its turn. Regression for the `database is locked` flake
 /// in `voom-node-agent`'s `delayed_acquire_replay_never_dispatches`.
-#[tokio::test]
+///
+/// The writer is released by an ordered sequence, not a timer. A timed release
+/// passes on any host slow enough that `expire_due` has not reached its first
+/// `UPDATE` before the timer fires — a false green that grows more likely on
+/// exactly the loaded CI where the flake lives.
+///
+/// **Residual.** Nothing exposes "this connection is now waiting on the write
+/// lock", so step 4 cannot prove the treatment reached its `BEGIN`. If it has
+/// not, the writer is released and the treatment runs uncontended — a vacuous
+/// pass, failing toward a green treatment. The window is two fail-fast
+/// round-trips rather than 200 ms. Owned by issue #588.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn expire_due_waits_out_a_concurrent_writer() {
     let (pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
     let lease = lrepo
@@ -966,22 +1022,134 @@ async fn expire_due_waits_out_a_concurrent_writer() {
         })
         .await
         .unwrap();
-    // Hold the write lock for long enough that `expire_due` cannot reach its
-    // first UPDATE before the lock is contended.
     let competing_writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
-    let release_writer = async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        competing_writer.commit().await.unwrap();
-    };
 
-    let (expired, ()) = tokio::join!(lrepo.expire_due(T0 + Duration::seconds(11)), release_writer);
+    // 1. The lock is held and the window is real.
+    assert_deferred_upgrade_is_refused(&pool, "before the treatment started").await;
 
-    let report = expired.expect("expire_due must wait out the writer, not fail with SQLITE_BUSY");
+    // 2. Start the treatment against that held lock, and wait until its task is
+    //    actually running rather than merely spawned.
+    let running = std::sync::Arc::new(tokio::sync::Notify::new());
+    let treatment = tokio::spawn({
+        let lrepo = lrepo.clone();
+        let running = std::sync::Arc::clone(&running);
+        async move {
+            running.notify_one();
+            lrepo.expire_due(T0 + Duration::seconds(11)).await
+        }
+    });
+    running.notified().await;
+
+    // 3. The lock is still held now that the treatment is under way, and each
+    //    probe is real database work — so a host slow enough to delay the
+    //    treatment delays these equally. That is the property a `sleep` lacks.
+    //    One probe is not enough: measured against a deferred `expire_due`, the
+    //    treatment had not yet reached its first UPDATE on the first pass.
+    for probe in 0..4 {
+        assert_deferred_upgrade_is_refused(&pool, "after the treatment started").await;
+        // 4. A deferred `expire_due` fails at its first UPDATE without ever
+        //    waiting, so finishing here means it did not wait. Unwrap inside
+        //    the assertion so the panic carries its own error rather than a
+        //    message about task state.
+        assert!(
+            !treatment.is_finished(),
+            "expire_due returned while the write lock was held (probe {probe}): {:?}",
+            treatment.await.expect("treatment task panicked")
+        );
+    }
+
+    // 5. Release. The treatment must now succeed, having waited rather than failed.
+    competing_writer.commit().await.unwrap();
+    let report = treatment
+        .await
+        .expect("treatment task panicked")
+        .expect("expire_due must wait out the writer, not fail with SQLITE_BUSY");
     assert_eq!(report.expired_leases, vec![lease.id]);
     assert_eq!(report.requeued_tickets, vec![tid]);
     assert_eq!(
         trepo.get(tid).await.unwrap().unwrap().state,
         TicketState::Ready
+    );
+}
+
+/// A pool whose connections refuse to wait, so contention is an immediate error
+/// rather than a 30-second block. Every pooled connection is pragma'd, because
+/// `busy_timeout` is connection-local and the one that matters is whichever the
+/// call under test happens to draw.
+async fn zero_busy_timeout_pool(path: &std::path::Path) -> sqlx::SqlitePool {
+    let pool = fresh_initialized_pool_at(path).await.unwrap();
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA busy_timeout = 0")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        held.push(conn);
+    }
+    drop(held);
+    pool
+}
+
+/// The mode itself, with no concurrency and no timing: under a zero
+/// `busy_timeout` a held write lock makes `expire_due` fail, and *where* it
+/// fails names the opener it used.
+///
+/// `BEGIN IMMEDIATE` asks for the lock at the opener, so the error carries the
+/// opener's context. A deferred `BEGIN` gets past the opener and is refused at
+/// the first `UPDATE`, carrying that statement's context instead. Reverting
+/// #546 flips this assertion deterministically — where
+/// `expire_due_waits_out_a_concurrent_writer` depends on the treatment reaching
+/// its transaction while the lock is held, this depends on nothing but the
+/// ordering `SQLite` guarantees.
+#[tokio::test]
+async fn expire_due_asks_for_the_write_lock_at_its_opener() {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let pool = zero_busy_timeout_pool(tmp.path()).await;
+    let trepo = SqliteTicketRepo::new(pool.clone());
+    let wrepo = SqliteWorkerRepo::new(pool.clone());
+    let lrepo = SqliteLeaseRepo::new(pool.clone());
+    let (tid, wid) = seed_ticket_and_worker(&trepo, &wrepo).await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(10),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let competing_writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+
+    let due = T0 + Duration::seconds(11);
+    let error = lrepo
+        .expire_due(due)
+        .await
+        .expect_err("a held write lock and a zero busy_timeout must fail expire_due");
+    competing_writer.rollback().await.unwrap();
+
+    let text = error.to_string();
+    assert!(
+        text.contains("leases: expire_due"),
+        "expire_due must contend at its opener, not at a later statement: {text}"
+    );
+    assert!(
+        !text.contains("lease expire"),
+        "contention reported at the first UPDATE means the opener was deferred: {text}"
+    );
+    assert_eq!(
+        lrepo.get(lease.id).await.unwrap().unwrap().state,
+        lease.state,
+        "a refused expire_due must leave the lease alone"
+    );
+    // Anti-vacuity: the same call, uncontended, must actually expire it. An
+    // empty batch would make every assertion above pass without the opener
+    // ever asking for the write lock.
+    let report = lrepo.expire_due(due).await.unwrap();
+    assert_eq!(
+        report.expired_leases,
+        vec![lease.id],
+        "the fixture must present a genuinely overdue lease"
     );
 }
 

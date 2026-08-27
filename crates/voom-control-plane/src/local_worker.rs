@@ -30,6 +30,7 @@ use voom_worker_protocol::{
 
 use crate::ControlPlane;
 use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_hex_128};
+use voom_store::tx::begin_write_first;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const READINESS_LIMIT_BYTES: usize = 4 * 1024;
@@ -449,9 +450,8 @@ impl ControlPlane {
         secret: &str,
         accelerator: Option<&ResolvedLocalVideoAcceleratorConfig>,
     ) -> Result<(voom_store::repo::execution::workers::Worker, Child), VoomError> {
-        let mut tx = self.pool.begin().await.map_err(|error| {
-            VoomError::database_context("begin local worker registration", error)
-        })?;
+        let mut tx =
+            begin_write_first(&self.pool, "local_worker: register_spawn_and_claim").await?;
         let worker = self
             .register_supervisor_worker_in_tx(
                 &mut tx,

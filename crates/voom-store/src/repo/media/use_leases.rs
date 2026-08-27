@@ -17,6 +17,7 @@ use super::Repository;
 use super::artifact_commit_intents::consult_artifact_intent_lock_in_tx;
 use super::commit_safety_gate::consult_pending_commit_lock_in_tx;
 use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
+use crate::tx::{begin_read_then_write, begin_write_first};
 
 // ============================================================================
 // Domain enums (CHECK-constraint mirrors)
@@ -268,12 +269,6 @@ impl SqliteUseLeaseRepo {
 impl Repository for SqliteUseLeaseRepo {}
 
 // ----- shared helpers -------------------------------------------------------
-
-async fn begin_tx(pool: &SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, VoomError> {
-    pool.begin()
-        .await
-        .map_err(|e| VoomError::database_context("begin", e))
-}
 
 async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), VoomError> {
     tx.commit()
@@ -630,7 +625,7 @@ impl SqliteUseLeaseRepo {
     }
 
     pub async fn acquire(&self, input: NewUseLease) -> Result<UseLease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "use_leases: acquire").await?;
         let out = self.acquire_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(out)
@@ -726,7 +721,7 @@ impl SqliteUseLeaseRepo {
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "use_leases: heartbeat").await?;
         let out = self.heartbeat_in_tx(&mut tx, lease_id, now).await?;
         commit_tx(tx).await?;
         Ok(out)
@@ -778,7 +773,7 @@ impl SqliteUseLeaseRepo {
         reason: UseLeaseReleaseReason,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: release").await?;
         let out = self.release_in_tx(&mut tx, lease_id, reason, now).await?;
         commit_tx(tx).await?;
         Ok(out)
@@ -816,7 +811,7 @@ impl SqliteUseLeaseRepo {
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: force_release").await?;
         let out = self.force_release_in_tx(&mut tx, lease_id, now).await?;
         commit_tx(tx).await?;
         Ok(out)
@@ -867,7 +862,7 @@ impl SqliteUseLeaseRepo {
     }
 
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: expire_due").await?;
         let out = self.expire_due_in_tx(&mut tx, now).await?;
         commit_tx(tx).await?;
         Ok(out)
@@ -944,7 +939,7 @@ impl SqliteUseLeaseRepo {
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: recover_stale_issuer").await?;
         let out = self
             .recover_stale_issuer_in_tx(&mut tx, lease_id, now)
             .await?;
@@ -1017,7 +1012,7 @@ impl SqliteUseLeaseRepo {
         new: FileLocationId,
         now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: reanchor_on_move").await?;
         let out = self
             .reanchor_on_move_in_tx(&mut tx, retired, new, now)
             .await?;

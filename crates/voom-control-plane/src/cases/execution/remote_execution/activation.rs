@@ -21,13 +21,14 @@ use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, Remote
 use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker};
 
 use crate::ControlPlane;
-use crate::cases::{append_event, begin_immediate_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
 
 use super::{
     ActivatedWorker, RemoteActivateInput, RemoteActivateOutcome, RemoteDeactivateInput,
     RemoteDeactivateOutcome, RemoteWorkerDeclaration, ReplayRoute, append_scan_stale_events_in_tx,
     decode_replay,
 };
+use voom_store::tx::begin_read_then_write;
 
 const MAX_WORKERS: usize = 64;
 const MAX_LOGICAL_NAME_BYTES: usize = 64;
@@ -46,7 +47,7 @@ impl ControlPlane {
     ) -> Result<RemoteActivateOutcome, VoomError> {
         validate_manifest(&input.workers)?;
         let route_key = super::route_node_activate(input.node_id);
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "activation: remote_activate").await?;
         let now = self.clock().now();
         let auth = self
             .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
@@ -142,7 +143,7 @@ impl ControlPlane {
         let status = deactivation_status(input.reason)?;
         let now = self.clock().now();
         let route_key = super::route_node_deactivate(input.node_id);
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "activation: remote_deactivate").await?;
         self.verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
             .await?;
         match self
@@ -221,7 +222,8 @@ impl ControlPlane {
         node_id: voom_core::NodeId,
         cutoff: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "activation: prune_node_activation_history").await?;
         let quota_floor = self.clock().now() - ACTIVATION_WINDOW;
         let effective_cutoff = cutoff.min(quota_floor);
         let candidates = self

@@ -9,6 +9,7 @@ use voom_core::{BundleId, FileAssetId, MediaVariantId, VoomError};
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
+use crate::tx::begin_write_first;
 
 /// `asset_bundle_members.role` vocabulary. Mirrors the SQL CHECK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -136,11 +137,7 @@ impl SqliteBundleRepo {
     }
 
     pub async fn create(&self, input: NewAssetBundle) -> Result<AssetBundle, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "bundles: create").await?;
         let out = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -304,11 +301,7 @@ impl SqliteBundleRepo {
     }
 
     pub async fn add_member(&self, input: NewBundleMember) -> Result<BundleMember, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "bundles: add_member").await?;
         let out = self.add_member_in_tx(&mut tx, input).await?;
         tx.commit()
             .await

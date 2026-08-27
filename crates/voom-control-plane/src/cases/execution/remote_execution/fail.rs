@@ -6,10 +6,11 @@ use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, Remote
 use voom_store::repo::media::artifact_access_plans::ArtifactAccessPlanStatus;
 
 use crate::ControlPlane;
+use crate::cases::commit_tx;
 use crate::cases::execution::remote_execution::{
     RemoteFailInput, RemoteFailOutcome, ReplayRoute, decode_replay, is_remote_replayable_error,
 };
-use crate::cases::{begin_immediate_tx, commit_tx};
+use voom_store::tx::begin_read_then_write;
 
 impl ControlPlane {
     /// Fail a held remote lease and update its selected artifact plan.
@@ -23,7 +24,7 @@ impl ControlPlane {
     ) -> Result<RemoteFailOutcome, VoomError> {
         let now = self.clock().now();
         let route_key = super::route_lease_fail(input.lease_id);
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "fail: remote_fail").await?;
         let auth = self
             .require_remote_incarnation_fence_in_tx(
                 &mut tx,

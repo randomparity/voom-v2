@@ -2,12 +2,17 @@
 //! repository `_in_tx` write with `EventRepo::append_in_tx` inside one
 //! transaction so the state transition and its event remain atomic.
 //!
-//! `begin_tx`, `commit_tx`, and `append_event` are the shared
-//! transaction-and-event boilerplate used by every case file. They live
-//! here rather than duplicated per folder so media, policy, execution, and
-//! worker use cases stay consistent.
+//! `commit_tx` and `append_event` are the shared transaction-and-event
+//! boilerplate used by every case file. They live here rather than duplicated
+//! per folder so media, policy, execution, and worker use cases stay
+//! consistent.
+//!
+//! Transactions are opened by the `voom_store::tx` helpers, each named for the
+//! shape of transaction it opens — see ADR 0086. There is deliberately no
+//! `begin_tx` here: a single opener shared by read-then-write and write-first
+//! callers is exactly the information loss that hid the ADR 0083 violations.
 
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::VoomError;
 use voom_events::{Event, EventEnvelope, SubjectType};
@@ -33,29 +38,6 @@ pub(crate) use tests::{
     TerminalFailureIssueRow, count, cp, issue_link_targets, terminal_failure_issues,
     transcodable_input,
 };
-
-pub(crate) async fn begin_tx(pool: &SqlitePool) -> Result<Transaction<'_, Sqlite>, VoomError> {
-    pool.begin()
-        .await
-        .map_err(|e| VoomError::database_context("begin", e))
-}
-
-/// Begin a transaction that takes `SQLite`'s write lock up front (`BEGIN
-/// IMMEDIATE`) instead of lazily on the first write.
-///
-/// Use this for read-then-write transactions that run under contention. A
-/// deferred `BEGIN` acquires the write lock only when the first write executes;
-/// if another writer holds it by then, `SQLite` returns `SQLITE_BUSY` *without*
-/// invoking the busy handler (to avoid a lock-upgrade deadlock), so the caller
-/// fails instead of waiting. `BEGIN IMMEDIATE` lets `busy_timeout` serialize the
-/// writers cleanly. Mirrors `begin_immediate` in the policy registry repo.
-pub(crate) async fn begin_immediate_tx(
-    pool: &SqlitePool,
-) -> Result<Transaction<'_, Sqlite>, VoomError> {
-    pool.begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|e| VoomError::database_context("begin immediate", e))
-}
 
 pub(crate) async fn commit_tx(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
     tx.commit()

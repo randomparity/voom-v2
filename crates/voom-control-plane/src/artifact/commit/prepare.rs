@@ -31,13 +31,14 @@ use crate::artifact::commit::{
     CommitArtifactCommandError, CommitArtifactInput, CommitArtifactPreMutationReport,
     PreparedCommit,
 };
-use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::cases::commit_tx;
+use voom_store::tx::begin_read_then_write;
 
 pub(super) async fn prepare_commit(
     cp: &ControlPlane,
     input: CommitArtifactInput,
 ) -> Result<PreparedCommit, CommitArtifactCommandError> {
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx = begin_read_then_write(&cp.pool, "prepare: prepare_commit").await?;
     let now = cp.clock().now();
     let prepared_result = prepare_commit_in_tx(cp, &mut tx, input, now).await;
     match prepared_result {

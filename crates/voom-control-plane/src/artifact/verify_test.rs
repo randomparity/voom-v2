@@ -202,7 +202,14 @@ async fn verification_persistence_survives_a_concurrent_writer_attempt() {
     )
     .await
     .unwrap();
-    let competing_writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let competing_writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
 
     let persistence = persist_verification_outcome(
         &cp,

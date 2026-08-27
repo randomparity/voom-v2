@@ -28,7 +28,8 @@ use crate::cases::execution::remote_execution::{
     ReplaySlot, decode_replay, incarnation_replay_key, is_remote_replayable_error,
     remote_error_message,
 };
-use crate::cases::{append_event, begin_immediate_tx, begin_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
+use voom_store::tx::{begin_read_only, begin_read_then_write};
 
 const ROUTE_SCAN_START: &str = "POST /v1/scan/session/start";
 const ROUTE_SCAN_BATCH: &str = "POST /v1/scan/session/batch";
@@ -140,7 +141,7 @@ impl ControlPlane {
         idle_timeout_seconds: u32,
     ) -> Result<ScanSession, VoomError> {
         validate_idle_timeout(idle_timeout_seconds)?;
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "sessions: request_scan_session").await?;
         let now = self.clock().now();
         let expired = self.scan_sessions.stale_expired_in_tx(&mut tx, now).await?;
         for session in &expired {
@@ -197,7 +198,7 @@ impl ControlPlane {
         &self,
         input: RemoteScanStartInput,
     ) -> Result<RemoteScanStartOutcome, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "sessions: start_scan_session").await?;
         let now = self.clock().now();
         self.require_scan_authority_in_tx(&mut tx, &input.scan_auth())
             .await?;
@@ -262,7 +263,8 @@ impl ControlPlane {
         input: RemoteScanBatchInput,
     ) -> Result<RemoteScanBatchOutcome, VoomError> {
         validate_batch_input(&input)?;
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "sessions: accept_scan_observation_batch").await?;
         let now = self.clock().now();
         self.require_scan_authority_in_tx(&mut tx, &input.scan_auth())
             .await?;
@@ -296,7 +298,7 @@ impl ControlPlane {
         &self,
         input: RemoteScanFailInput,
     ) -> Result<RemoteScanTerminalOutcome, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "sessions: fail_scan_session").await?;
         let now = self.clock().now();
         self.require_scan_authority_in_tx(&mut tx, &input.scan_auth())
             .await?;
@@ -352,7 +354,7 @@ impl ControlPlane {
         input: RemoteScanCompleteInput,
     ) -> Result<RemoteScanCompleteOutcome, VoomError> {
         validate_completion_input(&input)?;
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "sessions: complete_scan_session").await?;
         let now = self.clock().now();
         self.require_scan_authority_in_tx(&mut tx, &input.scan_auth())
             .await?;
@@ -393,7 +395,7 @@ impl ControlPlane {
         id: ScanSessionId,
         reason: ScanTerminalReason,
     ) -> Result<ScanSession, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "sessions: cancel_scan_session").await?;
         let now = self.clock().now();
         let session = self
             .scan_sessions
@@ -455,7 +457,7 @@ impl ControlPlane {
         &self,
         input: RemoteScanInspectInput,
     ) -> Result<ScanSession, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_only(&self.pool, "sessions: inspect_remote_scan_session").await?;
         self.require_scan_authority_in_tx(&mut tx, &input.scan_auth())
             .await?;
         let session = self
@@ -469,7 +471,8 @@ impl ControlPlane {
         &self,
         input: RemoteScanReconciliationInput,
     ) -> Result<ScanReconciliationPage, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_only(&self.pool, "sessions: inspect_remote_scan_reconciliation").await?;
         self.require_scan_authority_in_tx(&mut tx, &input.auth.scan_auth())
             .await?;
         self.owned_scan_session_in_tx(&mut tx, input.auth.scan_session_id, input.auth.node_id)

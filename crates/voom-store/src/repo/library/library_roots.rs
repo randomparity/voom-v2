@@ -12,7 +12,8 @@ use super::super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::libraries::is_unique_violation;
-use super::{SqliteLibraryRepo, begin, commit, rollback};
+use super::{SqliteLibraryRepo, commit, rollback};
+use crate::tx::{begin_read_then_write, begin_write_first};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryScanMode {
@@ -162,7 +163,8 @@ impl SqliteLibraryRepo {
         input: NewLibraryRoot,
         now: OffsetDateTime,
     ) -> Result<LibraryRoot, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "library_roots: create_library_root").await?;
         let root = match self.create_library_root_in_tx(&mut tx, input, now).await {
             Ok(root) => root,
             Err(error) => {
@@ -302,7 +304,7 @@ impl SqliteLibraryRepo {
             update.default_backup_root_id.flatten(),
         ];
         let timestamp = iso8601(now)?;
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "library_roots: update_library_root").await?;
         let update_result = async {
             require_default_ids_in_library(&mut tx, current.library_id, &updated_defaults).await?;
             update_root_settings(&mut tx, id, &update, &timestamp).await

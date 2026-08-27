@@ -21,7 +21,8 @@ use voom_store::repo::execution::workers::{
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;
 
-use super::{append_event, begin_immediate_tx, begin_tx, commit_tx};
+use super::{append_event, commit_tx};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 const BUILTIN_FFPROBE_NAME: &str = "builtin.ffprobe";
 const LOCAL_FFMPEG_NAME: &str = "local-ffmpeg";
@@ -97,7 +98,7 @@ impl ControlPlane {
     pub async fn register_worker(&self, input: RegisterWorkerInput) -> Result<Worker, VoomError> {
         reject_reserved_provider(&input.name)?;
         let registered_at = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "registry: register_worker").await?;
         let worker = self
             .register_worker_with_event_in_tx(
                 &mut tx,
@@ -119,7 +120,7 @@ impl ControlPlane {
         input: NewWorker,
     ) -> Result<Worker, VoomError> {
         validate_supervisor_worker(&input)?;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "registry: register_supervisor_worker").await?;
         let worker = self
             .register_worker_with_event_in_tx(&mut tx, input)
             .await?;
@@ -170,7 +171,8 @@ impl ControlPlane {
     ) -> Result<Worker, VoomError> {
         reject_reserved_provider(&input.name)?;
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "registry: register_worker_for_node").await?;
         let auth = self
             .nodes
             .auth_record_in_tx(&mut tx, input.node_id)
@@ -353,7 +355,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates `SqliteWorkerRepo::record_capability_in_tx` and event-append errors.
     pub async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "registry: record_capability").await?;
         let worker_id = input.worker_id;
         let operation = input.operation.clone();
         let cap = self.workers.record_capability_in_tx(&mut tx, input).await?;
@@ -379,7 +381,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates `SqliteWorkerRepo::record_grant_in_tx` and event-append errors.
     pub async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "registry: record_grant").await?;
         let worker_id = input.worker_id;
         let grant = self.workers.record_grant_in_tx(&mut tx, input).await?;
         append_event(
@@ -408,7 +410,7 @@ impl ControlPlane {
         expected_epoch: u64,
         now: OffsetDateTime,
     ) -> Result<Worker, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "registry: retire_worker").await?;
         let worker = self
             .workers
             .retire_in_tx(&mut tx, id, expected_epoch, now)

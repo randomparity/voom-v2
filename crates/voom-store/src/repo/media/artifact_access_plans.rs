@@ -13,6 +13,7 @@ use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
+use crate::tx::{begin_read_then_write, begin_write_first};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -162,11 +163,8 @@ impl SqliteArtifactAccessPlanRepo {
         &self,
         input: NewArtifactAccessPlan,
     ) -> Result<ArtifactAccessPlan, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "artifact_access_plans: create_selected").await?;
         let plan = self.create_selected_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -231,11 +229,7 @@ impl SqliteArtifactAccessPlanRepo {
         evidence: JsonValue,
         now: OffsetDateTime,
     ) -> Result<ArtifactAccessPlan, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "artifact_access_plans: mark_status").await?;
         let plan = self
             .mark_status_in_tx(&mut tx, id, status, reason, evidence, now)
             .await?;

@@ -23,6 +23,7 @@ use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+use crate::tx::begin_write_first;
 
 /// Outcome of a whole phase across the input set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,7 +338,8 @@ impl SqliteWorkflowSummaryRepo {
         job_id: JobId,
         inputs: Vec<NewFileRunStart>,
     ) -> Result<Vec<FileRunStart>, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "workflow_summaries: insert_file_run_starts").await?;
         self.insert_file_run_starts_in_tx(&mut tx, job_id, &inputs)
             .await?;
         commit(tx).await?;
@@ -354,7 +356,8 @@ impl SqliteWorkflowSummaryRepo {
         job_id: JobId,
         inputs: Vec<NewFileRunHistory>,
     ) -> Result<Vec<FileRunHistory>, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "workflow_summaries: insert_file_run_history").await?;
         self.insert_file_run_history_in_tx(&mut tx, job_id, &inputs)
             .await?;
         commit(tx).await?;
@@ -418,7 +421,7 @@ impl SqliteWorkflowSummaryRepo {
         input: NewWorkflowSummary,
         now: OffsetDateTime,
     ) -> Result<WorkflowSummary, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "workflow_summaries: insert_summary").await?;
         let out = self.insert_summary_in_tx(&mut tx, input, now).await?;
         commit(tx).await?;
         Ok(out)
@@ -488,7 +491,8 @@ impl SqliteWorkflowSummaryRepo {
         input: NewPhaseSummary,
         now: OffsetDateTime,
     ) -> Result<PhaseSummary, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "workflow_summaries: upsert_phase_summary").await?;
         let out = self.upsert_phase_summary_in_tx(&mut tx, input, now).await?;
         commit(tx).await?;
         Ok(out)
@@ -597,7 +601,8 @@ impl SqliteWorkflowSummaryRepo {
         input: NewFilePhaseSummary,
         now: OffsetDateTime,
     ) -> Result<FilePhaseSummary, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "workflow_summaries: upsert_file_phase_summary").await?;
         let out = self
             .upsert_file_phase_summary_in_tx(&mut tx, input, now)
             .await?;
@@ -741,12 +746,6 @@ impl SqliteWorkflowSummaryRepo {
         .map_err(|error| VoomError::database_context("workflow_file_run_history list", error))?;
         rows.iter().map(row_to_file_run_history).collect()
     }
-}
-
-async fn begin(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    pool.begin()
-        .await
-        .map_err(|e| VoomError::database_context("begin", e))
 }
 
 async fn commit(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {

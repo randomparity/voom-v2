@@ -27,7 +27,8 @@ use voom_store::repo::media::identity::{
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, commit_tx};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 impl ControlPlane {
     /// Watcher-side ingest entry point. Composes
@@ -49,7 +50,7 @@ impl ControlPlane {
         alias_proof: Option<AliasProof>,
     ) -> Result<IngestOutcome, VoomError> {
         let observed_at = discovered.observed_at;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "identity: record_discovered_file").await?;
         let outcome = self
             .identity
             .record_discovered_file_in_tx(&mut tx, discovered, alias_proof)
@@ -217,7 +218,7 @@ impl ControlPlane {
         observed: ObservedBytes,
         observed_at: OffsetDateTime,
     ) -> Result<RenameReconciledOutcome, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "identity: reconcile_rename").await?;
         let outcome = self
             .identity
             .reconcile_rename_in_tx(&mut tx, proof, observed, observed_at)
@@ -345,7 +346,8 @@ impl ControlPlane {
         accepted_at: OffsetDateTime,
         pinned: AcceptedPin,
     ) -> Result<IdentityEvidence, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "identity: accept_identity_evidence").await?;
         let updated = self
             .identity
             .accept_identity_evidence_in_tx(&mut tx, id, actor.clone(), accepted_at, pinned)
@@ -381,7 +383,7 @@ impl ControlPlane {
         new_input: NewIdentityEvidence,
         superseded_at: OffsetDateTime,
     ) -> Result<IdentityEvidence, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "identity: supersede_identity_evidence").await?;
         let new = self
             .identity
             .supersede_identity_evidence_in_tx(&mut tx, old_id, new_input, superseded_at)
@@ -434,7 +436,7 @@ impl ControlPlane {
         payload: JsonValue,
         probed_at: OffsetDateTime,
     ) -> Result<MediaSnapshot, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "identity: record_media_snapshot").await?;
         let snap = crate::media_snapshot::record_with_event_in_tx(
             self,
             &mut tx,
@@ -456,7 +458,7 @@ impl ControlPlane {
     /// Propagates repo and event-append errors.
     pub async fn create_media_work(&self, input: NewMediaWork) -> Result<MediaWork, VoomError> {
         let created_at = input.created_at;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "identity: create_media_work").await?;
         let mw = self
             .identity
             .create_media_work_in_tx(&mut tx, input)
@@ -488,7 +490,7 @@ impl ControlPlane {
         input: NewMediaVariant,
     ) -> Result<MediaVariant, VoomError> {
         let created_at = input.created_at;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "identity: create_media_variant").await?;
         let mv = self
             .identity
             .create_media_variant_in_tx(&mut tx, input)
@@ -520,7 +522,7 @@ impl ControlPlane {
         &self,
         created_at: OffsetDateTime,
     ) -> Result<FileAsset, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "identity: create_file_asset").await?;
         let asset = self
             .identity
             .create_file_asset_in_tx(&mut tx, created_at)
@@ -549,7 +551,7 @@ impl ControlPlane {
         input: NewFileVersion,
     ) -> Result<FileVersion, VoomError> {
         let observed_at = input.created_at;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "identity: create_file_version").await?;
         let v = self
             .identity
             .create_file_version_in_tx(&mut tx, input)
@@ -583,7 +585,7 @@ impl ControlPlane {
         input: NewFileLocation,
     ) -> Result<voom_store::repo::media::identity::FileLocation, VoomError> {
         let observed_at = input.observed_at;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "identity: create_file_location").await?;
         let loc = self
             .identity
             .create_file_location_in_tx(&mut tx, input)

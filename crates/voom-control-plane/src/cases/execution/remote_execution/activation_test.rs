@@ -498,7 +498,12 @@ async fn remote_activation_samples_quota_window_after_writer_serialization() {
         .await
         .unwrap();
     }
-    let holding_tx = crate::cases::begin_immediate_tx(cp.pool_for_test())
+    // Hold the write lock so the call under test contends. Raw here,
+    // as in voom-store's tests: this reserves the lock without
+    // writing, which no production opener describes.
+    let holding_tx = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .unwrap();
     let waiting_cp = cp.clone();
