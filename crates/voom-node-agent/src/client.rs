@@ -23,7 +23,14 @@ const RESPONSE_LIMIT_BYTES: usize = 1024 * 1024;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const DEFAULT_MAXIMUM_ATTEMPTS: usize = 5;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long one HTTP attempt against the control plane may take before the
+/// client abandons it.
+///
+/// This bounds a single attempt, not the logical call — a retried call can take
+/// up to [`production_request_budget`]. Callers reasoning about how long a node
+/// agent can be stuck almost always want that one instead.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct RetryRequest<T> {
@@ -428,6 +435,44 @@ impl ControlPlaneClient {
 enum AttemptResult<T> {
     Complete(Result<T, VoomError>),
     Retry(VoomError),
+}
+
+/// Worst-case wall clock one logical control-plane call can consume under the
+/// production retry policy.
+///
+/// Every attempt is assumed to burn the full [`REQUEST_TIMEOUT`], and every
+/// backoff to draw its ceiling. That is the number to compare against when
+/// sizing anything that waits on a node agent — a supervisor's shutdown grace,
+/// an operator runbook, or a test's hang guard. [`REQUEST_TIMEOUT`] alone
+/// understates it by roughly a factor of five, which is how the guard in the
+/// lifecycle suite came to be shorter than the call it was watching (#592).
+#[must_use]
+pub fn production_request_budget() -> Duration {
+    retry_budget(
+        DEFAULT_MAXIMUM_ATTEMPTS,
+        REQUEST_TIMEOUT,
+        INITIAL_RETRY_DELAY,
+        MAX_RETRY_DELAY,
+    )
+}
+
+/// Upper bound on `attempts` attempts plus the backoff between them.
+///
+/// [`RetryBackoff`] draws uniformly from `0..=ceiling`, so a ceiling is the most
+/// any one sleep can contribute; summing the ceilings bounds the whole run.
+fn retry_budget(
+    attempts: usize,
+    per_attempt: Duration,
+    initial_delay: Duration,
+    maximum_delay: Duration,
+) -> Duration {
+    let mut total = per_attempt.saturating_mul(u32::try_from(attempts).unwrap_or(u32::MAX));
+    let mut ceiling = initial_delay;
+    for _ in 1..attempts {
+        total = total.saturating_add(ceiling);
+        ceiling = ceiling.saturating_mul(2).min(maximum_delay);
+    }
+    total
 }
 
 struct RetryBackoff {

@@ -1,8 +1,33 @@
 use std::path::Path;
+use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqlitePool};
 use voom_core::VoomError;
+
+/// How long one statement waits for `SQLite`'s write lock before giving up.
+///
+/// Lock-wait budget: wait out transient write contention instead of surfacing a
+/// spurious `SQLITE_BUSY` -> `DB_UNREACHABLE`. 30s is deliberately generous
+/// because a lock holder can be descheduled for several seconds under load
+/// (first observed as flakes on a CPU-starved parallel test suite). Genuine
+/// deadlocks are reported separately and do not consume this budget, so the
+/// longer wait only affects real, transient contention.
+///
+/// This is the innermost rung of the control-path budget ladder: every layer
+/// that can observe a lock wait must outlast it. See
+/// `voom-node-agent/tests/budget_ladder.rs`.
+pub const LOCK_WAIT_BUDGET: Duration = Duration::from_secs(30);
+
+/// How long a caller waits for a free pooled connection before giving up.
+///
+/// With a single `SQLite` writer, write transactions can each hold their
+/// connection for up to [`LOCK_WAIT_BUDGET`] while waiting out lock contention
+/// (more so for the `BEGIN IMMEDIATE` paths, which hold the connection across
+/// the whole lock wait). Without this, a saturated pool makes new callers block
+/// forever; this surfaces a clean error instead. Sized at [`LOCK_WAIT_BUDGET`]
+/// plus headroom so it only fires under genuine sustained saturation.
+pub const POOL_ACQUIRE_BUDGET: Duration = Duration::from_secs(45);
 
 /// Open a `SQLite` pool against an existing database. **Never creates the main
 /// database file or parent directories.** On-disk pools may create normal `SQLite`
@@ -32,13 +57,7 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
     options = options
         .create_if_missing(create || is_memory)
         .foreign_keys(true)
-        // Lock-wait budget: wait out transient write contention instead of
-        // surfacing a spurious SQLITE_BUSY -> DB_UNREACHABLE. 30s is deliberately
-        // generous because a lock holder can be descheduled for several seconds
-        // under load (first observed as flakes on a CPU-starved parallel test
-        // suite). Genuine deadlocks are reported separately and do not consume
-        // this budget, so the longer wait only affects real, transient contention.
-        .busy_timeout(std::time::Duration::from_secs(30));
+        .busy_timeout(LOCK_WAIT_BUDGET);
 
     if is_memory {
         options = options.shared_cache(true);
@@ -66,14 +85,7 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
     SqlitePoolOptions::new()
         .max_connections(pool_size)
         .min_connections(u32::from(is_memory))
-        // Bound the wait for a free pooled connection. With a single SQLite
-        // writer, write transactions can each hold their connection for up to
-        // `busy_timeout` while waiting out lock contention (more so for the
-        // `BEGIN IMMEDIATE` paths, which hold the connection across the whole
-        // lock wait). Without this, a saturated pool makes new callers block
-        // forever; this surfaces a clean error instead. Sized at `busy_timeout`
-        // plus headroom so it only fires under genuine sustained saturation.
-        .acquire_timeout(std::time::Duration::from_secs(45))
+        .acquire_timeout(POOL_ACQUIRE_BUDGET)
         .connect_with(options)
         .await
         .map_err(|e| {
