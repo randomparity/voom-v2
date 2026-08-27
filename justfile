@@ -104,6 +104,14 @@ check-payload-deny-unknown:
 check-payload-deny-unknown-selftest:
     ./scripts/check-payload-deny-unknown-selftest.sh
 
+# Guard: every pool-level transaction is opened by a named voom_store::tx helper
+check-transaction-openers:
+    ./scripts/check-transaction-openers.sh
+
+# Self-test for the transaction-opener guard (keeps its ast-grep rule honest)
+check-transaction-openers-selftest:
+    ./scripts/check-transaction-openers-selftest.sh
+
 # Guard: every numbered ADR is listed in the ADR index and every index link exists
 check-adr-index:
     ./scripts/check-adr-index.sh

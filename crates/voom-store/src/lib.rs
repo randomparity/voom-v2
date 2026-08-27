@@ -27,6 +27,7 @@ mod migrator;
 pub mod pool;
 pub mod repo;
 pub mod schema;
+pub mod tx;
 
 #[cfg(any(test, feature = "test"))]
 pub mod test_support;
