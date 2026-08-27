@@ -69,7 +69,7 @@ records that finding.
 `scripts/check-transaction-openers.sh`: one `ast-grep` rule matching
 `.begin()` / `.begin_with(…)` on a pool receiver, over production sources, with
 `crates/voom-store/src/tx.rs` excluded. Any match is a violation naming the file,
-line, and the three helpers.
+line, and the four helpers.
 
 A savepoint (`tx.begin()` on a live handle) is not a pool-level opener and is not
 matched: the rule keys on the receiver being a pool, not on the method name.
@@ -125,26 +125,38 @@ Replace the timer with an ordered control/treatment sequence, `tokio::sync`
 primitives only, multi-threaded runtime, per ADR 0085:
 
 1. **Control, before.** A deferred `BEGIN` against the held lock must fail
-   `database is locked` — proof the lock is held and the window is real.
-2. **Start the treatment** and signal that it has been spawned.
-3. **Control, after.** The deferred control arm must fail the same way again —
-   proof the lock was *still* held once the treatment was under way.
-4. **Assert the treatment has not finished.** A deferred `BEGIN` fails fast, so a
-   treatment that already returned cannot have waited. **If it has finished,
-   `await` and unwrap it inside the assertion**, so the panic carries the
-   treatment's own error rather than a message about task state — that is what
-   makes criterion 5's `database is locked` evidence reachable.
+   `database is locked` — proof the lock is held and the window is real. This
+   asserts in both directions: an upgrade that *succeeds* means the lock was not
+   held, and says so rather than passing vacuously.
+2. **Start the treatment**, signalling from *inside* the spawned task so the
+   sequence resumes only once that task is running, not merely scheduled.
+3. **Control, after — four times.** The deferred control arm must fail the same
+   way on each pass, proving the lock is still held while the treatment is under
+   way. One pass is not enough; see below.
+4. **Assert the treatment has not finished**, after each probe. A deferred
+   `BEGIN` fails fast, so a treatment that already returned cannot have waited.
+   **If it has finished, `await` and unwrap it inside the assertion**, so the
+   panic carries the treatment's own error rather than a message about task
+   state — that is what makes criterion 5's `database is locked` evidence
+   reachable.
 5. **Release** the writer; the treatment must succeed.
 
 A window too short to contend makes a control arm succeed, which reddens the test
-rather than passing it. There is no wall-clock budget for a slow host to outrun.
+rather than passing it. There is no wall-clock budget for a slow host to outrun:
+each probe is database round-trips, so a slow host slows both arms alike.
+
+**Why four probes.** Measured, not chosen. With one probe the reverted treatment
+had not yet reached its first `UPDATE`, the writer was released, and it then ran
+uncontended and passed — the exact false green this rewrite exists to remove.
+Against the revert the treatment is now caught at probe 1–2 in both crates.
 
 **Residual.** Nothing exposes "this connection is now waiting on the write lock",
-so the test cannot prove the treatment reached its `BEGIN`. If it has not, steps
-3 and 4 both pass, the writer is released, and the treatment runs uncontended and
-succeeds — a vacuous pass, failing toward a **green treatment**. The window
-shrinks from 200 ms to two fail-fast transaction round-trips. Owned by issue
+so the test still cannot *prove* the treatment reached its `BEGIN`. If it has not,
+the probes pass, the writer is released, and the treatment runs uncontended — a
+vacuous pass, failing toward a **green treatment**. Owned by issue
 [#588](https://github.com/randomparity/voom-v2/issues/588).
+`expire_due_asks_for_the_write_lock_at_its_opener` is not subject to it: it uses
+no concurrency at all, and is the deterministic guard against a #546 revert.
 
 No production code gains a test-only hook: the control arm is test-local SQL
 against the test's own pool.
@@ -176,13 +188,31 @@ root, each asserted in both directions:
 | `matcher_alive` | a fixture that must match; if it does not, the rule has rotted |
 
 **Regression proof (criterion 2).** Reverting #546's change to
-`ControlPlane::expire_due` must redden a check. Under this design that is the
-`voom-store` unit test, not the opener check — the opener check sees a helper
-call either way, because the revert changes *which* helper. So criterion 2 is
-satisfied by criterion 5's revert-and-observe: with `expire_due` opened by
-`begin_write_first` instead of `begin_read_then_write`, both contention tests
-fail naming #546's `database is locked` error. That run is recorded in the
-first-run report.
+`ControlPlane::expire_due` must redden a check. Under this design that is a
+`voom-store`/`voom-control-plane` unit test, not the opener check — the opener
+check sees a helper call either way, because the revert changes *which* helper.
+
+The ordered sequence alone does **not** satisfy this, which was measured rather
+than predicted. With `expire_due` reverted to `begin_write_first`, a single
+control probe followed by one `is_finished()` check passed: the treatment had
+not yet reached its first `UPDATE`, so the writer was released and it then ran
+uncontended. Two changes fix it, and each is verified by revert-and-observe:
+
+- The waits-out test signals from *inside* the spawned task and then probes
+  **four** times, checking after each. The reverted treatment is caught at probe
+  1–2 carrying its own `lease expire: … database is locked`. Probes are database
+  round-trips, not sleeps, so a slow host slows control and treatment alike.
+- A second test, `expire_due_asks_for_the_write_lock_at_its_opener`, drops
+  concurrency entirely. Under a zero `busy_timeout` with the write lock held,
+  `expire_due` must fail, and the error's context says which opener asked:
+  `leases: expire_due` for `BEGIN IMMEDIATE`, `lease expire` (the first `UPDATE`)
+  for a deferred `BEGIN`. This depends on nothing but the ordering SQLite
+  guarantees, so it is the deterministic half of criterion 2. It carries its own
+  anti-vacuity assertion: an uncontended re-run must actually expire the lease,
+  because an empty batch would satisfy every other assertion without the opener
+  ever requesting the lock.
+
+Both live in both crates. That run is recorded in the first-run report.
 
 This is a real narrowing against the issue's wording, and it is deliberate: the
 issue assumed a check that verifies ordering. A boundary check cannot redden on a
@@ -200,7 +230,8 @@ reddens CI" still holds, through the tests rather than the gate.
 4. The four ADR 0083 sites open with `begin_read_then_write`. — issue #552
    criterion 4.
 5. Neither `expire_due_waits_out_a_concurrent_writer` test contains a timed
-   release. Verified both ways:
+   release, and each crate also carries
+   `expire_due_asks_for_the_write_lock_at_its_opener`. Verified both ways:
    - **Holds:** `just test-repeat <crate> expire_due_waits_out_a_concurrent_writer 20`
      — 20 green iterations, each crate.
    - **Bites:** open `expire_due` with `begin_write_first` and run
