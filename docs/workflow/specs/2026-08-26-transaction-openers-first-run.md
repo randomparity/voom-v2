@@ -232,9 +232,10 @@ The check proves deliberateness, not correctness: a caller can still pick
 wrong claim at one call site, reviewable in a diff, rather than an invisible
 omission. ADR 0086 states why that trade is accepted.
 
-## Follow-up worth filing
+## Follow-up filed
 
-Seventeen `begin_read_only` transactions open a transaction to run a single
-read — `node_ticket_exists` is one statement between `BEGIN` and `COMMIT`. A
-lone read needs no transaction. Removing them is a separate change; nothing here
-depends on it.
+Seventeen `begin_read_only` transactions open a transaction to run reads, and
+most run a single one — `node_ticket_exists` is one statement between `BEGIN` and
+`COMMIT`. A lone read needs no transaction. Naming the openers is what made that
+visible. Removing them is a separate change and nothing here depends on it:
+issue [#589](https://github.com/randomparity/voom-v2/issues/589).
