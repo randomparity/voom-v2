@@ -121,11 +121,19 @@ which must leave an independent connection able to take the write lock at every
 test itself, which must leak at some *N*.
 
 Only the control is host-dependent, and only the control is gated on host
-parallelism. The fixed arm runs everywhere: post-fix the caller is a spawn plus a
-`oneshot` await, so it is `Pending` on its first poll on any core count. That
-split is deliberate — a skip notice from a passing test is invisible under both
-of this repo's CI test invocations, so the regression proof must not sit behind
-one.
+parallelism. That split is deliberate — a skip notice from a passing test is
+invisible under both of this repo's CI test invocations, so the regression proof
+must not sit behind one.
+
+A third arm covers what the poll sweep cannot. Post-fix, the caller's only wakeup
+is the `oneshot` send, which fires after the open has already returned, so no
+poll count cancels an open *in flight* — the sweep proves the regression, not the
+cancellation. The orphan arm gets that deterministically from SQLite instead of
+from scheduling: a holder connection keeps the write lock, so the detached
+`BEGIN IMMEDIATE` cannot return, so a short timeout is guaranteed to drop the
+caller mid-open; releasing the holder then lets the open complete, find no
+receiver, and roll back. It is the only coverage the `sender.send` error branch
+will ever get, and that branch is the decision.
 
 What the control buys is not that the fixed arm's range still brackets anything —
 the two arms count different clocks, and the fix is what decouples them, so the

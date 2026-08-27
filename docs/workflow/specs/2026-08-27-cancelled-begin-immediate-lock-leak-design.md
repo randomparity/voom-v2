@@ -255,10 +255,21 @@ elsewhere: 75s exceeds the node agent's 30s per-attempt timeout
 153.75s five-attempt budget. A request that queues behind a saturated pool can
 exceed the client's per-attempt timeout before it ever asks for the lock, and
 that attempt's own cancellation adds another detached opener. "Occupancy decays"
-is asymptotic; the criterion is a finite window. It is accepted rather than
-controlled because reaching saturation needs sustained multi-second lock
-contention, which is precisely what this change removes — the assumption is
-exercised by the `run-constrained.sh` acceptance sweep, not asserted by a test.
+is asymptotic; the criterion is a finite window.
+
+It is accepted, and the honest statement of what it is accepted *on* is an
+assumption rather than a consequence: that **no other sustained source of pool
+occupancy coincides with a cancellation burst** — I/O throttling, a long
+migration, a slow query. Saying instead that "saturation needs sustained lock
+contention, which this change removes" would be circular, and this document
+supplies its own counterexample: the acceptance sweep below deliberately creates
+one, running under `--write-bps 40M`, an fsync throttle that #592 records as
+*required* to reproduce. Two agents deactivating concurrently against a throttled
+disk are exactly the shape that could reach the eight-opener saturation. The 75s
+termination bound still holds there; what does not hold is any claim that the
+condition cannot arise. No machinery is added for it: bounding the detached open
+with a timeout would drop the detached future inside the leak window and undo the
+fix. The assumption is exercised by the sweep, not asserted by a test.
 
 No test asserts the bound itself:
 the property follows from two constants rather than from a race, and a test that
@@ -290,13 +301,28 @@ integration test, the regression proof.
 - **Two named constants, and what makes each safe.** A **100ms settle** between
   the cancellation and the first observer attempt, and the **5s** retry bound
   above. The settle is what stops the observer from taking and releasing the lock
-  before the cancelled `BEGIN IMMEDIATE` ever asks for it; its adequacy is not
-  asserted by hand but by the control arm below, which must go *red* — a settle
-  too short to let the lock be taken would make the control go green, failing the
-  test. The 5s bound only has to exceed the detached rollback's latency, which is
-  one queued statement on a worker thread, not a lock wait; it does not
-  discriminate between the arms, because the control's failure is now `SQLITE_BUSY`
-  on every attempt rather than the bound expiring.
+  before the cancelled `BEGIN IMMEDIATE` ever asks for it. Its adequacy is
+  established **per arm**, because the three arms have different timelines and an
+  argument from one does not transfer to another:
+
+  - *control arm*: the settle is validated by the arm having to go red. The
+    unfixed open runs inline on the caller's task, so a settle too short to let
+    the lock be taken would make the control go green and fail the test.
+  - *orphan arm*: no settle is needed at all. The holder owns the write lock
+    across the whole cancellation, so the observer cannot slip in front of the
+    detached opener by construction.
+  - *fixed arm*: the settle is **not** validated by the control, and an earlier
+    draft claimed it was. The post-fix timeline is strictly longer and
+    structurally different — task spawn, `pool.acquire()`, worker round trip —
+    and no arm measures it. Stated honestly: the fixed arm's settle is sized
+    against the measured latency of a detached open on the pinned toolchain, and
+    if it were short the arm would go green without proving the rollback. The
+    orphan arm is what covers that gap, which is a further reason it exists.
+
+  The 5s bound only has to exceed the detached rollback's latency, which is one
+  queued statement on a worker thread, not a lock wait; it does not discriminate
+  between the arms, because the control's failure is now `SQLITE_BUSY` on every
+  attempt rather than the bound expiring.
 - **Two sweeps.** Through `begin_read_then_write`, the independent write must
   succeed at every *N*. Through a bare `pool.begin_with("BEGIN IMMEDIATE")`
   written in the test itself, it must fail at some *N* — that is the positive
@@ -306,22 +332,52 @@ integration test, the regression proof.
   that passes while proving nothing. Note what the control does *not* buy: the
   two arms count different clocks, so a red control means "check whether upstream
   closed the window", not "the fixed arm stopped covering".
-- **The fixed arm asserts that it cancelled.** After the fix the caller is a
-  spawn plus a `oneshot` await, so it resolves on its second poll and only
-  *N* = 1 drops the future while it is still pending; *N* >= 2 exercises an open
-  that completed and was dropped by the ordinary path. The poll helper already
-  returns whether it dropped a still-pending future, so the arm requires at least
-  one *N* in the sweep to have actually cancelled. Without that assertion a
-  dependency bump that let the receiver be `Ready` on its first poll would leave
-  the arm green while cancelling nothing — the vacuity the control guards against
-  on the other arm, which does not transfer to this one.
-- **The parallelism precondition gates the control arm only.** The **fixed arm
-  always runs, on every host.** Post-fix the caller is a spawn plus a `oneshot`
-  await, so it goes `Pending` on its first poll and `Ready` on its second
-  regardless of core count: *N* = 1 cancels a still-pending future on one core
-  exactly as it does on forty-eight. Nothing in the fixed arm depends on where
-  the sqlx window falls, so nothing about it is host-dependent — the earlier
-  draft gated it for no reason it could name.
+- **The poll sweep cannot cancel a post-fix open, and the fixed arm does not
+  claim to.** Post-fix the caller's only await is `receiver.await`, and its only
+  wakeup source is the `oneshot` send — which happens *after* `pool.begin_with`
+  has returned. So at *N* = 1 the helper is re-entered by the completion wakeup
+  itself and drops a future whose value is already in the channel; at *N* >= 2 the
+  open completed on an earlier poll. At every *N* in the sweep the transaction is
+  fully open before the caller goes away. An earlier draft of this spec asserted
+  "at least one *N* actually cancelled" as an anti-vacuity guard; that assertion
+  is unsatisfiable in the sense intended and reports true in exactly the
+  degenerate case it was meant to catch, so it is **removed**. It was also a flake
+  risk in the other direction: on a many-core host the detached task can finish
+  before the parent's first poll of the receiver, making *N* = 1 resolve `Ready`
+  immediately and turning the guard spuriously red.
+
+  What the fixed arm is, then, is a **regression** assertion and nothing more: it
+  is red on the unfixed code at *N* = 3 and green after the fix, which is
+  completion criterion 3. Cancellation *during* an open is covered by the orphan
+  arm below, deterministically, instead of being hoped for here.
+- **Orphan arm — deterministic, no poll counting, no host dependence.** This is
+  the arm that exercises a caller vanishing while the open is genuinely in
+  flight, and it gets its determinism from SQLite's lock rather than from timing:
+
+  1. A holder connection takes `BEGIN IMMEDIATE` and keeps the write lock.
+  2. The caller runs `begin_read_then_write(&pool, …)` under a short
+     `tokio::time::timeout`. While the holder has the lock, the detached
+     `BEGIN IMMEDIATE` **cannot** return — so the timeout is guaranteed to fire
+     and drop the caller mid-open. This is a physical guarantee from SQLite, not
+     a race that happens to land.
+  3. The holder rolls back, releasing the lock.
+  4. The detached open now completes, finds no receiver, warns, and drops the
+     `Transaction` — which queues the `ROLLBACK`.
+  5. An independent `busy_timeout(0)` connection must be able to take the write
+     lock within the 5s bound.
+
+  This is the only coverage the `sender.send` error branch will ever get, and
+  that branch is the whole point of the design. Note it is **not** red on the
+  unfixed code: cancelling inside step 1 of `SqliteTransactionManager::begin`
+  lands in the window the worker already self-heals (`worker.rs:234-252`), so
+  pre-fix this arm passes. It is a coverage arm, not a regression arm, and saying
+  so is the difference between the two being useful.
+- **The parallelism precondition gates the control arm only.** The **fixed and
+  orphan arms run on every host.** The fixed arm's post-fix outcome does not
+  depend on where the sqlx window falls — the open completes on the detached task
+  at every *N*, on one core as on forty-eight — and the orphan arm's determinism
+  comes from a held lock, not from scheduling. Only the control arm asks where
+  the window is, so only the control arm is host-dependent.
 
   The **control** arm is skipped when `std::thread::available_parallelism()`
   reports fewer than 4. On one core the unfixed open collapses into one or two
@@ -340,15 +396,26 @@ integration test, the regression proof.
   runs `cargo llvm-cov … -- --test-threads=1` (`.github/workflows/ci.yml:83`). So
   a skip notice is *invisible* in both, and a design that put the regression
   proof behind it would let CI go green with zero coverage of the fix and no
-  visible signal. It does not, because the proof is never behind the gate. What
-  is behind it is the meta-check, and CI's `test (ubuntu-latest)` and `coverage`
-  jobs both clear it; `test (macos-latest)` on 3 vCPU is expected to run the
-  fixed arm and skip the control, permanently.
+  visible signal. It does not, because neither the proof nor the orphan coverage
+  is behind the gate. What is behind it is the meta-check.
+- **Which CI legs clear the gate is an external property, and it is sourced
+  rather than asserted.** `randomparity/voom-v2` is public
+  (`gh repo view --json visibility` → `PUBLIC`), and GitHub's documented
+  hosted-runner specs for public repositories give `ubuntu-latest` 4 vCPU and the
+  arm64 `macos-latest` 3. So `test (ubuntu-latest)` and `coverage` clear the gate
+  and `test (macos-latest)` skips the control permanently — but that is GitHub's
+  fact, not this repository's, and it moves without notice. **If the repository
+  were made private, the 2-vCPU default would skip the control on every CI leg**,
+  silently, which is the failure mode this whole paragraph is about. The exposure
+  is bounded rather than eliminated: the regression and orphan arms still run
+  everywhere, so what is lost in that case is the meta-check, not the coverage.
+  The first CI run on this branch should have its observed
+  `available_parallelism()` recorded here in place of the documented figures.
 - **What the fixed arm alone does not establish.** It proves the lock is not held
   indefinitely; on its own it does not distinguish "opened and rolled back" from
-  "never opened". The control arm is what establishes the window is real at these
-  *N*. On a host where the control is skipped the fixed arm is therefore a
-  weaker check, and that is stated rather than papered over.
+  "never opened". The orphan arm settles that on every host — the holder's lock
+  guarantees the open was in flight — and the control arm establishes that the
+  *unfixed* window is still real at these *N*.
 - Test files are exempt from `check-transaction-openers.sh`
   (`! -name '*_test.rs' ! -path '*/tests/*'`), so the control's raw
   `pool.begin_with` is allowed where it lives.
@@ -385,8 +452,23 @@ recipe, repeated:
 
 **at least 90 times.** 60 is not enough and the first draft's arithmetic read the
 range backwards: 1-in-30 is the *lower* failure probability, so a clean 60-run
-sweep still has probability (29/30)^60 = 0.13 of proving nothing. At 90 runs the
-worst case is (29/30)^90 = 0.047.
+sweep still has probability (29/30)^60 = 0.13 of proving nothing. At 90 runs it
+is (29/30)^90 = 0.047.
+
+**That 0.047 is conditional, and the condition is not established by this
+protocol.** It assumes *p* >= 1/30 **on the host running the sweep**, and #592's
+rate was measured elsewhere. The pre-fix control below stops at the first
+reproduction, which establishes only that *p* > 0 there. If the sweep host's true
+rate were 1/200 — still reproducing, just rarer under different disk latency or
+core count, and this document already documents how configuration-sensitive the
+reproduction is — then 90 green runs carry a false-negative probability of
+(199/200)^90 = 0.64, not 0.047. So report the figure as conditional and report
+the **pre-fix reproduction index** (which run number first reproduced) as the
+host-local evidence it is; that index is what a later reader needs to judge
+whether the rate transferred. Making 0.047 load-bearing instead would mean
+running the pre-fix arm to the full 90 and deriving the bound from the
+reproduction count actually observed — more than this criterion is worth, and
+stated here so the choice is visible rather than silent.
 
 **The pre-fix control gates the sweep.** Reproduction is configuration-sensitive,
 not merely rare — #592 records that 101 unthrottled runs did not reproduce and
@@ -408,6 +490,19 @@ of the full protocol is reported as what it is.
 **Unchanged:** `crates/voom-node-agent/tests/lifecycle.rs`. `HANG_GUARD` stays at
 30s. That test is the end-to-end signal for this defect and it stays tight, which
 is the whole reason it caught this.
+
+**What discharges completion criterion 2** — graceful shutdown reaching the
+durable `Retired` write under write contention rather than exhausting the retry
+budget — is `live_agent_fences_prior_incarnation_and_retires_orderly`, unchanged,
+running inside the acceptance sweep above. It therefore inherits that sweep's
+probabilistic confidence and everything said about it: criterion 2 is discharged
+at the same conditional figure, not deterministically. A deterministic
+use-case-level contention test in ADR 0085's shape (barrier-released claimers
+against a real on-disk WAL database) is **not** added, because the contention
+this defect needs is a cancellation landing in a one-poll window rather than a
+race between claimers — the orphan arm constructs that directly and at the store
+layer, where it is deterministic, instead of trying to provoke it through the
+use case.
 
 **Unchanged:** `crates/voom-node-agent/tests/budget_ladder.rs`. No budget moves.
 
