@@ -10,6 +10,7 @@ use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+use crate::tx::begin_read_then_write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -247,11 +248,7 @@ impl SqliteSchedulerDecisionRepo {
         &self,
         input: NewSchedulerDecision,
     ) -> Result<SchedulerDecision, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "scheduler_decisions: create").await?;
         let decision = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -284,11 +281,8 @@ impl SqliteSchedulerDecisionRepo {
         &self,
         input: NewSchedulerDecision,
     ) -> Result<SchedulerDecision, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "scheduler_decisions: create_or_suppress").await?;
         let decision = self.create_or_suppress_in_tx(&mut tx, input).await?;
         tx.commit()
             .await

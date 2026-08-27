@@ -10,6 +10,7 @@ use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+use crate::tx::{begin_read_only, begin_read_then_write, begin_write_first};
 
 /// Default backoff window: capped exponential with full jitter.
 const DEFAULT_BACKOFF_BASE_SECS: u64 = 5;
@@ -214,11 +215,7 @@ impl SqliteTicketRepo {
     /// Returns the errors documented by [`Self::create_in_tx`], or
     /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn create(&self, input: NewTicket) -> Result<Ticket, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "tickets: create").await?;
         let out = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -475,11 +472,7 @@ impl SqliteTicketRepo {
         ticket_id: TicketId,
         depends_on: TicketId,
     ) -> Result<(), VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "tickets: add_dependency").await?;
         self.add_dependency_in_tx(&mut tx, ticket_id, depends_on)
             .await?;
         tx.commit()
@@ -602,11 +595,7 @@ impl SqliteTicketRepo {
         ticket_id: TicketId,
         now: OffsetDateTime,
     ) -> Result<Vec<Ticket>, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "tickets: mark_ready_if_unblocked").await?;
         let out = self
             .mark_ready_if_unblocked_in_tx(&mut tx, ticket_id, now)
             .await?;
@@ -1154,11 +1143,7 @@ impl SqliteTicketRepo {
         operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Option<Ticket>, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_only(&self.pool, "tickets: next_ready_for_operations").await?;
         let out = self
             .next_ready_for_operations_in_tx(&mut tx, operations, now)
             .await?;
