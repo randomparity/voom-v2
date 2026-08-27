@@ -85,9 +85,18 @@ classification is evidence, not authority.
 | read-only | 9 | `begin_read_only` |
 | classification uncertain | 41 | read the body; no allow file exists to defer into |
 
-The 41 uncertain ones are where the abandoned analyzer gave up. They are not a
-residue to disposition here — there is nothing to disposition *into*, because the
-new check has no allow file. Each is read and given a name like any other site.
+The 41 uncertain ones are where the abandoned analyzer gave up, and the counts
+above will move as they are read: spot-reading found read-only getters
+(`SqliteWorkerRepo::get_by_name`, `SqliteLeaseRepo::get_held_for_worker`) and at
+least one genuine read-then-write violation
+(`SqliteSchedulerDecisionRepo::create`, which validates with a `SELECT` before
+writing). They are not a residue to disposition — there is nothing to
+disposition *into*, because the new check has no allow file. Each is read and
+named like any other site.
+
+Reading them is cheap: in `voom-store` the near-universal shape is open, one
+`*_in_tx` delegate, commit, so the question reduces to what that delegate's
+first statement does.
 
 The four sites ADR 0083 deferred to this issue are in the 24 by construction:
 `SqliteLeaseRepo::fail`, `SqliteLeaseRepo::force_release`,

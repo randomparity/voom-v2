@@ -32,7 +32,7 @@ Files: `crates/voom-store/src/tx.rs` (new), `crates/voom-store/src/lib.rs`
 `scripts/check-transaction-openers-selftest.sh` (new), `justfile` (the two bare
 recipes — **not** added to `ci` here).
 
-`tx.rs` holds the three helpers from the spec, each mapping to its `BEGIN` mode
+`tx.rs` holds both helpers from the spec, each mapping to its `BEGIN` mode
 and wrapping the error with the caller's `context`. Each carries a doc comment
 saying when to use it and what goes wrong otherwise, so the choice is answerable
 at the call site without opening ADR 0083.
@@ -52,8 +52,11 @@ helpers as their callers move: `begin` in `repo/library/mod.rs`,
 `repo/policy/policies.rs`; `begin_tx` in `repo/media/use_leases.rs`;
 `begin_gate_tx` in `repo/media/commit_safety_gate.rs`.
 
-One commit per file. Each commit names the transactions it converts and the
-shape it claims for each.
+One commit per repository module, not per file. The `prek` hook runs `just lint`
+and the workspace test suite on every commit — measured at over two minutes —
+so 59 per-file commits would spend hours in hooks for no extra bisect
+resolution. A module is still a coherent, revertible unit. Each commit names the
+transactions it converts and the shape it claims for each.
 
 **Read before naming.** For each site, confirm from the source what its first
 statement does on that handle, following `*_in_tx` callees. A site whose reading
@@ -74,7 +77,7 @@ Files: `crates/voom-control-plane/src/**`, including deletion of `begin_tx` and
 opener. `local_worker.rs:452`'s direct `pool.begin()` is the one leak past the
 existing helpers and converts like any other site.
 
-Same discipline as T2: one commit per file, read before naming.
+Same discipline as T2: one commit per module, read before naming.
 `ControlPlane::force_release_lease` becomes `begin_read_then_write`.
 
 Verify per commit: `cargo test -p voom-control-plane`. At the end,

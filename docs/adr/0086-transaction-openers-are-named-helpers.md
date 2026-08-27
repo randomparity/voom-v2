@@ -49,6 +49,16 @@ does. Of the 186, **24 are confirmed read-then-write on a deferred opener** —
 live instances of #546's defect class — and none of their call sites reads
 differently from the 67 deferred openers that are genuinely safe.
 
+**What the analyzer could not classify.** Its 41-transaction residue is not a
+tail of exotic cases. Spot-reading it found `SqliteWorkerRepo::get_by_name` and
+`SqliteLeaseRepo::get_held_for_worker` — plain read-only getters — and
+`SqliteSchedulerDecisionRepo::create`, which calls
+`validate_selected_lease_coherence_in_tx` (opening `SELECT`) before it writes,
+making it a live instance of #546's defect class that the analyzer filed as
+"cannot say". The residue was where the answers were hardest to recover
+mechanically and easiest to read: every one of those three is an opener, a
+single `*_in_tx` delegate, and a commit.
+
 **Why a static analyzer was tried first, and abandoned.** This record originally
 specified an interprocedural analyzer recovering read/write ordering from source.
 It was built and it worked: 186 transactions classified, 24 violations found. It
