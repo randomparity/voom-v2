@@ -15,6 +15,7 @@ use voom_core::{BackupId, FileVersionId, JobId, TicketId, VoomError};
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
+use crate::tx::begin_write_first;
 
 /// Lifecycle of a backup record. Mirrors the `backups.status` CHECK exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +168,7 @@ impl SqliteBackupRepo {
         input: NewBackup,
         now: OffsetDateTime,
     ) -> Result<Backup, VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "backups: insert_pending").await?;
         let out = self.insert_pending_in_tx(&mut tx, input, now).await?;
         commit(tx).await?;
         Ok(out)
@@ -215,7 +216,7 @@ impl SqliteBackupRepo {
         checksum: &str,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "backups: mark_verified").await?;
         self.mark_verified_in_tx(&mut tx, id, size_bytes, checksum, now)
             .await?;
         commit(tx).await
@@ -260,7 +261,7 @@ impl SqliteBackupRepo {
         detail: &BackupFailureDetail,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let mut tx = begin(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "backups: mark_failed").await?;
         self.mark_failed_in_tx(&mut tx, id, detail, now).await?;
         commit(tx).await
     }
@@ -397,12 +398,6 @@ impl SqliteBackupRepo {
         .map_err(|e| VoomError::database_context("backups verified_for_ticket_and_version", e))?;
         row.as_ref().map(row_to_backup).transpose()
     }
-}
-
-async fn begin(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    pool.begin()
-        .await
-        .map_err(|e| VoomError::database_context("begin", e))
 }
 
 async fn commit(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {

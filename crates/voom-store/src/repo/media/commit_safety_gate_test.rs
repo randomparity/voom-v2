@@ -2486,7 +2486,9 @@ async fn begin_gate_tx_emits_begin_immediate_and_takes_reserved_lock() {
     // connection's busy_timeout to 0 before BEGIN IMMEDIATE so the
     // contention surfaces deterministically rather than waiting).
     let (pool, _tmp) = fresh_pool().await;
-    let tx1 = super::begin_gate_tx(&pool).await.unwrap();
+    let tx1 = crate::tx::begin_read_then_write(&pool, "test: gate lock holder")
+        .await
+        .unwrap();
 
     // Probe on a separate connection. busy_timeout=0 turns the
     // contention into an immediate SQLITE_BUSY rather than a wait.

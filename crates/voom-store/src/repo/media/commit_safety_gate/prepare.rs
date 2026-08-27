@@ -11,8 +11,9 @@ use super::{
     CommitId, CommitIntent, CommitIntentRecordedPayload, CommitTarget, DestructiveCommit, Event,
     EventEnvelope, EventRepo, EvidenceDrift, EvidenceId, EvidenceRevalidationResult,
     ForcePathToken, LeaseScope, OffsetDateTime, SqlitePool, SubjectType, UseLeaseId, VoomError,
-    begin_gate_tx, bypass_kind_str, consult_pending_commit_lock_in_tx, iso8601, u64_from_i64,
+    bypass_kind_str, consult_pending_commit_lock_in_tx, iso8601, u64_from_i64,
 };
+use crate::tx::{begin_read_then_write, begin_write_first};
 
 // ============================================================================
 // Phase A entry point — `prepare_destructive_commit` + abort helper
@@ -154,7 +155,8 @@ async fn phase_a_gate_abort_with_event(
     // BEGIN IMMEDIATE invariant holds even on the abort path.
     let started_iso = iso8601(row.started_at)?;
     let aborted_iso = iso8601(aborted_at)?;
-    let mut tx1 = begin_gate_tx(pool).await?;
+    let mut tx1 =
+        begin_write_first(pool, "commit_safety_gate: phase_a_gate_abort_with_event").await?;
     let insert = sqlx::query(
         "INSERT INTO commit_intents \
          (target, closure_initial, accepted_evidence_ids, state, started_at, \
@@ -180,7 +182,7 @@ async fn phase_a_gate_abort_with_event(
 
     // two-tx: tx 2 emits the matching event.
     let payload = phase_a_abort_event(commit_id, aborted_at, &abort);
-    let mut tx2 = begin_gate_tx(pool).await?;
+    let mut tx2 = begin_write_first(pool, "commit_safety_gate: phase_a_gate_abort event").await?;
     event_repo
         .append_in_tx(
             &mut tx2,
@@ -341,7 +343,8 @@ pub async fn prepare_destructive_commit(
         .map(|t| t.bypass.clone())
         .unwrap_or_default();
 
-    let mut tx = begin_gate_tx(pool).await?;
+    let mut tx =
+        begin_read_then_write(pool, "commit_safety_gate: prepare_destructive_commit").await?;
 
     let walk_outcome = run_phase_a_gate_in_tx(
         &mut tx,

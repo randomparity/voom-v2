@@ -52,12 +52,6 @@ impl SqliteLibraryRepo {
 
 impl Repository for SqliteLibraryRepo {}
 
-async fn begin(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    pool.begin()
-        .await
-        .map_err(|e| VoomError::database_context("begin", e))
-}
-
 async fn commit(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
     tx.commit()
         .await

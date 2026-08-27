@@ -9,6 +9,7 @@ use sqlx::Row;
 use super::super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
+use crate::tx::{begin_read_only, begin_write_first};
 
 impl SqliteArtifactRepo {
     pub async fn create_handle_in_tx(
@@ -66,11 +67,7 @@ impl SqliteArtifactRepo {
         &self,
         input: NewArtifactHandle,
     ) -> Result<ArtifactHandle, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "artifacts_handles: create_handle").await?;
         let out = self.create_handle_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -115,11 +112,7 @@ impl SqliteArtifactRepo {
         &self,
         input: NewArtifactLocation,
     ) -> Result<ArtifactLocation, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "artifacts_handles: record_location").await?;
         let out = self.record_location_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -174,11 +167,7 @@ impl SqliteArtifactRepo {
         location_id: ArtifactLocationId,
         now: OffsetDateTime,
     ) -> Result<ArtifactHandleId, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "artifacts_handles: retire_location").await?;
         let out = self
             .retire_location_in_tx(&mut tx, location_id, now)
             .await?;
@@ -224,11 +213,7 @@ impl SqliteArtifactRepo {
         &self,
         input: NewArtifactLineage,
     ) -> Result<ArtifactLineage, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "artifacts_handles: record_lineage").await?;
         let out = self.record_lineage_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -333,11 +318,8 @@ impl SqliteArtifactRepo {
         &self,
         handle_id: ArtifactHandleId,
     ) -> Result<ArtifactExpectedFacts, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| VoomError::database_context("begin", error))?;
+        let mut tx =
+            begin_read_only(&self.pool, "artifacts_handles: require_expected_facts").await?;
         let facts = self
             .require_expected_facts_in_tx(&mut tx, handle_id)
             .await?;

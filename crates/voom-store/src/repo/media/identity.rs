@@ -25,6 +25,7 @@ use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
 use super::use_leases::LeaseScope;
+use crate::tx::{begin_read_then_write, begin_write_first};
 
 // ---------- value-type vocabularies ----------------------------------------
 
@@ -963,11 +964,7 @@ impl IngestRepo for SqliteIdentityRepo {
         discovered: DiscoveredFile,
         alias_proof: Option<AliasProof>,
     ) -> Result<IngestOutcome, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "identity: record_discovered_file").await?;
         let out = self
             .record_discovered_file_in_tx(&mut tx, discovered, alias_proof)
             .await?;
@@ -1025,11 +1022,7 @@ impl IngestRepo for SqliteIdentityRepo {
         observed: ObservedBytes,
         observed_at: OffsetDateTime,
     ) -> Result<RenameReconciledOutcome, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "identity: reconcile_rename").await?;
         let out = self
             .reconcile_rename_in_tx(&mut tx, proof, observed, observed_at)
             .await?;
@@ -1069,11 +1062,7 @@ impl MediaWorkRepo for SqliteIdentityRepo {
     }
 
     async fn create_media_work(&self, input: NewMediaWork) -> Result<MediaWork, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "identity: create_media_work").await?;
         let out = self.create_media_work_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -1174,11 +1163,7 @@ impl MediaVariantRepo for SqliteIdentityRepo {
         &self,
         input: NewMediaVariant,
     ) -> Result<MediaVariant, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "identity: create_media_variant").await?;
         let out = self.create_media_variant_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -1276,11 +1261,7 @@ impl FileAssetRepo for SqliteIdentityRepo {
     }
 
     async fn create_file_asset(&self, created_at: OffsetDateTime) -> Result<FileAsset, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_write_first(&self.pool, "identity: create_file_asset").await?;
         let out = self.create_file_asset_in_tx(&mut tx, created_at).await?;
         tx.commit()
             .await
@@ -1414,11 +1395,7 @@ impl FileVersionRepo for SqliteIdentityRepo {
     }
 
     async fn create_file_version(&self, input: NewFileVersion) -> Result<FileVersion, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+        let mut tx = begin_read_then_write(&self.pool, "identity: create_file_version").await?;
         let out = self.create_file_version_in_tx(&mut tx, input).await?;
         tx.commit()
             .await

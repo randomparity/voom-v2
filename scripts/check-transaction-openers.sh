@@ -48,6 +48,7 @@ while IFS= read -r source_file; do
 done < <(find "$root" -type f -name '*.rs' \
 	-path '*/src/*' \
 	! -name '*_test.rs' \
+	! -name 'tests.rs' \
 	! -name 'test_support.rs' \
 	! -path '*/tests/*' \
 	! -path "*/$opener_module" |

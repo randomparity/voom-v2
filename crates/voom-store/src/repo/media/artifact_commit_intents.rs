@@ -15,6 +15,7 @@ use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
 use super::use_leases::LeaseScope;
+use crate::tx::begin_read_only;
 use voom_core::ids::{
     ArtifactCommitIntentId, ArtifactCommitRecordId, ArtifactHandleId, ArtifactVerificationId,
     FileLocationId, FileVersionId,
@@ -517,11 +518,7 @@ impl SqliteArtifactCommitIntentRepo {
         &self,
         id: ArtifactCommitIntentId,
     ) -> Result<ArtifactCommitIntent, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("artifact_commit_intents begin", e))?;
+        let mut tx = begin_read_only(&self.pool, "artifact_commit_intents: require_intent").await?;
         self.require_intent_in_tx(&mut tx, id).await
     }
 

@@ -181,6 +181,22 @@ impl Repo {
     }
 }'
 
+# A `#[cfg(test)] mod tests;` module lives in `tests.rs`, which is a test file
+# despite not matching `*_test.rs`.
+fixture cfg_test_module 0 'voom-store/src/repo/artifacts/tests.rs' '
+use super::*;
+#[tokio::test]
+async fn seeds() {
+    let mut tx = pool.begin().await.unwrap();
+}' \
+	'use crate::tx::begin_write_first;
+impl Repo {
+    async fn clean(&self) -> R {
+        let mut tx = begin_write_first(&self.pool, "clean").await?;
+        Ok(())
+    }
+}'
+
 # Support crates exist to serve tests.
 fixture support_crate 0 'voom-test-support/src/lib.rs' '
 pub async fn seed(pool: &SqlitePool) -> R {

@@ -325,7 +325,10 @@ async fn activation_requires_active_owner_and_fences_changed_identity() {
         .create_library_root(new_root(library_id, owner, "/media"), at(1))
         .await
         .unwrap();
-    let mut validation_tx = begin(&repo.pool).await.unwrap();
+    let mut validation_tx =
+        crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+            .await
+            .unwrap();
     for invalid in [String::new(), "x".repeat(4097), "nul\0identity".to_owned()] {
         let error = repo
             .activate_library_root_in_tx(&mut validation_tx, root.id, invalid, at(2))
@@ -335,7 +338,9 @@ async fn activation_requires_active_owner_and_fences_changed_identity() {
     }
     drop(validation_tx);
 
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     let inactive = repo
         .activate_library_root_in_tx(&mut tx, root.id, "device:1".to_owned(), at(2))
         .await
@@ -348,7 +353,9 @@ async fn activation_requires_active_owner_and_fences_changed_identity() {
         .execute(&repo.pool)
         .await
         .unwrap();
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     let active = repo
         .activate_library_root_in_tx(&mut tx, root.id, "device:1".to_owned(), at(3))
         .await
@@ -359,7 +366,9 @@ async fn activation_requires_active_owner_and_fences_changed_identity() {
         (StorageRootState::Active, 1)
     );
 
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     repo.mark_library_root_unavailable_in_tx(&mut tx, root.id, at(4))
         .await
         .unwrap();
@@ -370,7 +379,9 @@ async fn activation_requires_active_owner_and_fences_changed_identity() {
     commit(tx).await.unwrap();
     assert_eq!(unchanged.root_epoch, 1);
 
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     repo.mark_library_root_unavailable_in_tx(&mut tx, root.id, at(6))
         .await
         .unwrap();
@@ -393,7 +404,9 @@ async fn effective_availability_fails_closed_at_each_gate() {
         .unwrap();
     assert_reason(&repo, root.id, RootAvailabilityReason::RootNotActive).await;
 
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     repo.activate_library_root_in_tx(&mut tx, root.id, "device:1".to_owned(), at(2))
         .await
         .unwrap();
@@ -508,7 +521,9 @@ async fn set_root_enabled_distinguishes_missing_from_retired() {
         .create_library_root(new_root(library_id, owner, "/media"), at(2))
         .await
         .unwrap();
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     repo.retire_library_root_in_tx(&mut tx, root.id, at(3))
         .await
         .unwrap();
@@ -543,7 +558,9 @@ async fn retire_is_terminal_and_library_delete_is_restricted() {
         .create_library_root(new_root(library_id, owner, "/media"), at(1))
         .await
         .unwrap();
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     let retired = repo
         .retire_library_root_in_tx(&mut tx, root.id, at(2))
         .await
@@ -552,7 +569,9 @@ async fn retire_is_terminal_and_library_delete_is_restricted() {
     assert_eq!(retired.state, StorageRootState::Retired);
     assert!(!retired.enabled);
 
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     let error = repo
         .retire_library_root_in_tx(&mut tx, root.id, at(3))
         .await
@@ -657,7 +676,9 @@ async fn corrupt_persisted_root_lifecycle_is_a_database_error_before_classificat
         .create_library_root(new_root(library_id, owner, "/media"), at(1))
         .await
         .unwrap();
-    let mut tx = begin(&repo.pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: activate_library_root")
+        .await
+        .unwrap();
     repo.activate_library_root_in_tx(&mut tx, root.id, "device:media".to_owned(), at(2))
         .await
         .unwrap();

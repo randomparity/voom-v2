@@ -14,6 +14,7 @@ use voom_core::{
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, u32_from_i64, u64_from_i64};
+use crate::tx::{begin_read_only, begin_read_then_write, begin_write_first};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioSynthesisOperationState {
@@ -224,13 +225,7 @@ impl SqliteAudioSynthesisOperationRepo {
         now: OffsetDateTime,
     ) -> Result<AudioSynthesisOperationRecord, VoomError> {
         validate_new_operation(&input, companions)?;
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| {
-                VoomError::database_context("audio synthesis create begin immediate", error)
-            })?;
+        let mut tx = begin_read_then_write(&self.pool, "audio_synthesis: create_planned").await?;
         if let Some(existing) = load_record_by_key(&mut tx, &input.operation_key).await? {
             require_exact_replay(&existing, &input, companions)?;
             tx.commit().await.map_err(|error| {
@@ -255,11 +250,7 @@ impl SqliteAudioSynthesisOperationRepo {
         &self,
         operation_key: &str,
     ) -> Result<Option<AudioSynthesisOperationRecord>, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| VoomError::database_context("audio synthesis get begin", error))?;
+        let mut tx = begin_read_only(&self.pool, "audio_synthesis: get_by_key").await?;
         let record = load_record_by_key(&mut tx, operation_key).await?;
         tx.commit()
             .await
@@ -660,13 +651,8 @@ impl SqliteAudioSynthesisOperationRepo {
                 "audio synthesis dispatch lease must match the creating claim".to_owned(),
             ));
         }
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| {
-                VoomError::database_context("audio synthesis dispatch begin", error)
-            })?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "audio_synthesis: record_dispatch_attempt").await?;
         let operation_id = require_live_planned_claim(&mut tx, claim, now).await?;
         let result = sqlx::query(
             "INSERT INTO audio_synthesis_dispatch_attempts \
@@ -731,9 +717,7 @@ impl SqliteAudioSynthesisOperationRepo {
         let Some(attempt_id) = attempt_id else {
             return Ok(None);
         };
-        let mut tx = self.pool.begin().await.map_err(|error| {
-            VoomError::database_context("audio synthesis dispatch attempt get begin", error)
-        })?;
+        let mut tx = begin_read_only(&self.pool, "audio_synthesis: get_dispatch_attempt").await?;
         let attempt = load_dispatch_attempt(&mut tx, attempt_id).await?;
         tx.commit().await.map_err(|error| {
             VoomError::database_context("audio synthesis dispatch attempt get commit", error)
@@ -786,13 +770,11 @@ impl SqliteAudioSynthesisOperationRepo {
         attempt_id: u64,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| {
-                VoomError::database_context("audio synthesis generation begin", error)
-            })?;
+        let mut tx = begin_write_first(
+            &self.pool,
+            "audio_synthesis: quarantine_and_advance_generation",
+        )
+        .await?;
         let now = iso8601(now)?;
         let quarantined = sqlx::query(
             "UPDATE audio_synthesis_dispatch_attempts SET status = ? \

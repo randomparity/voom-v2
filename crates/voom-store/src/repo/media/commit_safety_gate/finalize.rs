@@ -8,9 +8,10 @@ use super::{
     CommitRecoveryRequiredPayload, CommitTarget, Event, EventEnvelope, EventRepo, FileLocationRepo,
     FileVersionRepo, LeaseScope, MutationOutcome, OffsetDateTime, Row, Sqlite, SubjectType,
     TargetEpochDrift, TargetEpochDriftWire, TargetMemberKind, Transaction, UseLeaseId, VoomError,
-    begin_gate_tx, i64_from_u64, iso8601, u64_from_i64,
+    i64_from_u64, iso8601, u64_from_i64,
 };
 use crate::repo::media::identity::NewFileLocation;
+use crate::tx::begin_read_then_write;
 
 // ============================================================================
 // Phase C entry point — `finalize_destructive_commit`
@@ -102,7 +103,8 @@ pub async fn finalize_destructive_commit(
         event_repo,
         alias_resolver,
     } = context;
-    let mut tx = begin_gate_tx(pool).await?;
+    let mut tx =
+        begin_read_then_write(pool, "commit_safety_gate: finalize_destructive_commit").await?;
 
     let row = read_authorized_intent_in_tx(&mut tx, permit.commit_id(), permit.epoch()).await?;
 

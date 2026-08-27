@@ -14,8 +14,9 @@ use super::{
     CommitGateContext, CommitGateIdentityRepo, CommitGateResult, CommitId, CommitPermit,
     CommitTarget, Event, EventEnvelope, EventRepo, EvidenceDrift, EvidenceId,
     EvidenceRevalidationResult, ForcePathToken, LeaseScope, OffsetDateTime, Row, SubjectType,
-    TargetMemberKind, UseLeaseId, VoomError, begin_gate_tx, i64_from_u64, iso8601, u64_from_i64,
+    TargetMemberKind, UseLeaseId, VoomError, i64_from_u64, iso8601, u64_from_i64,
 };
+use crate::tx::begin_read_then_write;
 
 // ============================================================================
 // Phase B entry point — `authorize_destructive_commit`
@@ -89,7 +90,8 @@ pub async fn authorize_destructive_commit(
         event_repo,
         alias_resolver,
     } = context;
-    let mut tx = begin_gate_tx(pool).await?;
+    let mut tx =
+        begin_read_then_write(pool, "commit_safety_gate: authorize_destructive_commit").await?;
 
     let row = read_pending_intent_in_tx(&mut tx, commit_id).await?;
     let walk_outcome = run_phase_b_gate_in_tx(
