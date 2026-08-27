@@ -5,7 +5,7 @@ use voom_store::repo::issues::TerminalFailureIssueDraft;
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx, require_audit_field};
+use super::{append_event, commit_tx, require_audit_field};
 
 mod inspection;
 pub(crate) mod jobs;

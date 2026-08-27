@@ -23,7 +23,8 @@ use voom_worker_protocol::{
 use crate::ControlPlane;
 use crate::artifact::bootstrap::ensure_builtin_verify_artifact_worker_in_tx;
 use crate::artifact::worker::{BundledWorkerProcess, VerifyWorkerError};
-use crate::cases::{append_event, begin_immediate_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 #[derive(Debug)]
 pub struct VerifyArtifactInput {
@@ -329,7 +330,7 @@ async fn record_verification_started(
     location_id: ArtifactLocationId,
     path: &str,
 ) -> Result<WorkerId, VoomError> {
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx = begin_write_first(&cp.pool, "verify: record_verification_started").await?;
     let worker = ensure_builtin_verify_artifact_worker_in_tx(cp, &mut tx).await?;
     append_verification_started_event(cp, &mut tx, handle_id, location_id, path, worker.id).await?;
     commit_tx(tx).await?;
@@ -343,7 +344,8 @@ async fn record_verification_started_for_worker(
     path: &str,
     worker_id: WorkerId,
 ) -> Result<(), VoomError> {
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx =
+        begin_write_first(&cp.pool, "verify: record_verification_started_for_worker").await?;
     append_verification_started_event(cp, &mut tx, handle_id, location_id, path, worker_id).await?;
     commit_tx(tx).await
 }
@@ -380,7 +382,7 @@ async fn persist_verification_outcome(
     outcome: VerifyOutcome,
     hooks: &dyn VerifyArtifactHooks,
 ) -> Result<VerifyArtifactReport, VoomError> {
-    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let mut tx = begin_read_then_write(&cp.pool, "verify: persist_verification_outcome").await?;
     let now = cp.clock().now();
     let outcome = validate_success_facts(&expected, outcome);
     let outcome = match revalidate_selected_live_location(

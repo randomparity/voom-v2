@@ -4,7 +4,8 @@ use voom_events::{Event, SubjectType};
 use voom_store::repo::media::artifacts::PolicyArtifactTarget;
 
 use crate::ControlPlane;
-use crate::cases::{append_event, begin_immediate_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
+use voom_store::tx::begin_read_then_write;
 
 impl ControlPlane {
     pub(crate) async fn resolve_policy_artifact_target(
@@ -25,7 +26,9 @@ impl ControlPlane {
                 "policy artifact verification canonical path must be valid UTF-8".into(),
             )
         })?;
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "policy_target: resolve_policy_artifact_target")
+                .await?;
         let now = self.clock().now();
         let resolution = self
             .artifacts

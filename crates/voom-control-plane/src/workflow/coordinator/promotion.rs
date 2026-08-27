@@ -15,9 +15,10 @@ use voom_store::repo::execution::workflow_summaries::FilePhaseSummary;
 use voom_store::repo::media::identity::{FileLocationAddress, FileLocationRepo, FileVersionRepo};
 
 use crate::ControlPlane;
+use crate::cases::commit_tx;
 use crate::cases::policy::compliance::PromotionPlan;
-use crate::cases::{begin_tx, commit_tx};
 use crate::workflow::coordinator::finalize::WorkingDirArtifact;
+use voom_store::tx::begin_write_first;
 
 /// Canonicalized `(working dir, output dir)` pairs for a run. A working dir is
 /// absent when its operation produced nothing this run, so it is dropped.
@@ -657,7 +658,8 @@ impl ControlPlane {
                 )));
             }
         }
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "promotion: reclaim_intermediate_location").await?;
         self.identity
             .retire_file_location_in_tx(&mut tx, location.id, self.clock().now(), location.epoch)
             .await?;
@@ -742,7 +744,7 @@ impl ControlPlane {
             )
             .await?;
         move_terminal_artifact(current, &dest, artifact.location_id).await?;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "promotion: promote_artifact").await?;
         self.identity
             .update_file_location_address_in_tx(
                 &mut tx,

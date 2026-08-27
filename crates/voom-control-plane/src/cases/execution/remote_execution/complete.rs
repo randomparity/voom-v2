@@ -11,11 +11,12 @@ use voom_store::repo::media::artifact_access_plans::{
 };
 
 use crate::ControlPlane;
+use crate::cases::commit_tx;
 use crate::cases::execution::remote_execution::{
     RemoteCompleteInput, RemoteCompleteOutcome, ReplayRoute, ValidatedArtifactAccess,
     decode_replay, is_remote_replayable_error, remote_error_message, route_lease_complete,
 };
-use crate::cases::{begin_immediate_tx, commit_tx};
+use voom_store::tx::begin_read_then_write;
 
 impl ControlPlane {
     /// Complete a held remote lease successfully.
@@ -29,7 +30,7 @@ impl ControlPlane {
     ) -> Result<RemoteCompleteOutcome, VoomError> {
         let now = self.clock().now();
         let route_key = route_lease_complete(input.lease_id);
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "complete: remote_complete").await?;
         let auth = self
             .require_remote_incarnation_fence_in_tx(
                 &mut tx,

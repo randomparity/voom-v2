@@ -14,9 +14,9 @@ use voom_store::repo::execution::tickets::{
 };
 
 use crate::ControlPlane;
-use crate::cases::begin_immediate_tx;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, commit_tx};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 #[cfg(test)]
 #[derive(Default)]
@@ -37,7 +37,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates `SqliteTicketRepo::create_in_tx` and event-append errors.
     pub async fn create_ticket(&self, input: NewTicket) -> Result<Ticket, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "tickets: create_ticket").await?;
         let ticket = self.create_ticket_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(ticket)
@@ -94,7 +94,8 @@ impl ControlPlane {
         now: OffsetDateTime,
         #[cfg(test)] observer: Option<&MarkReadyTransactionObserver>,
     ) -> Result<Vec<Ticket>, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "tickets: mark_ready_if_unblocked_observed").await?;
         #[cfg(test)]
         if let Some(observer) = observer {
             observer.begun.notify_one();
@@ -147,11 +148,10 @@ impl ControlPlane {
         now: OffsetDateTime,
     ) -> Result<PreLeaseFailureOutcome, VoomError> {
         let reason = pre_lease_failure_reason(class)?;
-        // Read-then-write: the ticket read and held-lease check below precede
-        // the failure write, so the transaction must take the write lock at
-        // `BEGIN`. See [`begin_immediate_tx`] for why a deferred `BEGIN`
-        // bypasses `busy_timeout` on the upgrade and fails under contention.
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        // The ticket read and held-lease check below precede the failure
+        // write (ADR 0083).
+        let mut tx =
+            begin_read_then_write(&self.pool, "tickets: record_pre_lease_ticket_failure").await?;
         let ticket = self
             .tickets
             .get_in_tx(&mut tx, ticket_id)

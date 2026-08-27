@@ -21,15 +21,14 @@ use voom_store::repo::media::audio_extract_operations::SqliteAudioExtractOperati
 use voom_store::repo::media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo;
 
 use crate::ControlPlane;
-use crate::cases::begin_immediate_tx;
 
-use super::{append_event, begin_tx, commit_tx, require_audit_field};
+use super::{append_event, commit_tx, require_audit_field};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct HeartbeatTransactionObserver {
     pub(crate) invocations: std::sync::atomic::AtomicUsize,
-    pub(crate) acquired: std::sync::atomic::AtomicBool,
     pub(crate) invoked: tokio::sync::Notify,
 }
 
@@ -41,7 +40,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates repo and event-append errors.
     pub async fn acquire_lease(&self, input: NewLease) -> Result<Lease, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "leases: acquire_lease").await?;
         let lease = self.acquire_lease_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(lease)
@@ -51,7 +50,7 @@ impl ControlPlane {
         &self,
         input: NewLease,
     ) -> Result<LeaseAcquireOutcome, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "leases: try_acquire_lease").await?;
         let outcome = self.try_acquire_lease_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(outcome)
@@ -157,13 +156,7 @@ impl ControlPlane {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             observer.invoked.notify_one();
         }
-        let mut tx = begin_immediate_tx(&self.pool).await?;
-        #[cfg(test)]
-        if let Some(observer) = observer {
-            observer
-                .acquired
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
+        let mut tx = begin_write_first(&self.pool, "leases: heartbeat_lease_observed").await?;
         let lease = self
             .heartbeat_lease_in_tx(&mut tx, lease_id, ttl, now)
             .await?;
@@ -214,7 +207,7 @@ impl ControlPlane {
         result: JsonValue,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "leases: release_lease").await?;
         let lease = self
             .release_lease_in_tx(&mut tx, lease_id, result, now)
             .await?;
@@ -301,7 +294,7 @@ impl ControlPlane {
         class: FailureClass,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "leases: fail_lease").await?;
         let lease = self
             .fail_lease_in_tx(&mut tx, lease_id, reason, class, now)
             .await?;
@@ -424,11 +417,10 @@ impl ControlPlane {
     /// Propagates repo and event-append errors. The transaction aborts on
     /// any error and no events are persisted.
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
-        // Read-then-write: `expire_due_in_tx` scans candidates before updating
-        // them, so the transaction must take the write lock at `BEGIN`. See
-        // [`begin_immediate_tx`] for why a deferred `BEGIN` bypasses
-        // `busy_timeout` on the upgrade and fails under contention.
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        // `expire_due_in_tx` scans candidates before updating them, so a
+        // deferred `BEGIN` would fail the lock upgrade under a concurrent
+        // writer without ever consulting `busy_timeout` (ADR 0083, #546).
+        let mut tx = begin_read_then_write(&self.pool, "leases: expire_due").await?;
         let report = self.leases.expire_due_in_tx(&mut tx, now).await?;
         for &(lease_id, ticket_id) in &report.pairs {
             self.emit_expire_pair(&mut tx, lease_id, ticket_id, &report, now)
@@ -541,7 +533,7 @@ impl ControlPlane {
     ) -> Result<ForceReleaseOutcome, VoomError> {
         require_audit_field("actor", &actor)?;
         require_audit_field("reason", &reason)?;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "leases: force_release_lease").await?;
         let outcome = self
             .leases
             .force_release_in_tx(&mut tx, lease_id, also_requeue, now)

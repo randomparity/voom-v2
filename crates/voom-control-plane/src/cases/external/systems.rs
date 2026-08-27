@@ -19,7 +19,8 @@ use voom_store::repo::external::systems::{
 
 use crate::ControlPlane;
 
-use super::super::{append_event, begin_immediate_tx, begin_tx, commit_tx};
+use super::super::{append_event, commit_tx};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 impl ControlPlane {
     /// Register an external system (health starts `Unknown`) and emit
@@ -32,7 +33,7 @@ impl ControlPlane {
         input: NewExternalSystem,
     ) -> Result<ExternalSystem, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "systems: register_external_system").await?;
         let system = self
             .external_systems
             .register_in_tx(&mut tx, input, now)
@@ -91,7 +92,8 @@ impl ControlPlane {
             .ok_or_else(|| VoomError::NotFound(format!("external system id={id} not found")))?;
         let probed = self.probe_health(&system).await?;
         let now = self.clock().now();
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "systems: health_check_external_system").await?;
         let updated = self
             .record_probed_health_in_tx(&mut tx, id, probed, now)
             .await?;
@@ -244,7 +246,7 @@ impl ControlPlane {
         input: NewExternalLink,
     ) -> Result<ExternalSystemLink, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "systems: link_external_ref").await?;
         let link = self
             .external_systems
             .record_link_in_tx(&mut tx, input, now)
@@ -278,7 +280,7 @@ impl ControlPlane {
         id: ExternalSystemLinkId,
     ) -> Result<Option<ExternalSystemLink>, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "systems: unlink_external_ref").await?;
         let Some(link) = self
             .external_systems
             .retire_link_in_tx(&mut tx, id, now)

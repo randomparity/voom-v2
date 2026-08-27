@@ -19,7 +19,8 @@ use voom_store::repo::media::identity::{
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, commit_tx};
+use voom_store::tx::begin_write_first;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PrimaryBundleResolution {
@@ -93,7 +94,7 @@ impl ControlPlane {
     /// Propagates repo and event-append errors.
     pub async fn create_bundle(&self, input: NewAssetBundle) -> Result<AssetBundle, VoomError> {
         let created_at = input.created_at;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "bundles: create_bundle").await?;
         let bundle = self.bundles.create_in_tx(&mut tx, input).await?;
         append_event(
             &self.events,
@@ -126,7 +127,7 @@ impl ControlPlane {
         role: BundleMemberRole,
         observed_at: OffsetDateTime,
     ) -> Result<BundleMember, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "bundles: add_bundle_member").await?;
         let member = self
             .bundles
             .add_member_in_tx(
@@ -170,7 +171,7 @@ impl ControlPlane {
         file_asset_id: FileAssetId,
         observed_at: OffsetDateTime,
     ) -> Result<BundleMember, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "bundles: remove_bundle_member").await?;
         let removed = self
             .bundles
             .remove_member_in_tx(&mut tx, bundle_id, file_asset_id)

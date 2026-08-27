@@ -12,6 +12,7 @@ use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 
 use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{cp, issue_link_targets, terminal_failure_issues};
+use voom_store::tx::begin_write_first;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -173,7 +174,9 @@ async fn mark_ready_reserves_writer_lock_before_repository_reads() {
 #[tokio::test]
 async fn ticket_lifecycle_in_tx_commits_multiple_ready_roots_and_events() {
     let (cp, _tmp) = cp().await;
-    let mut tx = begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_write_first(&cp.pool, "tickets_test: ticket_lifecycle_commits")
+        .await
+        .unwrap();
     let mut created = Vec::new();
 
     for kind in ["root.one", "root.two"] {
@@ -198,7 +201,9 @@ async fn ticket_lifecycle_in_tx_commits_multiple_ready_roots_and_events() {
 #[tokio::test]
 async fn ticket_lifecycle_in_tx_rolls_back_rows_and_events_together() {
     let (cp, _tmp) = cp().await;
-    let mut tx = begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_write_first(&cp.pool, "tickets_test: ticket_lifecycle_rolls_back")
+        .await
+        .unwrap();
     let ticket = cp
         .create_ticket_in_tx(&mut tx, ticket("root.rollback"))
         .await

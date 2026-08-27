@@ -19,7 +19,8 @@ use voom_store::repo::media::use_leases::{
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx, require_audit_field};
+use super::{append_event, commit_tx, require_audit_field};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 impl ControlPlane {
     /// Acquire an `AssetUseLease`. Emits `use_lease.acquired`.
@@ -28,7 +29,7 @@ impl ControlPlane {
     /// Propagates repo and event-append errors.
     pub async fn acquire_use_lease(&self, input: NewUseLease) -> Result<UseLease, VoomError> {
         let acquired_at = input.acquired_at;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "use_leases: acquire_use_lease").await?;
         let lease = self.use_leases.acquire_in_tx(&mut tx, input).await?;
         append_event(
             &self.events,
@@ -75,7 +76,7 @@ impl ControlPlane {
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "use_leases: heartbeat_use_lease").await?;
         let out = self
             .use_leases
             .heartbeat_in_tx(&mut tx, lease_id, now)
@@ -94,7 +95,7 @@ impl ControlPlane {
         reason: UseLeaseReleaseReason,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: release_use_lease").await?;
         let lease = self
             .use_leases
             .release_in_tx(&mut tx, lease_id, reason, now)
@@ -131,7 +132,7 @@ impl ControlPlane {
     ) -> Result<UseLease, VoomError> {
         require_audit_field("actor", &actor)?;
         require_audit_field("reason", &reason)?;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: force_release_use_lease").await?;
         let lease = self
             .use_leases
             .force_release_in_tx(&mut tx, lease_id, now)
@@ -166,7 +167,7 @@ impl ControlPlane {
         &self,
         now: OffsetDateTime,
     ) -> Result<ExpireReport, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_write_first(&self.pool, "use_leases: expire_due_use_leases").await?;
         let report = self.use_leases.expire_due_in_tx(&mut tx, now).await?;
         for &lease_id in &report.expired {
             append_event(
@@ -200,7 +201,8 @@ impl ControlPlane {
     ) -> Result<UseLease, VoomError> {
         require_audit_field("actor", &actor)?;
         require_audit_field("reason", &reason)?;
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "use_leases: recover_use_lease_stale_issuer").await?;
         let lease = self
             .use_leases
             .recover_stale_issuer_in_tx(&mut tx, lease_id, now)
@@ -246,7 +248,8 @@ impl ControlPlane {
         new: FileLocationId,
         now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "use_leases: reanchor_use_leases_on_move").await?;
         let mut total_reanchored: Vec<UseLeaseId> = Vec::new();
         loop {
             let batch = self

@@ -11,7 +11,7 @@ use voom_core::{JobId, TicketOperation, VoomError, WORKFLOW_OPERATION_NAMESPACE}
 use voom_store::repo::execution::tickets::{NewTicket, Ticket};
 use voom_store::repo::media::identity::{FileLocationRepo, FileVersionRepo};
 
-use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::cases::commit_tx;
 use crate::operation_source::{require_live_rooted, select_location};
 use crate::workflow::execution::executor::{PlannedLineageGuard, WorkflowExecutor};
 use crate::workflow::execution::timing::{EffectiveTiming, seeded_timing};
@@ -25,6 +25,7 @@ use crate::workflow::plan::binding::{
 use crate::workflow::plan::envelope;
 use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
+use voom_store::tx::{begin_serialized_read, begin_write_first};
 
 impl WorkflowExecutor {
     pub(super) async fn create_root_tickets(
@@ -60,7 +61,14 @@ impl WorkflowExecutor {
         now: OffsetDateTime,
         lineage_guard: &PlannedLineageGuard,
     ) -> Result<(), VoomError> {
-        let mut guard_tx = begin_immediate_tx(&self.control_plane.pool).await?;
+        // Serialized, not a plain read: the guard must see what an in-flight
+        // promoter commits. A WAL reader that does not wait for it passes on
+        // the pre-promotion snapshot and dispatches a superseded run.
+        let mut guard_tx = begin_serialized_read(
+            &self.control_plane.pool,
+            "tickets: create_guarded_root_tickets",
+        )
+        .await?;
         self.control_plane
             .identity
             .require_active_file_versions_in_tx(&mut guard_tx, lineage_guard.expectations())
@@ -77,7 +85,11 @@ impl WorkflowExecutor {
             }
         }
 
-        let mut tx = begin_immediate_tx(&self.control_plane.pool).await?;
+        let mut tx = begin_write_first(
+            &self.control_plane.pool,
+            "tickets: create_guarded_root_tickets",
+        )
+        .await?;
         for input in inputs {
             let ticket = self
                 .control_plane

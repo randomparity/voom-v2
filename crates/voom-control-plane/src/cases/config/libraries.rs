@@ -14,7 +14,8 @@ use voom_store::repo::library::library_roots::{
 };
 
 use crate::ControlPlane;
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
+use voom_store::tx::begin_read_then_write;
 
 impl ControlPlane {
     /// Create a library.
@@ -123,7 +124,7 @@ impl ControlPlane {
         input: NewLibraryRoot,
     ) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "libraries: create_library_root").await?;
         let result = async {
             let root = self
                 .libraries
@@ -218,7 +219,8 @@ impl ControlPlane {
         owner_node_id: NodeId,
     ) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "libraries: assign_library_root_owner").await?;
         let result = async {
             let root = self
                 .libraries
@@ -252,7 +254,7 @@ impl ControlPlane {
         activation_identity: String,
     ) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "libraries: activate_library_root").await?;
         let result = async {
             let prior = self
                 .libraries
@@ -306,7 +308,8 @@ impl ControlPlane {
             ));
         }
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "libraries: mark_library_root_unavailable").await?;
         let result = async {
             let root = self
                 .libraries
@@ -336,7 +339,7 @@ impl ControlPlane {
     /// Terminally retire a root while retaining its stable identity and facts.
     pub async fn retire_library_root(&self, id: StorageRootId) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "libraries: retire_library_root").await?;
         let result = async {
             let root = self
                 .libraries

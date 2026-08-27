@@ -21,8 +21,9 @@ use super::envelope;
 use super::model::{OperationNode, WorkflowPlan};
 use super::ticket_payload::WorkflowTicketPayload;
 use crate::ControlPlane;
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
 use crate::workflow::execution::timing::{EffectiveTiming, branch_codec, seeded_timing};
+use voom_store::tx::begin_read_then_write;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExpansionContext<'a> {
@@ -320,7 +321,8 @@ async fn create_missing_tickets(
 ) -> Result<Vec<Ticket>, VoomError> {
     let specs = dedupe_specs(specs);
 
-    let mut tx = begin_tx(&ctx.control.pool).await?;
+    let mut tx =
+        begin_read_then_write(&ctx.control.pool, "expansion: create_missing_tickets").await?;
     let mut expected_ids = Vec::new();
     let mut created_ids = Vec::new();
     for spec in specs {

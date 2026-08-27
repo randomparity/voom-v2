@@ -44,6 +44,13 @@ pub async fn begin_write_first(pool: &SqlitePool, context: &'static str)
 /// Open a transaction that only reads.
 pub async fn begin_read_only(pool: &SqlitePool, context: &'static str)
     -> Result<Transaction<'_, Sqlite>, VoomError>;
+
+/// Open a read-only transaction that must order itself after any in-flight
+/// writer. Takes `BEGIN IMMEDIATE` despite never writing: in WAL a reader does
+/// not block on an uncommitted writer, so a plain `BEGIN` would read the
+/// snapshot as it stood before that writer.
+pub async fn begin_serialized_read(pool: &SqlitePool, context: &'static str)
+    -> Result<Transaction<'_, Sqlite>, VoomError>;
 ```
 
 `context` preserves the call-specific error text the existing sites already
@@ -51,6 +58,11 @@ pass to `VoomError::database_context`.
 
 `begin_write_first` and `begin_read_only` both emit a plain `BEGIN`. They stay
 separate because the name is the record of the author's claim — see ADR 0086.
+
+`begin_serialized_read` was not in the original three; the migration found the
+shape when converting `create_guarded_root_tickets` reddened
+`guarded_root_dispatch_waits_for_promoter_then_rejects_every_root`. ADR 0086
+records that finding.
 
 ### The guardrail
 

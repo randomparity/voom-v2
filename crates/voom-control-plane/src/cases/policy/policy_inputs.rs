@@ -13,10 +13,10 @@ use voom_store::repo::{
 };
 
 use crate::ControlPlane;
-use crate::cases::begin_immediate_tx;
 use crate::media_snapshot::stream_summary_from_snapshot_payload;
 
 use super::commit_tx;
+use voom_store::tx::begin_read_then_write;
 
 #[derive(Debug, Clone)]
 pub struct PolicyInputFromScanInput {
@@ -96,7 +96,8 @@ impl ControlPlane {
                 .iter()
                 .filter_map(|snapshot| snapshot.existing_media_snapshot_id),
         )?;
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "policy_inputs: persist_policy_input_set").await?;
         let snapshot_versions: HashMap<MediaSnapshotId, FileVersionId> = self
             .identity
             .get_media_snapshot_file_versions_in_tx(&mut tx, &query)
@@ -136,7 +137,11 @@ impl ControlPlane {
         &self,
         input: PolicyInputFromScanInput,
     ) -> Result<PolicyInputFromScanResult, VoomError> {
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(
+            &self.pool,
+            "policy_inputs: create_policy_input_set_from_scan",
+        )
+        .await?;
         let file_version = self
             .identity
             .get_file_version_in_tx(&mut tx, input.file_version_id)

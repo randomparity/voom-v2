@@ -21,6 +21,7 @@ use voom_store::repo::media::identity::{
 
 use super::*;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
+use voom_store::tx::{begin_read_then_write, begin_write_first};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const NODE_ID: &str = "normalize";
@@ -865,7 +866,9 @@ async fn repoint_location(
         .await
         .unwrap()
         .unwrap();
-    let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_write_first(&cp.pool, "finalize_test: update_file_location_address")
+        .await
+        .unwrap();
     cp.identity()
         .update_file_location_address_in_tx(
             &mut tx,
@@ -1086,7 +1089,12 @@ async fn create_sidecar_commit_result(
 ) -> (Value, FileLocationId) {
     let staged = create_verified_staging(cp, context.source, context.worker_id, None).await;
     let commit = create_pending_commit(cp, context.source, &staged).await;
-    let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_write_first(
+        &cp.pool,
+        "finalize_test: record_verified_sidecar_commit_rows",
+    )
+    .await
+    .unwrap();
     let committed = cp
         .artifacts()
         .record_verified_sidecar_commit_rows_in_tx(
@@ -1160,7 +1168,9 @@ async fn create_verified_staging(
         })
         .await
         .unwrap();
-    let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_read_then_write(&cp.pool, "finalize_test: record_verification")
+        .await
+        .unwrap();
     let verification = cp
         .artifacts()
         .record_verification_in_tx(
@@ -1202,7 +1212,9 @@ async fn create_pending_commit(
 ) -> voom_store::repo::media::artifacts::ArtifactCommitRecord {
     let target_path = format!("/output/job-produced-{}.mkv", staged.handle_id.0);
     let provider_relative_locator = voom_store::test_support::test_relative_locator(&target_path);
-    let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_write_first(&cp.pool, "finalize_test: create_pending_commit")
+        .await
+        .unwrap();
     let record = cp
         .artifacts()
         .create_pending_commit_in_tx(
@@ -1234,7 +1246,9 @@ async fn mark_commit_committed(
     version_id: FileVersionId,
     location_id: FileLocationId,
 ) {
-    let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
+    let mut tx = begin_write_first(&cp.pool, "finalize_test: mark_commit_committed")
+        .await
+        .unwrap();
     cp.artifacts()
         .mark_commit_committed_in_tx(&mut tx, commit_id, version_id, location_id, T0, T0)
         .await

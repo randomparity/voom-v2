@@ -18,11 +18,12 @@ use voom_store::repo::issues::{
 use voom_worker_protocol::{HttpClient, WorkerCredentials};
 
 use crate::ControlPlane;
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, commit_tx};
 use crate::local_worker::NVIDIA_STARTUP_TIMEOUT;
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::{WorkflowExecutorOptions, WorkflowQueueOptions};
 use crate::workflow::ticket_results::{OrderedTicketResult, ordered_ticket_result};
+use voom_store::tx::begin_write_first;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {
@@ -875,7 +876,8 @@ impl ControlPlane {
             })?;
         let prefix = dedupe_prefix(policy_document_id, input_set_id);
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx =
+            begin_write_first(&self.pool, "compliance: apply_generated_compliance_report").await?;
         let mut summary = IssueApplicationSummary::default();
         let mut emitted_keys = BTreeSet::new();
 

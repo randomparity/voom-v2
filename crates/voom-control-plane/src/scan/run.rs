@@ -21,11 +21,12 @@ use voom_store::repo::library::library_roots::RootAvailabilityReason;
 use super::sessions::{append_lifecycle_event, progress_deadline, validate_idle_timeout};
 
 use crate::ControlPlane;
+use crate::cases::commit_tx;
 use crate::cases::execution::remote_execution::is_remote_replayable_error;
-use crate::cases::{begin_immediate_tx, commit_tx};
 use crate::workflow::execution::timing::EffectiveTiming;
 use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
+use voom_store::tx::begin_read_then_write;
 
 /// Ticket-kind suffix for scan runs. The ticket kind itself MUST be the
 /// namespaced form `{WORKFLOW_OPERATION_NAMESPACE}.scan_library`:
@@ -62,7 +63,7 @@ impl ControlPlane {
         idle_timeout_seconds: u32,
     ) -> Result<ScanRunOutcome, VoomError> {
         validate_idle_timeout(idle_timeout_seconds)?;
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "run: request_scan_run").await?;
         let now = self.clock().now();
         let expired = self.scan_sessions.stale_expired_in_tx(&mut tx, now).await?;
         for session in &expired {

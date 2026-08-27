@@ -1641,9 +1641,8 @@ async fn guarded_root_dispatch_waits_for_promoter_then_rejects_every_root() {
         .await
         .unwrap();
     let job_id = fixture.open_workflow_job().await;
-    let mut promoter = crate::cases::begin_immediate_tx(&fixture.cp.pool)
-        .await
-        .unwrap();
+    // Hold the write lock so the call under test contends.
+    let mut promoter = fixture.cp.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let current = fixture
         .cp
         .identity

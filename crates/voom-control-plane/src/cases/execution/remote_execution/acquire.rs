@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 
 use crate::ControlPlane;
+use crate::cases::commit_tx;
 use crate::cases::execution::remote_execution::{
     ROUTE_ACQUIRE, RemoteAcquireInput, RemoteAcquireOutcome, RemoteArtifactAccessPlan,
     RemoteLeaseDispatch, ReplayRoute, decode_acquire_replay, is_remote_replayable_error,
 };
-use crate::cases::{begin_immediate_tx, commit_tx};
 use crate::workflow::plan::artifact_access_resolution::{
     AccessResolution, AccessResolutionError, resolve_artifact_access,
 };
@@ -40,6 +40,7 @@ use voom_store::repo::execution::scheduler_decisions::{
 use voom_store::repo::execution::tickets::Ticket;
 use voom_store::repo::execution::workers::WorkerOperationEligibility;
 use voom_store::repo::media::artifact_access_plans::{ArtifactAccessPlan, NewArtifactAccessPlan};
+use voom_store::tx::begin_read_then_write;
 
 impl ControlPlane {
     /// Acquire the next ready ticket for a node-owned remote worker.
@@ -56,7 +57,7 @@ impl ControlPlane {
         input: RemoteAcquireInput,
     ) -> Result<RemoteAcquireOutcome, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let mut tx = begin_read_then_write(&self.pool, "acquire: remote_acquire").await?;
         let auth = self
             .require_remote_incarnation_fence_in_tx(
                 &mut tx,

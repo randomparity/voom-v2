@@ -71,7 +71,7 @@ author held at the keystroke and discarded.
 ## Decision
 
 **Every pool-level transaction is opened by a helper whose name states the shape
-of the transaction.** `voom-store` gains one module with three functions, `pub`
+of the transaction.** `voom-store` gains one module with four functions, `pub`
 so `voom-control-plane` uses the same vocabulary:
 
 | helper | mode | for |
@@ -79,12 +79,30 @@ so `voom-control-plane` uses the same vocabulary:
 | `begin_read_then_write` | `BEGIN IMMEDIATE` | reads before it writes — ADR 0083's hazard |
 | `begin_write_first` | `BEGIN` | first statement writes, so the lock is taken up front |
 | `begin_read_only` | `BEGIN` | never writes, so it never upgrades |
+| `begin_serialized_read` | `BEGIN IMMEDIATE` | never writes, but must not read a stale snapshot |
 
 The guardrail is then a **boundary check**: no production code calls
 `.begin()` or `.begin_with()` outside that module. That is a single `ast-grep`
 rule, and it replaces the analyzer entirely.
 
-Five sub-decisions follow.
+Six sub-decisions follow.
+
+**`begin_serialized_read` exists because the migration found the shape, not
+because it was designed in.** The vocabulary above started at three, and
+`WorkflowExecutor::create_guarded_root_tickets` opened its planned-lineage guard
+with `BEGIN IMMEDIATE` despite only reading — which read as a redundant mode and
+was converted to `begin_read_only`. `guarded_root_dispatch_waits_for_promoter_then_rejects_every_root`
+failed: expected `StaleIdentityEvidence`, got `NoEligibleWorker`. In WAL a reader
+does not block on an uncommitted writer, so the plain `BEGIN` guard read the
+pre-promotion snapshot, passed, and dispatched a superseded run. The
+`BEGIN IMMEDIATE` was load-bearing — it made the guard queue behind the promoter
+and read what it committed.
+
+That is a fourth shape: read-only, but ordered after in-flight writers. It gets
+its own name rather than borrowing `begin_read_then_write`, whose claim would be
+false, or `begin_read_only`, whose mode is wrong. It is deliberately narrow — a
+guard that reads and then acts in a *separate* transaction still races, and the
+doc comment says so; this closes the stale-snapshot window, not check-then-act.
 
 **The name is the classification.** `begin_write_first` and `begin_read_only`
 compile to the same `BEGIN`, and are not merged. Two names for one mechanism is
