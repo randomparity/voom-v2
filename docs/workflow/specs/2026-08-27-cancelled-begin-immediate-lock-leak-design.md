@@ -77,7 +77,8 @@ universal, which is why the regression test sweeps a range instead of pinning 3.
 
 ## Design
 
-One change, in the two openers that can leak.
+Two files: the openers that can leak, and the one production caller that opens the
+same shape without going through them.
 
 `crates/voom-store/src/tx.rs` — `begin_read_then_write` and
 `begin_serialized_read` drive `pool.begin_with("BEGIN IMMEDIATE")` on a detached
@@ -108,15 +109,31 @@ no write lock, and the worker's rendezvous acknowledgement
 (`sqlx-sqlite-0.8.6/src/connection/worker.rs:81,528-538,234-252`) already rolls
 back a cancelled open, so there is no hazard there to wrap.
 
+`crates/voom-store/src/init.rs` — `run_migrations_on` currently does
+`pool.acquire()` and then `conn.begin_with("BEGIN IMMEDIATE")` at `:54-56`, which
+is the same two-step path with the same window. It moves to
+`begin_read_then_write(pool, "acquire migration write lock")`. The explicit
+`pool.acquire()` exists only so the connection can be dropped before
+`probe_schema` runs against the pool; a pool-level `Transaction<'static>` owns
+its connection and returns it on `commit` or `drop`, so both `drop(conn)` lines
+go away with it. `MIGRATOR.run_direct(&mut *tx)` is unchanged.
+
 **Why the openers and not the pool.** `scripts/check-transaction-openers.sh`
-already fails a build in which production code opens a pool-level transaction
-outside `voom-store/src/tx.rs`, so fixing the openers covers every production
-transaction — and it covers them whichever pool they run against. That last part
-matters: `rg -n 'SqlitePoolOptions' --type rust` finds five pool construction
-sites, four of them test modules, and
+already fails a build in which production code calls `pool.begin*()` outside
+`voom-store/src/tx.rs`, so the openers reach every transaction that goes through
+them, whichever pool it runs against. That last part matters:
+`rg -n 'SqlitePoolOptions' --type rust` finds five pool construction sites, four
+of them test modules, and
 `crates/voom-control-plane/src/cases/execution/leases_test.rs:223` hands its own
 pool to production `ControlPlane` code. A fix expressed as a pool option would
 miss it.
+
+That check is not full coverage. Its rule constrains the receiver to `(?i)pool`
+so a savepoint cannot match, which also makes `conn.begin_with` invisible —
+`./scripts/check-transaction-openers.sh crates` reports `OK (378 files)` with
+`init.rs:55` present. This change removes the only production instance; closing
+the guardrail gap so a future one is caught is deferred to
+`docs/debt/0005-connection-level-custom-begins-are-unguarded.md`.
 
 Rejected alternatives — including the pool-level `after_release` guard this
 design originally proposed, and the evidence that it destroys `:memory:`
@@ -144,23 +161,33 @@ integration test, the regression proof.
 - A helper polls a future for exactly *N* wakeup-driven polls and then drops it.
   It does not self-wake, so each poll corresponds to one genuine step of
   progress; that is what makes the count reproducible rather than a timing sweep.
-- For *N* in 1..=8 it cancels `begin_read_then_write` at that point, then asks a
-  second, independent pool on the same database file to execute a write, bounded
-  by a short timeout.
-- Every *N* must leave the independent write succeeding. Against the unfixed
-  code, *N* = 3 blocks until the timeout; that is the assertion that bites.
-- The second pool is what makes the assertion honest: a write issued back through
-  the *same* pool can be handed the leaked connection and silently join its open
-  transaction.
-- **The sweep asserts that it brackets completion** — at least one *N* where the
-  open had not finished and at least one where it had. The window is one poll
-  wide and its position depends on the pinned `sqlx`, `flume`, and `tokio`
-  versions; the bracket is what turns a version bump that moves the window out of
-  range into a red test rather than a green test that proves nothing.
+- For *N* in 1..=8 it cancels the open at that point, then asks a second,
+  independent pool on the same database file to execute a write, bounded by a
+  short timeout. The second pool is what makes the assertion honest: a write
+  issued back through the *same* pool can be handed the leaked connection and
+  silently join its open transaction.
+- **Two sweeps.** Through `begin_read_then_write`, the independent write must
+  succeed at every *N*. Through a bare `pool.begin_with("BEGIN IMMEDIATE")`
+  written in the test itself, it must fail at some *N* — that is the positive
+  control, and it is what keeps the first sweep honest. Without it the test is
+  green whether or not the sweep still straddles a vulnerable window, so a
+  dependency bump that moved the window outside 1..=8 would leave an assertion
+  that passes while proving nothing.
+- Test files are exempt from `check-transaction-openers.sh`
+  (`! -name '*_test.rs' ! -path '*/tests/*'`), so the control's raw
+  `pool.begin_with` is allowed where it lives.
+- Measured on the pinned toolchain: the unfixed opener leaks at *N* = 3 and only
+  at 3; the fixed one completes from *N* = 2. Both counts are properties of the
+  pinned `sqlx` 0.8.6, `flume`, and `tokio`, which is why the sweep is a range
+  and the control is what asserts the range is still the right one.
 
 The test is bounded by `tokio::time::timeout` only to fail fast; it asserts an
 observable state transition (a write lock that can be taken), not an elapsed
 duration.
+
+**`crates/voom-store/tests/`** existing init/migration coverage exercises the
+`init.rs` change; no new test is written for it, since the behaviour is
+unchanged and the shape is what moved.
 
 **Unchanged:** `crates/voom-node-agent/tests/lifecycle.rs`. `HANG_GUARD` stays at
 30s. That test is the end-to-end signal for this defect and it stays tight, which
@@ -205,4 +232,9 @@ what the change does to that.
 - **The lock-free opener ring buffer** issue #592 proposes as the next
   diagnostic. Its question — which transaction holds the lock — is answered.
 - **Reporting the window upstream to `sqlx`.** Worth doing, and not a
-  precondition for un-redding `main`.
+  precondition for un-redding `main`. Carrying a `[patch.crates-io]` fork instead
+  is rejected in ADR 0087.
+- **Extending `check-transaction-openers.sh` to catch connection-level custom
+  begins.** `scripts/` is outside the frozen surface, and the rule change is not
+  a one-liner. Deferred with an owner:
+  `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`.

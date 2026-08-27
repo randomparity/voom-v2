@@ -65,25 +65,46 @@ everywhere.
 
 Two sub-decisions follow.
 
-**The choke point is ADR 0086's, reused.** `scripts/check-transaction-openers.sh`
-already fails a build in which production code opens a pool-level transaction
-anywhere but `voom-store/src/tx.rs`, so fixing the openers covers every
-production transaction without a second guardrail. It covers them independently
-of which pool they run against, which matters because four test modules construct
-their own pools and one of them
-(`crates/voom-control-plane/src/cases/execution/leases_test.rs:223`) hands one to
-production `ControlPlane` code.
+**One opener vocabulary, and `init.rs` joins it.**
+`scripts/check-transaction-openers.sh` already fails a build in which production
+code calls `pool.begin*()` outside `voom-store/src/tx.rs`, which is why the
+openers are the right place: the fix reaches every transaction that goes through
+them, whichever pool it runs against. Four test modules construct their own
+pools, and `crates/voom-control-plane/src/cases/execution/leases_test.rs:223`
+hands one to production `ControlPlane` code — a fix expressed as a pool option
+would miss it.
 
-**The regression test sweeps the window rather than pinning it.** Cancelling the
-opener after exactly *N* wakeup-driven polls is deterministic, but which *N*
-lands between the two steps is a property of the pinned `sqlx`, `flume`, and
-`tokio` versions — measured here as 3 unfixed, and one poll wide. So the test
-cancels at every *N* from 1 to 8 and requires an independent pool to keep taking
-the write lock at all of them, and it asserts that the sweep **brackets**
-completion: at least one *N* where the open had not finished and at least one
-where it had. A version bump that shifts the window keeps it inside the sweep; a
-bump that shifts it outside fails the bracket assertion instead of leaving a
-green test that proves nothing.
+That check is not full coverage, and this record does not claim it is. Its rule
+constrains the receiver to `(?i)pool` so a savepoint (`tx.begin()`) cannot match,
+which also makes an `acquire`-then-`conn.begin_with` open invisible to it.
+`crates/voom-store/src/init.rs:54-56` is exactly that shape, on the same
+`BEGIN IMMEDIATE` two-step path, and `./scripts/check-transaction-openers.sh
+crates` reports `OK (378 files)` with it present. This change routes it through
+`begin_read_then_write`, which is also what it always meant — the explicit
+`pool.acquire()` exists only so the connection can be returned before
+`probe_schema`, and a pool-level `Transaction` returns it on `commit` or `drop`
+anyway. Closing the guardrail's blind spot so a *future* site in that shape is
+caught is deferred: `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`.
+
+**The regression test carries its own positive control.** Cancelling the opener
+after exactly *N* wakeup-driven polls is deterministic, but which *N* lands
+between the two steps is a property of the pinned `sqlx`, `flume`, and `tokio`
+versions: measured here as 3 against the unfixed opener, one poll wide, and 2
+against the fixed one, where the first poll is spent on the spawn. So the test
+sweeps *N* from 1 to 8 twice — once through `begin_read_then_write`, which must
+leave an independent pool able to take the write lock at every *N*, and once
+through a bare `pool.begin_with("BEGIN IMMEDIATE")` written in the test itself,
+which must leak at some *N*.
+
+The second sweep is the part that keeps the first honest. Without it the test is
+green whether or not the sweep still straddles a vulnerable window, so a version
+bump that moved the window outside 1..=8 would leave an assertion that passes
+while proving nothing. With it, that bump fails the control and says so. An
+earlier draft used a cheaper proxy — assert the sweep brackets the point where
+the open completes — and it does not work: against the fixed opener that
+transition sits at *N* = 2, so the lower arm rests on the single sample *N* = 1
+and any run where the spawned task beats the caller's first poll turns a passing
+branch red for no reason.
 
 ## Consequences
 
@@ -93,10 +114,12 @@ database until the process restarts.
 
 A cancelled caller's detached task keeps its pooled connection until
 `BEGIN IMMEDIATE` returns — up to `LOCK_WAIT_BUDGET` under contention — and then
-releases it. That is not a regression: before this change the connection was
-released earlier but poisoned, which is the defect. It does mean a burst of
-cancellations can hold connections it previously discarded, bounded by
-`max_connections` and the same lock wait every writer already pays.
+releases it. That is not a regression, and it is not even a change: an isolated
+`sqlx` 0.8.6 program cancelling eight opens against an eight-connection pool
+whose write lock is held elsewhere behaves identically before and after
+(`size=8`, `idle=0`, a live request failing on `acquire_timeout`), because
+today's cancelled open cannot return its connection until the in-flight
+`BEGIN IMMEDIATE` finishes on the worker thread either.
 
 Every `begin_read_then_write` and `begin_serialized_read` now costs one task
 spawn on top of the channel round trip to the `sqlite` worker it already paid.
@@ -111,7 +134,11 @@ would return a connection at depth 1 — no write lock, so no deadlock, but a
 later `begin` on that connection would issue a `SAVEPOINT`. The regression test
 covers the openers this change touches; that residual is stated, not covered.
 
-Test code may still open a transaction directly — AGENTS.md permits it, and
+Two shapes stay outside the invariant. A connection-level
+`conn.begin_with("BEGIN IMMEDIATE")` has the same window and no guardrail;
+`init.rs` was the only production instance and this change removes it, but
+nothing stops the next one — `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`
+owns that. And test code may still open a transaction directly — AGENTS.md permits it, and
 `check-transaction-openers.sh` scopes its boundary to production code — so a test
 that calls `pool.begin_with` itself is outside this invariant.
 
@@ -124,9 +151,10 @@ that calls `pool.begin_with` itself is outside this invariant.
   `min_connections(1)`; a shared-cache in-memory database exists only while a
   connection to it is open. An isolated `sqlx` 0.8.6 program mirroring those
   options, with an `after_release` returning `Ok(false)` once, runs `CREATE TABLE t`
-  and `INSERT` successfully and then fails the next `SELECT count(*) FROM t` with
-  `SqliteError { code: 1, message: "no such table: t" }` — the pool refilled with a
-  different, empty database (Fedora, Linux 7.1.8, rustc 1.95.0, sqlx 0.8.6).
+  successfully and then fails the very next statement — the `INSERT` — with
+  `SqliteError { code: 1, message: "no such table: t" }`, because the pool's single
+  connection is released after the `CREATE TABLE` and the database dies with it
+  (Fedora, Linux 7.1.8, rustc 1.95.0, sqlx 0.8.6).
   verified: it also reads the depth through `sqlx`'s `TransactionManager`, which
   `sqlx-0.8.6/src/lib.rs:33` re-exports but `sqlx-core-0.8.6/src/transaction.rs:11-15`
   marks `#[doc(hidden)]` with "This trait should not be used, except when
@@ -158,9 +186,18 @@ that calls `pool.begin_with` itself is outside this invariant.
   from the `sqlx` sources cited above and reproduced deterministically at a fixed
   poll count. judgment: an instrument whose question is answered is scope, not
   evidence.
-- **Fix it upstream in `sqlx` and wait.** judgment: worth reporting, but `main` is
-  red now and the repository pins 0.8.6; an invariant we hold in our own openers
-  does not expire when the dependency moves.
+- **Report it upstream to `sqlx` and wait for a release.** judgment: worth
+  reporting either way, but `main` is red now and the repository pins 0.8.6.
+- **Carry the fix locally with a `[patch.crates-io]` fork of `sqlx-sqlite`.** The
+  defect is entirely inside `sqlx-sqlite-0.8.6/src/transaction.rs:19-30`, so a
+  patched `SqliteTransactionManager::begin` would cover every call site — including
+  `init.rs`, the four test-constructed pools, and any future
+  `acquire`-then-`begin_with` shape — with no task spawn per open and no `rt`
+  feature on `voom-store`. It is the option that most nearly makes the invariant
+  workspace-wide. judgment: it buys that by taking on a forked dependency
+  permanently — supply-chain surface, a `just ci` that builds it, and a re-fork at
+  every `sqlx` bump — to fix two functions we already own and already funnel every
+  production transaction through.
 - **Do nothing — the window is small.** verified: it is reached by ordinary client
   disconnects, and issue #592 reproduces it at roughly 1 run in 20–30 under
   `./scripts/run-constrained.sh --load 1 --write-bps 40M -- cargo llvm-cov
