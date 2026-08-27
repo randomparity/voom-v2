@@ -60,8 +60,11 @@ helpers.
 
 ### Why cancellation happens in production
 
-`axum`/`hyper` drop a handler future when the client disconnects. The node agent
-disconnects on two ordinary paths: when it is fenced and exits, and when
+One source is systematic rather than incidental: `bounded_router` installs a
+`TimeoutLayer` at `request_processing` on every route
+(`crates/voom-api/src/server.rs:348-351`, `crates/voom-api/src/config.rs:12,111`
+— 30s), and it drops the handler future. `axum`/`hyper` drop one on client
+disconnect too, and the node agent disconnects when it is fenced and when
 `REQUEST_TIMEOUT` (30s, `crates/voom-node-agent/src/client.rs:32`) fires. This is
 not a test-only condition — issue #592 records the production consequence: an
 agent that cannot deactivate within any reasonable SIGTERM grace is SIGKILLed and
@@ -103,25 +106,56 @@ async fn begin_detached(
     context: &'static str,
 ) -> Result<Transaction<'static, Sqlite>, VoomError> {
     let pool = pool.clone();
-    tokio::spawn(async move { pool.begin_with(statement).await })
+    let (sender, receiver) = oneshot::channel();
+    tokio::spawn(
+        async move {
+            let opened = pool.begin_with(statement).await;
+            if let Err(unsent) = sender.send(opened) {
+                if unsent.is_ok() {
+                    tracing::warn!(
+                        context,
+                        "transaction open completed after its caller was cancelled; \
+                         rolling back"
+                    );
+                }
+                // Dropping `unsent` drops the Transaction, which queues the
+                // ROLLBACK that releases the write lock.
+            }
+        }
+        .instrument(tracing::Span::current()),
+    );
+    receiver
         .await
         .map_err(|e| VoomError::database_context(context, e))?
         .map_err(|e| VoomError::database_context(context, e))
 }
 ```
 
-Dropping a `JoinHandle` detaches the task rather than aborting it. A cancelled
-caller therefore leaves a task that still constructs the `Transaction` and then
-drops it — and `Transaction::drop` queues the `ROLLBACK` the leak was missing.
-`voom-store` gains `tokio`'s `rt` feature; every caller is already inside a
-runtime.
+A spawned task outlives the future that spawned it, so a cancelled caller leaves
+a task that still constructs the `Transaction` and then drops it — and
+`Transaction::drop` queues the `ROLLBACK` the leak was missing. The `oneshot` is
+what makes that visible: a failed `send` is the only place the detached path can
+tell it is orphaned, and without it a pool slot held by a request answered thirty
+seconds ago is indistinguishable from one held by a live request. The
+`Instrument` keeps the open inside the caller's span, which `tokio::spawn` does
+not inherit.
+
+`voom-store` gains `tokio`'s `rt` feature. The openers now require a `tokio`
+runtime — `tokio::spawn` panics without one, and during thread-local teardown
+(`tokio-1.53.1/src/task/spawn.rs:211-214`). That is not a new requirement for the
+pool: `PoolConnection::drop` already routes through
+`sqlx-core-0.8.6/src/rt/mod.rs:61-79`, which panics with "this functionality
+requires a Tokio context" when `Handle::try_current()` fails.
 
 `begin_write_first` and `begin_read_only` are unchanged. A deferred `BEGIN` takes
 no write lock, and the worker's rendezvous acknowledgement
 (`sqlx-sqlite-0.8.6/src/connection/worker.rs:81,528-538,234-252`) already rolls
 back a cancelled open, so there is no hazard there to wrap.
 
-`crates/voom-store/src/init.rs` — `run_migrations_on` currently does
+`crates/voom-store/src/init.rs` — this supersedes one sentence of ADR 0068,
+whose Decision names `conn.begin_with("BEGIN IMMEDIATE")` as the mechanism; its
+substance (write lock up front, held across the whole run, per-migration opens
+nesting as savepoints) is unchanged. `run_migrations_on` currently does
 `pool.acquire()` and then `conn.begin_with("BEGIN IMMEDIATE")` at `:54-56`, which
 is the same two-step path with the same window. It moves to
 `begin_read_then_write(pool, "acquire migration write lock")`. The explicit
@@ -162,15 +196,13 @@ Two new error paths, both mapping to `VoomError::Database` exactly as the curren
 openers do:
 
 - the spawned task panics — surfaced through `JoinError`;
-- the spawn succeeds into a draining runtime and the task is cancelled before it
-  opens anything — also a `JoinError`, and no transaction to lose.
+- the spawned task is dropped without sending — the `oneshot` receiver returns
+  `RecvError`, and there is no transaction to lose because the same drop rolls
+  one back if it exists.
 
-`tokio::spawn` itself *panics* with no runtime context or during thread-local
-teardown (`tokio-1.53.1/src/task/spawn.rs:211-214`). That is not a new
-requirement: `PoolConnection::drop` already routes through
-`sqlx-core-0.8.6/src/rt/mod.rs:61-79`, which panics with "this functionality
-requires a Tokio context" when `Handle::try_current()` fails. It is a new place
-for it to bite, and the openers carry a doc note saying so.
+The residual the detach adds is bounded and stated in ADR 0087: at most
+`max_connections` detached openers at once, each terminating within
+`LOCK_WAIT_BUDGET`, so a burst degrades and drains rather than wedging.
 
 ## Testing
 

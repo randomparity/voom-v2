@@ -58,9 +58,13 @@ vanish in. In this repository the custom-statement path is exactly
 [ADR 0086](0086-transaction-openers-are-named-helpers.md)'s `begin_read_then_write`
 and `begin_serialized_read`.
 
-Cancellation is ordinary here, not exotic. `axum` drops a handler future when the
-client disconnects, and the node agent disconnects both when it is fenced and
-when its 30s per-attempt timeout fires.
+Cancellation is ordinary here, not exotic, and one source is systematic rather
+than incidental: `bounded_router` puts a `TimeoutLayer` at `request_processing`
+on every route (`crates/voom-api/src/server.rs:348-351`,
+`crates/voom-api/src/config.rs:12,111` — 30s), and it drops the handler future.
+`axum` drops one on client disconnect too, and the node agent disconnects both
+when it is fenced and when its own 30s per-attempt timeout fires. The layer fires
+hardest under exactly the contention this record is about.
 
 ## Decision
 
@@ -97,7 +101,12 @@ crates` reports `OK (378 files)` with it present. This change routes it through
 `begin_read_then_write`, which is also what it always meant — the explicit
 `pool.acquire()` exists only so the connection can be returned before
 `probe_schema`, and a pool-level `Transaction` returns it on `commit` or `drop`
-anyway. Closing the guardrail's blind spot so a *future* site in that shape is
+anyway. That supersedes one sentence of
+[ADR 0068](0068-serialize-sqlite-migration-application.md), whose Decision names
+`conn.begin_with("BEGIN IMMEDIATE")` as the mechanism; 0068's substance is
+untouched — the write lock is still taken up front and still held across the
+whole run, and `run_direct`'s per-migration opens still nest as savepoints on the
+same connection. Closing the guardrail's blind spot so a *future* site in that shape is
 caught is deferred: `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`.
 
 **The regression test carries its own positive control.** Cancelling after
@@ -108,20 +117,13 @@ which must leave an independent pool able to take the write lock at every *N*,
 and once through a bare `pool.begin_with("BEGIN IMMEDIATE")` written in the test
 itself, which must leak at some *N*.
 
-The two arms count different clocks, and the record is explicit about it rather
-than papering over it. The control cancels the inlined future, whose window sits
-at *N* = 3 here; the fixed arm cancels a `JoinHandle` await, which resolves at
-*N* = 2 because the first poll is spent on the spawn. So the fixed arm has
-exactly one non-trivial sample — *N* = 1, the only *N* at which the caller is
-cancelled before the handle resolves, and there the detached task's position is
-set by the scheduler rather than by *N*. At *N* >= 2 it asserts something milder:
-that a transaction which was returned and then dropped releases its lock.
-
-What the control buys is therefore not that the fixed arm's range still brackets
-anything. It is that the `sqlx` 0.8.6 window is still present in the bare shape —
-that the wrapper is still load-bearing rather than dead weight. A bump that reds
-the control is telling a maintainer to check whether upstream fixed the window,
-in which case the wrapper and the control both go.
+What the control buys is not that the fixed arm's range still brackets anything —
+the two arms count different clocks, and the fix is what decouples them, so the
+exact poll positions live in the test file's comments where they can be corrected
+when a bump moves them. It is that the `sqlx` 0.8.6 window is still present in the
+bare shape: that the wrapper is still load-bearing rather than dead weight. A
+control that goes green is telling a maintainer to check whether upstream closed
+the window, in which case the wrapper and the control both go.
 
 ## Consequences
 
@@ -142,14 +144,31 @@ until the in-flight `BEGIN IMMEDIATE` finishes on the worker thread either.
 and the other one does change. A caller cancelled while still inside `acquire()`
 used to drop the acquire future, release its permit, and request nothing; now the
 detached task finishes the acquire and issues `BEGIN IMMEDIATE` on behalf of a
-caller that is gone, holding a pool slot for up to `LOCK_WAIT_BUDGET`. Under the
-contention this ADR targets, `acquire` is where a request spends its time, so a
-burst of client timeouts can fill the pool with doomed openers while live
-requests wait on `POOL_ACQUIRE_BUDGET` — degrading, not wedging, since each
-doomed open takes the lock and immediately gives it back. Spawning only after the
-caller holds the connection would remove it, and that needs `Transaction::begin`
-and `MaybePoolConnection` — the same `#[doc(hidden)]` surface the `after_release`
+caller that is gone, holding a pool slot for up to `LOCK_WAIT_BUDGET`. Under the contention this ADR
+targets, `acquire` is where a request spends its time, and the `TimeoutLayer`
+above answers a request at 30s while `POOL_ACQUIRE_BUDGET` is 45s — so a detached
+opener routinely outlives the request that spawned it, and one `deactivate` call
+can leave up to five of them across its five attempts.
+
+The bound, rather than an adjective: at most `max_connections` detached openers
+exist at once, because each holds a pooled connection; and each terminates within
+`LOCK_WAIT_BUDGET` of acquiring one, since it either takes the write lock and
+immediately rolls back or gives up on `busy_timeout`. So the pool drains on its
+own at a rate that does not depend on arrival rate — it degrades under a burst
+and cannot wedge. No measurement of the acquire-cancellation case is offered
+here; the argument is the two constants and the fact that a detached open has no
+unbounded wait in it. Spawning only after the caller holds the connection would
+remove the residual entirely, and that needs `Transaction::begin` and
+`MaybePoolConnection` — the same `#[doc(hidden)]` surface the `after_release`
 bullets below decline to reach for.
+
+A detached open is otherwise invisible, on precisely the failure an operator will
+meet, so the openers pay for one signal: the spawned task hands its result back
+over a `oneshot`, warns when the send fails — the caller was cancelled and the
+transaction is being rolled back on its behalf — and runs inside the caller's
+`tracing` span, since `tokio::spawn` does not inherit one. That turns a pool
+stall with no attribution, which is what made #592 cost a `gdb` session, into a
+logged event.
 
 Every `begin_read_then_write` and `begin_serialized_read` now costs one task
 spawn on top of the channel round trip to the `sqlite` worker it already paid.
@@ -212,6 +231,16 @@ that calls `pool.begin_with` itself is outside this invariant.
   `#[doc(hidden)]` `TransactionManager` trait, and still misses the four
   test-constructed pools, for the reasons cited in the previous bullet. judgment:
   it buys nothing the opener fix does not, at a lower-level dependency surface.
+- **Detach at the HTTP boundary instead — a tower layer that spawns the handler
+  future and awaits its `JoinHandle`.** The same technique one level up, and
+  strictly wider: one layer in `crates/voom-api/src/server.rs`'s stack, no `rt`
+  feature on `voom-store`, no spawn per opener, and it would cover the
+  `acquire`-then-`conn.begin_with` shape, the four test-constructed pools, and
+  every other await point in a handler rather than two. judgment: it changes what
+  a cancelled request *means*. Today a request answered with 408 stops where it
+  stopped; under that layer its whole transaction runs to completion and commits,
+  and the work escapes request accounting entirely. The hazard is two openers
+  wide; the remedy would be every handler wide.
 - **Wrap all four openers, not the two that can leak.** judgment: ADR 0086's own
   ground — a rule that fires everywhere carries no information about where the
   hazard is — and the deferred path's safety is cited above rather than assumed.
