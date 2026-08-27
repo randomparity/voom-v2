@@ -34,7 +34,8 @@ connection that no value owns.
 `sqlx-core-0.8.6/src/pool/connection.rs:275-328` then returns that connection to
 the pool. It tests the connection with `ping()` at `:314`; it never inspects the
 transaction depth and never rolls back, and `test_before_acquire` is that same
-ping (`options.rs:149`), so nothing quarantines it either. The connection sits in
+ping — `options.rs:149` sets its default `true` and `pool/inner.rs:469-471` is
+where it fires — so nothing quarantines it either. The connection sits in
 the idle queue holding the write lock indefinitely.
 
 Writers then split three ways. On another connection: wait out the full 30s
@@ -65,7 +66,7 @@ One source is systematic rather than incidental: `bounded_router` installs a
 (`crates/voom-api/src/server.rs:348-351`, `crates/voom-api/src/config.rs:12,111`
 — 30s), and it drops the handler future. `axum`/`hyper` drop one on client
 disconnect too, and the node agent disconnects when it is fenced and when
-`REQUEST_TIMEOUT` (30s, `crates/voom-node-agent/src/client.rs:32`) fires. This is
+`REQUEST_TIMEOUT` (30s, `crates/voom-node-agent/src/client.rs:33`) fires. This is
 not a test-only condition — issue #592 records the production consequence: an
 agent that cannot deactivate within any reasonable SIGTERM grace is SIGKILLed and
 its incarnation is never retired.
@@ -246,7 +247,20 @@ single `deactivate` under contention can leave up to five detached openers, and
 eight concurrent ones saturate the pool. A `:memory:` pool has one connection, so
 one detached opener blocks it for the window. That is accepted, on the ground
 that every detached opener terminates within its own budget with no unbounded
-wait in it, so occupancy decays regardless of arrival rate. No test asserts it:
+wait in it, so occupancy decays regardless of arrival rate.
+
+State the interaction that bound does *not* cover, because it is unstated
+elsewhere: 75s exceeds the node agent's 30s per-attempt timeout
+(`crates/voom-node-agent/src/client.rs:33`) and is a large fraction of its
+153.75s five-attempt budget. A request that queues behind a saturated pool can
+exceed the client's per-attempt timeout before it ever asks for the lock, and
+that attempt's own cancellation adds another detached opener. "Occupancy decays"
+is asymptotic; the criterion is a finite window. It is accepted rather than
+controlled because reaching saturation needs sustained multi-second lock
+contention, which is precisely what this change removes — the assumption is
+exercised by the `run-constrained.sh` acceptance sweep, not asserted by a test.
+
+No test asserts the bound itself:
 the property follows from two constants rather than from a race, and a test that
 tried to observe it would need sustained contention and a timing assertion —
 the shape this design exists to avoid. The `run-constrained.sh` acceptance sweep
@@ -260,11 +274,29 @@ integration test, the regression proof.
 - A helper polls a future for exactly *N* wakeup-driven polls and then drops it.
   It does not self-wake, so each poll corresponds to one genuine step of
   progress; that is what makes the count reproducible rather than a timing sweep.
-- For *N* in 1..=8 it cancels the open at that point, then asks a second,
-  independent pool on the same database file to execute a write, bounded by a
-  short timeout. The second pool is what makes the assertion honest: a write
-  issued back through the *same* pool can be handed the leaked connection and
-  silently join its open transaction.
+- For *N* in 1..=8 it cancels the open at that point, then asks an **independent
+  connection** on the same database file to execute a write. Independent is what
+  makes the assertion honest: a write issued back through the *same* pool can be
+  handed the leaked connection and silently join its open transaction.
+- **The observer sets `busy_timeout(0)`**, built from a raw
+  `SqliteConnectOptions` in the test rather than through `voom_store::connect`
+  — which sets `busy_timeout = LOCK_WAIT_BUDGET` (30s,
+  `crates/voom-store/src/pool.rs:20,60`). With the repo's value SQLite does not
+  return on a held lock, it sleeps, so "blocked" would be observable only as a
+  wall-clock expiry and would be indistinguishable from a slow host. At 0 a held
+  lock returns `SQLITE_BUSY` immediately: each attempt is an observable,
+  attributable error. The observer then retries on `SQLITE_BUSY` for up to **5s**
+  and reports whether the lock ever became takeable.
+- **Two named constants, and what makes each safe.** A **100ms settle** between
+  the cancellation and the first observer attempt, and the **5s** retry bound
+  above. The settle is what stops the observer from taking and releasing the lock
+  before the cancelled `BEGIN IMMEDIATE` ever asks for it; its adequacy is not
+  asserted by hand but by the control arm below, which must go *red* — a settle
+  too short to let the lock be taken would make the control go green, failing the
+  test. The 5s bound only has to exceed the detached rollback's latency, which is
+  one queued statement on a worker thread, not a lock wait; it does not
+  discriminate between the arms, because the control's failure is now `SQLITE_BUSY`
+  on every attempt rather than the bound expiring.
 - **Two sweeps.** Through `begin_read_then_write`, the independent write must
   succeed at every *N*. Through a bare `pool.begin_with("BEGIN IMMEDIATE")`
   written in the test itself, it must fail at some *N* — that is the positive
@@ -283,19 +315,40 @@ integration test, the regression proof.
   dependency bump that let the receiver be `Ready` on its first poll would leave
   the arm green while cancelling nothing — the vacuity the control guards against
   on the other arm, which does not transfer to this one.
-- **Parallelism precondition.** Both arms are skipped, loudly, when
-  `std::thread::available_parallelism()` reports fewer than 4. On one core the
-  open collapses into one or two polls and the window frequently has no poll
-  boundary in it at all (table above), which would make the control red on a
-  1-vCPU container for a reason that has nothing to do with the defect — and
-  would let the fixed arm pass vacuously. Four is the lowest parallelism measured
+- **The parallelism precondition gates the control arm only.** The **fixed arm
+  always runs, on every host.** Post-fix the caller is a spawn plus a `oneshot`
+  await, so it goes `Pending` on its first poll and `Ready` on its second
+  regardless of core count: *N* = 1 cancels a still-pending future on one core
+  exactly as it does on forty-eight. Nothing in the fixed arm depends on where
+  the sqlx window falls, so nothing about it is host-dependent — the earlier
+  draft gated it for no reason it could name.
+
+  The **control** arm is skipped when `std::thread::available_parallelism()`
+  reports fewer than 4. On one core the unfixed open collapses into one or two
+  polls and the window frequently has no poll boundary in it at all (table
+  above), which would make the control red on a 1-vCPU container for a reason
+  that has nothing to do with the defect. Four is the lowest parallelism
   *sampled* to reproduce deterministically, including with a busy loop per core —
-  a sampled point, not a located boundary. The envelope was measured under
+  a sampled point, not a located boundary — measured under
   `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`, which the test
-  carries, so the gate and the measurement are about the same thing. The skip
-  prints the observed parallelism and says the run proved nothing, so a host that
-  silently stops covering says so. CI's `test (ubuntu-latest)` and `coverage`
-  jobs clear the gate; a 3-vCPU `macos-latest` runner does not, and skips.
+  carries, so the gate and the measurement are about the same thing.
+
+  This split is what keeps the skip from mattering. `libtest` captures a passing
+  test's output and prints it only under `--nocapture` / `--show-output`, and
+  neither CI invocation passes either — `just ci` runs
+  `cargo test --workspace --all-features` (`justfile:52`), and the coverage job
+  runs `cargo llvm-cov … -- --test-threads=1` (`.github/workflows/ci.yml:83`). So
+  a skip notice is *invisible* in both, and a design that put the regression
+  proof behind it would let CI go green with zero coverage of the fix and no
+  visible signal. It does not, because the proof is never behind the gate. What
+  is behind it is the meta-check, and CI's `test (ubuntu-latest)` and `coverage`
+  jobs both clear it; `test (macos-latest)` on 3 vCPU is expected to run the
+  fixed arm and skip the control, permanently.
+- **What the fixed arm alone does not establish.** It proves the lock is not held
+  indefinitely; on its own it does not distinguish "opened and rolled back" from
+  "never opened". The control arm is what establishes the window is real at these
+  *N*. On a host where the control is skipped the fixed arm is therefore a
+  weaker check, and that is stated rather than papered over.
 - Test files are exempt from `check-transaction-openers.sh`
   (`! -name '*_test.rs' ! -path '*/tests/*'`), so the control's raw
   `pool.begin_with` is allowed where it lives.
@@ -304,9 +357,14 @@ integration test, the regression proof.
   pinned `sqlx` 0.8.6, `flume`, and `tokio`, which is why the sweep is a range
   and the control is what asserts the range is still the right one.
 
-The test is bounded by `tokio::time::timeout` only to fail fast; it asserts an
-observable state transition (a write lock that can be taken), not an elapsed
-duration.
+Both arms assert an observable state transition rather than an elapsed duration:
+with `busy_timeout(0)` the observer gets `SQLITE_BUSY` or a completed write on
+every attempt, never a silent sleep. The fixed arm's 5s retry bound is a
+fail-fast ceiling on a rollback that takes one statement. The control arm's
+assertion is honestly a **bounded wait** — an abandoned lock is held until the
+process exits, so "held" can only ever be observed as "still `SQLITE_BUSY` after
+a bound". Naming it that way is the point: the bound is not what discriminates,
+the repeated `SQLITE_BUSY` is.
 
 **`crates/voom-store/tests/`** existing init/migration coverage exercises the
 `init.rs` change; no new test is written for it, since the behaviour is
@@ -334,10 +392,18 @@ worst case is (29/30)^90 = 0.047.
 not merely rare — #592 records that 101 unthrottled runs did not reproduce and
 that the `--write-bps` throttle is required — so 90 green post-fix runs cannot be
 told apart from a host that would never have entered the window that day. Run the
-unfixed opener under the identical invocation on the same host until it
-reproduces at least once (expected ~25 runs). If it does not, criterion 5 is
-reported as **not discharged**, not as a green sweep. Report both counts either
-way; anything short of the full protocol is reported as what it is.
+unfixed opener under the identical invocation on the same host, stopping at the
+first reproduction or **at 90 runs, whichever comes first** — the same bound and
+the same stated confidence as the post-fix arm. "Until it reproduces" is not a
+protocol and "~25 runs" is not a bound: 25 is roughly the mean of a geometric
+with *p* = 1/30, at which a false negative still has probability
+(29/30)^25 = 0.43. At 90 it is 0.047, matching the other arm. If 90 unfixed runs
+do not reproduce, criterion 5 is reported as **not discharged** at that
+confidence, not as a green sweep.
+
+**Cost up front:** the full protocol is up to ~180 instrumented, throttled,
+`--test-threads=1` lifecycle runs. Report both counts either way; anything short
+of the full protocol is reported as what it is.
 
 **Unchanged:** `crates/voom-node-agent/tests/lifecycle.rs`. `HANG_GUARD` stays at
 30s. That test is the end-to-end signal for this defect and it stays tight, which

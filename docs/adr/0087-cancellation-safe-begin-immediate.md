@@ -31,8 +31,9 @@ The pool does not recover it. `sqlx-core-0.8.6/src/pool/connection.rs:275-328`
 returns a connection by testing it with `ping()` at `:314`; it never inspects the
 transaction depth and never rolls back. So the connection goes back into the idle
 queue holding the write lock, and stays there — nothing quarantines it, because
-the `test_before_acquire` default is that same `ping`
-(`sqlx-core-0.8.6/src/pool/options.rs:149`).
+the `test_before_acquire` default is that same `ping` — defaulted to `true` at
+`sqlx-core-0.8.6/src/pool/options.rs:149`, fired at
+`sqlx-core-0.8.6/src/pool/inner.rs:469-471`.
 
 What later writers see then splits three ways. A writer on another connection
 waits out the full 30s `busy_timeout` and fails; that is the path the node
@@ -115,9 +116,16 @@ caught is deferred: `docs/debt/0005-connection-level-custom-begins-are-unguarded
 exactly *N* wakeup-driven polls is a deterministic *mechanism*; where it lands
 inside the open is not, and depends on the pinned `sqlx`, `flume`, and `tokio`.
 The test sweeps *N* from 1 to 8 twice — once through `begin_read_then_write`,
-which must leave an independent pool able to take the write lock at every *N*,
-and once through a bare `pool.begin_with("BEGIN IMMEDIATE")` written in the test
-itself, which must leak at some *N*.
+which must leave an independent connection able to take the write lock at every
+*N*, and once through a bare `pool.begin_with("BEGIN IMMEDIATE")` written in the
+test itself, which must leak at some *N*.
+
+Only the control is host-dependent, and only the control is gated on host
+parallelism. The fixed arm runs everywhere: post-fix the caller is a spawn plus a
+`oneshot` await, so it is `Pending` on its first poll on any core count. That
+split is deliberate — a skip notice from a passing test is invisible under both
+of this repo's CI test invocations, so the regression proof must not sit behind
+one.
 
 What the control buys is not that the fixed arm's range still brackets anything —
 the two arms count different clocks, and the fix is what decouples them, so the
