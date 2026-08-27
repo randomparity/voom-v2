@@ -108,6 +108,20 @@ impl Repo {
     }
 }'
 
+# `begin_serialized_read` is the one whose name sits closest to the rule: it
+# wraps `pool.begin_with("BEGIN IMMEDIATE")`. A call site is a free function
+# call, not a method call on a pool, so the rule must not match it -- and if a
+# future edit relaxed the pattern to a bare name match, this fixture reddens.
+fixture helper_call_serialized_read 0 'voom-store/src/repo/thing.rs' '
+use crate::tx::begin_serialized_read;
+impl Repo {
+    async fn f(&self) -> R {
+        let mut tx = begin_serialized_read(&self.pool, "thing: f").await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}'
+
 # --- A savepoint is not a pool-level opener ---
 #
 # `tx.begin()` on a live handle nests inside an existing transaction. It cannot

@@ -13,6 +13,7 @@
 #   voom_store::tx::begin_read_then_write   BEGIN IMMEDIATE
 #   voom_store::tx::begin_write_first       BEGIN
 #   voom_store::tx::begin_read_only         BEGIN
+#   voom_store::tx::begin_serialized_read   BEGIN IMMEDIATE
 #
 # Uses ast-grep (not ripgrep) so it matches real syntax-tree nodes: most openers
 # in this codebase are multi-line `self\n.pool\n.begin()` chains that no line
@@ -132,9 +133,15 @@ Open it with the helper that names what the transaction does:
   voom_store::tx::begin_read_then_write(&pool, "context")  reads, then writes
   voom_store::tx::begin_write_first(&pool, "context")      first statement writes
   voom_store::tx::begin_read_only(&pool, "context")        never writes
+  voom_store::tx::begin_serialized_read(&pool, "context")  never writes, but must
+                                                           not read a stale snapshot
 
 The first statement executed against the handle is what decides -- including
 statements inside the *_in_tx helpers the handle is passed to.
+
+If it only reads, ask whether a concurrent writer's outcome matters. WAL readers
+do not block on an in-flight writer, so a plain BEGIN can pass a guard on state
+the next statement invalidates -- that is what begin_serialized_read is for.
 
 See docs/adr/0083 and docs/adr/0086.
 MSG
