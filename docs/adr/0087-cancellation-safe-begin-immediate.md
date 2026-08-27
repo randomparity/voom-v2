@@ -71,9 +71,11 @@ hardest under exactly the contention this record is about.
 **Opening a `BEGIN IMMEDIATE` transaction is cancellation-safe: the open runs to
 completion whether or not its caller is still waiting.** The two openers that
 issue a custom statement drive `pool.begin_with` on a detached `tokio` task and
-await its `JoinHandle`. Dropping a `JoinHandle` detaches the task rather than
-aborting it, so a cancelled caller leaves a task that still constructs the
-`Transaction` — and then drops it, which is the rollback the leak was missing.
+take its result over a `oneshot`. A spawned task outlives the future that spawned
+it, so a cancelled caller leaves a task that still constructs the `Transaction` —
+and then drops it, which is the rollback the leak was missing. The `oneshot`
+rather than the `JoinHandle` is what lets the detached side notice it was
+orphaned and say so.
 
 The two deferred-`BEGIN` openers are unchanged. They cannot leak the write lock:
 a deferred `BEGIN` takes no lock, and the worker's rendezvous acknowledgement
@@ -150,11 +152,13 @@ above answers a request at 30s while `POOL_ACQUIRE_BUDGET` is 45s — so a detac
 opener routinely outlives the request that spawned it, and one `deactivate` call
 can leave up to five of them across its five attempts.
 
-The bound, rather than an adjective: at most `max_connections` detached openers
-exist at once, because each holds a pooled connection; and each terminates within
-`LOCK_WAIT_BUDGET` of acquiring one, since it either takes the write lock and
-immediately rolls back or gives up on `busy_timeout`. So the pool drains on its
-own at a rate that does not depend on arrival rate — it degrades under a burst
+The bound, rather than an adjective, in two clauses because `begin_with` is two
+steps: at most `max_connections` detached openers *hold a pooled connection* at
+once, each releasing it within `LOCK_WAIT_BUDGET` of acquiring it, since it
+either takes the write lock and immediately rolls back or gives up on
+`busy_timeout`; an opener still queued inside `acquire()` holds no connection and
+is bounded by `POOL_ACQUIRE_BUDGET` on top, so worst-case termination is 75s, not
+30s. So the pool drains on its own at a rate that does not depend on arrival rate — it degrades under a burst
 and cannot wedge. No measurement of the acquire-cancellation case is offered
 here; the argument is the two constants and the fact that a detached open has no
 unbounded wait in it. Spawning only after the caller holds the connection would
@@ -178,8 +182,11 @@ goes through `sqlx-core-0.8.6/src/rt/mod.rs:61-79`, which panics with "this
 functionality requires a Tokio context" when `Handle::try_current()` fails. What
 is new is where it bites — `tokio::spawn` itself panics both with no runtime and
 during thread-local teardown (`tokio-1.53.1/src/task/spawn.rs:211-214`,
-`runtime/context/current.rs:41-45`). What surfaces as `VoomError::Database` is the
-narrower case: a `JoinError` from a task cancelled after a successful spawn.
+`runtime/context/current.rs:41-45`). A panic *inside* the spawned task surfaces
+differently: the sender drops, the caller sees `RecvError` mapped to
+`VoomError::Database`, and the payload and location reach the panic hook rather
+than the call site — the cost of discarding the handle in exchange for the
+orphan signal.
 
 The detach discharges the guarantee only while a runtime outlives the task. On a
 current-thread runtime whose `block_on` returns while the detached task sits

@@ -85,10 +85,26 @@ pool on the same file to write:
 
 Three polls lands in the window, and it is the only value that does: two is
 before the write lock is taken, four is after the `Transaction` is constructed.
-No load, no throttle, no elapsed-time assertion. Measured on Fedora / Linux
-7.1.8 / rustc 1.95.0, identically in debug and `--release`; the count is a
-property of the pinned `sqlx` 0.8.6, `flume`, and `tokio` versions rather than a
-universal, which is why the regression test sweeps a range instead of pinning 3.
+No load, no throttle, no elapsed-time assertion.
+
+The count is **not** a version constant, and the first draft of this design said
+it was. `conn.worker.begin` awaits a channel fed by a separate OS thread
+(`sqlx-sqlite-0.8.6/src/connection/worker.rs:79-82,528-545`), so whether that
+await is `Ready` on its first poll depends on whether the worker has already
+replied — a scheduling artifact. Measured envelope, same compiled binary
+throughout (Fedora / Linux 7.1.8 / rustc 1.95.0 / sqlx 0.8.6 / tokio 1.53.1 /
+flume 0.11.1, debug):
+
+| host parallelism | N at which the write lock leaks |
+|---|---|
+| 48 cores, unloaded, 8 runs | 3, every run |
+| 4 cores + one busy loop per core, 8 runs | 3, every run |
+| 1 core (`taskset -c 0`), 8 runs | 1, 1, 1, {1,2}, and **no leak at any N in 4 of 8** |
+
+On one core the whole open collapses into one or two polls and there is often no
+poll boundary inside the window at all. That is why the test sweeps a range
+rather than pinning 3, and why it declares a parallelism precondition rather than
+asserting unconditionally.
 
 ## Design
 
@@ -111,12 +127,17 @@ async fn begin_detached(
         async move {
             let opened = pool.begin_with(statement).await;
             if let Err(unsent) = sender.send(opened) {
-                if unsent.is_ok() {
-                    tracing::warn!(
+                match &unsent {
+                    Ok(_) => tracing::warn!(
                         context,
                         "transaction open completed after its caller was cancelled; \
                          rolling back"
-                    );
+                    ),
+                    Err(error) => tracing::warn!(
+                        context,
+                        %error,
+                        "transaction open failed for a caller that was already cancelled"
+                    ),
                 }
                 // Dropping `unsent` drops the Transaction, which queues the
                 // ROLLBACK that releases the write lock.
@@ -136,7 +157,14 @@ a task that still constructs the `Transaction` and then drops it — and
 `Transaction::drop` queues the `ROLLBACK` the leak was missing. The `oneshot` is
 what makes that visible: a failed `send` is the only place the detached path can
 tell it is orphaned, and without it a pool slot held by a request answered thirty
-seconds ago is indistinguishable from one held by a live request. The
+seconds ago is indistinguishable from one held by a live request. Both outcomes
+log, including the orphaned-and-failed one — an `acquire_timeout` firing for a
+caller answered 45s earlier is exactly the pool-stall symptom worth attributing.
+One orphan stays invisible and the design does not claim otherwise: `send` writes
+the value before it CASes the state (`tokio-1.53.1/src/sync/oneshot.rs:622-646`),
+so a caller dropped after that CAS gets a successful send and its `Transaction`
+is dropped inside the channel. The rollback is correct either way; only the
+signal is missing. The
 `Instrument` keeps the open inside the caller's span, which `tokio::spawn` does
 not inherit.
 
@@ -196,13 +224,21 @@ Two new error paths, both mapping to `VoomError::Database` exactly as the curren
 openers do:
 
 - the spawned task panics — surfaced through `JoinError`;
-- the spawned task is dropped without sending — the `oneshot` receiver returns
-  `RecvError`, and there is no transaction to lose because the same drop rolls
-  one back if it exists.
+- the spawned task panics, or is dropped without sending — either way the sender
+  drops, `receiver.await` yields `RecvError`, and `database_context` maps it. No
+  transaction is lost: the same drop rolls one back if it exists. Note what this
+  costs — the `JoinHandle` is discarded, so a panic's payload and location reach
+  the panic hook and not the call site, which sees a `DB_UNREACHABLE`-shaped
+  error whose source reads "channel closed".
 
-The residual the detach adds is bounded and stated in ADR 0087: at most
-`max_connections` detached openers at once, each terminating within
-`LOCK_WAIT_BUDGET`, so a burst degrades and drains rather than wedging.
+The residual the detach adds is bounded and stated in ADR 0087, in two clauses
+because `Pool::begin_with` is two steps. At most `max_connections` detached
+openers *hold a pooled connection* at once, each releasing it within
+`LOCK_WAIT_BUDGET` of acquiring it. An opener still queued inside `acquire()`
+holds no connection and is additionally bounded by `POOL_ACQUIRE_BUDGET`, so
+worst-case termination for a detached opener is `POOL_ACQUIRE_BUDGET +
+LOCK_WAIT_BUDGET` — 75s, not 30s. It degrades and drains rather than wedging;
+the drain is just slower than the first draft claimed.
 
 ## Testing
 
@@ -223,7 +259,19 @@ integration test, the regression proof.
   control, and it is what keeps the first sweep honest. Without it the test is
   green whether or not the sweep still straddles a vulnerable window, so a
   dependency bump that moved the window outside 1..=8 would leave an assertion
-  that passes while proving nothing.
+  that passes while proving nothing. Note what the control does *not* buy: the
+  two arms count different clocks, so a red control means "check whether upstream
+  closed the window", not "the fixed arm stopped covering".
+- **Parallelism precondition.** Both arms are skipped, loudly, when
+  `std::thread::available_parallelism()` reports fewer than 4. On one core the
+  open collapses into one or two polls and the window frequently has no poll
+  boundary in it at all (table above), which would make the control red on a
+  1-vCPU container for a reason that has nothing to do with the defect — and
+  would let the fixed arm pass vacuously. Four is the lowest parallelism measured
+  to reproduce deterministically, including with a busy loop per core. The skip
+  prints the observed parallelism and says the run proved nothing, so a host that
+  silently stops covering says so. CI's `test (ubuntu-latest)` and `coverage`
+  jobs clear the gate; a 3-vCPU `macos-latest` runner does not, and skips.
 - Test files are exempt from `check-transaction-openers.sh`
   (`! -name '*_test.rs' ! -path '*/tests/*'`), so the control's raw
   `pool.begin_with` is allowed where it lives.
@@ -239,6 +287,24 @@ duration.
 **`crates/voom-store/tests/`** existing init/migration coverage exercises the
 `init.rs` change; no new test is written for it, since the behaviour is
 unchanged and the shape is what moved.
+
+**Acceptance run for completion criterion 5.** The mechanism test proves the
+window is closed; it does not discharge "the `coverage` job's serialized
+instrumented run no longer reproduces the hang", because #592 reproduces at
+roughly 1 run in 20–30 and a single green `just ci` is indistinguishable from a
+run that never entered the window. The run that discharges it is #592's own
+recipe, repeated:
+
+```
+./scripts/run-constrained.sh --load 1 --write-bps 40M -- \
+  cargo llvm-cov --no-report -p voom-node-agent --test lifecycle \
+  --all-features -- --test-threads=1
+```
+
+at least 60 times — three times the upper end of the observed 1-in-20–30 rate, so
+a clean sweep is a meaningful negative rather than an unlucky one. Run it against
+the branch and report the count; if the pre-fix control is also run, report both.
+Anything less is reported as what it is, not as the criterion discharged.
 
 **Unchanged:** `crates/voom-node-agent/tests/lifecycle.rs`. `HANG_GUARD` stays at
 30s. That test is the end-to-end signal for this defect and it stays tight, which
