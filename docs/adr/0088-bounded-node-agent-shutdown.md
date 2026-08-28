@@ -41,7 +41,13 @@ wait. Any unresponsive control plane still reaches it.
 ## Decision
 
 **Each control-plane wait in the shutdown tail gets its own wall-clock budget,
-`SHUTDOWN_CALL_DEADLINE`, of 10 s.** Two budgets rather than one shared instant:
+`SHUTDOWN_CALL_DEADLINE`, of 10 s.** The budgets live in one `ShutdownBudgets`
+value carried by `AgentRuntime` — `call`, `reap_after_kill`, `backstop_margin` —
+with a `DEFAULT` used in production and a `#[cfg(test)]` constructor. They are
+threaded as arguments, not read from constants at the point of use: three of the
+waits they bound are exercised by existing real-time tests whose whole design is
+that the call blocks until a signal arrives, and a real 10 s timer would turn
+each into a wall-clock race. Two budgets rather than one shared instant:
 a single instant covering both waits leaves deactivation whatever settlement did
 not spend, so a settlement finishing at 19 s of 20 s abandons the write on
 arrival.
@@ -109,18 +115,32 @@ by reading further, not by a rule, and the next one would be found the same way.
 So `run_with_seeded_shutdowns` wraps its whole tail — `wait_for_coordinators`
 through `finish_shutdown_lifecycle` — in a `tokio::time::timeout` equal to the
 published total, `2 × SHUTDOWN_CALL_DEADLINE + shutdown_grace_seconds +
-REAP_AFTER_KILL`, and returns `shutdown_deadline_error()` on expiry. Dropping
-that future drops the coordinator `JoinSet`, which aborts its tasks; a
-`RunningChild` aborted mid-reap is `start_kill`ed by its own `Drop`
-(`child.rs:216-231`), so no child is left un-signalled.
+REAP_AFTER_KILL`, plus `BACKSTOP_MARGIN`, and returns a distinct `shutdown_backstop_error()` on
+expiry. Dropping that future drops the coordinator `JoinSet`, which aborts its
+tasks; the child a coordinator was reaping is `SIGKILL`ed because `launch` sets
+`.kill_on_drop(true)` on it (`child.rs:404`), so no child is left un-signalled.
+`RunningChild`'s own `Drop` (`:216-231`) does not cover that window —
+`shutdown` has already moved the handle out at `:195` and does not set `reaped`
+until `:211`, so `Drop` takes its early return — and it covers only a coordinator
+aborted before it reaches `shutdown_all`. The distinction matters because
+`kill_on_drop(true)` reads as redundant beside an explicit killing `Drop`, and
+removing it would silently reintroduce an orphaned worker on every backstop
+expiry.
 
-The backstop is not the mechanism, and sizing it at exactly the sum is what keeps
-it from becoming one: every inner bound expires strictly first, so an ordinary
-overrun is still attributed to the wait that caused it and still leaves the
-deactivation its own budget. The backstop fires only when an inner bound did not
-hold — which is a defect, reported as one. What it buys is that the number in the
-runbook is an upper bound on the process, rather than an upper bound on the waits
-this record happened to enumerate.
+The margin is what makes the backstop a backstop. The inner bounds are sequential
+and sum to `2 × call + grace + reap_after_kill` exactly, and the tail carries
+costs outside all of them: `wait_or_force`'s post-expiry
+`abort_all` and drain (`runtime.rs:1771-1774`) is itself unbounded,
+`shutdown_all` starts each child's `grace` on first poll after a `JoinSet` spawn
+rather than at the call (`child.rs:356-361`), and `finish_shutdown_lifecycle`
+stops the heartbeat before deactivating. Sized at the bare sum, the backstop
+would fire *during* the deactivation it exists to protect — cancelling the
+`Retired` write, which is the loss this decision refused when it rejected letting
+a deadline force skip deactivation. `BACKSTOP_MARGIN` of 5 s covers those
+fragments so every inner bound genuinely expires first. An ordinary overrun is
+then still attributed to the wait that caused it; the backstop fires only when an
+inner bound did not hold, which is a defect, and its own error says so rather
+than reusing the deadline message an operator is told to expect.
 
 Two of those three waits are still raced directly, because a backstop that fires
 is a worse outcome than one that does not. `restart_after_child_exit`'s readiness
@@ -140,7 +160,7 @@ agent join and the `Retired` observation to it, and this issue's charter forbids
 raising it; a budget near 30 s would leave the guard, not the deadline, firing
 first — the bound would move and the symptom would not. Two budgets of 10 s plus
 the maximum `shutdown_grace_seconds` of 60 and `REAP_AFTER_KILL` also keep the
-whole tail at 81 s, inside systemd's upstream 90 s. And 10 s sits below one
+whole tail at 86 s, inside systemd's upstream 90 s. And 10 s sits below one
 `REQUEST_TIMEOUT` (30 s) deliberately: a shutdown blocked on a wedged control
 plane should abandon rather than spend an attempt.
 
@@ -177,16 +197,16 @@ and its scope so the relationship is asserted rather than rediscovered.
 ## Consequences
 
 Graceful shutdown becomes finite and computable:
-`2 × SHUTDOWN_CALL_DEADLINE + shutdown_grace_seconds + REAP_AFTER_KILL`. The
-validator holds `shutdown_grace_seconds` to 1..=60 (`config.rs:159`), so the
-worst case is 81 s and the common case — the runbook's example
-`shutdown_grace_seconds = 10` — is 31 s.
+`2 × SHUTDOWN_CALL_DEADLINE + shutdown_grace_seconds + REAP_AFTER_KILL +
+BACKSTOP_MARGIN`. The validator holds `shutdown_grace_seconds` to 1..=60
+(`config.rs:159`), so the worst case is 86 s and the common case — the runbook's
+example `shutdown_grace_seconds = 10` — is 36 s.
 
-**81 s fits systemd's upstream 90 s `DefaultTimeoutStopSec` and not every
+**86 s fits systemd's upstream 90 s `DefaultTimeoutStopSec` and not every
 distribution's, and where it does not fit the change does not deliver its
 outcome.** Fedora 44 ships 45 s (`systemctl show -p DefaultTimeoutStopUSec` →
 `DefaultTimeoutStopUSec=45s`). On that default, any `shutdown_grace_seconds`
-above 24 — a configuration the validator accepts — still produces a tail longer
+above 19 — a configuration the validator accepts — still produces a tail longer
 than the stop timeout, so `SIGKILL` still lands and the write is still skipped:
 #452's exposure, unfixed, inside the accepted range. The agent cannot read its
 unit's `TimeoutStopSec`, so keeping the sum inside it remains the operator's job;
