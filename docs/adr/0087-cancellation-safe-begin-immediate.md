@@ -271,6 +271,24 @@ that calls `pool.begin_with` itself is outside this invariant.
   stopped; under that layer its whole transaction runs to completion and commits,
   and the work escapes request accounting entirely. The hazard is two openers
   wide; the remedy would be every handler wide.
+- **Await the `JoinHandle` instead of a `oneshot`.** verified: this variant
+  *works* for the fix and is strictly simpler — dropping a `JoinHandle` detaches
+  rather than aborts, the task still runs to completion, and its output is
+  dropped the moment it finishes with no handle holding it, which queues the same
+  `ROLLBACK`. It also *recovers* something the chosen design gives up: a
+  `JoinError` carries the panic payload and location to the call site, where the
+  `oneshot` leaves them to the panic hook. What it cannot do is notice it was
+  orphaned: nothing distinguishes a task whose caller is gone from one whose
+  caller is still waiting, so there is no place to log. judgment: that signal is
+  the reason to pay for the channel. A pool slot held on behalf of a request
+  answered thirty seconds ago is otherwise indistinguishable from one held by a
+  live request, and this design's own accepted residual — a detached opener
+  holding a slot for up to 75s on the node agent's shutdown path — has **no other
+  observable**. The `warn` count is what turns "occupancy decays" from an
+  argument into a measurement, so removing the channel would remove the only
+  evidence the residual is bounded in practice. Price paid knowingly: one
+  dev-dependency (`tracing-subscriber`, already in the workspace graph), the
+  orphan test arm, and panic attribution.
 - **Wrap all four openers, not the two that can leak.** judgment: ADR 0086's own
   ground — a rule that fires everywhere carries no information about where the
   hazard is — and the deferred path's safety is cited above rather than assumed.

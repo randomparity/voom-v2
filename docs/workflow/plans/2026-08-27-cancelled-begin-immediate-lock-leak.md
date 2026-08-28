@@ -249,6 +249,23 @@ lock probe**. Revert the fault.
 
 ## T5 — `init.rs` joins the opener vocabulary
 
+**This is a sibling fix, not part of the deadlock remedy, and the PR says so.**
+No completion criterion requires it. `run_migrations_on` is not on the deadlocked
+control path: its only production caller is
+`crates/voom-cli/src/commands/system/init.rs:16` (every other caller is a test,
+and `init_on` is behind the `test` feature by construction at `init.rs:31`), so it
+sits behind neither `bounded_router`'s `TimeoutLayer` nor an axum client
+disconnect — the two cancellation sources this design identifies. A CLI
+invocation's cancellation is SIGINT, which takes the process and the file lock
+with it.
+
+It is kept because it shares the *verified* root cause, sits inside the frozen
+surface, is small, and is what makes `docs/debt/0005` a pure recurrence guard.
+**The two are coupled and cannot be dispositioned independently:** if T5 is
+dropped, `docs/debt/0005`'s "Why deferred" section must be rewritten, because it
+rests on "The live instance is fixed: ADR 0087's change routes `init.rs` through
+`begin_read_then_write`, so no production `conn.begin_with` remains."
+
 Files: `crates/voom-store/src/init.rs`.
 
 `run_migrations_on` at `:50-57` does `pool.acquire()` then
@@ -454,7 +471,22 @@ deterministic discharge path in this design — that is a property of a
 pre-fix arm does not reproduce within 90 runs, **proceed** on the mechanism test
 alone and report criteria 2 and 5 as *not discharged at the stated confidence*,
 naming the executed count and the host. Do not block on it, and do not quote
-0.047 unconditionally in the PR. A fully successful run of this plan can
+0.047 unconditionally in the PR.
+
+**The post-fix arm runs either way.** An earlier draft made the whole sweep
+conditional on the pre-fix arm reproducing, which left a hole: the orphan-`warn`
+counts are the *only* evidence about the residual this design adds on criterion
+2's path, and that draft permitted the run to end having never gathered them. The
+two arms answer different questions and are decoupled accordingly — the pre-fix
+arm calibrates the *confidence* attachable to criterion 5, and the post-fix arm
+supplies the residual evidence regardless of what the pre-fix arm found. **A
+`executed=90` post-fix arm is required before criterion 2 is reported at all**,
+discharged or not.
+
+**Pre-commit to the split.** If any run reports more than one concurrent orphan
+`warn`, that is the sustained multi-opener occupancy the spec names, and it opens
+a follow-up issue rather than being absorbed here. Decide that now so the result
+cannot be read charitably after the fact. A fully successful run of this plan can
 legitimately end with two of five criteria undischarged; that is the plan working,
 and the PR body must say so in those words rather than implying a green sweep.
 
