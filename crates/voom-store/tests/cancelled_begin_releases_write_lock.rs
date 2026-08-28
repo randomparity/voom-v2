@@ -113,12 +113,14 @@ impl Wake for SignalWaker {
     }
 }
 
-/// Poll `future` for exactly `polls` wakeup-driven polls, then drop it.
+/// Poll `future` for at most `polls` wakeup-driven polls, then drop it.
 ///
-/// Returns `true` if the future was still pending when dropped. A future that
-/// resolves before the count is reached returns `false` — that is not a failure,
-/// it just means this *N* did not land inside the window.
-async fn poll_n_then_drop<F: Future>(future: F, polls: usize) -> bool {
+/// A future that resolves before the count is reached is simply dropped resolved —
+/// that is not a failure, it just means this *N* did not land inside the window.
+/// Which of the two happened is deliberately not reported: an earlier draft
+/// returned it to drive a sweep-wide "at least one *N* cancelled" guard, and that
+/// guard was removed as host-scheduling-dependent rather than kept unused.
+async fn poll_n_then_drop<F: Future>(future: F, polls: usize) {
     let signal = Arc::new(SignalWaker(tokio::sync::Notify::new()));
     let waker = Waker::from(Arc::clone(&signal));
     let mut context = Context::from_waker(&waker);
@@ -126,7 +128,7 @@ async fn poll_n_then_drop<F: Future>(future: F, polls: usize) -> bool {
 
     for poll in 0..polls {
         if future.as_mut().poll(&mut context).is_ready() {
-            return false;
+            return;
         }
         if poll + 1 < polls {
             // `notify_one` before `notified()` stores a permit, so a wakeup that
@@ -138,7 +140,6 @@ async fn poll_n_then_drop<F: Future>(future: F, polls: usize) -> bool {
     }
 
     drop(future);
-    true
 }
 
 /// One completed transaction through the pool.
@@ -183,8 +184,9 @@ fn is_busy(error: &sqlx::Error) -> bool {
     let sqlx::Error::Database(database) = error else {
         return false;
     };
-    // SQLITE_BUSY is 5; the extended codes SQLITE_BUSY_SNAPSHOT (517) and
-    // SQLITE_BUSY_RECOVERY (261) share the primary code and are matched by prefix.
+    // SQLITE_BUSY is 5; SQLITE_BUSY_SNAPSHOT (517) and SQLITE_BUSY_RECOVERY (261)
+    // are extended codes over the same primary code, and `code()` reports whichever
+    // SQLite returned, so all three are listed rather than derived.
     database
         .code()
         .is_some_and(|code| code == "5" || code == "517" || code == "261")

@@ -31,7 +31,8 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use voom_core::VoomError;
 
-/// Open a transaction on a detached task and take its result over a channel.
+/// Open a `BEGIN IMMEDIATE` transaction on a detached task and take its result
+/// over a channel.
 ///
 /// This is the fix for issue #592. `sqlx` 0.8.6's `SqliteTransactionManager::begin`
 /// with a *custom* statement (`sqlx-sqlite-0.8.6/src/transaction.rs:19-30`) runs the
@@ -53,7 +54,6 @@ use voom_core::VoomError;
 /// `send`-failure branch for a test to assert on. See ADR 0087.
 async fn begin_detached(
     pool: &SqlitePool,
-    statement: &'static str,
     context: &'static str,
 ) -> Result<Transaction<'static, Sqlite>, VoomError> {
     let pool = pool.clone();
@@ -73,7 +73,7 @@ async fn begin_detached(
             // `acquire()` holds no connection at all. A large value means the open
             // was slow, not that a pool slot was occupied that long.
             let started = std::time::Instant::now();
-            let opened = pool.begin_with(statement).await;
+            let opened = pool.begin_with("BEGIN IMMEDIATE").await;
             let open_ms = started.elapsed().as_millis();
             // `send` returns the value back when the receiver is gone, which is
             // exactly the orphan case: the caller was cancelled while this open was
@@ -122,7 +122,7 @@ pub async fn begin_read_then_write(
     pool: &SqlitePool,
     context: &'static str,
 ) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    begin_detached(pool, "BEGIN IMMEDIATE", context).await
+    begin_detached(pool, context).await
 }
 
 /// Open a transaction whose first statement writes.
@@ -185,5 +185,5 @@ pub async fn begin_serialized_read(
     pool: &SqlitePool,
     context: &'static str,
 ) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    begin_detached(pool, "BEGIN IMMEDIATE", context).await
+    begin_detached(pool, context).await
 }
