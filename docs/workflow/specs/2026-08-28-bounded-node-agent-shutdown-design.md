@@ -401,12 +401,25 @@ an unavoidable consequence of a sourced criterion rather than absorbed adjacent
 work. It is recorded here rather than left for a reviewer to find.
 
 `commit.rs` subsequently gained a **behavioural** change as well, on a third
-maintainer amendment (2026-08-28): its poll loop's `drive_open_intents` is raced
-against the shutdown receiver. The branch review established that without it the
-tail's own bound is undeliverable in the charter's scenario, since that
-coordinator shares the `JoinSet` `wait_for_coordinators` joins. Its sibling test
-`a_shutdown_releases_the_commit_coordinator_mid_call` gates `commit_open` on the
-fake and fails on `Elapsed` if the race is removed.
+maintainer amendment (2026-08-28): its poll loop stands down for a shutdown at two
+boundaries — the `open_commit_intents` listing call, raced against the shutdown
+receiver, and between intents in the listing. The branch review established that
+without the first, the tail's own bound is undeliverable in the charter's scenario,
+since that coordinator shares the `JoinSet` `wait_for_coordinators` joins. Its
+sibling test `a_shutdown_releases_the_commit_coordinator_mid_call` gates
+`commit_open` on the fake and fails on `Elapsed` if the race is removed.
+
+The race deliberately stops short of a drive that has already journaled `applying`.
+Cancelling one there leaves the intent `Authorized` carrying an `Applying` receipt
+that no later incarnation can resume — the frozen idempotency key is
+per-incarnation stack state, so the replay path is gone, the fresh authorize is
+refused as `not pending`, and recovery classifies the intent `operator_required`,
+wedging the artifact's commit slot until a human runs `recover_commit` (ADR 0074).
+Letting the drive finish risks only an unbounded wait, which the tail backstop
+already covers. `a_shutdown_finishes_the_journaled_drive_and_starts_no_more` gates
+`report_commit_outcome` on the fake and fails both ways: widening the race back over
+the whole drive drops the `complete` call, and dropping the between-intents check
+starts a second drive.
 
 ## Failure modes
 
@@ -418,7 +431,8 @@ fake and fails on `Elapsed` if the race is removed.
 | Settlement completes, deactivation blocked | The deactivation arm fires at its own budget and returns `shutdown_deadline_error()` directly. |
 | Second signal arrives before either budget | Unchanged: `forced_shutdown_error()`. |
 | Deactivation slower than 10 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
-| A commit intent is open when the shutdown arrives | `run_commit_coordinator`'s `drive_open_intents` is raced against the shutdown receiver, so its task joins instead of holding the tail open for `production_request_budget()`. Without that race the tail ends at its backstop with no deactivation attempted. |
+| A commit intent is open when the shutdown arrives, and the drive has not journaled `applying` | `drive_open_intents` stands down at the listing call or between intents, so its task joins instead of holding the tail open for `production_request_budget()`. Without that the tail ends at its backstop with no deactivation attempted. No durable state changes: nothing before the `applying` receipt mutates anything. |
+| A commit drive is past the `applying` receipt when the shutdown arrives | The drive runs to completion; it is never cancelled. The promotion is unbounded, so this wait is the tail backstop's to catch — the one case the published bound does not cover. Cancelling instead would leave an `Authorized` intent with an `Applying` receipt that no later incarnation can resume, wedging the artifact's commit slot until an operator runs `recover_commit` (ADR 0074). |
 | Worker crashes, then a shutdown arrives while its readiness update is blocked | `restart_after_child_exit`'s readiness calls are released by the shutdown receiver instead of draining the retry budget. |
 | Worker crashes, shutdown arrives mid-restart of an NVIDIA worker | Same race releases it; the 5-minute startup timeout is never entered, because a shutdown observed first returns instead of restarting. |
 | Second signal arrives after a deadline force is already recorded | The signal arm is disabled by its existing `!forced` guard, so the signal is consumed later in `deactivate_or_second_signal`. Outcome unchanged (`forced_shutdown_error()`, write skipped); latency is up to one budget plus a reap — 71 s at the maximum grace. R4's "unchanged" is ratified as outcome-only by explicit maintainer decision on 2026-08-28; the alternative (guarding on `forced != Some(Signal)`) was offered and declined. |

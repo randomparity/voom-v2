@@ -288,6 +288,23 @@ a stuck unit. Accepted, because the alternative is the unbounded wait; changing
 the discard would change coordinator exit semantics for every existing failure on
 that path and is not taken here.
 
+**A commit drive past its `applying` receipt is left to the backstop, deliberately.**
+The commit coordinator stands down for a shutdown at its listing call and between
+intents, and nowhere else. Once `drive_commit_intent` has journaled `applying`, every
+remaining step is an await — three canonicalizations, a source-to-staging
+materialization, and a hash-copy-link promotion — and for a large artifact that is the
+bulk of the drive's wall clock. It is not raced anyway: cancelling there leaves the
+intent `Authorized` carrying an `Applying` receipt, and the frozen idempotency key that
+would hit the control plane's replay path is per-incarnation stack state, so no later
+incarnation can resume it. The fresh authorize is refused as `not pending`, the intent
+is skipped on every poll, and recovery classifies it `operator_required` — which
+[ADR 0074](0074-fenced-node-local-commit-intents.md) records as wedging the artifact's
+commit slot until a human runs `recover_commit`. Trading a bounded tail for a wedged
+commit slot on every `SIGTERM` is the worse bargain, so this one wait is uncovered by
+the published sum and caught by the tail backstop instead. The runbook tells the
+operator to check for a `recovery_required` artifact after a stop that reported the
+bound.
+
 **The lifecycle suite fails differently, not less.** [ADR
 0066](0066-observe-graceful-shutdown-as-one-bounded-lifecycle.md) binds the agent
 join and the `Retired` observation to one 30 s `HANG_GUARD`. When the control

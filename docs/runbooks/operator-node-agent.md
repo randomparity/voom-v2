@@ -217,6 +217,14 @@ or any exit reporting a shutdown budget or the tail bound, check for leftover wo
 holding a GPU, a mount, or a port before starting a replacement agent. See
 [ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
 
+**A commit already promoting bytes is finished, not abandoned — so a stop can exceed the sum
+above.** The agent stops driving commit intents as soon as it sees the signal, but a drive that
+has already journaled its `applying` receipt runs to completion; abandoning one there would leave
+the artifact needing `voom artifact recover-commit` before any later commit to it could
+proceed. Promotion is a copy and two hashes of the artifact's bytes, so for a large artifact this
+can outlast the stop timeout. If the agent exits reporting the tail bound, check the affected
+artifacts for a `recovery_required` state alongside the leftover-process check above.
+
 A signal that arrives while the agent is still retrying activation against an unreachable
 control plane stops it immediately and exits successfully. No child has started at that
 point; if an earlier activation attempt did land, heartbeat expiry reconciles it.

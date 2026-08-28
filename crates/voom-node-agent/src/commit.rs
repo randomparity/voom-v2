@@ -96,21 +96,12 @@ pub(crate) async fn run_commit_coordinator(
     // the control plane's replay path, which returns the same fence.
     let mut authorize_requests: HashMap<u64, RetryRequest<CommitAuthorizeRequest>> = HashMap::new();
     loop {
-        // Raced against the shutdown, not awaited bare. This task shares the `JoinSet`
-        // that `wait_for_coordinators` joins, and `drive_open_intents` reaches the
-        // retrying client — so an unraced call here holds the whole shutdown tail open
-        // for `production_request_budget()`, past every budget above it, and the tail
-        // ends at its backstop without ever attempting the deactivation. See ADR 0088.
-        let Some(driven) = until_shutdown(
-            &shutdown,
-            drive_open_intents(&context, &mut authorize_requests),
-        )
-        .await
-        else {
-            return CoordinatorExit::Shutdown(shutdown_settlement(*shutdown.borrow()));
-        };
-        if let Err(error) = driven {
-            return CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error));
+        match drive_open_intents(&context, &shutdown, &mut authorize_requests).await {
+            Ok(DrivePass::Drained) => {}
+            Ok(DrivePass::ShutdownObserved) => {
+                return CoordinatorExit::Shutdown(shutdown_settlement(*shutdown.borrow()));
+            }
+            Err(error) => return CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)),
         }
         let delay = centered_jitter(context.poll_interval, &mut schedule_rng);
         tokio::select! {
@@ -139,12 +130,41 @@ fn shutdown_settlement(kind: ShutdownKind) -> LeaseSettlement {
     }
 }
 
+/// How a drive pass ended when it did not fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrivePass {
+    /// Every intent in the listing was driven.
+    Drained,
+    /// The pass stood down at a boundary where standing down costs nothing.
+    ShutdownObserved,
+}
+
+/// Drive one listing, standing down for a shutdown only where that is free.
+///
+/// The listing call is raced rather than awaited bare: this task shares the `JoinSet`
+/// that `wait_for_coordinators` joins, and `open_commit_intents` reaches the retrying
+/// client, so an unraced call holds the whole shutdown tail open for
+/// `production_request_budget()` — past every budget above it — and the tail ends at its
+/// backstop without ever attempting the deactivation.
+///
+/// A drive that has already journaled `applying` is never abandoned. Cancelling it leaves
+/// the intent `Authorized` carrying an `Applying` receipt, which no later incarnation can
+/// resume: the frozen idempotency key is per-incarnation stack state, so the replay path
+/// is gone and the intent classifies `operator_required`, wedging the artifact's commit
+/// slot until a human runs `recover_commit` (ADR 0074). Letting it finish risks only an
+/// unbounded wait, which the tail backstop already covers. See ADR 0088.
 async fn drive_open_intents(
     context: &CommitCoordinatorContext,
+    shutdown: &watch::Receiver<ShutdownKind>,
     authorize_requests: &mut HashMap<u64, RetryRequest<CommitAuthorizeRequest>>,
-) -> Result<(), VoomError> {
-    let listing = open_commit_intents(context).await?;
-    for intent in listing.intents {
+) -> Result<DrivePass, VoomError> {
+    let Some(listing) = until_shutdown(shutdown, open_commit_intents(context)).await else {
+        return Ok(DrivePass::ShutdownObserved);
+    };
+    for intent in listing?.intents {
+        if *shutdown.borrow() != ShutdownKind::Running {
+            return Ok(DrivePass::ShutdownObserved);
+        }
         match intent.state.as_str() {
             "pending" | "authorized" => {
                 drive_commit_intent(context, intent.id, authorize_requests).await?;
@@ -158,7 +178,7 @@ async fn drive_open_intents(
             }
         }
     }
-    Ok(())
+    Ok(DrivePass::Drained)
 }
 
 /// Drive one `pending`/`authorized` intent: authorize (replaying the frozen
