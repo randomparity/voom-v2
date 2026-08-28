@@ -130,7 +130,7 @@ same shape without going through them.
 
 `crates/voom-store/src/tx.rs` — `begin_read_then_write` and
 `begin_serialized_read` drive `pool.begin_with("BEGIN IMMEDIATE")` on a detached
-`tokio` task and await its `JoinHandle`:
+`tokio` task and take its result over a `oneshot`:
 
 ```rust
 async fn begin_detached(
@@ -634,12 +634,23 @@ what the change does to that.
 
 ## Out of scope
 
-- **Re-sizing the control-path budget ladder.** `budget_ladder.rs` records that
-  shrinking the server-side budgets so a whole call fits inside one attempt
-  "belongs with the #592 fix". It does not land here: with the leak gone, a lock
-  wait is the transient contention the 30s `busy_timeout` was sized for, and
-  re-sizing the ladder is a separate change against separate evidence. Flagged in
-  the pull request.
+- **Re-sizing the control-path budget ladder.** This exclusion overrides a
+  repository record, so quote what it overrides rather than paraphrasing it.
+  `crates/voom-node-agent/tests/budget_ladder.rs:31-33`: *"Shrinking the
+  server-side budgets so a whole call fits inside one attempt is the better
+  long-term answer; it collides with the `busy_timeout >= 30s` floor in
+  `voom-store/src/pool_test.rs` and belongs with the #592 fix."*
+
+  It does not land here. With the leak gone, a lock wait is the transient
+  contention the 30s `busy_timeout` was sized for; and the resize collides with a
+  floor asserted in another crate's tests, which is separate work against
+  separate evidence. But the exclusion is taken on **this run's** authority
+  against that record, not on the operator's, so it is flagged in the pull request
+  in those terms — and the residual it leaves sits on criterion 2's own path
+  (Error handling, above). The acceptance sweep's orphan-`warn` counts are the
+  evidence that decides whether this stays a clean exclusion or becomes a
+  follow-up issue; if they show sustained multi-opener occupancy, that is a
+  **split**, not something to absorb here.
 - **Issue #452.** The same defect seen from the agent side. This change may make
   it resolvable; closing it is its owner's call.
 - **The lock-free opener ring buffer** issue #592 proposes as the next

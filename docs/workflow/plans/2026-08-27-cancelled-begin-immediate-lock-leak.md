@@ -46,12 +46,36 @@ tests run on the pinned `.test-tmp/` root (ADR 0079).
 - **Callers are untouched.** ~50 files call the two openers; the change is inside
   them. That is the ADR 0086 property being cashed in, and no call site moves.
 - **No production dependency changes.** `tokio` gains the `rt` *feature*;
-  `tracing-subscriber` joins `voom-store` as a **dev**-dependency only.
-- **The spec's test design is not settled.** Its review cycle exited at budget
-  with the Testing section rewritten three times, each rewrite producing new
-  defects in the next pass. Treat T2–T4 as the spec's *intent*, verify each arm
-  bites (below), and expect the branch review at quest step 6 to be where the
-  test design is actually settled.
+  `tracing-subscriber` joins `voom-store` as a **dev**-dependency only. It is a
+  fourth direct dependency where the charter's surface bullet names three
+  (`sqlx`, `axum`/`hyper`, `tokio`), so the judgement is recorded rather than
+  assumed: `crates/voom-store/` is in the frozen surface and its manifest with
+  it; `AGENTS.md:175` states dev-dependencies "are deliberately excluded from the
+  production map" and already sanctions voom-store's dev-only edges against the
+  normal layering; and `tracing-subscriber` 0.3.23 is already in the workspace
+  graph for `voom-api`, `voom-control-plane` and `voom-cli`, so this adds an edge
+  and no new supply-chain code. The `Cargo.lock` line at the repository root is
+  an unavoidable consequence of an in-surface manifest change. The alternative —
+  hand-rolling a `tracing::Subscriber` in the test file — is more code in the
+  least-settled file. Take the dependency.
+- **The spec's test design is not settled, and the latitude that grants is
+  bounded here.** Its review cycle exited at budget with the Testing section
+  rewritten three times, each rewrite producing new defects in the next pass.
+  Treat T2–T4 as the spec's *intent* and verify each arm bites (below). But the
+  implementer does **not** hold open-ended design authority over it:
+
+  - **Arm structure returns to the spec.** Changing the number of arms, what an
+    arm asserts, or the parallelism gate is a design change: stop, amend the
+    spec, and do not land it through the branch review. The structure is the part
+    that is well-argued — each arm is earned by something the others cannot
+    prove — and it is not what churned.
+  - **Constants stay with the implementer.** The settle, the two ceilings, and
+    the repeat count are already parameterised here with stated grounds; tune
+    them against measurement and record what changed. That is what churned, and
+    it is tuning, not design.
+
+  The branch review at quest step 6 remains the check on the implemented test.
+  This bullet says what it may not be asked to settle.
 
 ## T0 — Remove the scratch probe
 
@@ -382,11 +406,23 @@ for i in $(seq 90); do
   esac
   grep -q 'test result:' "$log" || { echo "ABORT: run $i never ran the suite"; break; }
   executed=$((executed + 1))
+  orphans=$(grep -c 'completed after its caller was cancelled' "$log" || true)
+  echo "run $i: orphan_warns=$orphans"
   if grep -q 'second agent graceful-shutdown lifecycle did not complete' "$log"
   then echo "reproduced at run $i"; break; fi
 done
 echo "executed=$executed"
 ```
+
+**Count the orphan `warn`s per run.** One `grep` over logs already being written,
+and it is the only evidence anyone will have about the residual this design
+introduces. ADR 0087 accepts that a caller cancelled inside `acquire()` now leaves
+a detached task holding a pool slot for up to `LOCK_WAIT_BUDGET`, worst-case 75s
+end to end — which **exceeds the node agent's 30s per-attempt timeout** and is a
+large fraction of its 153.75s budget, on exactly the path completion criterion 2
+is judged on. No measurement of that case exists, here or anywhere. The sweep
+runs the real workload under the real throttle, so it is where "occupancy decays"
+stops being an argument and becomes an observation. Report the counts.
 
 **Every iteration must prove it ran**, because the grep alone cannot tell "90
 clean runs" from "90 runs that never started". `run-constrained.sh` exits 2 or 3
@@ -411,6 +447,23 @@ the pre-fix arm runs all 90 regardless. The post-fix arm runs the same loop with
 Report both counts and the pre-fix reproduction index. The (29/30)^90 = 0.047
 figure is conditional on #592's rate transferring to this host, and that index is
 the host-local evidence for it.
+
+**Decide the bar now, not after the sweep.** Criteria 2 and 5 have no
+deterministic discharge path in this design — that is a property of a
+1-in-20-to-30, throttle-dependent defect, not a defect of the plan. So: if the
+pre-fix arm does not reproduce within 90 runs, **proceed** on the mechanism test
+alone and report criteria 2 and 5 as *not discharged at the stated confidence*,
+naming the executed count and the host. Do not block on it, and do not quote
+0.047 unconditionally in the PR. A fully successful run of this plan can
+legitimately end with two of five criteria undischarged; that is the plan working,
+and the PR body must say so in those words rather than implying a green sweep.
+
+**Do not run this sweep concurrently with any other `run-constrained.sh`
+invocation on the same host.** The reap above is `pkill -f` on a command-line
+pattern, which matches host-wide rather than by process group — the hogs are
+reparented to init by the script's own `exec`, so they are not in this loop's
+process tree and cannot be reaped from it. A concurrent invocation would silently
+lose its load generators mid-run.
 
 Up to ~180 instrumented, throttled, serialized lifecycle runs. If it is not run
 to completion, say so and say which criteria that leaves undischarged.

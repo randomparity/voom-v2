@@ -63,6 +63,14 @@ indistinguishable in the log.
 That sweep compensates in its own loop (reap after each run, abort if any hog
 survives into the next) rather than modifying the script.
 
+The compensation is itself constrained by this defect. Because `exec` reparents
+the hogs to init, they are not in the sweep loop's process tree, so the reap has
+to match on the command-line pattern host-wide (`pkill -f 'sh -c while :; do :;
+done'`). That kills *any* concurrent `run-constrained.sh` invocation's load
+generators too, silently. Until the script reaps its own, **no two
+`run-constrained.sh` users can share a host safely** — which is a second reason
+to fix it at the source rather than in every caller.
+
 ## What would resolve it
 
 `run-constrained.sh` reaps its own hogs on every exit path, plus a
