@@ -46,8 +46,36 @@ use voom_test_support::TempDatabase;
 /// 6-9s loaded ceiling while still surfacing a hang promptly.
 const HANG_GUARD: Duration = Duration::from_secs(30);
 
+/// Install one process-wide `tracing` subscriber so `voom_store`'s warnings reach
+/// this binary's stderr.
+///
+/// Issue #592's acceptance sweep counts the orphan `warn` that
+/// `voom_store::tx::begin_detached` emits when its caller was already cancelled, and
+/// that count is the only evidence for the pool-occupancy residual the detach
+/// introduces. Nothing else installs a subscriber here: `voom-api`'s is in its binary
+/// and `voom-cli`'s in its own, and neither is linked into this test. Without this,
+/// `tracing::warn!` is a no-op that emits no bytes, so the sweep's grep would report
+/// zero orphans on every run whatever the code did — indistinguishable from an
+/// instrument that was never connected.
+///
+/// `OnceLock` rather than a bare `try_init` call so concurrent test entry cannot race,
+/// and a second call is a no-op rather than a panic. The writer is stderr because the
+/// sweep redirects both streams to one log.
+fn init_tracing() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("voom_store=warn"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
+    });
+}
+
 #[tokio::test]
 async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
+    init_tracing();
     assert_current_agent_version();
     let fixture = LiveFixture::start(None).await;
     let echo_worker = echo_worker_binary();
