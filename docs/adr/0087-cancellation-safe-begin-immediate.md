@@ -86,7 +86,7 @@ everywhere.
 
 Two sub-decisions follow.
 
-**One opener vocabulary, and `init.rs` joins it.**
+**The openers are the right place, and the vocabulary is not yet total.**
 `scripts/check-transaction-openers.sh` already fails a build in which production
 code calls `pool.begin*()` outside `voom-store/src/tx.rs`, which is why the
 openers are the right place: the fix reaches every transaction that goes through
@@ -100,17 +100,25 @@ constrains the receiver to `(?i)pool` so a savepoint (`tx.begin()`) cannot match
 which also makes an `acquire`-then-`conn.begin_with` open invisible to it.
 `crates/voom-store/src/init.rs:54-56` is exactly that shape, on the same
 `BEGIN IMMEDIATE` two-step path, and `./scripts/check-transaction-openers.sh
-crates` reports `OK (378 files)` with it present. This change routes it through
-`begin_read_then_write`, which is also what it always meant — the explicit
-`pool.acquire()` exists only so the connection can be returned before
-`probe_schema`, and a pool-level `Transaction` returns it on `commit` or `drop`
-anyway. That supersedes one sentence of
-[ADR 0068](0068-serialize-sqlite-migration-application.md), whose Decision names
-`conn.begin_with("BEGIN IMMEDIATE")` as the mechanism; 0068's substance is
-untouched — the write lock is still taken up front and still held across the
-whole run, and `run_direct`'s per-migration opens still nest as savepoints on the
-same connection. Closing the guardrail's blind spot so a *future* site in that shape is
-caught is deferred: `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`.
+crates` reports `OK (378 files)` with it present.
+
+**That site is left alone**, and the rule this record establishes therefore has
+one known production exception on the day it lands. Routing it through
+`begin_read_then_write` would have been small and would have shared the verified
+root cause, but no completion criterion of issue #592 reaches it, and doing it
+would supersede a sentence of
+[ADR 0068](0068-serialize-sqlite-migration-application.md)'s Decision, drop the
+`acquire connection for migration` error context, and put an unbounded task-spawn
+latency on the migration path — adjacent work taken on the implementing run's own
+authority. It is also not reachable by either cancellation source above:
+`run_migrations_on`'s only production caller is the `voom-cli` `system init`
+command, behind neither a `TimeoutLayer` nor an axum client disconnect, and a CLI
+cancellation is SIGINT, which takes the process and the file lock with it.
+
+Both the live site and the guardrail blind spot are owned by
+`docs/debt/0005-connection-level-custom-begins-are-unguarded.md`, with a
+`review-by` date. A reader checking this rule's reach should expect
+`init.rs:55` in the audit and find it recorded, not be surprised by it.
 
 **The regression test carries its own positive control.** Cancelling after
 exactly *N* wakeup-driven polls is a deterministic *mechanism*; where it lands
@@ -226,9 +234,9 @@ covers the openers this change touches; that residual is stated, not covered.
 
 Two shapes stay outside the invariant. A connection-level
 `conn.begin_with("BEGIN IMMEDIATE")` has the same window and no guardrail;
-`init.rs` was the only production instance and this change removes it, but
-nothing stops the next one — `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`
-owns that. And test code may still open a transaction directly — AGENTS.md permits it, and
+`init.rs:54-56` is a live production instance that this change does not remove,
+and nothing stops the next one — `docs/debt/0005-connection-level-custom-begins-are-unguarded.md`
+owns both. And test code may still open a transaction directly — AGENTS.md permits it, and
 `check-transaction-openers.sh` scopes its boundary to production code — so a test
 that calls `pool.begin_with` itself is outside this invariant.
 
@@ -279,16 +287,30 @@ that calls `pool.begin_with` itself is outside this invariant.
   `JoinError` carries the panic payload and location to the call site, where the
   `oneshot` leaves them to the panic hook. What it cannot do is notice it was
   orphaned: nothing distinguishes a task whose caller is gone from one whose
-  caller is still waiting, so there is no place to log. judgment: that signal is
-  the reason to pay for the channel. A pool slot held on behalf of a request
-  answered thirty seconds ago is otherwise indistinguishable from one held by a
-  live request, and this design's own accepted residual — a detached opener
-  holding a slot for up to 75s on the node agent's shutdown path — has **no other
-  observable**. The `warn` count is what turns "occupancy decays" from an
-  argument into a measurement, so removing the channel would remove the only
-  evidence the residual is bounded in practice. Price paid knowingly: one
-  dev-dependency (`tracing-subscriber`, already in the workspace graph), the
-  orphan test arm, and panic attribution.
+  caller is still waiting, so there is no place to log.
+
+  Two things pay for the channel, and the first does not depend on the second.
+  verified: the orphan branch is **testable only with it** — the regression
+  suite's orphan arm asserts on the `send`-failure path, and with a `JoinHandle`
+  there is no such branch to assert on, while no poll count can cancel a
+  post-fix open in flight (the caller's only wakeup is the send itself, which
+  fires after `begin_with` returns). Coverage of "a cancelled open is rolled
+  back" is unobtainable in the simpler variant. judgment: the second is the
+  operational signal. A pool slot held on behalf of a request answered thirty
+  seconds ago is otherwise indistinguishable from one held by a live request, and
+  this design's accepted residual — a detached opener holding a slot for up to
+  75s on the node agent's shutdown path — has no other observable.
+
+  That second reason is contingent on a subscriber existing where the count is
+  read, and it very nearly was not. `tracing::warn!` with no subscriber installed
+  emits no bytes, and the sweep's test binary had none — so the acceptance
+  protocol would have reported `orphan_warns=0` on every run regardless of the
+  code, which reads as *no orphans* and is indistinguishable from *no
+  instrument*. The design wires one and verifies it against a real emitted line
+  before the sweep starts; without that step this bullet would rest on a
+  measurement nothing performs. Price paid knowingly: two dev-dependencies on
+  `tracing-subscriber` (already in the workspace graph), the orphan test arm, and
+  panic attribution.
 - **Wrap all four openers, not the two that can leak.** judgment: ADR 0086's own
   ground — a rule that fires everywhere carries no information about where the
   hazard is — and the deferred path's safety is cited above rather than assumed.

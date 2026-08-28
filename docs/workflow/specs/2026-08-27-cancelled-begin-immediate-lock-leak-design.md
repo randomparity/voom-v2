@@ -197,17 +197,30 @@ no write lock, and the worker's rendezvous acknowledgement
 (`sqlx-sqlite-0.8.6/src/connection/worker.rs:81,528-538,234-252`) already rolls
 back a cancelled open, so there is no hazard there to wrap.
 
-`crates/voom-store/src/init.rs` — this supersedes one sentence of ADR 0068,
-whose Decision names `conn.begin_with("BEGIN IMMEDIATE")` as the mechanism; its
-substance (write lock up front, held across the whole run, per-migration opens
-nesting as savepoints) is unchanged. `run_migrations_on` currently does
-`pool.acquire()` and then `conn.begin_with("BEGIN IMMEDIATE")` at `:54-56`, which
-is the same two-step path with the same window. It moves to
-`begin_read_then_write(pool, "acquire migration write lock")`. The explicit
-`pool.acquire()` exists only so the connection can be dropped before
-`probe_schema` runs against the pool; a pool-level `Transaction<'static>` owns
-its connection and returns it on `commit` or `drop`, so both `drop(conn)` lines
-go away with it. `MIGRATOR.run_direct(&mut *tx)` is unchanged.
+`crates/voom-store/src/init.rs` is **not** changed, though an earlier draft of
+this design changed it. `run_migrations_on` does `pool.acquire()` and then
+`conn.begin_with("BEGIN IMMEDIATE")` at `:54-56`, which is the same two-step path
+with the same window, and routing it through `begin_read_then_write` would have
+been a small edit sharing the verified root cause.
+
+It is cut because no completion criterion reaches it and the charter does not
+authorize it. Surface says where a change may land, not what may change: the
+edit would have superseded a sentence of ADR 0068's Decision, removed the
+`acquire connection for migration` error context, and moved a migration-path
+acquire onto a spawned task whose added latency nothing in this change bounds —
+absorbed adjacent work on the quest's own authority.
+
+The hazard there is also not reachable by either cancellation source this design
+identifies. `run_migrations_on`'s only production caller is
+`crates/voom-cli/src/commands/system/init.rs:16` — every other caller is a test,
+and `init_on` is behind the `test` feature at `init.rs:31` — so it sits behind
+neither `bounded_router`'s `TimeoutLayer` nor an axum client disconnect. A CLI
+invocation's cancellation is SIGINT, which takes the process and the file lock
+with it.
+
+The live site is not thereby unowned:
+`docs/debt/0005-connection-level-custom-begins-are-unguarded.md` owns it
+explicitly, alongside the guardrail gap, with a `review-by` date.
 
 **Why the openers and not the pool.** `scripts/check-transaction-openers.sh`
 already fails a build in which production code calls `pool.begin*()` outside
@@ -222,9 +235,13 @@ miss it.
 That check is not full coverage. Its rule constrains the receiver to `(?i)pool`
 so a savepoint cannot match, which also makes `conn.begin_with` invisible —
 `./scripts/check-transaction-openers.sh crates` reports `OK (378 files)` with
-`init.rs:55` present. This change removes the only production instance; closing
-the guardrail gap so a future one is caught is deferred to
-`docs/debt/0005-connection-level-custom-begins-are-unguarded.md`.
+`init.rs:55` present. That site stays, for the reasons above, so this change
+leaves one production `conn.begin_with` standing and says so rather than
+implying the vocabulary is now total.
+`docs/debt/0005-connection-level-custom-begins-are-unguarded.md` owns both the
+live site and the guardrail gap, and this change's non-regression predicate
+expects matches in `tx.rs` **and** `init.rs` — a predicate demanding `tx.rs`
+alone would go red on the tree this change actually produces.
 
 Rejected alternatives — including the pool-level `after_release` guard this
 design originally proposed, and the evidence that it destroys `:memory:`
@@ -535,9 +552,12 @@ process exits, so "held" can only ever be observed as "still `SQLITE_BUSY` after
 a bound". Naming it that way is the point: the bound is not what discriminates,
 the repeated `SQLITE_BUSY` is.
 
-**`crates/voom-store/tests/`** existing init/migration coverage exercises the
-`init.rs` change; no new test is written for it, since the behaviour is
-unchanged and the shape is what moved.
+**`crates/voom-store/src/init_test.rs`** is untouched and needs to be. With the
+`init.rs` rewrite cut, `run_migrations_on` keeps its inline `pool.acquire()`, so
+`busy_timeout_exhaustion_surfaces_database_error` (`:297`) and
+`locked_migration_true_race_reports_zero_applied` (`:268`) keep the internal
+acquire their setups depend on — the first deliberately returns a
+`busy_timeout = 0` connection to the idle queue so that acquire reuses it.
 
 **Acceptance run for completion criterion 5.** The mechanism test proves the
 window is closed; it does not discharge "the `coverage` job's serialized
@@ -589,9 +609,38 @@ confidence, not as a green sweep.
 `--test-threads=1` lifecycle runs. Report both counts either way; anything short
 of the full protocol is reported as what it is.
 
-**Unchanged:** `crates/voom-node-agent/tests/lifecycle.rs`. `HANG_GUARD` stays at
-30s. That test is the end-to-end signal for this defect and it stays tight, which
-is the whole reason it caught this.
+**`crates/voom-node-agent/tests/lifecycle.rs` gains a log subscriber, and nothing
+else.** `HANG_GUARD` stays at 30s, every wait it bounds stays where it is, and no
+assertion changes. That test is the end-to-end signal for this defect and it stays
+tight, which is the whole reason it caught this.
+
+The subscriber is not a convenience. An earlier draft of this spec listed the file
+as wholly unchanged while also making the acceptance sweep's orphan-`warn` count
+the evidence for the detach's pool-occupancy residual — and those two statements
+cannot both hold. `crates/voom-node-agent/Cargo.toml` declares no `tracing` and no
+`tracing-subscriber` edge in either section; the only global-subscriber
+installations in the workspace are `crates/voom-api/src/main.rs:54` and
+`crates/voom-cli/src/logging.rs:21,28`, neither of which is linked into the
+`lifecycle` test binary, and `voom-test-support` has no `tracing` edge to supply
+one transitively. `tracing::warn!` with no subscriber installed is a no-op that
+emits no bytes, so the sweep's
+
+```
+grep -c 'completed after its caller was cancelled' "$log"
+```
+
+would have returned `0` on every run whatever the code did. That is worse than no
+instrument: `orphan_warns=0` across ~90 runs reads as *no orphans occurred* and is
+indistinguishable from *the instrument was never connected*.
+
+So the test binary installs one global subscriber, once, and the sweep verifies it
+against a real emitted line before it starts — the same discipline already applied
+to the `HANG_GUARD` predicate string. This is not a libtest capture question: a
+`fmt` layer holds `io::stderr()` directly and its writes survive libtest's capture
+of a passing test. Cost: `tracing-subscriber` joins
+`crates/voom-node-agent/Cargo.toml` as a **dev**-dependency, under the same
+`AGENTS.md` carve-out relied on for `voom-store`, and 0.3.23 is already in the
+workspace graph.
 
 **What discharges completion criterion 2** — graceful shutdown reaching the
 durable `Retired` write under write contention rather than exhausting the retry
@@ -644,13 +693,24 @@ what the change does to that.
   It does not land here. With the leak gone, a lock wait is the transient
   contention the 30s `busy_timeout` was sized for; and the resize collides with a
   floor asserted in another crate's tests, which is separate work against
-  separate evidence. But the exclusion is taken on **this run's** authority
-  against that record, not on the operator's, so it is flagged in the pull request
-  in those terms — and the residual it leaves sits on criterion 2's own path
-  (Error handling, above). The acceptance sweep's orphan-`warn` counts are the
-  evidence that decides whether this stays a clean exclusion or becomes a
-  follow-up issue; if they show sustained multi-opener occupancy, that is a
-  **split**, not something to absorb here.
+  separate evidence. The exclusion is the **operator's**, 2026-08-27, confirming
+  what this run had taken on its own authority
+  (https://github.com/randomparity/voom-v2/issues/592#issuecomment-5447684231) —
+  and the residual it leaves sits on criterion 2's own path (Error handling,
+  above). The acceptance sweep's orphan-`warn` counts are the evidence that
+  decides whether this stays a clean exclusion or becomes a follow-up issue.
+
+  **The trip condition is restated to what the instrument measures.** The charter
+  words it as *"more than one concurrent orphan in any run"*. A `grep -c` over a
+  whole ~200s run's log yields one integer with no timestamps and no paired
+  release event, so it cannot distinguish two genuinely overlapping orphans from
+  five spread across the run — and deciding which had occurred *after* seeing the
+  number is exactly the charitable reading the pre-committed bar exists to
+  prevent. The condition this design acts on is therefore **more than one orphan
+  `warn` in any single run**. That is strictly more sensitive than the charter's:
+  every concurrent pair is also two in a run, so the restatement can only trip the
+  split earlier, never suppress one the operator asked for. Recorded here rather
+  than adopted silently, because the original wording is the operator's.
 - **Issue #452.** The same defect seen from the agent side. This change may make
   it resolvable; closing it is its owner's call.
 - **The lock-free opener ring buffer** issue #592 proposes as the next
