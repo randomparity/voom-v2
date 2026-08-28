@@ -291,15 +291,8 @@ impl AgentRuntime {
             Ok(children) => children,
             Err(error) => {
                 node_heartbeat.stop();
-                let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
-                self.deactivate_or_second_signal(
-                    incarnation_id,
-                    NodeIncarnationEndReason::ChildStartupFailed,
-                    &mut signals,
-                    &mut signal_phase,
-                    Instant::now() + self.budgets().call,
-                )
-                .await?;
+                self.deactivate_after_startup_failure(incarnation_id, &mut signals)
+                    .await?;
                 return Err(VoomError::ExternalSystemUnavailable(format!(
                     "start node-agent children: {error}"
                 )));
@@ -311,15 +304,8 @@ impl AgentRuntime {
         {
             node_heartbeat.stop();
             let shutdown = startup_supervisor.shutdown_all(children).await;
-            let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
-            self.deactivate_or_second_signal(
-                incarnation_id,
-                NodeIncarnationEndReason::ChildStartupFailed,
-                &mut signals,
-                &mut signal_phase,
-                Instant::now() + self.budgets().call,
-            )
-            .await?;
+            self.deactivate_after_startup_failure(incarnation_id, &mut signals)
+                .await?;
             if let Err(shutdown_error) = shutdown {
                 return Err(VoomError::ExternalSystemUnavailable(format!(
                     "mark node-agent children ready: {error}; shut down children: {shutdown_error}"
@@ -355,11 +341,41 @@ impl AgentRuntime {
         let shutdown_kind = shutdown_kind_for_exit(&exit);
         let signal_phase = signal_phase_for_exit(&exit);
         let _ = shutdown_tx.send(shutdown_kind);
-        let settled =
-            wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals, signal_phase)
-                .await;
-        self.finish_shutdown_lifecycle(incarnation_id, exit, settled, node_heartbeat, &mut signals)
+        let bound = self.budgets().tail(self.shutdown_grace());
+        let tail = async {
+            let settled =
+                wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals, signal_phase)
+                    .await;
+            self.finish_shutdown_lifecycle(
+                incarnation_id,
+                exit,
+                settled,
+                node_heartbeat,
+                &mut signals,
+            )
             .await
+        };
+        run_shutdown_tail_within(bound, tail).await
+    }
+
+    /// Deactivate after a child-startup failure, within one call budget.
+    ///
+    /// Both startup-failure paths run this identically; they precede any shutdown tail,
+    /// so each takes its own budget from now rather than sharing the tail's.
+    async fn deactivate_after_startup_failure(
+        &self,
+        incarnation_id: NodeIncarnationId,
+        signals: &mut mpsc::UnboundedReceiver<()>,
+    ) -> Result<(), VoomError> {
+        let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
+        self.deactivate_or_second_signal(
+            incarnation_id,
+            NodeIncarnationEndReason::ChildStartupFailed,
+            signals,
+            &mut signal_phase,
+            Instant::now() + self.budgets().call,
+        )
+        .await
     }
 
     async fn finish_shutdown_lifecycle(
@@ -2284,6 +2300,36 @@ fn random_hex(byte_count: usize) -> String {
 ///
 /// Distinct from [`forced_shutdown_error`] because no signal arrived: an operator
 /// told to look for one would be looking for something nobody sent.
+/// Run the shutdown tail, giving up after `bound`.
+///
+/// The inner budgets bound the waits this design enumerated; this bounds the ones it
+/// did not. Dropping `tail` drops the coordinator [`JoinSet`], aborting its tasks — a
+/// child mid-reap is still `SIGKILL`ed, by `.kill_on_drop(true)` in `launch`, not by
+/// `RunningChild`'s `Drop`, which early-returns once `shutdown` has moved the handle
+/// out. Sized above the sum of the inner bounds, so each of those expires first and an
+/// ordinary overrun is still attributed to the wait that caused it.
+async fn run_shutdown_tail_within<F>(bound: Duration, tail: F) -> Result<(), VoomError>
+where
+    F: Future<Output = Result<(), VoomError>>,
+{
+    match tokio::time::timeout(bound, tail).await {
+        Ok(result) => result,
+        Err(_) => Err(shutdown_backstop_error(bound)),
+    }
+}
+
+/// The whole shutdown tail overran its published bound.
+///
+/// Deliberately distinct from [`shutdown_deadline_error`]: that one is an ordinary,
+/// documented abandon at a named budget, and this one means a wait nobody bounded ran
+/// past every inner budget — a defect, and the operator's only channel says so.
+fn shutdown_backstop_error(bound: Duration) -> VoomError {
+    VoomError::ExternalSystemUnavailable(format!(
+        "node-agent shutdown exceeded its {bound:?} tail bound; a wait outside the \
+         shutdown budgets did not complete — please report this"
+    ))
+}
+
 fn shutdown_deadline_error() -> VoomError {
     VoomError::ExternalSystemUnavailable(
         "node-agent shutdown abandoned a control-plane call at its shutdown budget; \

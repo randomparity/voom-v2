@@ -32,12 +32,24 @@
 //! the better long-term answer; it collides with the `busy_timeout >= 30s`
 //! floor in `voom-store/src/pool_test.rs` and belongs with the #592 fix.
 //!
+//! The shutdown budgets are the one deliberate **inversion** of that rule, and
+//! they are recorded here for the same reason every other rung is: so the
+//! relationship is checked rather than rediscovered. See ADR 0088.
+//!
+//! ```text
+//!   ShutdownBudgets::DEFAULT.call   10s   INVERTED: below what it observes
+//!     < production_request_budget()       during shutdown the agent must exit,
+//!                                         and the failure underneath is one it
+//!                                         can no longer act on
+//! ```
+//!
 //! Adding a rung means adding it here too. A layer absent from this file is a
 //! layer nobody is checking.
 
 use std::time::Duration;
 
 use voom_node_agent::client::{REQUEST_TIMEOUT, production_request_budget};
+use voom_node_agent::runtime::ShutdownBudgets;
 use voom_store::pool::{LOCK_WAIT_BUDGET, POOL_ACQUIRE_BUDGET};
 
 /// Assert one rung, naming both sides so a failure says which relationship
@@ -97,5 +109,21 @@ fn the_retry_budget_is_the_sum_of_its_attempts_and_backoff() {
     assert_eq!(
         production_request_budget(),
         Duration::from_secs(150) + Duration::from_millis(3750),
+    );
+}
+
+#[test]
+fn the_shutdown_budgets_deliberately_invert_the_ladder() {
+    // Every other rung asserts an observer outlasts what it observes. This one asserts
+    // the opposite, and that is the decision: during shutdown the agent's obligation is
+    // to exit, not to diagnose. See docs/adr/0088-bounded-node-agent-shutdown.md.
+    //
+    // The magnitudes — the 90s ceiling and the published `grace + 26` arithmetic — are
+    // asserted in runtime_test.rs. This file owns only the ordering.
+    assert!(
+        ShutdownBudgets::DEFAULT.call < production_request_budget(),
+        "the shutdown budget ({:?}) is meant to cut a retrying call ({:?}) short",
+        ShutdownBudgets::DEFAULT.call,
+        production_request_budget(),
     );
 }

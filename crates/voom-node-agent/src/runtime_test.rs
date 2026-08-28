@@ -2628,3 +2628,18 @@ async fn until_shutdown_leaves_the_original_receivers_notification_unconsumed() 
     assert!(still_observable.is_ok());
     assert_eq!(*shutdown_rx.borrow(), ShutdownKind::User);
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_tail_backstop_bounds_a_wait_no_inner_budget_covers() {
+    // `pending()` stands in for a wait nobody raced. After the inner bounds land, no
+    // reachable wait is like that — which is the design working — so the backstop is
+    // tested at the function that implements it rather than through fault injection.
+    let error = run_shutdown_tail_within(Duration::from_secs(30), std::future::pending())
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("please report this"),
+        "the backstop must name itself as a defect, not reuse the deadline message: {error}"
+    );
+}
