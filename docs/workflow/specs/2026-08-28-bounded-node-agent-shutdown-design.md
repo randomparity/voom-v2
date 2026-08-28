@@ -414,9 +414,12 @@ Cancelling one there leaves the intent `Authorized` carrying an `Applying` recei
 that no later incarnation can resume — the frozen idempotency key is
 per-incarnation stack state, so the replay path is gone, the fresh authorize is
 refused as `not pending`, and recovery classifies the intent `operator_required`,
-wedging the artifact's commit slot until a human runs `recover_commit` (ADR 0074).
-Letting the drive finish risks only an unbounded wait, which the tail backstop
-already covers. `a_shutdown_finishes_the_journaled_drive_and_starts_no_more` gates
+wedging the artifact's commit slot until a human runs `voom artifact recover-commit`
+(ADR 0074). The drive is not exempt from the bound, though: its task is in the
+`JoinSet` `wait_for_coordinators` joins, so the tail backstop still aborts it, and for
+a large artifact that is the ordinary case. The narrowing shrinks the wedge's window
+from every shutdown to a shutdown the drive outlasts.
+`a_shutdown_finishes_the_journaled_drive_and_starts_no_more` gates
 `report_commit_outcome` on the fake and fails both ways: widening the race back over
 the whole drive drops the `complete` call, and dropping the between-intents check
 starts a second drive.
@@ -432,7 +435,8 @@ starts a second drive.
 | Second signal arrives before either budget | Unchanged: `forced_shutdown_error()`. |
 | Deactivation slower than 10 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
 | A commit intent is open when the shutdown arrives, and the drive has not journaled `applying` | `drive_open_intents` stands down at the listing call or between intents, so its task joins instead of holding the tail open for `production_request_budget()`. Without that the tail ends at its backstop with no deactivation attempted. No durable state changes: nothing before the `applying` receipt mutates anything. |
-| A commit drive is past the `applying` receipt when the shutdown arrives | The drive runs to completion; it is never cancelled. The promotion is unbounded, so this wait is the tail backstop's to catch — the one case the published bound does not cover. Cancelling instead would leave an `Authorized` intent with an `Applying` receipt that no later incarnation can resume, wedging the artifact's commit slot until an operator runs `recover_commit` (ADR 0074). |
+| A commit drive is past the `applying` receipt when the shutdown arrives, and finishes inside the remaining tail budget | The drive is not raced; it runs to completion and reports its outcome normally. Cancelling instead would leave an `Authorized` intent with an `Applying` receipt that no later incarnation can resume, wedging the artifact's commit slot until an operator runs `voom artifact recover-commit` (ADR 0074). |
+| The same drive outlasts the tail backstop | The backstop aborts the coordinator `JoinSet`, the drive with it, and the intent wedges as `operator_required`. This is the one enumerated reachable backstop firing, and for a large artifact it is the ordinary case rather than the exotic one. The cutoff is the agent's own, so a longer supervisor stop timeout does not extend it — a lever the pre-change tree did have, since only the init system's `SIGKILL` ended the drive. The backstop error names `voom artifact recover-commit` for that reason. |
 | Worker crashes, then a shutdown arrives while its readiness update is blocked | `restart_after_child_exit`'s readiness calls are released by the shutdown receiver instead of draining the retry budget. |
 | Worker crashes, shutdown arrives mid-restart of an NVIDIA worker | Same race releases it; the 5-minute startup timeout is never entered, because a shutdown observed first returns instead of restarting. |
 | Second signal arrives after a deadline force is already recorded | The signal arm is disabled by its existing `!forced` guard, so the signal is consumed later in `deactivate_or_second_signal`. Outcome unchanged (`forced_shutdown_error()`, write skipped); latency is up to one budget plus a reap — 71 s at the maximum grace. R4's "unchanged" is ratified as outcome-only by explicit maintainer decision on 2026-08-28; the alternative (guarding on `forced != Some(Signal)`) was offered and declined. |
@@ -455,30 +459,34 @@ satisfied: the file references neither `SqlitePool` nor the exact identifier
 | `shutdown_deadline_forces_blocked_lease_settlement` | `runtime_test.rs` | R1, R5 | `wait_or_force` with a deadline, against leases that never settle, aborts them and reports `Deadline`; `settle_leases_for_shutdown` returns `LeaseSettlement::Forced(ShutdownForce::Deadline)`. |
 | `a_crashed_worker_release_does_not_wait_out_the_retry_budget` | `runtime_test.rs` | R1, **R5** | With `set_worker_readiness` gated the way `deactivate_gate` gates deactivation, a crashed child and then a shutdown releases `restart_after_child_exit` instead of draining `production_request_budget()`. This is the regression for the unobserved coordinator wait. |
 | `the_crash_settlement_path_is_not_armed` | `runtime_test.rs` | R1 | `settle_leases_after_child_crash` with a settlement far longer than `budgets.call` completes normally and does not force. This is the regression for the steady-state contamination that kept the budget out of `wait_or_force`. |
-| `a_settlement_deadline_expiry_reports_the_deadline_not_a_signal` | `runtime_test.rs` | R3 | `finish_shutdown_lifecycle` given `forced: Some(ShutdownForce::Deadline)` returns `shutdown_deadline_error()`, not `forced_shutdown_error()`. The mapping at `runtime.rs:315` is the reason the field is widened, so it gets its own test. |
-| `a_second_signal_still_outranks_the_shutdown_deadline` | `runtime_test.rs` | R4 | With a budget far in the future, a second signal still produces `forced_shutdown_error()` — the deadline did not replace the escape. |
+| `a_deadline_forced_settlement_reports_deadline` | `runtime_test.rs` | R3 | `finish_shutdown_lifecycle` given `forced: Some(ShutdownForce::Deadline)` returns `shutdown_deadline_error()`, not `forced_shutdown_error()`. The mapping at `runtime.rs:315` is the reason the field is widened, so it gets its own test. |
+| `a_queued_signal_still_forces_after_a_deadline_force` | `runtime_test.rs` | R4 | A `Deadline` force is recorded, then a signal that was queued rather than consumed still ends the run in `forced_shutdown_error()` with the write skipped — the deadline did not replace the escape. Asserts R4's ratified outcome, not the latency. |
 | `a_second_signal_after_a_deadline_force_still_forces` | `runtime_test.rs` | R4 | The deadline-then-signal ordering the previous test cannot reach: a `Deadline` force is recorded, then a second signal arrives, and the run still ends in `forced_shutdown_error()` with the write skipped. Asserts the outcome R4 protects, not the latency, which the failure-mode table records as changed. |
-| `the_tail_backstop_bounds_an_unraced_wait` | `runtime_test.rs` | R1 | A coordinator parked in a wait no receiver races still lets `run_with_seeded_shutdowns` return `shutdown_deadline_error()` at `budgets.tail(grace)`. Drives the backstop directly rather than relying on the enumeration above being complete. |
-| `a_full_shutdown_grace_is_not_a_forced_shutdown` | `runtime_test.rs` | R2 | A coordinator whose settlement is instant but whose reap outlasts `budgets.call` is **not** forced: the incarnation retires and `run_with_seeded_shutdowns` returns `Ok(())`. Nothing times the reap, and a routine stop must not exit non-zero. |
+| `the_tail_backstop_bounds_a_wait_no_inner_budget_covers` | `runtime_test.rs` | R1, R3 | `run_shutdown_tail_within` given a never-ready future returns at its bound with `shutdown_backstop_error()`, distinct from `shutdown_deadline_error()` and naming both of its causes — the unenumerated wait and the journaled commit drive. Drives the wrapper directly rather than relying on the enumeration above being complete. |
+| `wait_for_coordinators_does_not_time_the_reap` | `runtime_test.rs` | R2 | A coordinator whose settlement is instant but which returns long after `budgets.call` is **not** forced. Nothing times the coordinator join, so a routine stop whose worker uses its full grace must not exit non-zero. |
 | `a_deadline_forced_settlement_still_deactivates` | `runtime_test.rs` | R2, R3 | `finish_shutdown_lifecycle` given `forced: Some(ShutdownForce::Deadline)` deactivates, retires the incarnation, and *then* returns `shutdown_deadline_error()`. |
-| `an_unkillable_child_is_abandoned_at_the_reap_bound` | `child_test.rs` | R1 | A child that survives its grace and cannot be reaped inside the bound makes `shutdown` return a `ChildError` naming it rather than pending. An unkillable process cannot be constructed portably, so the test drives a near-zero bound instead, proving the timeout is wired rather than proving the kernel case. That needs a seam: `ChildSupervisor::with_timeouts` (`child.rs:276`, already `#[cfg(all(test, target_os = \"linux\"))]`) gains a reap parameter, and `RunningChild::shutdown` takes the bound as an argument beside `grace` rather than reading the constant directly. |
-| `the_backstop_error_names_a_defect` | `runtime_test.rs` | R3 | The backstop returns `shutdown_backstop_error()`, distinct from `shutdown_deadline_error()`, so an operator can tell an unenumerated wait from a documented abandon. |
+| `a_child_that_cannot_be_reaped_is_abandoned_at_the_bound` | `child_test.rs` | R1 | A child that survives its grace and cannot be reaped inside the bound makes `shutdown` return a `ChildError` naming it rather than pending. An unkillable process cannot be constructed portably, so the test drives a near-zero bound instead, proving the timeout is wired rather than proving the kernel case. That needs a seam: `ChildSupervisor::with_timeouts` (`child.rs:276`, already `#[cfg(all(test, target_os = \"linux\"))]`) gains a reap parameter, and `RunningChild::shutdown` takes the bound as an argument beside `grace` rather than reading the constant directly. |
+| `a_shutdown_finishes_the_journaled_drive_and_starts_no_more` | `commit_test.rs` | R1, R2 | A shutdown arriving while a commit drive is parked past its `applying` receipt neither cancels that drive nor starts the next intent in the listing. Both mechanisms are gated: widening the race drops the `complete` call, dropping the between-intents check starts a second drive. |
+| `a_shutdown_releases_the_commit_coordinator_mid_call` | `commit_test.rs` | R1 | A shutdown releases a `commit_open` blocked on an unresponsive control plane, so the coordinator's task joins instead of holding the tail open for `production_request_budget()`. |
 | the shutdown rung | `tests/budget_ladder.rs` | R1 | `budgets.call` is below `production_request_budget()` — the named inversion, and the only thing this file asserts. It owns the ordering relationship, as its own module doc says; `runtime_test.rs` owns the magnitudes, including the 90 s ceiling. `ShutdownBudgets` is `pub` with a `pub const DEFAULT`, so this integration test reads it the way it already reads `client::REQUEST_TIMEOUT`. |
 
-**R5's witnesses are the two tests that compile against the pre-change tree.**
-`shutdown_deadline_abandons_a_blocked_deactivation` is *not* one of them: the plan
-gives `deactivate_or_second_signal` a `deadline` parameter, and that test passes it
-as an argument, so pre-change it does not build. The witnesses are:
+**R5 rests on one witness — the only delivered test that compiles against the
+pre-change tree.** `shutdown_deadline_abandons_a_blocked_deactivation` is not one:
+`deactivate_or_second_signal` gained a `deadline` parameter and that test passes it,
+so pre-change it does not build. Neither is
+`a_crashed_worker_release_does_not_wait_out_the_retry_budget`, which the plan
+expected to qualify: as delivered it calls
+`ChildSupervisor::new(Duration::from_millis(50), Duration::from_millis(50))`, and
+pre-change that constructor took one argument (`git show
+main:crates/voom-node-agent/src/child.rs`, `pub fn new(shutdown_grace: Duration)`).
+It is real coverage of the wiring point, not evidence for R5.
 
-- `a_sigterm_exits_the_agent_when_the_control_plane_never_answers`, driven through
-  `AgentRuntime::with_client` and `run_until` — both pre-existing — taking the
-  **default** budgets and wrapped in an outer `tokio::time::timeout` well above the
-  86 s tail. Pre-change the gated deactivation never returns and the test fails on
-  `Elapsed`; post-change it returns the deadline error at about 10 s. This is the
-  one that covers the charter's headline behaviour.
-- `a_crashed_worker_release_does_not_wait_out_the_retry_budget`, existing API plus
-  one new gate on the fake; pre-change it drains the retry budget and exits
-  `CoordinatorExit::Fatal`.
+The witness is `a_sigterm_exits_the_agent_when_the_control_plane_never_answers`,
+driven through `AgentRuntime::with_client` and `run_until` — both pre-existing —
+taking the **default** budgets and wrapped in an outer `tokio::time::timeout` well
+above the 86 s tail. Verified in a temporary worktree against `main` at `6fd4ece7`
+with only that test added: it compiles and fails on `Elapsed` after 120.04 s.
+On this branch it passes in 10.04 s. It covers the charter's headline behaviour.
 
 Every other test names a type or parameter this change introduces, so pre-change it
 does not build — real coverage of the new behaviour, but not evidence for R5.
@@ -507,10 +515,13 @@ coordinator, which means a `RunningChild` from `ChildSupervisor::start_all` and
 therefore a real process; every existing test in `runtime_test.rs` that does this
 (`child_crash_restarts_only_after_every_held_lease_settles` at `:634-648`,
 `graceful_shutdown_settles_before_child_reap_and_deactivation` at `:744-760`) is
-`#[cfg(unix)] #[tokio::test]` on real time via `ProcessWorkerFixture`. That is
-precisely why the budgets are a struct: those two set `call`,
-`reap_after_kill` and `backstop_margin` in the tens of milliseconds, so they cost
-well under a second rather than the 26 s the defaults would.
+`#[cfg(unix)] #[tokio::test]` on real time via `ProcessWorkerFixture`. Neither pays the
+default budgets in practice: `the_tail_backstop_bounds_a_wait_no_inner_budget_covers`
+calls `run_shutdown_tail_within` directly under `start_paused`, and
+`a_crashed_worker_release_does_not_wait_out_the_retry_budget` never reaches a
+shutdown-tail budget at all. The struct is justified by the three `Notify`-gated
+deactivation tests named above, which take a far-future `call` so the signal stays
+the cause under test.
 
 Everything else pauses. `runtime_test.rs` already uses
 `#[tokio::test(start_paused = true)]` widely, and the three existing real-time

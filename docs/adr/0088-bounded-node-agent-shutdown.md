@@ -127,15 +127,17 @@ aborted before it reaches `shutdown_all`. The distinction matters because
 removing it would silently reintroduce an orphaned worker on every backstop
 expiry.
 
-**The backstop is expected to be unreachable, and is kept anyway.** Once the
-enumerated waits are raced and bounded, no wait this design knows about can
-outlast every inner bound — so in a correct implementation the backstop never
-fires, and its tests drive the wrapper with a never-ready future rather than
-driving the system. That is the honest description of what it is: insurance
-against an enumeration this record declines to certify, bought because the review
-of this design found a further unraced wait on each of three passes. Its price is
-5 s on the number the runbook instructs operators to configure against. Kept by
-explicit maintainer decision on 2026-08-28, after a scope audit put the question.
+**The backstop has exactly one enumerated reachable path, and is otherwise
+insurance.** Once the enumerated waits are raced and bounded, one deliberate
+exception remains: a commit drive past its `applying` receipt is not raced, for the
+reasons below, and nothing else bounds it. That is the one firing this design
+expects. Everything else the backstop catches is a wait the enumeration missed —
+insurance against a completeness claim this record declines to make, bought because
+the review of this design found a further unraced wait on each of three passes, and
+its own tests drive the wrapper with a never-ready future rather than driving the
+system. Its price is 5 s on the number the runbook instructs operators to configure
+against. Kept by explicit maintainer decision on 2026-08-28, after a scope audit put
+the question.
 
 The margin is what makes the backstop a backstop. The inner bounds are sequential
 and sum to `2 × call + grace + reap_after_kill` exactly, and the tail carries
@@ -148,9 +150,11 @@ would fire *during* the deactivation it exists to protect — cancelling the
 `Retired` write, which is the loss this decision refused when it rejected letting
 a deadline force skip deactivation. `BACKSTOP_MARGIN` of 5 s covers those
 fragments so every inner bound genuinely expires first. An ordinary overrun is
-then still attributed to the wait that caused it; the backstop fires only when an
-inner bound did not hold, which is a defect, and its own error says so rather
-than reusing the deadline message an operator is told to expect.
+then still attributed to the wait that caused it; the backstop fires only on the
+enumerated unraced wait — the journaled commit drive — or when an inner bound did
+not hold, which is a defect. Its error names both, because neither is inferable
+from the other and the crate has no other channel, and it does not reuse the
+deadline message an operator is told to expect.
 
 Two of those three waits are still raced directly, because a backstop that fires
 is a worse outcome than one that does not. `restart_after_child_exit`'s readiness
@@ -299,11 +303,25 @@ would hit the control plane's replay path is per-incarnation stack state, so no 
 incarnation can resume it. The fresh authorize is refused as `not pending`, the intent
 is skipped on every poll, and recovery classifies it `operator_required` — which
 [ADR 0074](0074-fenced-node-local-commit-intents.md) records as wedging the artifact's
-commit slot until a human runs `recover_commit`. Trading a bounded tail for a wedged
-commit slot on every `SIGTERM` is the worse bargain, so this one wait is uncovered by
-the published sum and caught by the tail backstop instead. The runbook tells the
-operator to check for a `recovery_required` artifact after a stop that reported the
-bound.
+commit slot until a human runs `voom artifact recover-commit`. Trading a bounded tail
+for a wedged commit slot on every `SIGTERM` is the worse bargain, so this one wait is
+uncovered by the published sum.
+
+**That narrows the wedge; it does not close it, and the difference is deliberate.**
+The commit coordinator's task is in the `JoinSet` `wait_for_coordinators` joins, so a
+drive still running when the tail backstop expires is aborted with the rest and lands
+in exactly the state above. Promotion is a copy and two hashes of the artifact's
+bytes, so for a large artifact outlasting `grace + 26` is the ordinary case, not the
+exotic one — this is the enumerated reachable backstop firing named earlier in this
+record. What the change buys is that a drive shorter than the remaining tail budget
+now survives a `SIGTERM` where before every drive was cancelled by one. What it costs
+is that the cutoff becomes the agent's own and deterministic at `grace + 26`, where
+previously it was the init system's `SIGKILL` at a timeout the operator sets — so
+raising `TimeoutStopSec` no longer buys a large commit more time. That lever's removal
+is recorded in the runbook beside the arithmetic, and the backstop error names the
+recovery command because the crate has no log output. Bounding the tail is the
+outcome #452 asks for and this is its price; leaving the drive unbounded would
+withdraw the bound in the case the bound exists for.
 
 **The lifecycle suite fails differently, not less.** [ADR
 0066](0066-observe-graceful-shutdown-as-one-bounded-lifecycle.md) binds the agent

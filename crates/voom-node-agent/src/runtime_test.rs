@@ -2649,9 +2649,14 @@ async fn the_tail_backstop_bounds_a_wait_no_inner_budget_covers() {
         .await
         .unwrap_err();
 
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("please report this"),
-        "the backstop must name itself as a defect, not reuse the deadline message: {error}"
+        message.contains("please report this if no commit was in flight"),
+        "the backstop must name itself, not reuse the deadline message: {error}"
+    );
+    assert!(
+        message.contains("voom artifact recover-commit"),
+        "the backstop is the only channel that names the commit-slot action: {error}"
     );
 }
 

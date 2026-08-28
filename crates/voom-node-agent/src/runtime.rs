@@ -2322,12 +2322,18 @@ where
 /// The whole shutdown tail overran its published bound.
 ///
 /// Deliberately distinct from [`shutdown_deadline_error`]: that one is an ordinary,
-/// documented abandon at a named budget, and this one means a wait nobody bounded ran
-/// past every inner budget — a defect, and the operator's only channel says so.
+/// documented abandon at a named budget. This one has exactly two causes, and neither
+/// is inferable from the other, so the message names both. One is enumerated and by
+/// design — a commit drive past its `applying` receipt, which nothing races and nothing
+/// bounds; the operator's action there is `voom artifact recover-commit`, and this error
+/// is the only channel that will tell them, since the crate logs nothing. The other is a
+/// wait nobody bounded, which is a defect.
 fn shutdown_backstop_error(bound: Duration) -> VoomError {
     VoomError::ExternalSystemUnavailable(format!(
-        "node-agent shutdown exceeded its {bound:?} tail bound; a wait outside the \
-         shutdown budgets did not complete — please report this"
+        "node-agent shutdown exceeded its {bound:?} tail bound; a commit drive past its \
+         applying receipt, or a wait outside the shutdown budgets, did not complete — \
+         check for artifacts needing `voom artifact recover-commit`, and please report \
+         this if no commit was in flight"
     ))
 }
 

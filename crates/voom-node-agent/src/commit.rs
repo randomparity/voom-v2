@@ -147,12 +147,17 @@ enum DrivePass {
 /// `production_request_budget()` — past every budget above it — and the tail ends at its
 /// backstop without ever attempting the deactivation.
 ///
-/// A drive that has already journaled `applying` is never abandoned. Cancelling it leaves
-/// the intent `Authorized` carrying an `Applying` receipt, which no later incarnation can
+/// A drive that has already journaled `applying` is not raced. Cancelling one leaves the
+/// intent `Authorized` carrying an `Applying` receipt, which no later incarnation can
 /// resume: the frozen idempotency key is per-incarnation stack state, so the replay path
 /// is gone and the intent classifies `operator_required`, wedging the artifact's commit
-/// slot until a human runs `recover_commit` (ADR 0074). Letting it finish risks only an
-/// unbounded wait, which the tail backstop already covers. See ADR 0088.
+/// slot until a human runs `voom artifact recover-commit` (ADR 0074).
+///
+/// It is not exempt from the bound, though. This task sits in the same `JoinSet`, so a
+/// drive still running when the tail backstop expires is aborted with it, and for a large
+/// artifact that is the ordinary case — promotion is a copy and two hashes of the bytes.
+/// So the narrowing shrinks the wedge's window from every shutdown to a shutdown the drive
+/// outlasts; it does not close it. See ADR 0088.
 async fn drive_open_intents(
     context: &CommitCoordinatorContext,
     shutdown: &watch::Receiver<ShutdownKind>,
