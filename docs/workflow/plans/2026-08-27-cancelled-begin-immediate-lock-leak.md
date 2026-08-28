@@ -69,27 +69,26 @@ at the version the workspace already pins for `voom-api`, `voom-control-plane`
 and `voom-cli`. `tracing` is already a normal dependency; `oneshot` is already
 covered by the `sync` feature.
 
-Verify with **two** commands, because they prove different things and only one of
-them can catch a wrong `rt`:
+**The `rt` addition is declarative and no compilation can falsify it.** Two
+earlier drafts of this plan argued about which `cargo check` invocation detects an
+omitted `rt`; both were wrong, and the answer is that none does and none needs to.
+`sqlx-core` 0.8.6 declares its tokio dependency with
+`features = ["time","net","sync","fs","io-util","rt"]`
+(`sqlx-core-0.8.6/Cargo.toml:192-201`), and `sqlx`'s `runtime-tokio` — which the
+workspace pin enables — activates it through `sqlx-core/_rt-tokio`. voom-store
+depends on `sqlx` unconditionally, so `rt` is already on the single unified tokio
+build in the crate's **normal, no-dev** graph. Measured:
+`cargo tree --locked -p voom-store -e no-dev -f '{p} | {f}'` reports
+`tokio v1.53.1 | bytes,default,fs,io-util,libc,mio,net,rt,socket2,sync,time`.
 
-- `cargo check -p voom-store --all-features` — **lib only, and this is the
-  detector.** An earlier draft of this plan said the opposite. `--all-targets` is
-  precisely the invocation that *cannot* see a missing `rt`: voom-store's
-  dev-dependency already carries `tokio = { features = ["rt-multi-thread",
-  "macros"] }` (`Cargo.toml:42`), `rt-multi-thread` implies `rt`, and any build
-  that compiles test targets unifies dev-dependency features into the lib
-  compile. Measured on a probe crate with this exact feature shape and the pinned
-  toolchain: bare `cargo check` exits 101 with `E0425 cannot find function
-  spawn`; `cargo check --all-targets` exits 0; `cargo build --release` exits 101;
-  `cargo doc` exits 0 because it does not type-check bodies. Every `just ci` step
-  that compiles voom-store passes `--all-targets` or is `cargo doc`, so **no
-  guardrail in this repository detects an omitted `rt`** — this one command is
-  it. Re-run it at the end of T3, where `tokio::spawn` first appears; at T1
-  nothing uses the feature yet, so T1's run proves only that the manifest parses.
-- `cargo check -p voom-store --all-features --all-targets` — proves the
-  `tracing-subscriber` dev-dependency resolves and compiles. That much it does do.
+Add the feature anyway: declaring a tokio API the crate calls directly is correct
+hygiene and costs nothing, and it stops the build depending on sqlx continuing to
+enable `rt` for us. But do not write a verify step for it — there is nothing to
+observe.
 
-Then `just deny`, `just audit`.
+Verify: `cargo check -p voom-store --all-features --all-targets`, which proves the
+`tracing-subscriber` dev-dependency resolves and compiles. Then `just deny`,
+`just audit`.
 
 `Cargo.lock` gains exactly one `"tracing-subscriber"` line in the `voom-store`
 package's `dependencies` array and **no new `[[package]]` block** — the lock
@@ -182,11 +181,9 @@ The module doc comment gains the cancellation-safety property, since the file's
 existing doc explains *why these four functions exist* and this adds a second
 reason.
 
-Verify: T2 goes green, both arms. **`cargo check -p voom-store --all-features`
-(lib only)** — this is where the `rt` feature is first exercised and the only
-place in the repository a missing one is detectable; see T1. `just lint` clean
-(the `pedantic` group over a new async fn returning `Result` is the likely source
-of noise). Reverting T3 alone must put T2's fixed arm back to red.
+Verify: T2 goes green, both arms. `just lint` clean (the `pedantic` group over a
+new async fn returning `Result` is the likely source of noise). Reverting T3
+alone must put T2's fixed arm back to red.
 
 ## T4 — The orphan arm
 
@@ -250,9 +247,9 @@ It also gains `use crate::tx::begin_read_then_write;`.
 Verify: `cargo test -p voom-store --all-features init` — **both** targets.
 `--test init` alone runs only `tests/init.rs` (4 tests) and misses the coverage
 this task actually rests on, which lives in the lib target at
-`crates/voom-store/src/init_test.rs`. Three tests there must stay green, and each
-encodes an assumption about `run_migrations_on`'s *internal* acquire that T3
-moves onto a spawned task:
+`crates/voom-store/src/init_test.rs`. **Two** tests there call
+`run_migrations_on` and each encodes an assumption about its *internal* acquire
+that T3 moves onto a spawned task:
 
 - `busy_timeout_exhaustion_surfaces_database_error` (`:297`) — its own comment
   calls the setup load-bearing: `conn2` is returned to the idle queue so
@@ -263,8 +260,17 @@ moves onto a spawned task:
   not.
 - `locked_migration_true_race_reports_zero_applied` (`:268`) — the held-lock race
   ADR 0068 exists for.
-- `single_shot_replacement_has_no_polling` (`:214`) — a <25ms wall-clock bound on
-  the rollback-then-probe path, which now carries a task spawn.
+
+An earlier draft of this plan also listed `single_shot_replacement_has_no_polling`
+(`:214`) as a wall-clock guard on this path. It is not: that test never calls
+`run_migrations_on`: it inlines its own `pool.acquire()`, `conn.begin_with`,
+`run_direct`, drops and `probe_schema`, and its `<25ms` assertion bounds that
+inline sequence. It stays green whatever T5 does.
+
+**So nothing bounds the latency the task spawn adds to the migration path**, and
+that is accepted rather than covered: the addition is one `tokio::spawn` plus one
+`oneshot` round trip on a path that already performs a pooled acquire and runs
+migrations. Stated here so the gap is a decision rather than an oversight.
 
 No new test is written for `init.rs` itself: the behaviour is unchanged and only
 the shape moved.
@@ -282,16 +288,20 @@ index row, the spec, and `docs/debt/0005`.
     -g '!**/tests/**' -g '!**/*_test.rs' -g '!crates/voom-test-support/**'
   ```
 
-  returns only `crates/voom-store/src/tx.rs`. The earlier wording — "only tx.rs
-  and test files" — could not distinguish success from failure: run on the tree
-  today it also returns `crates/voom-test-support/src/commit_node.rs:89,110` and
-  `staging_seed.rs:59`, which are `src/` files in a support crate, exempt from
-  `check-transaction-openers.sh` by its
-  `grep -Ev "/(voom-test-support|voom-fakes|…)/"` filter rather than by its
-  test-file filter, and untouched by T5. `docs/debt/0005` **already carries this
-  exact predicate** under its Non-regression boundary section, corrected when
-  this plan was reviewed; T6 re-runs it and confirms the result is `tx.rs` alone.
-  Leave that record unmodified — T6 touches no files.
+  returns only `crates/voom-store/src/tx.rs`. **Today** it returns `tx.rs:5`
+  (a module doc comment), `tx.rs:40`, `tx.rs:105` and `init.rs:55`; after T5 the
+  `init.rs` line goes and the three `tx.rs` lines remain.
+
+  The `crates/voom-test-support/**` glob is load-bearing **even though nothing it
+  excludes appears in either output** — that is the point of it. Drop the glob and
+  `commit_node.rs:89,110` and `staging_seed.rs:59` reappear: `src/` files in a
+  support crate that `check-transaction-openers.sh` exempts through its
+  `grep -Ev "/(voom-test-support|voom-fakes|…)/"` filter rather than its test-file
+  filter, and untouched by T5. That is what the earlier wording — "only `tx.rs`
+  and test files" — could not express, which is why it could not distinguish
+  success from failure. `docs/debt/0005` **already carries this exact predicate**
+  under its Non-regression boundary section; T6 re-runs it and confirms the
+  result. Leave that record unmodified — T6 touches no files.
 - `just check-transaction-openers-selftest` passes (the rule is unchanged; this
   confirms the change did not weaken it).
 - `just ci` green.
