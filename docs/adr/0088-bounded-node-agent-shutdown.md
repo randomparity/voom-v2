@@ -41,58 +41,71 @@ wait. Any unresponsive control plane still reaches it.
 ## Decision
 
 **Each control-plane wait in the shutdown tail gets its own wall-clock budget,
-`SHUTDOWN_CALL_DEADLINE`, of 10 s.** Expiry does what a second signal already
-does, so no new teardown path exists. Two budgets rather than one shared instant:
+`SHUTDOWN_CALL_DEADLINE`, of 10 s.** Two budgets rather than one shared instant:
 a single instant covering both waits leaves deactivation whatever settlement did
 not spend, so a settlement finishing at 19 s of 20 s abandons the write on
 arrival.
 
-**The settlement budget is one `sleep_until` arm in `wait_for_coordinators`,
-mirroring the signal arm beside it.** That arm already reads
-`forced = true; let _ = shutdown.send(ShutdownKind::Forced);` and keeps looping
-(`runtime.rs:1838-1846`); the deadline arm does the same, guarded so it fires
-once. Sending on the watch rather than abandoning the join is what keeps the
-child reap whole: `wait_or_force` observes `Forced` and abandons the
-control-plane wait, while `ChildSupervisor::shutdown_all` does not observe it and
-runs to completion at the operator's full `shutdown_grace_seconds`.
+**The settlement budget is a parameter on `wait_or_force`, supplied by one call
+site.** `wait_or_force` (`runtime.rs:1744`) is where the settlement wait actually
+blocks, and it takes an `Option<Instant>` deadline: `settle_leases_for_shutdown`
+passes `Some` at `:1798`, and the two crash-path call sites — `:1705` and `:1718`,
+both inside `settle_leases_after_child_crash` — pass `None`. Expiry does locally
+what observing `ShutdownKind::Forced` already does: abort the lease tasks and
+return forced. It does not publish on the watch, so it does not force
+coordinators that are not overrunning.
 
-**Not in `wait_or_force` itself**, which is where the settlement wait literally
-blocks. It has three call sites (`runtime.rs:1705`, `:1718`, `:1798`) and only
-the last is the shutdown tail; the other two are `settle_leases_after_child_crash`,
-reached from `restart_after_child_exit` (`:771-796`) on an ordinary worker crash
-with no shutdown in progress. An arm there would arm all three, so a crash whose
-lease settlement ran past 10 s would terminate a healthy, running agent.
+Both halves of that placement are load-bearing, and each rules out an obvious
+alternative. Arming `wait_or_force` unconditionally would arm the crash path,
+where `restart_after_child_exit` (`:771-796`) runs during ordinary operation with
+no shutdown in progress, so a slow settlement after one worker crash would
+terminate a healthy agent. Putting the budget one level up, in
+`wait_for_coordinators`, would arm a wall clock over whole coordinator tasks — and
+a coordinator does not return until `settle_leases_for_shutdown` *and*
+`shutdown_all` have both finished (`:742-747`), so the arm would fire on the
+child reap. With any `shutdown_grace_seconds` above 10 and a worker that uses it,
+a routine stop with a healthy control plane would then be marked forced and exit
+non-zero, putting the unit into `failed` on every stop.
+
+`wait_for_coordinators` therefore gains nothing: its signal arm and its
+`!forced` guard are unchanged apart from the field's type.
 
 **A deadline force does not skip the deactivation; a signal force still does.**
 `finish_shutdown_lifecycle` returns at `runtime.rs:315` on any force today. Under
 this decision `Some(Signal)` keeps exactly that — the operator said stop, and
 criterion 4 holds it unchanged — while `Some(Deadline)` falls through to the
 deactivation, which has its own budget, and then returns
-`shutdown_deadline_error()` whether or not the write landed. A timer expiring is
-not an instruction to skip the write the whole change exists to protect, and
-attempting it costs a bounded 10 s. This is also what makes a long-but-healthy
-reap safe: with `shutdown_grace_seconds = 30` and a worker that uses its grace,
-the deadline elapses during the reap, but the incarnation still retires.
+`shutdown_deadline_error()`. A timer expiring is not an instruction to skip the
+write the whole change exists to protect, and attempting it costs a bounded 10 s.
+Returning an error there is honest because `Deadline` now means settlement itself
+overran: leases were abandoned mid-settlement, whether or not the write landed.
 
-**The cause is decided where the arm fires.** Reporting a deadline expiry as
+**The cause travels with the settlement result.** Reporting a deadline expiry as
 "interrupted by a termination signal" would send an operator looking for a signal
-nobody sent, so `ShutdownProgress.forced` becomes `Option<ShutdownForce>` —
-`Signal` or `Deadline` — written by whichever of the two arms fired. Nothing
-travels: `LeaseSettlement` and `CoordinatorExit` are unchanged. With up to 64
-coordinators the two arms can both fire, so precedence is stated rather than left
-to `join_next()` order: **a signal force outranks a deadline force**, because it
-is the operator's explicit instruction and it is the arm whose behaviour must not
-change. The join arm, which sets the flag when a coordinator reports
-`LeaseSettlement::Forced` (`:1822-1824`), only records a cause where none is set;
-both local arms set theirs before sending `Forced`, so that path is reachable
-only through `wait_or_force`'s watch-closed case, and it takes `Signal` to
-preserve today's message there.
+nobody sent, so `LeaseSettlement::Forced` carries a `ShutdownForce` — `Signal`
+when `wait_or_force` broke out on the watch, `Deadline` when it broke out on its
+own timer — through `CoordinatorExit::Shutdown` into `ShutdownProgress.forced`,
+which becomes `Option<ShutdownForce>`. The first force recorded wins, exactly as
+today: the signal arm's guard already disables it once anything has forced, and
+that behaviour is preserved rather than replaced by a precedence rule.
 
 `deactivate_or_second_signal` returns its error directly, so its own arm returns
 a new `shutdown_deadline_error()` beside the existing `forced_shutdown_error()`.
-Both are `VoomError::ExternalSystemUnavailable`, so the exit code is unchanged.
-The startup-failure deactivations take the same budget; they call the same
-function and were unbounded for the same reason.
+Both are `VoomError::ExternalSystemUnavailable`, so the exit code on a genuine
+failure is unchanged. The startup-failure deactivations take the same budget;
+they call the same function and were unbounded for the same reason.
+
+**One coordinator wait does not observe the shutdown, and it has to.** The bound
+above assumes every coordinator either finishes or is released once a shutdown
+begins. `restart_after_child_exit` breaks that: it awaits `set_worker_readiness`
+bare at `:781-790`, with no `select!` against the shutdown receiver. A worker
+crashes, its coordinator blocks there against a control plane that has stopped
+answering, the operator sends `SIGTERM` — and `wait_for_coordinators` cannot
+finish until the client's full 153.75 s retry budget drains, past every stop
+timeout in play. So that call is raced against the shutdown receiver, the way the
+main coordinator loop already races its work at `:704-717`: a readiness update
+for a worker that is going away is not worth waiting on, and the existing
+shutdown handling immediately below it is where the coordinator then goes.
 
 **10 s is derived from the guard the change has to prove itself under.**
 `crates/voom-node-agent/tests/lifecycle.rs:47` holds `HANG_GUARD` at 30 s, [ADR
@@ -121,6 +134,10 @@ an unisolated suspect; its 2026-08-27 reopening comment ruled it out — "Both a
 ruled out. The agent reaches `deactivate` and behaves correctly. It is the
 **control plane** that deadlocks." The bound exists to make the arithmetic true,
 not to close the reported hang.
+
+**Both constants are `pub`**, in `runtime` and `child` respectively, because
+`crates/voom-node-agent/tests/budget_ladder.rs` is an integration test and reads
+them the way it already reads `client::REQUEST_TIMEOUT`.
 
 **The shutdown budgets invert `budget_ladder.rs`'s ordering rule, deliberately,
 and are recorded there as a rung.** That file's rule is that an observer's budget
@@ -154,17 +171,26 @@ validator's grace range would close the gap without operator action and is not
 done here: it would invalidate configurations that are legal today, for a ceiling
 that varies by distribution and unit file.
 
+**A routine stop is unchanged, including a slow one.** Nothing times the child
+reap, so a graceful stop whose worker uses its full `shutdown_grace_seconds`
+against a healthy control plane settles, reaps, deactivates, records
+`Retired`/`GracefulShutdown` and returns `Ok(())` exactly as it does today. That
+matters more than it sounds: `voom-node-agent`'s `main` returns
+`Result<(), VoomError>` (`main.rs:17-21`), so any error here becomes
+`ExitCode::FAILURE`, and a bound that marked a routine stop forced would put the
+unit into `failed` on every `systemctl stop`.
+
 **One new way to lose the `Retired` write, and it is the deactivation's own
 budget.** A control plane that cannot answer the deactivation inside 10 s
 abandons the write where the full retry budget might eventually have landed it,
-and the startup-failure deactivations inherit that. Settlement overrunning no
-longer costs the write, because a deadline force falls through to the
-deactivation; nor does a long reap. The resulting state is not new — it is what
+and the startup-failure deactivations inherit that. A settlement that overruns
+its budget does *not* cost the write — the deadline force falls through to the
+deactivation — but it does cost the exit code, and it abandons leases
+mid-settlement for TTL reconciliation. The resulting state is not new: it is what
 the second-signal force already produced, and the runbook records that a forced
-shutdown leaves terminal state for TTL expiry to reconcile — but the way of
-reaching it is. That is the price of the bound, and the reason 10 s clears a
-healthy shutdown by a wide margin rather than being as tight as the ceiling
-allows.
+shutdown leaves terminal state for TTL expiry to reconcile. That is the price of
+the bound, and the reason 10 s clears a healthy shutdown by a wide margin rather
+than being as tight as the ceiling allows.
 
 Settlement being concurrent keeps its own budget generous: the coordinators run
 as a `JoinSet` and each settles its own leases as another, so settlement's wall
@@ -186,9 +212,11 @@ plane is genuinely wedged the incarnation is still not retired, so that assertio
 still fails — but it now fails on the agent's own `shutdown_deadline_error()` at
 about 20 s rather than on a guard expiring against a wait with no end.
 
-Steady-state behaviour is untouched. The budgets are in `wait_for_coordinators`
-and `deactivate_or_second_signal`, neither of which runs outside a shutdown; the
-worker-crash settlement path through `wait_or_force` is deliberately not armed.
+Steady-state behaviour is untouched. `wait_or_force`'s deadline is an argument,
+and only `settle_leases_for_shutdown` supplies it; the two worker-crash call
+sites pass `None`. The one steady-state edit is the `select!` around
+`restart_after_child_exit`'s readiness call, which changes nothing while no
+shutdown is in progress — the receiver simply never fires.
 
 ## Considered & rejected
 
@@ -208,22 +236,27 @@ worker-crash settlement path through `wait_or_force` is deliberately not armed.
   an error naming the deadline, instead of one `SIGKILL`ed mid-shutdown leaving an
   operator to infer from a TTL. It does not buy correctness TTL reconciliation could not
   eventually reach.
-- **Put the settlement budget in `wait_or_force`, where the wait literally blocks.**
-  verified: `wait_or_force` has three call sites (`runtime.rs:1705`, `:1718`, `:1798`)
-  and two of them are `settle_leases_after_child_crash`, reached from
-  `restart_after_child_exit` (`:771-796`) during ordinary operation with no shutdown in
-  progress. An arm there arms all three, so a slow settlement after one worker crash
-  would fold a `Forced` settlement into `progress.forced` and terminate a healthy agent
-  with a shutdown-deadline error. judgment: the budget belongs where the shutdown is,
-  and `wait_for_coordinators` is the only wait that runs nowhere else.
+- **Arm `wait_or_force` unconditionally, rather than passing the deadline in.**
+  verified: it has three call sites (`runtime.rs:1705`, `:1718`, `:1798`) and two of them
+  are `settle_leases_after_child_crash`, reached from `restart_after_child_exit`
+  (`:771-796`) during ordinary operation with no shutdown in progress. An unconditional
+  arm would fold a `Forced` settlement into `progress.forced` after one slow worker-crash
+  settlement and terminate a healthy agent with a shutdown-deadline error.
+- **Put the settlement budget in `wait_for_coordinators` instead.** It is one arm
+  mirroring the signal arm already there, and it needs no change to `LeaseSettlement` or
+  `CoordinatorExit`. verified: that function joins whole coordinator tasks, and a
+  coordinator returns only after both `settle_leases_for_shutdown` and `shutdown_all`
+  (`:742-747`), so the arm fires on wall clock during the child reap. With
+  `shutdown_grace_seconds` above 10 (the validator accepts 1..=60, `config.rs:162-163`),
+  a worker that uses its grace, and a fully healthy control plane, a routine stop is
+  marked forced. verified: `main.rs:17-21` returns `Result<(), VoomError>`, so that stop
+  then exits `ExitCode::FAILURE` where it exits 0 today — a unit in `failed` on every
+  `systemctl stop`, with the write itself untouched. judgment: cheaper types are not
+  worth a false failure on the ordinary path.
 - **Let a deadline force skip the deactivation, as a signal force does.** The smallest
-  edit at `runtime.rs:315` (`if progress.forced.is_some()`), and it is wrong. verified:
-  the deadline elapses on wall clock regardless of what the coordinators are doing, and
-  a coordinator does not return until both `settle_leases_for_shutdown` and
-  `shutdown_all` have finished (`:742-747`) — so with `shutdown_grace_seconds = 30` (the
-  validator accepts 1..=60, `config.rs:162-163`), a worker that uses its grace, and a
-  fully healthy control plane, the flag is set by the reap's duration alone and the
-  write is skipped. That is #452's exposure re-created by the fix.
+  edit at `runtime.rs:315` (`if progress.forced.is_some()`). judgment: a timer expiring
+  is not the operator saying stop, and the write is what the change exists to protect;
+  attempting it costs a bounded 10 s.
 - **One shared absolute deadline across both waits.** verified: it leaves deactivation
   only what settlement did not spend, so a settlement finishing at 19 s of a 20 s budget
   abandons the write against a client whose single attempt is 30 s (`client.rs:33`).
