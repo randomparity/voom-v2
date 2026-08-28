@@ -208,6 +208,15 @@ signal: the deadline abandons it and the process exits unsuccessfully on its own
 deadline rather than a signal. Either way a forced shutdown can leave the incarnation or lease terminal state for TTL
 expiry/recovery to reconcile.
 
+**A `graceful_shutdown` retirement is not proof that the incarnation's leases were settled.**
+When the deadline abandons settlement, the agent still attempts the deactivation, so the
+incarnation can be recorded `retired` with reason `graceful_shutdown` while the leases it held
+were abandoned mid-settlement and stay live until the lease TTL expires. Nothing in the
+incarnation record distinguishes that from a clean stop. The signals are the agent's non-zero
+exit and its stderr naming a shutdown budget — and the agent has no log output, so a supervisor
+that records only exit status keeps no trace of which it was. When reading incarnation history,
+check for held leases rather than inferring them from the reason.
+
 **A child is not always reaped by the agent, and nothing logs it when it is not.** Two paths
 leave a worker process behind: a child the kernel cannot kill is abandoned 1 s after `SIGKILL`,
 and if the whole sequence overruns its bound the agent aborts mid-reap and the child is
@@ -223,14 +232,27 @@ commit intents as soon as it sees the signal, and a drive that has already journ
 `applying` receipt is left to finish. If the whole sequence reaches its `shutdown_grace_seconds`
 + 26 bound first, the agent gives up and that drive is abandoned. Promotion is a copy and two
 hashes of the artifact's bytes, so for a large artifact that is the likely outcome. The bound is
-the agent's own, so a longer supervisor stop timeout does not extend it. After any stop that
-reports the tail bound, run `voom artifact recover-commit --artifact-handle-id <id>` for the
-artifacts that were committing, alongside the leftover-process check above. Do not wait for a
-`recovery_required` state to appear: an abandoned drive leaves the commit record `pending` and
-`voom artifact show` reports the artifact as `staged`, so nothing distinguishes it from an
-ordinary staged artifact. `recover-commit` is what moves it to `recovery_required`, and it
-reports whether the commit can be finished or needs a human. Until it runs, the stuck record
-holds the artifact's commit slot and the next commit to that artifact is refused.
+the agent's own, so a longer supervisor stop timeout does not extend it. Until an abandoned
+drive is recovered, its record holds the artifact's commit slot and the next commit to that
+artifact is refused.
+
+**Finding the affected artifacts takes a search, and the agent cannot narrow it for you.** An
+abandoned drive leaves the commit record `pending`, so `voom artifact show` reports the artifact
+as `staged` — indistinguishable from an ordinary staged artifact — and nothing is in
+`recovery_required` yet. That state is what `recover-commit` *sets*, not a state to wait for.
+After any stop that reports the tail bound:
+
+1. `voom artifact list --state staged` for the candidate set.
+2. For each candidate, check the target path's directory for a `.voom-tmp.`-prefixed sibling.
+   One is positive evidence that a promotion was interrupted. Its absence proves nothing — a
+   drive abandoned before the copy began leaves no sibling and is wedged just the same.
+3. `voom artifact recover-commit --artifact-handle-id <id>` on each candidate. It reports
+   whether the commit can be finished or needs a human, and it is the only thing that will tell
+   you which of the candidates was actually mid-commit.
+
+The agent has no log output and the backstop error names no artifact, so this search is the
+whole detection path. Keep the candidate set small by not stopping an agent during a large
+commit when that is avoidable.
 
 A signal that arrives while the agent is still retrying activation against an unreachable
 control plane stops it immediately and exits successfully. No child has started at that

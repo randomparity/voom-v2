@@ -255,11 +255,26 @@ abandons the write where the full retry budget might eventually have landed it,
 and the startup-failure deactivations inherit that. A settlement that overruns
 its budget does *not* cost the write — the deadline force falls through to the
 deactivation — but it does cost the exit code, and it abandons leases
-mid-settlement for TTL reconciliation. The resulting state is not new: it is what
-the second-signal force already produced, and the runbook records that a forced
-shutdown leaves terminal state for TTL expiry to reconcile. That is the price of
-the bound, and the reason 10 s clears a healthy shutdown by a wide margin rather
-than being as tight as the ceiling allows.
+mid-settlement for TTL reconciliation. The *lease* state is not new: live leases
+awaiting TTL expiry are what the second-signal force already produced, and the
+runbook records that. That is the price of the bound, and the reason 10 s clears a
+healthy shutdown by a wide margin rather than being as tight as the ceiling allows.
+
+**The pairing is new, though, and the durable record does not distinguish it.**
+Pre-change, `finish_shutdown_lifecycle` returned before the deactivation on *any*
+force, so no force could produce a `Retired` incarnation: a second signal left live
+leases under an incarnation still `Active`. A `Deadline` force now falls through, so
+the write lands with `GracefulShutdown` — which `remote_deactivate` maps to
+`Retired` — while the leases that incarnation held were aborted mid-settlement
+rather than settled. A `Retired`/`GracefulShutdown` incarnation therefore no longer
+implies its leases were settled, and nothing durable says which case it was:
+`NodeIncarnationEndReason` has no variant for a partial settlement, and adding one
+would be the worker-protocol change this charter excludes. The distinguishing
+signals are the non-zero exit and `shutdown_deadline_error()`'s text, and the crate
+has no logging, so a supervisor recording exit status alone keeps no attributable
+trace. Accepted: landing the write is the outcome #452 asks for, and skipping it to
+keep the old implication intact is the trade this decision already rejected. The
+runbook says so beside its existing TTL note.
 
 Settlement being concurrent keeps its own budget generous: the coordinators run
 as a `JoinSet` and each settles its own leases as another, so settlement's wall

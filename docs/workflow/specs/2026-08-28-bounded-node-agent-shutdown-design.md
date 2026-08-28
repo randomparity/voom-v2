@@ -430,7 +430,7 @@ starts a second drive.
 |---|---|
 | Control plane healthy | Unchanged. Settlement, reap, deactivation, `Retired`/`GracefulShutdown`, `Ok(())`. |
 | Reap uses the full `shutdown_grace_seconds`, control plane healthy | Unchanged, and this is the case the placement exists for: no budget covers the reap, nothing is forced, the incarnation retires, and the process exits 0. |
-| Settlement blocked, no second signal | Settlement forced at its budget with cause `Deadline`; leases abandoned; children reaped inside grace; deactivation **is** attempted under its own budget, so the incarnation still retires if the control plane answers. Returns `shutdown_deadline_error()` either way. |
+| Settlement blocked, no second signal | Settlement forced at its budget with cause `Deadline`; leases abandoned; children reaped inside grace; deactivation **is** attempted under its own budget, so the incarnation still retires if the control plane answers. Returns `shutdown_deadline_error()` either way. The pairing is new: a `Retired`/`GracefulShutdown` incarnation whose leases were abandoned mid-settlement and stay live until the lease TTL. Pre-change no force could produce it, since any force returned before the deactivation. Nothing durable distinguishes it from a clean stop — recorded in ADR 0088 and the runbook. |
 | Settlement completes, deactivation blocked | The deactivation arm fires at its own budget and returns `shutdown_deadline_error()` directly. |
 | Second signal arrives before either budget | Unchanged: `forced_shutdown_error()`. |
 | Deactivation slower than 10 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
@@ -547,7 +547,7 @@ changes no dependency, lockfile, or pinned action. The one default it changes is
 a shutdown timeout, which is a liveness bound rather than a security control, and
 it shortens a wait rather than extending one.
 
-Two properties worth naming. The budgets make the existing forced-shutdown path
+Three properties worth naming. The budgets make the existing forced-shutdown path
 reachable without an operator signal, so anything that can keep the control plane
 from answering for 10 s can now cause a `Retired` write to be skipped. That same
 party could already cause it by keeping the control plane from answering for
@@ -557,6 +557,18 @@ unchanged; a shorter time to reach an outcome that was already reachable. And
 it, where previously the agent waited forever; the process is reparented to init
 and holds whatever resources it held, which is the same exposure a `SIGKILL`ed
 agent already produced.
+
+And the tail backstop's cutoff on an in-flight commit drive is set by the artifact's
+size, which is chosen by whoever submitted it: promotion is a stream copy plus two
+hashes of the bytes, so a large enough artifact makes any ordinary stop abandon the
+drive and wedge that artifact's commit slot until an operator runs `voom artifact
+recover-commit`. No adversary is required — `systemctl stop` during a large commit is
+enough — and the effect is on durable state and availability, not on confidentiality
+or authorization. It is accepted as the price of bounding the tail, and its residual is
+the identification gap: the backstop error names no artifact and the crate has no
+logging, so the operator's detection path is the search the runbook publishes rather
+than a report. A future change could carry the driving intent id into that error; it is
+new shared state on `CommitCoordinatorContext` and outside this charter's surface.
 
 ## AI surfaces
 
