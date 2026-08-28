@@ -51,7 +51,7 @@ tests run on the pinned `.test-tmp/` root (ADR 0079).
 - **No production dependency changes.** `tokio` gains the `rt` *feature*;
   `tracing-subscriber` joins `voom-store` **and** `voom-node-agent` as a
   **dev**-dependency only — the second so the acceptance sweep's test binary has
-  a subscriber to emit through at all (T5). It is a
+  a subscriber to emit through at all (T1b). It is a
   fourth direct dependency where the charter's surface bullet names three
   (`sqlx`, `axum`/`hyper`, `tokio`), so the judgement is recorded rather than
   assumed: `crates/voom-store/` is in the frozen surface and its manifest with
@@ -123,10 +123,59 @@ Verify: `cargo check -p voom-store --all-features --all-targets`, which proves t
 package's `dependencies` array and **no new `[[package]]` block** — the lock
 format merges normal and dev dependencies into one array (`voom-store` already
 lists `tempfile`, `voom-test-support` and `voom-control-plane` there), and
-`tracing-subscriber` 0.3.23 is already in the graph for three other crates. T5
+`tracing-subscriber` 0.3.23 is already in the graph for three other crates. T1b
 adds a second such line to the `voom-node-agent` package entry, by the same
 mechanism and with the same absence of a new `[[package]]` block; those two lines
 are the whole of this change's lock diff.
+
+## T1b — `lifecycle.rs` gains the log subscriber the sweep reads
+
+Files: `crates/voom-node-agent/tests/lifecycle.rs`,
+`crates/voom-node-agent/Cargo.toml`.
+
+**It runs here, before T2b, and the position is load-bearing.** An earlier draft
+placed this task after T4, which put it *between* the two acceptance arms: T2b
+would have measured the pre-fix binary without a subscriber and the post-fix arm a
+binary with one. The whole confidence argument treats those two arms as one
+experiment differing in a single variable — the fix — and a differing dev-
+dependency, a differing linked subscriber and differing stderr volume under a
+`--write-bps 40M` throttle break that. Landing it before both arms costs nothing:
+the plan's own Rollback section establishes this task is inert without the fix, so
+it cannot contaminate the pre-fix measurement it now precedes.
+
+Without this task the acceptance sweep's orphan-`warn` count is `0` on every run
+whatever the code does, and the operator's budget-ladder exclusion is conditioned
+on that count. The spec carries the full argument; the verified facts are that
+`crates/voom-node-agent/Cargo.toml` declares no `tracing` and no
+`tracing-subscriber` edge in either section, that the workspace's only global
+subscribers are `crates/voom-api/src/main.rs:54` and
+`crates/voom-cli/src/logging.rs:21,28` — neither linked into this test binary —
+and that `voom-test-support` has no `tracing` edge to supply one transitively.
+
+`Cargo.toml` gains `tracing-subscriber` as a **dev**-dependency
+(`tracing-subscriber.workspace = true` under `[dev-dependencies]`; 0.3.23 is
+already in the workspace graph).
+
+`lifecycle.rs` installs exactly one global subscriber, from a `OnceLock` so that
+concurrent test entry cannot race and a second install cannot panic, writing to
+`io::stderr()` with timestamps and an `EnvFilter` defaulting to
+`voom_store=warn`. `HANG_GUARD` stays at 30s, every wait it bounds stays where it
+is, and no assertion changes.
+
+**Verify the instrument before trusting it, in this task and not in the sweep.**
+Add a temporary `tracing::warn!` carrying the sweep's exact predicate string —
+`completed after its caller was cancelled` — to `begin_read_then_write` in
+`crates/voom-store/src/tx.rs`, which exists now and which the lifecycle test
+already drives. Run one lifecycle test the way the sweep runs it
+(`--test-threads=1 --nocapture`, output redirected to a file), confirm the line is
+in that file for a **passing** test, then revert the temporary line. `tx.rs` is
+the right site because `begin_detached` does not exist until T3 and this task
+deliberately precedes it; what is being proved is that a `voom_store` `warn`
+reaches the sweep's log, which does not depend on which function emitted it.
+
+A subscriber that installs but whose output never reaches the log is the same
+disconnected instrument in a new place, and the sweep cannot tell the difference —
+which is the entire defect this task exists to close.
 
 ## T2 — TDD red: the regression sweep and its positive control
 
@@ -180,18 +229,27 @@ Files: none. This task exists for its position in the order.
 
 The pre-fix arm of the acceptance run must execute against the *unfixed* openers,
 and this is the last point at which they exist: T3 detaches them. Running it here
-costs nothing extra — `crates/voom-node-agent` and the openers are both untouched
-at T2 — whereas running it after T6 needs a revert, a `git stash`, or
+costs nothing extra — the openers are untouched at T2 — whereas running it after
+T6 needs a revert, a `git stash`, or
 `git worktree add ../voom-592-prefix <merge-base>`, and each of those invalidates
 the `llvm-cov` instrumented build, adding two full instrumented rebuilds of
 `voom-node-agent` and its graph to a protocol already priced at ~180 runs.
+
+**Both arms run the same test binary, and that is why T1b precedes this.** The
+subscriber and its dev-dependency are already in place here, so the pre-fix and
+post-fix arms differ in exactly one variable — the fix. Had T1b run between them,
+the comparison would have crossed a changed dependency graph, a changed linked
+subscriber and changed stderr volume under a `--write-bps 40M` throttle, and the
+reproduction index measured here would not have transferred to the post-fix arm
+whose confidence rests on it.
 
 Run the loop from *Acceptance run* below, unfixed, into `.tmp/accept-prefix/`.
 Stop at the first log matching the predicate, or at 90 runs. Record the
 **reproduction index** — the run number that first reproduced — because that
 index is the host-local evidence the whole post-fix sweep's confidence rests on.
-If 90 runs do not reproduce, criterion 5 is reported **not discharged**, and that
-verdict is reached here rather than discovered at the end.
+If 90 runs do not reproduce, criteria 2, 4 and 5 are reported **not discharged at
+the stated confidence** per *Decide the bar now*, and that verdict is reached here
+rather than discovered at the end.
 
 ## T3 — TDD green: `begin_detached`
 
@@ -255,37 +313,6 @@ itself would fail `just lint` before it could be observed. With the fault in
 place step 4 still passes — the `warn` fires — and the arm must go red on **the
 lock probe**. Revert the fault.
 
-## T5 — `lifecycle.rs` gains the log subscriber the sweep reads
-
-Files: `crates/voom-node-agent/tests/lifecycle.rs`,
-`crates/voom-node-agent/Cargo.toml`.
-
-Without this task the acceptance sweep's orphan-`warn` count is `0` on every run
-whatever the code does, and the operator's budget-ladder exclusion is conditioned
-on that count. The spec carries the full argument; the verified facts are that
-`crates/voom-node-agent/Cargo.toml` declares no `tracing` and no
-`tracing-subscriber` edge in either section, that the workspace's only global
-subscribers are `crates/voom-api/src/main.rs:54` and
-`crates/voom-cli/src/logging.rs:21,28` — neither linked into this test binary —
-and that `voom-test-support` has no `tracing` edge to supply one transitively.
-
-`Cargo.toml` gains `tracing-subscriber` as a **dev**-dependency
-(`tracing-subscriber.workspace = true` under `[dev-dependencies]`; 0.3.23 is
-already in the workspace graph).
-
-`lifecycle.rs` installs exactly one global subscriber, from a `OnceLock` so that
-concurrent test entry cannot race and a second install cannot panic, writing to
-`io::stderr()` with timestamps and an `EnvFilter` defaulting to
-`voom_store=warn`. `HANG_GUARD` stays at 30s, every wait it bounds stays where it
-is, and no assertion changes.
-
-**Verify the instrument before trusting it, in this task and not in the sweep.**
-Run one lifecycle test with a temporary `tracing::warn!` carrying the sweep's
-exact predicate string added to `begin_detached`'s success path, confirm the line
-appears in the captured stderr of a **passing** test, and revert the temporary
-line. A subscriber that installs but whose output libtest swallows is the same
-disconnected instrument in a new place, and the sweep cannot tell the difference.
-
 ## Not done here — `init.rs`
 
 An earlier draft of this plan routed `run_migrations_on` through
@@ -323,7 +350,7 @@ acquire their setups assume, untouched.
 
 ## T6 — Guardrails and the record
 
-Files: none beyond what T1–T5 touched, except `docs/debt/0005`, whose "Why
+Files: none beyond what T0–T4 touched, except `docs/debt/0005`, whose "Why
 deferred" is rewritten to own the live `init.rs` site now that the `init.rs`
 rewrite is cut. `docs/` already carries ADR 0087, its index row, and the spec.
 
@@ -454,10 +481,10 @@ is judged on. No measurement of that case exists, here or anywhere. The sweep
 runs the real workload under the real throttle, so it is where "occupancy decays"
 stops being an argument and becomes an observation. Report the counts.
 
-**The count is worthless unless the subscriber is wired, which is T5's job.**
+**The count is worthless unless the subscriber is wired, which is T1b's job.**
 Without it `tracing::warn!` emits no bytes and this `grep` returns `0` on every
 run whatever the code does — `orphan_warns=0` across 90 runs reading as *no
-orphans occurred* while actually meaning *nothing was listening*. T5 installs the
+orphans occurred* while actually meaning *nothing was listening*. T1b installs the
 subscriber and proves it with one real emitted line before the sweep starts; do
 not start the sweep on an unverified instrument. `--nocapture` above is the
 second belt: a `fmt` layer holding `io::stderr()` should survive libtest's
@@ -487,13 +514,30 @@ Report both counts and the pre-fix reproduction index. The (29/30)^90 = 0.047
 figure is conditional on #592's rate transferring to this host, and that index is
 the host-local evidence for it.
 
-**Decide the bar now, not after the sweep.** Criteria 2 and 5 have no
+**Decide the bar now, not after the sweep.** Criteria 2, 4 and 5 have no
 deterministic discharge path in this design — that is a property of a
 1-in-20-to-30, throttle-dependent defect, not a defect of the plan. So: if the
 pre-fix arm does not reproduce within 90 runs, **proceed** on the mechanism test
-alone and report criteria 2 and 5 as *not discharged at the stated confidence*,
+alone and report criteria 2, 4 and 5 as *not discharged at the stated confidence*,
 naming the executed count and the host. Do not block on it, and do not quote
 0.047 unconditionally in the PR.
+
+**Criterion 4 is in that list, and an earlier draft of this plan left it out.**
+"`HANG_GUARD` in `crates/voom-node-agent/tests/lifecycle.rs` is not raised" is
+discharged by exactly one thing: the post-fix arm completing `executed=90` with no
+match for `second agent graceful-shutdown lifecycle did not complete`. That is the
+same evidence and the same conditional confidence as criterion 5's second clause,
+so it inherits the same caveat — a sweep that never reproduced pre-fix cannot
+distinguish "the guard no longer fires" from "the window was never entered". The
+omission mattered because the guard not firing is the *default* observation: a PR
+following the earlier draft literally would have caveated criteria 1, 2 and 5 and
+reported criterion 4 as cleanly discharged, on evidence this plan's own argument
+says is inconclusive. Report it beside criterion 5, never on its own.
+
+`just ci` going green is **not** criterion 4's discharge either. One unthrottled
+green run is exactly the signal the spec already rejects for criterion 5, for the
+same reason: at a 1-in-20-to-30 rate it is indistinguishable from a run that never
+entered the window.
 
 **Criterion 1 is named in that same failure case, and this is the sentence that
 does it.** The charter sets criterion 1's terms: discharged "by
@@ -520,21 +564,34 @@ supplies the residual evidence regardless of what the pre-fix arm found. **A
 `executed=90` post-fix arm is required before criterion 2 is reported at all**,
 discharged or not.
 
-**Pre-commit to the split.** If any single run reports **more than one orphan
-`warn`**, that is the multi-opener occupancy the spec names, and it opens a
-follow-up issue rather than being absorbed here. Decide that now so the result
-cannot be read charitably after the fact. A fully successful run of this plan can
-legitimately end with two of five criteria undischarged; that is the plan working,
-and the PR body must say so in those words rather than implying a green sweep.
+**Pre-commit to the split threshold.** If any single run reports **more than one
+orphan `warn`**, that is the multi-opener occupancy the spec names. Decide that
+now so the result cannot be read charitably after the fact. A fully successful run
+of this plan can legitimately end with two of five criteria undischarged; that is
+the plan working, and the PR body must say so in those words rather than implying
+a green sweep.
 
-The charter words this as *"more than one **concurrent** orphan in any run"*, and
-the restatement above is deliberate: `grep -c` over a whole ~200s log yields one
-integer with no timestamps and no paired release event, so it cannot tell two
-overlapping orphans from five spread across the run. Deciding which had occurred
-after seeing the number is exactly the after-the-fact reading this paragraph
-exists to prevent. Counting per run is strictly more sensitive — every concurrent
-pair is also two in a run — so it can only trip the split earlier, never suppress
-one the operator asked for. The spec records the restatement against the charter.
+**Tripping the threshold does not file anything.** The charter's wording is "opens
+a follow-up issue", but this plan does not create one automatically: the sweep
+reports the per-run counts and states plainly whether the threshold was crossed,
+in the PR body and the hand-off, and the operator decides whether an issue is
+opened. Two reasons, and either is sufficient. Creating an external artifact needs
+authority this run does not hold for a threshold it restated (below). And the
+number alone cannot distinguish sustained occupancy from a clustered burst, which
+is the judgement an issue would have to encode. Pre-committing to the *threshold*
+is what stops the result being argued away; pre-committing to the *filing* would
+be this run acting on the operator's behalf on the one point it changed.
+
+The charter words the threshold as *"more than one **concurrent** orphan in any
+run"*, and the restatement above is deliberate: `grep -c` over a whole ~200s log
+yields one integer with no timestamps and no paired release event, so it cannot
+tell two overlapping orphans from five spread across the run. Deciding which had
+occurred after seeing the number is exactly the after-the-fact reading this
+paragraph exists to prevent. Counting per run is strictly more sensitive — every
+concurrent pair is also two in a run — so it can only trip earlier, never suppress
+a signal the operator asked for. The spec records the restatement against the
+charter, and the hand-off surfaces it as a threshold this run changed rather than
+burying it.
 
 **Do not run this sweep concurrently with any other `run-constrained.sh`
 invocation on the same host.** The reap above is `pkill -f` on a command-line
@@ -552,7 +609,7 @@ to completion, say so and say which criteria that leaves undischarged.
 `begin_detached` is additive and the two openers keep their signatures, so
 reverting restores the prior behaviour without touching any of the ~50 call
 sites. T1 stays: the manifest change genuinely is inert, and `rt` is enabled
-through sqlx regardless. T5 stays too — a log subscriber in a test binary is
+through sqlx regardless. T1b stays too — a log subscriber in a test binary is
 inert with the fix reverted, and reverting it would only re-break the
 instrument.
 

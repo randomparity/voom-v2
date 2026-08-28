@@ -37,7 +37,7 @@ busy-loops per invocation.
 ## Why deferred
 
 `scripts/` is outside the frozen change surface for issue #592
-(https://github.com/randomparity/voom-v2/issues/592#issuecomment-5445659229,
+(https://github.com/randomparity/voom-v2/issues/592#issuecomment-5447684231,
 token `q592-387107cd`), whose surface is the crates on the deadlocked path plus
 `docs/`.
 

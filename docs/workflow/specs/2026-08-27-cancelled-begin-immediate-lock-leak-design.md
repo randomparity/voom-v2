@@ -602,8 +602,18 @@ the same stated confidence as the post-fix arm. "Until it reproduces" is not a
 protocol and "~25 runs" is not a bound: 25 is roughly the mean of a geometric
 with *p* = 1/30, at which a false negative still has probability
 (29/30)^25 = 0.43. At 90 it is 0.047, matching the other arm. If 90 unfixed runs
-do not reproduce, criterion 5 is reported as **not discharged** at that
+do not reproduce, criteria 2, 4 and 5 are reported as **not discharged** at that
 confidence, not as a green sweep.
+
+**Criterion 4 belongs in that list and is easy to lose from it.** "`HANG_GUARD` is
+not raised" is discharged by the post-fix arm reaching `executed=90` with no match
+for the guard's message, which is the same evidence and the same conditional
+confidence as criterion 5's second clause. It is easy to lose because the guard
+not firing is the *default* observation — a report that caveats the other criteria
+and calls criterion 4 cleanly discharged would be resting it on evidence this
+design's own argument calls inconclusive. A single green `just ci` run does not
+discharge it either, for the reason above: at a 1-in-20-to-30 rate an unthrottled
+green run is indistinguishable from one that never entered the window.
 
 **Cost up front:** the full protocol is up to ~180 instrumented, throttled,
 `--test-threads=1` lifecycle runs. Report both counts either way; anything short
@@ -711,6 +721,17 @@ what the change does to that.
   every concurrent pair is also two in a run, so the restatement can only trip the
   split earlier, never suppress one the operator asked for. Recorded here rather
   than adopted silently, because the original wording is the operator's.
+
+  **Crossing that threshold reports; it does not file.** The charter says the
+  condition "opens a follow-up issue", and this design does not open one
+  automatically. The sweep reports the per-run counts and states whether the
+  threshold was crossed, in the pull request and the hand-off, and the operator
+  decides whether an issue is created. Creating an external artifact on a
+  threshold this run restated would be acting on the operator's behalf at exactly
+  the point where the wording changed — and the count alone cannot encode the
+  judgement an issue would have to make, since it cannot separate sustained
+  occupancy from a clustered burst. The threshold is pre-committed so the result
+  cannot be argued away; the filing stays a decision.
 - **Issue #452.** The same defect seen from the agent side. This change may make
   it resolvable; closing it is its owner's call.
 - **The lock-free opener ring buffer** issue #592 proposes as the next
