@@ -297,6 +297,7 @@ impl AgentRuntime {
                     NodeIncarnationEndReason::ChildStartupFailed,
                     &mut signals,
                     &mut signal_phase,
+                    Instant::now() + self.budgets().call,
                 )
                 .await?;
                 return Err(VoomError::ExternalSystemUnavailable(format!(
@@ -316,6 +317,7 @@ impl AgentRuntime {
                 NodeIncarnationEndReason::ChildStartupFailed,
                 &mut signals,
                 &mut signal_phase,
+                Instant::now() + self.budgets().call,
             )
             .await?;
             if let Err(shutdown_error) = shutdown {
@@ -384,8 +386,14 @@ impl AgentRuntime {
             return Err(forced_shutdown_error());
         }
         let mut signal_phase = progress.signal_phase;
-        self.deactivate_or_second_signal(incarnation_id, reason, signals, &mut signal_phase)
-            .await?;
+        self.deactivate_or_second_signal(
+            incarnation_id,
+            reason,
+            signals,
+            &mut signal_phase,
+            Instant::now() + self.budgets().call,
+        )
+        .await?;
         if progress.forced == Some(ShutdownForce::Deadline) {
             // The write may have landed; the settlement that preceded it did not, so the
             // agent still exits unsuccessfully and names the budget rather than a signal.
@@ -610,18 +618,26 @@ impl AgentRuntime {
     /// control plane is not answering. Every deactivation path uses this: the runbook
     /// promises a second signal cancels blocked deactivation, without qualifying which
     /// reason ended the incarnation.
+    ///
+    /// `deadline` is a parameter rather than a constant read here, because three
+    /// existing tests gate `deactivate` with a `Notify` that is never notified: a real
+    /// timer read in place would turn each of them into a wall-clock race.
     async fn deactivate_or_second_signal(
         &self,
         incarnation_id: NodeIncarnationId,
         reason: NodeIncarnationEndReason,
         signals: &mut mpsc::UnboundedReceiver<()>,
         signal_phase: &mut ShutdownSignalPhase,
+        deadline: Instant,
     ) -> Result<(), VoomError> {
         let deactivation = self.deactivate(incarnation_id, reason);
         tokio::pin!(deactivation);
         loop {
             tokio::select! {
                 result = &mut deactivation => return result,
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(shutdown_deadline_error());
+                }
                 signal = signals.recv() => {
                     let Some(()) = signal else {
                         return Err(forced_shutdown_error());

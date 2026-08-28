@@ -1031,6 +1031,8 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
                 NodeIncarnationEndReason::GracefulShutdown,
                 &mut signal_rx,
                 &mut signal_phase,
+                // Far future: these test the signal, not the budget.
+                Instant::now() + Duration::from_hours(1),
             )
             .await
     });
@@ -1051,7 +1053,16 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
 async fn restart_exhausted_deactivation_requires_a_genuine_second_signal() {
     let control = Arc::new(FakeControlPlane::default());
     *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
-    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    // Far-future call budget: this test gates deactivate with a Notify that is
+    // never notified, so the production 10s budget would be a wall-clock race.
+    let runtime = AgentRuntime::with_client_and_budgets(
+        loaded_config(),
+        control.clone(),
+        ShutdownBudgets {
+            call: Duration::from_hours(1),
+            ..ShutdownBudgets::DEFAULT
+        },
+    );
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
     let finishing = runtime.finish_shutdown_lifecycle(
         incarnation(),
@@ -1095,7 +1106,16 @@ async fn restart_exhausted_deactivation_requires_a_genuine_second_signal() {
 async fn child_startup_failure_deactivation_requires_a_genuine_second_signal() {
     let control = Arc::new(FakeControlPlane::default());
     *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
-    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    // Far-future call budget: this test gates deactivate with a Notify that is
+    // never notified, so the production 10s budget would be a wall-clock race.
+    let runtime = AgentRuntime::with_client_and_budgets(
+        loaded_config(),
+        control.clone(),
+        ShutdownBudgets {
+            call: Duration::from_hours(1),
+            ..ShutdownBudgets::DEFAULT
+        },
+    );
     let (signal_tx, signal_rx) = mpsc::unbounded_channel();
     let running = runtime.run_with_shutdowns(signal_rx);
     tokio::pin!(running);
@@ -1240,6 +1260,8 @@ async fn second_signal_interrupts_a_non_graceful_deactivation() {
                 NodeIncarnationEndReason::ChildRestartExhausted,
                 &mut signal_rx,
                 &mut signal_phase,
+                // Far future: these test the signal, not the budget.
+                Instant::now() + Duration::from_hours(1),
             )
             .await
     });
@@ -2532,5 +2554,36 @@ async fn a_deadline_forced_settlement_still_deactivates() {
         control.events.lock().await.as_slice(),
         &["deactivate"],
         "the Retired write is what the bound exists to protect"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_deadline_abandons_a_blocked_deactivation() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (_signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let mut signal_phase = ShutdownSignalPhase::ForceEnabled;
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    // The outer timeout is what makes this a regression rather than a hang: without the
+    // deadline arm the inner call never returns and this fails on Elapsed.
+    let error = tokio::time::timeout(
+        Duration::from_mins(10),
+        runtime.deactivate_or_second_signal(
+            incarnation(),
+            NodeIncarnationEndReason::GracefulShutdown,
+            &mut signal_rx,
+            &mut signal_phase,
+            deadline,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("shutdown budget"),
+        "a blocked deactivation must report its budget: {error}"
     );
 }
