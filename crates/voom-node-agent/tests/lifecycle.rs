@@ -64,8 +64,21 @@ const HANG_GUARD: Duration = Duration::from_secs(30);
 fn init_tracing() {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("voom_store=warn"));
+        // `voom_store=warn` is unconditional, and RUST_LOG may only ADD to it.
+        // Deferring to `try_from_default_env` would let an ambient `RUST_LOG=error`
+        // silence the orphan warning the acceptance sweep counts — reintroducing the
+        // zero-forever instrument through the environment instead of the manifest —
+        // and an ambient `RUST_LOG=debug` would raise `log::set_max_level` and format
+        // every hyper/rustls record to stderr inside a HANG_GUARD-bounded test.
+        // `RUST_LOG=debug` is exactly what someone investigating this hang would set.
+        let mut filter = tracing_subscriber::EnvFilter::new("voom_store=warn");
+        if let Ok(directives) = std::env::var("RUST_LOG") {
+            for directive in directives.split(',').filter(|d| !d.trim().is_empty()) {
+                if let Ok(parsed) = directive.trim().parse() {
+                    filter = filter.add_directive(parsed);
+                }
+            }
+        }
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
@@ -255,6 +268,12 @@ struct LiveFixture {
 
 impl LiveFixture {
     async fn start(delay: Option<Arc<DelayedAcquire>>) -> Self {
+        // Every test that starts a live fixture drives the BEGIN IMMEDIATE openers
+        // and can therefore orphan one, so the subscriber is installed here rather
+        // than in a single test. Installed from one test only, it would miss any
+        // orphan produced by a test that libtest happens to run earlier — which is
+        // the same disconnected-instrument defect one scope narrower.
+        init_tracing();
         let database = TempDatabase::new().unwrap();
         let database_url = voom_store::test_support::sqlite_url_for(database.path());
         voom_store::init(&database_url).await.unwrap();

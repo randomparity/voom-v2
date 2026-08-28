@@ -61,6 +61,17 @@ const POLL_SWEEP: std::ops::RangeInclusive<usize> = 1..=8;
 /// rate, five repeats put that at 0.275^5 = 0.0016.
 const REPEATS: usize = 5;
 
+/// Sweeps for the *control* arm, deliberately fewer than the fixed arm's.
+///
+/// The control dominates the serialized wall clock: at a leaking *N* its observer
+/// necessarily burns its whole ceiling, and the warm fixture leaks at *N* = 3 in 40
+/// of 40 sweeps. Measured on the design host, `--test-threads=1` — the shape the
+/// instrumented `coverage` job runs — five control repeats put the file at ~19.8s
+/// against the plan's 15s budget, in the job whose duration is this issue's subject.
+/// Three keeps the miss rate at 0.275^3 = 0.021, still far below a per-run flake
+/// budget, and the fixed arm keeps all five because its *N* values return promptly.
+const CONTROL_REPEATS: usize = 3;
+
 /// Gap between the cancellation and the observer's first attempt. It stops the
 /// observer taking and releasing the lock *before* the cancelled `BEGIN IMMEDIATE`
 /// ever asks for it, which would report "not blocked" for the wrong reason.
@@ -270,7 +281,7 @@ async fn bare_begin_immediate_still_leaks_the_write_lock_when_cancelled() {
 
     let mut blocked_observations = 0_usize;
 
-    for _ in 1..=REPEATS {
+    for _ in 1..=CONTROL_REPEATS {
         for polls in POLL_SWEEP {
             let (database, pool) = fresh_fixture().await;
 
@@ -288,7 +299,7 @@ async fn bare_begin_immediate_still_leaks_the_write_lock_when_cancelled() {
 
     assert!(
         blocked_observations > 0,
-        "no cancelled bare BEGIN IMMEDIATE stranded the write lock across {REPEATS} \
+        "no cancelled bare BEGIN IMMEDIATE stranded the write lock across {CONTROL_REPEATS} \
          sweeps of N in 1..=8. The regression sweep is no longer straddling the \
          window it exists to cover — check whether sqlx closed it upstream, and \
          re-derive the poll range before trusting the fixed arm"
@@ -304,6 +315,16 @@ async fn bare_begin_immediate_still_leaks_the_write_lock_when_cancelled() {
 /// open, and these tests share one process and one global subscriber, so matching on
 /// the message alone would let a concurrent arm satisfy this arm's assertion.
 const ORPHAN_CONTEXT: &str = "issue 592 orphan arm";
+
+/// The `Ok`-branch message, which this arm requires *in addition to* the context.
+///
+/// `begin_detached` emits the context field on both branches, so waiting on the
+/// context alone would let the `Err` branch satisfy this arm — and the lock probe
+/// that follows would then pass trivially, because a failed open never took the
+/// write lock. The arm would report success without once exercising the
+/// drop-rolls-back path it exists to cover. Requiring the success text closes that:
+/// an `Err`-branch orphan now fails the arm loudly instead of passing it silently.
+const ORPHAN_ROLLED_BACK: &str = "completed after its caller was cancelled";
 
 /// How long the orphan arm gives its caller before cancelling it. Any value below
 /// the pool's 30s `busy_timeout` works: while the holder keeps the write lock the
@@ -355,13 +376,20 @@ fn capture() -> &'static CaptureBuffer {
     })
 }
 
-/// Wait for `needle` to appear in the captured log, up to `ceiling`.
-async fn wait_for_captured(needle: &str, ceiling: Duration) -> bool {
+/// Wait for a single captured line containing every needle, up to `ceiling`.
+async fn wait_for_captured(needles: &[&str], ceiling: Duration) -> bool {
     let deadline = Instant::now() + ceiling;
     loop {
         {
             let bytes = capture().0.lock().unwrap();
-            if String::from_utf8_lossy(&bytes).contains(needle) {
+            let captured = String::from_utf8_lossy(&bytes);
+            // Every needle must appear on the *same* line: the arms share one process
+            // and one global subscriber, so a match assembled from two different
+            // events would be a false positive.
+            if captured
+                .lines()
+                .any(|line| needles.iter().all(|needle| line.contains(needle)))
+            {
                 return true;
             }
         }
@@ -410,10 +438,12 @@ async fn an_orphaned_open_rolls_itself_back() {
     holder.rollback().await.unwrap();
 
     assert!(
-        wait_for_captured(ORPHAN_CONTEXT, FIXED_CEILING).await,
-        "no orphan warning naming {ORPHAN_CONTEXT:?} was captured within \
-         {FIXED_CEILING:?} of the holder releasing the lock; the detached open \
-         never noticed it had been abandoned"
+        wait_for_captured(&[ORPHAN_CONTEXT, ORPHAN_ROLLED_BACK], FIXED_CEILING).await,
+        "no rollback warning naming {ORPHAN_CONTEXT:?} was captured within \
+         {FIXED_CEILING:?} of the holder releasing the lock. Either the detached \
+         open never noticed it had been abandoned, or it took the failure branch — \
+         in which case no write lock was ever held and the probe below would pass \
+         without proving anything"
     );
 
     assert!(

@@ -599,6 +599,30 @@ supplies the residual evidence regardless of what the pre-fix arm found. **A
 `executed=90` post-fix arm is required before criterion 2 is reported at all**,
 discharged or not.
 
+**T2 measured result, as this plan's wall-clock budget above required.** On the
+design host (48 cores, debug, uninstrumented): default parallel 12.3-12.8s;
+`taskset -c 0-3` 11.6-14.3s; `--test-threads=1` **19.8s** with five control repeats.
+The serialized figure is the one that governs, because the `coverage` job runs
+`--test-threads=1` under `cargo llvm-cov`, and 19.8s is 32% above this plan's own
+15s threshold *before* instrumentation — in the job whose duration is this issue's
+subject. So the budget clause was exercised rather than waived: `CONTROL_REPEATS`
+is 3 while the fixed arm keeps 5, which brings the serialized figure to **14.9s**
+(three runs: 15.53s, 14.99s, 15.03s wall including build check). The control
+dominates because at a leaking *N* its observer necessarily burns its whole
+ceiling; the fixed arm's *N* values return promptly. At three repeats the
+per-sweep miss rate is 0.275^3 = 0.021.
+
+**The orphan counts cover the tests a subscriber was installed for.** An earlier
+version of `lifecycle.rs` called `init_tracing()` from one test, and libtest runs
+tests in name order, so `delayed_acquire_replay_never_dispatches` — which also
+starts a `LiveFixture` and drives the same openers — ran *before* any subscriber
+existed and any orphan it produced was invisible. That is the T1b defect one scope
+narrower: an instrument not connected where the count is read. The call is now in
+`LiveFixture::start`, so every test that can orphan an open is instrumented. The
+500-run counts below were gathered before that change and therefore cover
+`live_agent_fences_prior_incarnation_and_retires_orderly` only; they are a lower
+bound over the binary, not a count of the whole run.
+
 **Re-derived after the predicate was fixed, from the retained logs rather than a
 re-run.** The post-fix sweep at `904982e0` had already executed 500 runs under the
 old `Ok`-branch-only predicate. Recounting `.tmp/accept-postfix/*.log` for both

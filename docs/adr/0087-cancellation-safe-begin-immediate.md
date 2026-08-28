@@ -129,12 +129,27 @@ which must leave an independent connection able to take the write lock at every
 test itself, which must leak at some *N*. Where it lands also depends on the
 *fixture*: measured on one host, a warm pool leaks at *N* = 3 in 40 of 40 sweeps
 while a cold one leaks at 5 or 6 and not at all in 11 of 40. So the fixture is
-pinned and the control asserts across 5 repeats rather than within one sweep.
+pinned and the control asserts across repeats rather than within one sweep — three
+for the control, five for the fixed arm. The control's are fewer because at a
+leaking *N* its observer necessarily burns its whole ceiling and it therefore
+dominates the serialized wall clock; measured, five put the file at ~19.8s under
+`--test-threads=1` against a 15s budget, three at ~14.9s, and three keeps the
+per-sweep miss rate at 0.275^3 = 0.021.
 
 Only the control is host-dependent, and only the control is gated on host
 parallelism. That split is deliberate — a skip notice from a passing test is
 invisible under both of this repo's CI test invocations, so the regression proof
 must not sit behind one.
+
+**One CI leg falls under that gate, and a reader needs to know which.**
+`.github/workflows/ci.yml:19-23` runs `just ci` on `ubuntu-latest` *and*
+`macos-latest`, and GitHub's `macos-latest` arm64 runners are 3-vCPU — below the
+four the control requires. So on the macOS leg the control silently does not run,
+and its green tells you nothing about whether the sweep still straddles the
+window; only the Linux leg's green does. No machinery is added for this, because
+a notice from a passing test cannot be surfaced under either invocation — the
+point is that the record should not let a green macOS run be read as the control
+passing.
 
 A third arm covers what the poll sweep cannot. Post-fix, the caller's only wakeup
 is the `oneshot` send, which fires after the open has already returned, so no
