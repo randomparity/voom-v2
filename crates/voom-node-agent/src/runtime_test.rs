@@ -2097,6 +2097,7 @@ fn context(control: Arc<FakeControlPlane>) -> CoordinatorContext {
         progress_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(50),
         shutdown_grace: Duration::from_secs(1),
+        budgets: ShutdownBudgets::DEFAULT,
         worker: worker(),
         fatal_tx: mpsc::unbounded_channel().0,
         storage_roots: HashMap::new(),
@@ -2354,4 +2355,26 @@ async fn dispatch_to_child_forwards_owner_local_plan_and_normalized_operation() 
         request.lease_id, dispatch.lease_id,
         "the owner-local dispatch reaches the child with its lease identity"
     );
+}
+
+#[test]
+#[expect(
+    clippy::duration_suboptimal_units,
+    reason = "60 here is the validator's shutdown_grace_seconds cap, in seconds               (config.rs:159-164); from_mins(1) would hide what the number is"
+)]
+fn the_published_tail_bound_is_the_sum_of_every_inner_bound_plus_margin() {
+    let budgets = ShutdownBudgets::DEFAULT;
+    // docs/runbooks/operator-node-agent.md tells operators to set the supervisor stop
+    // timeout above `shutdown_grace_seconds + 26`. If this changes, that runbook is wrong.
+    assert_eq!(
+        budgets.tail(Duration::from_secs(10)),
+        Duration::from_secs(36)
+    );
+    // config.rs caps shutdown_grace_seconds at 60, and the worst case must stay inside
+    // systemd's upstream 90s DefaultTimeoutStopSec. See ADR 0088.
+    assert_eq!(
+        budgets.tail(Duration::from_secs(60)),
+        Duration::from_secs(86)
+    );
+    assert!(budgets.tail(Duration::from_secs(60)) < Duration::from_secs(90));
 }

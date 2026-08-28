@@ -37,6 +37,54 @@ use voom_core::ids::ArtifactCommitIntentId;
 
 const HEARTBEAT_DIVISOR: u32 = 3;
 const RESTART_DELAY: Duration = Duration::from_millis(250);
+/// Wall-clock budgets for the shutdown tail.
+///
+/// Threaded as values rather than read from constants at the point of use. Three
+/// existing tests gate `deactivate` with a [`tokio::sync::Notify`] that is never
+/// notified, so a real 10 s timer read in place would turn each of them into a
+/// wall-clock race.
+///
+/// See `docs/adr/0088-bounded-node-agent-shutdown.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownBudgets {
+    /// One control-plane wait in the shutdown tail.
+    pub call: Duration,
+    /// Collecting a killed child's exit status, after `SIGKILL`.
+    pub reap_after_kill: Duration,
+    /// Slack the tail backstop adds over the sum of the inner bounds.
+    pub backstop_margin: Duration,
+}
+
+impl ShutdownBudgets {
+    /// Production values.
+    ///
+    /// 10 s sits under the lifecycle suite's 30 s hang guard, so that guard stops
+    /// being the first thing to fire, and under one `REQUEST_TIMEOUT`, so a
+    /// shutdown blocked on a wedged control plane abandons rather than spending
+    /// another attempt. The 5 s margin covers the tail costs that fall outside
+    /// every inner bound — `wait_or_force`'s post-expiry lease drain, the
+    /// `JoinSet` spawn before each child's grace starts, and stopping the node
+    /// heartbeat — so that every inner bound expires before the backstop does.
+    pub const DEFAULT: Self = Self {
+        call: Duration::from_secs(10),
+        reap_after_kill: Duration::from_secs(1),
+        backstop_margin: Duration::from_secs(5),
+    };
+
+    /// Upper bound on the whole shutdown tail.
+    ///
+    /// This is the number `docs/runbooks/operator-node-agent.md` publishes, and
+    /// the bound the tail backstop enforces.
+    #[must_use]
+    pub fn tail(&self, grace: Duration) -> Duration {
+        self.call
+            .saturating_mul(2)
+            .saturating_add(grace)
+            .saturating_add(self.reap_after_kill)
+            .saturating_add(self.backstop_margin)
+    }
+}
+
 const VALIDATION_ATTEMPTS: u32 = 3;
 const CRASH_LIMIT: u32 = 3;
 const CRASH_WINDOW: Duration = Duration::from_mins(1);
@@ -102,6 +150,7 @@ pub struct AgentRuntime {
     /// Concrete HTTP transport for the scan-session pump; absent in tests
     /// that inject a fake [`ControlPlaneApi`], whose leases never route there.
     scan_client: Option<Arc<ControlPlaneClient>>,
+    budgets: ShutdownBudgets,
 }
 
 impl AgentRuntime {
@@ -117,16 +166,31 @@ impl AgentRuntime {
             config,
             scan_client: Some(Arc::clone(&client)),
             client,
+            budgets: ShutdownBudgets::DEFAULT,
         })
     }
 
     #[cfg(test)]
     fn with_client(config: LoadedAgentConfig, client: Arc<dyn ControlPlaneApi>) -> Self {
+        Self::with_client_and_budgets(config, client, ShutdownBudgets::DEFAULT)
+    }
+
+    #[cfg(test)]
+    fn with_client_and_budgets(
+        config: LoadedAgentConfig,
+        client: Arc<dyn ControlPlaneApi>,
+        budgets: ShutdownBudgets,
+    ) -> Self {
         Self {
             config,
             scan_client: None,
             client,
+            budgets,
         }
+    }
+
+    fn budgets(&self) -> ShutdownBudgets {
+        self.budgets
     }
 
     /// Run until SIGINT or SIGTERM requests an orderly shutdown.
@@ -221,7 +285,8 @@ impl AgentRuntime {
             .await?;
 
         let specs = self.child_specs(&activation)?;
-        let startup_supervisor = ChildSupervisor::new(self.shutdown_grace());
+        let startup_supervisor =
+            ChildSupervisor::new(self.shutdown_grace(), self.budgets().reap_after_kill);
         let children = match startup_supervisor.start_all(specs).await {
             Ok(children) => children,
             Err(error) => {
@@ -485,6 +550,7 @@ impl AgentRuntime {
                 )),
                 poll_interval: Duration::from_millis(self.config.config.poll_interval_ms),
                 shutdown_grace: self.shutdown_grace(),
+                budgets: self.budgets(),
                 worker: (*worker).clone(),
                 storage_roots: storage_roots.clone(),
                 fatal_tx: fatal_tx.clone(),
@@ -647,6 +713,7 @@ pub(crate) struct CoordinatorContext {
     pub(crate) progress_timeout: Duration,
     pub(crate) poll_interval: Duration,
     pub(crate) shutdown_grace: Duration,
+    pub(crate) budgets: ShutdownBudgets,
     pub(crate) worker: WorkerConfig,
     pub(crate) endpoints: ChildEndpointRegistry,
     /// Configured storage-root provider locators by root id (spawn-time
@@ -742,7 +809,8 @@ async fn run_coordinator(
             CoordinatorEvent::Shutdown(kind) => {
                 let settlement =
                     settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
-                let supervisor = ChildSupervisor::new(context.shutdown_grace);
+                let supervisor =
+                    ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
                 let _ = supervisor.shutdown_all(vec![child]).await;
                 return CoordinatorExit::Shutdown(settlement);
             }
@@ -792,7 +860,8 @@ async fn restart_after_child_exit(
     // Settling consumes any shutdown notification, so it must be returned
     // instead of falling through to a restart waiting on an observed change.
     if let Some(settlement) = settle_leases_after_child_crash(cancel_tx, leases, shutdown).await {
-        let supervisor = ChildSupervisor::new(context.shutdown_grace);
+        let supervisor =
+            ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
         let _ = supervisor.shutdown_all(vec![child]).await;
         return Err(CoordinatorExit::Shutdown(settlement));
     }
@@ -849,7 +918,8 @@ async fn restart_child(
     context: &CoordinatorContext,
     spec: ChildSpec,
 ) -> Result<RunningChild, ChildErrorKind> {
-    let mut supervisor = ChildSupervisor::new(context.shutdown_grace);
+    let mut supervisor =
+        ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
     loop {
         match supervisor.restart(&spec).await {
             Ok(child) => return Ok(child),
