@@ -867,6 +867,38 @@ async fn run_coordinator(
     }
 }
 
+/// Await `work`, abandoning it once a shutdown is in flight.
+///
+/// The predicate runs on a **clone** of the receiver. `changed()` on the original
+/// would mark the value seen, and that value is sent exactly once; the
+/// `cancel_and_wait` wait immediately below is deliberately unbounded and
+/// `shutdown.changed()` is its only escape, so consuming the notification here would
+/// strand it against the same unresponsive control plane. A clone tracks its own seen
+/// version, and `wait_for` checks the current value first.
+async fn until_shutdown<F, T>(shutdown: &watch::Receiver<ShutdownKind>, work: F) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    let mut watcher = shutdown.clone();
+    tokio::select! {
+        value = work => Some(value),
+        _ = watcher.wait_for(|kind| *kind != ShutdownKind::Running) => None,
+    }
+}
+
+/// Reap `child` and report the shutdown that interrupted a restart.
+async fn shutdown_during_restart(
+    context: &CoordinatorContext,
+    child: RunningChild,
+) -> CoordinatorExit {
+    // Mirrors the shutdown branch above: the child is closed and reaped through the
+    // supervisor rather than left to `Drop`, which would `SIGKILL` a freshly launched
+    // worker instead of honouring `shutdown_grace_seconds`.
+    let supervisor = ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
+    let _ = supervisor.shutdown_all(vec![child]).await;
+    CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+}
+
 async fn restart_after_child_exit(
     child: RunningChild,
     context: &CoordinatorContext,
@@ -876,15 +908,21 @@ async fn restart_after_child_exit(
     crashes: &mut CrashBudget,
 ) -> Result<RunningChild, CoordinatorExit> {
     context.endpoints.unpublish(&context.worker.name);
-    if let Err(error) = set_worker_readiness(
-        context.client.as_ref(),
-        context.node_id,
-        context.incarnation_id,
-        context.worker_id,
-        WorkerReadiness::NotReady,
+    // A readiness update for a worker that is going away is not worth waiting on, and
+    // this call reaches the retrying client. Left unraced, a coordinator blocked here
+    // holds up the whole shutdown tail for the client's full retry budget.
+    let readiness = until_shutdown(
+        shutdown,
+        set_worker_readiness(
+            context.client.as_ref(),
+            context.node_id,
+            context.incarnation_id,
+            context.worker_id,
+            WorkerReadiness::NotReady,
+        ),
     )
-    .await
-    {
+    .await;
+    if let Some(Err(error)) = readiness {
         return Err(CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)));
     }
     // Settling consumes any shutdown notification, so it must be returned
@@ -902,18 +940,27 @@ async fn restart_after_child_exit(
     }
     tokio::time::sleep(RESTART_DELAY).await;
     let spec = child.spec().clone();
-    let restarted = restart_child(context, spec)
-        .await
-        .map_err(|_| CoordinatorExit::RestartExhausted)?;
-    set_worker_readiness(
-        context.client.as_ref(),
-        context.node_id,
-        context.incarnation_id,
-        context.worker_id,
-        WorkerReadiness::Ready,
+    // Restarting a worker the agent is shutting down is wasted work, and an accelerator
+    // launch can take three NVIDIA startup timeouts — minutes the tail cannot absorb.
+    let Some(restarted) = until_shutdown(shutdown, restart_child(context, spec)).await else {
+        return Err(shutdown_during_restart(context, child).await);
+    };
+    let restarted = restarted.map_err(|_| CoordinatorExit::RestartExhausted)?;
+    let readiness = until_shutdown(
+        shutdown,
+        set_worker_readiness(
+            context.client.as_ref(),
+            context.node_id,
+            context.incarnation_id,
+            context.worker_id,
+            WorkerReadiness::Ready,
+        ),
     )
-    .await
-    .map_err(|error| CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)))?;
+    .await;
+    let Some(readiness) = readiness else {
+        return Err(shutdown_during_restart(context, restarted).await);
+    };
+    readiness.map_err(|error| CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)))?;
     publish_child_endpoint(context, &restarted);
     let _ = cancel_tx.send(LeaseCancellation::Running);
     Ok(restarted)

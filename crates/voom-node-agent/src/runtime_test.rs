@@ -2587,3 +2587,44 @@ async fn shutdown_deadline_abandons_a_blocked_deactivation() {
         "a blocked deactivation must report its budget: {error}"
     );
 }
+
+#[tokio::test]
+async fn until_shutdown_returns_the_work_when_no_shutdown_arrives() {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let value = until_shutdown(&shutdown_rx, std::future::ready(7)).await;
+    assert_eq!(value, Some(7), "steady state must not disturb the work");
+}
+
+#[tokio::test]
+async fn until_shutdown_abandons_the_work_once_a_shutdown_is_in_flight() {
+    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    let value = until_shutdown(&shutdown_rx, std::future::pending::<u8>()).await;
+    assert_eq!(
+        value, None,
+        "a blocked call must be released by the shutdown"
+    );
+}
+
+#[tokio::test]
+async fn until_shutdown_leaves_the_original_receivers_notification_unconsumed() {
+    // The load-bearing property. The shutdown value is sent exactly once, and
+    // cancel_and_wait's wait_or_force is deliberately unbounded with
+    // `shutdown.changed()` as its only escape. If until_shutdown marked the value seen
+    // on the caller's receiver, that wait would be stranded for the client's whole
+    // retry budget. It races a clone instead.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+
+    assert_eq!(
+        until_shutdown(&shutdown_rx, std::future::pending::<u8>()).await,
+        None
+    );
+
+    // The original receiver must still observe the change.
+    let still_observable = tokio::time::timeout(Duration::from_secs(1), shutdown_rx.changed())
+        .await
+        .unwrap();
+    assert!(still_observable.is_ok());
+    assert_eq!(*shutdown_rx.borrow(), ShutdownKind::User);
+}
