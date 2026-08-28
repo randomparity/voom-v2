@@ -767,7 +767,7 @@ async fn coordinator_exits_gracefully_then_forced_on_shutdown() {
     forced_tx.send(ShutdownKind::Forced).unwrap();
     assert!(matches!(
         joined.await.unwrap(),
-        CoordinatorExit::Shutdown(LeaseSettlement::Forced)
+        CoordinatorExit::Shutdown(LeaseSettlement::Forced(ShutdownForce::Signal))
     ));
 }
 

@@ -36,8 +36,8 @@ use crate::client::{
     CommitOutcomeUnknownEvidence, CommitReceiptOutcome, OpenCommitIntent, RetryRequest,
 };
 use crate::runtime::{
-    ControlPlaneApi, CoordinatorExit, LeaseSettlement, RuntimeFatal, ShutdownKind, centered_jitter,
-    new_key,
+    ControlPlaneApi, CoordinatorExit, LeaseSettlement, RuntimeFatal, ShutdownForce, ShutdownKind,
+    centered_jitter, new_key,
 };
 
 /// Prefix of the temp-sibling naming ported from the retired host-side
@@ -107,8 +107,10 @@ pub(crate) async fn run_commit_coordinator(
                 } else {
                     *shutdown.borrow()
                 };
+                // A published Forced kind only ever comes from wait_for_coordinators'
+                // signal arm; this coordinator has no budget of its own to expire.
                 return CoordinatorExit::Shutdown(if kind == ShutdownKind::Forced {
-                    LeaseSettlement::Forced
+                    LeaseSettlement::Forced(ShutdownForce::Signal)
                 } else {
                     LeaseSettlement::Completed
                 });

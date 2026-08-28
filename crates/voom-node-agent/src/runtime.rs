@@ -377,12 +377,20 @@ impl AgentRuntime {
             RuntimeExit::Fatal(_) => return Err(exit.into_error()),
             RuntimeExit::RestartExhausted => NodeIncarnationEndReason::ChildRestartExhausted,
         };
-        if progress.forced {
+        // A signal force is the operator saying stop, and skips the write as it always
+        // has. A deadline expiring is not that instruction: the write is what this whole
+        // bound exists to protect, and attempting it costs one more bounded call.
+        if progress.forced == Some(ShutdownForce::Signal) {
             return Err(forced_shutdown_error());
         }
         let mut signal_phase = progress.signal_phase;
         self.deactivate_or_second_signal(incarnation_id, reason, signals, &mut signal_phase)
             .await?;
+        if progress.forced == Some(ShutdownForce::Deadline) {
+            // The write may have landed; the settlement that preceded it did not, so the
+            // agent still exits unsuccessfully and names the budget rather than a signal.
+            return Err(shutdown_deadline_error());
+        }
         match exit {
             RuntimeExit::Graceful => Ok(()),
             RuntimeExit::RestartExhausted => Err(VoomError::ExternalSystemUnavailable(
@@ -807,8 +815,14 @@ async fn run_coordinator(
             }
             CoordinatorEvent::Acquire(Err(error)) => return CoordinatorExit::Fatal(error),
             CoordinatorEvent::Shutdown(kind) => {
-                let settlement =
-                    settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
+                let settlement = settle_leases_for_shutdown(
+                    &cancel_tx,
+                    &mut leases,
+                    &mut shutdown,
+                    kind,
+                    Some(Instant::now() + context.budgets.call),
+                )
+                .await;
                 let supervisor =
                     ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
                 let _ = supervisor.shutdown_all(vec![child]).await;
@@ -859,7 +873,9 @@ async fn restart_after_child_exit(
     }
     // Settling consumes any shutdown notification, so it must be returned
     // instead of falling through to a restart waiting on an observed change.
-    if let Some(settlement) = settle_leases_after_child_crash(cancel_tx, leases, shutdown).await {
+    if let Some(settlement) =
+        settle_leases_after_child_crash(cancel_tx, leases, shutdown, context.budgets.call).await
+    {
         let supervisor =
             ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
         let _ = supervisor.shutdown_all(vec![child]).await;
@@ -1770,33 +1786,54 @@ async fn cancel_and_wait(
     reason: LeaseCancellation,
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
-) -> Option<ShutdownKind> {
+) -> Option<(ShutdownKind, Option<ShutdownForce>)> {
     let _ = cancellation.send(reason);
-    wait_or_force(leases, shutdown, true).await
+    // Deliberately unarmed: this is the one wait that runs in steady state.
+    wait_or_force(leases, shutdown, true, None).await
 }
 
+/// Settle a crashed child's leases, returning the settlement once a shutdown is seen.
+///
+/// Takes `budget` as a `Duration`, not an `Instant`, and stamps the deadline **after**
+/// the first wait. That first wait is `cancel_and_wait`, which is deliberately
+/// unbounded and can run for the client's whole retry budget; a deadline computed by
+/// the caller would reach the second wait already spent, so that wait's budget would be
+/// zero rather than `budget`.
 async fn settle_leases_after_child_crash(
     cancellation: &watch::Sender<LeaseCancellation>,
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
+    budget: Duration,
 ) -> Option<LeaseSettlement> {
     let observed = cancel_and_wait(cancellation, LeaseCancellation::Crash, leases, shutdown).await;
-    let observed = observed?;
+    let (observed, observed_force) = observed?;
+    // Reached only with a shutdown already in flight, so this second wait is a
+    // shutdown-tail wait and takes the budget.
+    let deadline = Some(Instant::now() + budget);
     // Finish settling with the force escape, but do not re-send a cancellation: these
     // leases died with the child, and overwriting `Crash` would record a crashed worker's
     // ticket as user-cancelled.
-    let final_observed = wait_or_force(leases, shutdown, false).await;
-    Some(child_crash_lease_settlement(observed, final_observed))
+    let final_observed = wait_or_force(leases, shutdown, false, deadline).await;
+    Some(child_crash_lease_settlement(
+        observed,
+        observed_force,
+        final_observed,
+    ))
 }
 
 fn child_crash_lease_settlement(
     observed: ShutdownKind,
-    final_observed: Option<ShutdownKind>,
+    observed_force: Option<ShutdownForce>,
+    final_observed: Option<(ShutdownKind, Option<ShutdownForce>)>,
 ) -> LeaseSettlement {
-    if observed == ShutdownKind::Forced || final_observed == Some(ShutdownKind::Forced) {
-        LeaseSettlement::Forced
-    } else {
-        LeaseSettlement::Completed
+    if observed == ShutdownKind::Forced {
+        return LeaseSettlement::Forced(observed_force.unwrap_or(ShutdownForce::Signal));
+    }
+    match final_observed {
+        Some((ShutdownKind::Forced, cause)) => {
+            LeaseSettlement::Forced(cause.unwrap_or(ShutdownForce::Signal))
+        }
+        _ => LeaseSettlement::Completed,
     }
 }
 
@@ -1811,45 +1848,71 @@ fn child_crash_lease_settlement(
 /// only escalates on `Forced`, so it ignores anything else and keeps waiting. Crash
 /// settlement has observed no shutdown at all, so it must report the first one and let the
 /// caller run the real settlement rather than restarting the child.
+///
+/// `deadline` bounds the wait. Only the two callers that run inside a shutdown supply
+/// one; `cancel_and_wait`'s steady-state call passes `None`, because arming it would
+/// terminate a healthy running agent after one slow worker-crash settlement. Expiry
+/// does locally what observing [`ShutdownKind::Forced`] does, and deliberately does
+/// **not** publish on the watch: a coordinator that is not overrunning is not forced.
+///
+/// The second tuple element is itself optional: with `report_any` a kind is reported
+/// without anything having been forced, and there is no cause to name for that.
 async fn wait_or_force(
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
     report_any: bool,
-) -> Option<ShutdownKind> {
+    deadline: Option<Instant>,
+) -> Option<(ShutdownKind, Option<ShutdownForce>)> {
     let observed = {
         let settlement = wait_for_leases(leases);
         tokio::pin!(settlement);
         loop {
             tokio::select! {
                 () = &mut settlement => break None,
+                () = async {
+                    match deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        // No deadline: never ready, so this arm never fires.
+                        None => std::future::pending().await,
+                    }
+                } => break Some((ShutdownKind::Forced, Some(ShutdownForce::Deadline))),
                 changed = shutdown.changed() => {
                     // A closed channel means the runtime is gone: treat it as forced rather
                     // than looping, since `changed()` then returns Err on every poll.
                     let Ok(()) = changed else {
-                        break Some(ShutdownKind::Forced);
+                        break Some((ShutdownKind::Forced, Some(ShutdownForce::Signal)));
                     };
                     let kind = *shutdown.borrow();
-                    if kind == ShutdownKind::Forced
-                        || (report_any && kind != ShutdownKind::Running)
-                    {
-                        break Some(kind);
+                    if kind == ShutdownKind::Forced {
+                        break Some((kind, Some(ShutdownForce::Signal)));
+                    }
+                    if report_any && kind != ShutdownKind::Running {
+                        break Some((kind, None));
                     }
                 }
             }
         }
     };
-    if observed == Some(ShutdownKind::Forced) {
+    if matches!(observed, Some((ShutdownKind::Forced, _))) {
         leases.abort_all();
         wait_for_leases(leases).await;
     }
     observed
 }
 
+/// Settle this coordinator's leases for a shutdown, within `deadline`.
+///
+/// This is the only hop that carries a [`ShutdownForce::Deadline`] out of a
+/// coordinator. Collapsing either arm below to `Signal` would compile, pass, and make
+/// the whole bound a no-op: [`ShutdownProgress::forced`] could then never hold
+/// `Deadline`, and `finish_shutdown_lifecycle` would skip the deactivation the bound
+/// exists to protect.
 async fn settle_leases_for_shutdown(
     cancellation: &watch::Sender<LeaseCancellation>,
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
     kind: ShutdownKind,
+    deadline: Option<Instant>,
 ) -> LeaseSettlement {
     let reason = if kind == ShutdownKind::User {
         LeaseCancellation::User
@@ -1860,15 +1923,17 @@ async fn settle_leases_for_shutdown(
     if kind == ShutdownKind::Forced {
         leases.abort_all();
         wait_for_leases(leases).await;
-        return LeaseSettlement::Forced;
+        // A published Forced kind only ever comes from wait_for_coordinators' signal arm.
+        return LeaseSettlement::Forced(ShutdownForce::Signal);
     }
     // Settlement calls the control plane on every path, not just the user-requested one, so
     // a fenced or restart-exhausted shutdown needs the same force escape. Without it a lease
     // stuck retrying an unreachable control plane hangs the coordinator with no way out.
-    if wait_or_force(leases, shutdown, false).await == Some(ShutdownKind::Forced) {
-        LeaseSettlement::Forced
-    } else {
-        LeaseSettlement::Completed
+    match wait_or_force(leases, shutdown, false, deadline).await {
+        Some((ShutdownKind::Forced, cause)) => {
+            LeaseSettlement::Forced(cause.unwrap_or(ShutdownForce::Signal))
+        }
+        _ => LeaseSettlement::Completed,
     }
 }
 
@@ -1883,14 +1948,14 @@ async fn wait_for_coordinators(
     signals: &mut mpsc::UnboundedReceiver<()>,
     mut signal_phase: ShutdownSignalPhase,
 ) -> Result<ShutdownProgress, VoomError> {
-    let mut forced = false;
+    let mut forced: Option<ShutdownForce> = None;
     let mut signals_open = true;
     while !coordinators.is_empty() {
         tokio::select! {
             joined = coordinators.join_next() => {
                 match joined {
-                    Some(Ok(CoordinatorExit::Shutdown(LeaseSettlement::Forced))) => {
-                        forced = true;
+                    Some(Ok(CoordinatorExit::Shutdown(LeaseSettlement::Forced(cause)))) => {
+                        forced.get_or_insert(cause);
                     }
                     Some(Ok(
                         CoordinatorExit::Shutdown(LeaseSettlement::Completed)
@@ -1905,13 +1970,13 @@ async fn wait_for_coordinators(
                     }
                 }
             }
-            signal = signals.recv(), if signals_open && !forced => {
+            signal = signals.recv(), if signals_open && forced.is_none() => {
                 let Some(()) = signal else {
                     signals_open = false;
                     continue;
                 };
                 if signal_phase.signal_forces() {
-                    forced = true;
+                    forced = Some(ShutdownForce::Signal);
                     let _ = shutdown.send(ShutdownKind::Forced);
                 }
             }
@@ -1987,7 +2052,17 @@ enum ShutdownSignalPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeaseSettlement {
     Completed,
-    Forced,
+    Forced(ShutdownForce),
+}
+
+/// What abandoned a shutdown wait.
+///
+/// Reporting a deadline expiry as "interrupted by a termination signal" would send
+/// an operator looking for a signal nobody sent, so the two travel separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownForce {
+    Signal,
+    Deadline,
 }
 
 impl ShutdownSignalPhase {
@@ -2005,7 +2080,7 @@ impl ShutdownSignalPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ShutdownProgress {
     signal_phase: ShutdownSignalPhase,
-    forced: bool,
+    forced: Option<ShutdownForce>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2140,6 +2215,18 @@ fn random_hex(byte_count: usize) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+/// A shutdown-tail control-plane wait was abandoned at its own budget.
+///
+/// Distinct from [`forced_shutdown_error`] because no signal arrived: an operator
+/// told to look for one would be looking for something nobody sent.
+fn shutdown_deadline_error() -> VoomError {
+    VoomError::ExternalSystemUnavailable(
+        "node-agent shutdown abandoned a control-plane call at its shutdown budget; \
+         the control plane did not answer"
+            .to_owned(),
+    )
 }
 
 fn forced_shutdown_error() -> VoomError {

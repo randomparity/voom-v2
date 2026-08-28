@@ -104,7 +104,7 @@ async fn fatal_reaping_requires_a_genuine_second_signal() {
 
     let progress = reaping.await.unwrap();
     assert_eq!(progress.signal_phase, ShutdownSignalPhase::ForceEnabled);
-    assert!(progress.forced);
+    assert_eq!(progress.forced, Some(ShutdownForce::Signal));
 }
 
 #[tokio::test]
@@ -138,7 +138,7 @@ async fn graceful_reaping_forces_on_its_next_signal() {
 
     let progress = reaping.await.unwrap().unwrap();
     assert_eq!(progress.signal_phase, ShutdownSignalPhase::ForceEnabled);
-    assert!(progress.forced);
+    assert_eq!(progress.forced, Some(ShutdownForce::Signal));
 }
 
 #[test]
@@ -905,6 +905,7 @@ async fn second_signal_interrupts_blocked_settlement_then_reap_completes() {
             &mut leases,
             &mut shutdown_rx,
             ShutdownKind::User,
+            None,
         )
         .await;
         coordinator_control
@@ -918,7 +919,10 @@ async fn second_signal_interrupts_blocked_settlement_then_reap_completes() {
     assert!(Arc::clone(&permits).try_acquire_owned().is_err());
 
     shutdown_tx.send(ShutdownKind::Forced).unwrap();
-    assert_eq!(coordinator.await.unwrap(), LeaseSettlement::Forced);
+    assert_eq!(
+        coordinator.await.unwrap(),
+        LeaseSettlement::Forced(ShutdownForce::Signal)
+    );
     assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
     assert!(permits.try_acquire_owned().is_ok());
 }
@@ -931,7 +935,12 @@ async fn child_crash_shutdown_preserves_forced_final_wait() {
     leases.spawn(std::future::pending());
 
     shutdown_tx.send(ShutdownKind::User).unwrap();
-    let settling = settle_leases_after_child_crash(&cancel_tx, &mut leases, &mut shutdown_rx);
+    let settling = settle_leases_after_child_crash(
+        &cancel_tx,
+        &mut leases,
+        &mut shutdown_rx,
+        Duration::from_hours(1),
+    );
     tokio::pin!(settling);
     tokio::select! {
         biased;
@@ -944,7 +953,7 @@ async fn child_crash_shutdown_preserves_forced_final_wait() {
     shutdown_tx.send(ShutdownKind::Forced).unwrap();
     assert_eq!(
         settling.await,
-        Some(LeaseSettlement::Forced),
+        Some(LeaseSettlement::Forced(ShutdownForce::Signal)),
         "the production crash-settlement handoff must preserve final force"
     );
 }
@@ -952,7 +961,8 @@ async fn child_crash_shutdown_preserves_forced_final_wait() {
 #[tokio::test]
 async fn coordinator_reaping_aggregates_forced_settlement() {
     let mut coordinators = JoinSet::new();
-    coordinators.spawn(async { CoordinatorExit::Shutdown(LeaseSettlement::Forced) });
+    coordinators
+        .spawn(async { CoordinatorExit::Shutdown(LeaseSettlement::Forced(ShutdownForce::Signal)) });
     let (shutdown_tx, _shutdown_rx) = watch::channel(ShutdownKind::Fenced);
     let (_signal_tx, mut signal_rx) = mpsc::unbounded_channel();
 
@@ -966,7 +976,7 @@ async fn coordinator_reaping_aggregates_forced_settlement() {
     .unwrap();
 
     assert_eq!(progress.signal_phase, ShutdownSignalPhase::AwaitingFirst);
-    assert!(progress.forced);
+    assert_eq!(progress.forced, Some(ShutdownForce::Signal));
 }
 
 #[tokio::test]
@@ -994,12 +1004,12 @@ async fn coalesced_forced_shutdown_cancels_before_aborting_leases() {
     let kind = *shutdown_rx.borrow_and_update();
     let settlement = tokio::time::timeout(
         Duration::from_secs(5),
-        settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown_rx, kind),
+        settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown_rx, kind, None),
     )
     .await
     .unwrap();
 
-    assert_eq!(settlement, LeaseSettlement::Forced);
+    assert_eq!(settlement, LeaseSettlement::Forced(ShutdownForce::Signal));
     assert_eq!(
         trace.lock().unwrap().as_slice(),
         &["cancellation-fenced", "task-drop"]
@@ -1048,7 +1058,7 @@ async fn restart_exhausted_deactivation_requires_a_genuine_second_signal() {
         RuntimeExit::RestartExhausted,
         Ok(ShutdownProgress {
             signal_phase: ShutdownSignalPhase::AwaitingFirst,
-            forced: false,
+            forced: None,
         }),
         pending_heartbeat_handle(),
         &mut signal_rx,
@@ -1133,7 +1143,7 @@ async fn fatal_exit_stops_heartbeat_before_return_and_skips_deactivation() {
             RuntimeExit::Fatal(RuntimeFatal::Internal("fatal".to_owned())),
             Ok(ShutdownProgress {
                 signal_phase: ShutdownSignalPhase::ForceEnabled,
-                forced: true,
+                forced: Some(ShutdownForce::Signal),
             }),
             heartbeat,
             &mut signal_rx,
@@ -1185,7 +1195,7 @@ async fn settling_a_crash_reports_a_shutdown_it_consumed() {
         settled.is_ok(),
         "crash settlement swallowed the shutdown instead of reporting it"
     );
-    assert_eq!(settled.unwrap(), Some(ShutdownKind::User));
+    assert_eq!(settled.unwrap(), Some((ShutdownKind::User, None)));
     leases.abort_all();
 }
 
@@ -2377,4 +2387,150 @@ fn the_published_tail_bound_is_the_sum_of_every_inner_bound_plus_margin() {
         Duration::from_secs(86)
     );
     assert!(budgets.tail(Duration::from_secs(60)) < Duration::from_secs(90));
+}
+
+/// A lease `JoinSet` whose one task never finishes, with its cancellation and
+/// shutdown channels. The `Sender` halves are returned so a test can publish a
+/// kind and keep the channels open.
+fn never_settling_leases() -> (
+    watch::Sender<LeaseCancellation>,
+    JoinSet<()>,
+    watch::Sender<ShutdownKind>,
+    watch::Receiver<ShutdownKind>,
+) {
+    leases_settling_after(None)
+}
+
+/// The same, with the one lease task finishing after `after` (or never, on `None`).
+fn leases_settling_after(
+    after: Option<Duration>,
+) -> (
+    watch::Sender<LeaseCancellation>,
+    JoinSet<()>,
+    watch::Sender<ShutdownKind>,
+    watch::Receiver<ShutdownKind>,
+) {
+    let (cancel_tx, _cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let mut leases = JoinSet::new();
+    match after {
+        Some(delay) => leases.spawn(async move { tokio::time::sleep(delay).await }),
+        None => leases.spawn(std::future::pending()),
+    };
+    (cancel_tx, leases, shutdown_tx, shutdown_rx)
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_deadline_forces_blocked_lease_settlement() {
+    let (_cancel_tx, mut leases, _shutdown_tx, mut shutdown_rx) = never_settling_leases();
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    let observed = wait_or_force(&mut leases, &mut shutdown_rx, false, Some(deadline)).await;
+
+    assert_eq!(
+        observed,
+        Some((ShutdownKind::Forced, Some(ShutdownForce::Deadline))),
+        "an overrunning settlement must be abandoned at its own budget, and say so"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_crash_settlement_path_is_not_armed() {
+    // An unarmed wait must settle whatever the clock does. Arming the steady-state
+    // crash path would terminate a healthy running agent after one slow settlement.
+    let (_cancel_tx, mut leases, _shutdown_tx, mut shutdown_rx) =
+        leases_settling_after(Some(Duration::from_mins(1)));
+
+    let observed = wait_or_force(&mut leases, &mut shutdown_rx, false, None).await;
+
+    assert_eq!(observed, None, "an unarmed wait must settle, not force");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_crash_settlement_budget_starts_when_its_own_wait_does() {
+    // Regression for a deadline stamped too early. settle_leases_after_child_crash
+    // waits twice: the first wait is unbounded and can run long, and only the second
+    // takes the budget. A budget stamped before the first wait arrives at the second
+    // already spent. Here the first wait runs 20s and the leases settle 20s after
+    // that, so a 30s budget measured from the second wait is ample — and a 30s budget
+    // measured from the call is already gone.
+    let (cancel_tx, mut leases, shutdown_tx, mut shutdown_rx) =
+        leases_settling_after(Some(Duration::from_secs(40)));
+
+    // The sender stays in scope: dropping it would close the watch, which
+    // `wait_or_force` treats as forced, and the test would pass for the wrong reason.
+    let settling = settle_leases_after_child_crash(
+        &cancel_tx,
+        &mut leases,
+        &mut shutdown_rx,
+        Duration::from_secs(30),
+    );
+    tokio::pin!(settling);
+    tokio::select! {
+        settlement = &mut settling => panic!("settled before any shutdown: {settlement:?}"),
+        () = tokio::time::sleep(Duration::from_secs(20)) => {}
+    }
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    let settlement = settling.await;
+
+    assert_eq!(
+        settlement,
+        Some(LeaseSettlement::Completed),
+        "a 30s budget must still be 30s when the second wait starts, not zero"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deadline_forced_settlement_reports_deadline() {
+    // Obtained from the code under test, not hand-constructed. The feature is
+    // nullified if settle_leases_for_shutdown collapses every force to Signal, and a
+    // hand-built ShutdownProgress cannot see that.
+    let (cancel_tx, mut leases, _shutdown_tx, mut shutdown_rx) = never_settling_leases();
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    let settlement = settle_leases_for_shutdown(
+        &cancel_tx,
+        &mut leases,
+        &mut shutdown_rx,
+        ShutdownKind::User,
+        Some(deadline),
+    )
+    .await;
+
+    assert_eq!(
+        settlement,
+        LeaseSettlement::Forced(ShutdownForce::Deadline),
+        "a settlement abandoned at its budget must not report itself as a signal force"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deadline_forced_settlement_still_deactivates() {
+    let control = Arc::new(FakeControlPlane::default());
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (_signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+
+    let error = runtime
+        .finish_shutdown_lifecycle(
+            incarnation(),
+            RuntimeExit::Graceful,
+            Ok(ShutdownProgress {
+                signal_phase: ShutdownSignalPhase::ForceEnabled,
+                forced: Some(ShutdownForce::Deadline),
+            }),
+            pending_heartbeat_handle(),
+            &mut signal_rx,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("shutdown budget"),
+        "must name the budget, not a signal nobody sent: {error}"
+    );
+    assert_eq!(
+        control.events.lock().await.as_slice(),
+        &["deactivate"],
+        "the Retired write is what the bound exists to protect"
+    );
 }
