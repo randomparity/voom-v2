@@ -36,11 +36,11 @@ Each requirement traces to the frozen scope charter on issue #452.
 
 | # | Requirement | Source |
 |---|---|---|
-| R1 | A single shutdown signal makes the shutdown tail complete or abandon within a bounded, documented wall-clock deadline shorter than systemd's upstream 90 s `DefaultTimeoutStopSec`. | charter criterion 1 |
+| R1 | A single shutdown signal makes the shutdown tail complete or abandon within a bounded, documented wall-clock deadline shorter than systemd's upstream 90 s `DefaultTimeoutStopSec`. **Residual:** the worst case is 81 s, so on a platform whose default is lower — Fedora ships 45 s — every `shutdown_grace_seconds` above 24 still exceeds it and is still `SIGKILL`ed with the write skipped. Accepted and recorded in ADR 0088; narrowing the validator was considered and rejected there. | charter criterion 1 |
 | R2 | When deactivation completes inside the deadline, the incarnation still reaches `Retired` with `GracefulShutdown`, and the settlement → child-reaping → deactivation ordering is preserved. | charter criterion 2 |
 | R3 | When the deadline expires, the agent exits promptly and reports the missed deactivation as an error naming the deadline, not a signal that did not arrive. | charter criterion 3; `AGENTS.md` Rule 12 |
 | R4 | The second-signal force path keeps working unchanged. | charter criterion 4 |
-| R5 | A deterministic regression fails against the pre-change behaviour. | charter criterion 5; `AGENTS.md` Rule 9 |
+| R5 | A deterministic regression fails against the pre-change behaviour. Only a test that *compiles* against the pre-change tree can supply this: a test naming a new type or parameter fails to build, which is different evidence. | charter criterion 5; `AGENTS.md` Rule 9 |
 | R6 | `just ci` is green. | charter criterion 6 |
 
 Out of scope, per the charter's exclusions: any control-plane or `voom-store`
@@ -93,22 +93,37 @@ async fn wait_or_force(
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
     report_any: bool,
-    deadline: Option<Instant>,          // new
-) -> Option<(ShutdownKind, ShutdownForce)>
+    deadline: Option<Instant>,                        // new
+) -> Option<(ShutdownKind, Option<ShutdownForce>)>    // was Option<ShutdownKind>
 ```
 
-`settle_leases_for_shutdown` passes `Some(Instant::now() + SHUTDOWN_CALL_DEADLINE)`
-at `runtime.rs:1798`. The two crash-path call sites — `:1705` and `:1718`, both
-inside `settle_leases_after_child_crash` — pass `None`. Expiry aborts the lease
-tasks and returns forced, exactly as observing `ShutdownKind::Forced` does; it
-does **not** publish on the watch, so it does not force coordinators that are not
-overrunning.
+The second tuple element is itself optional because `report_any = true` returns
+`Some(kind)` for any observed kind *without having forced anything* — leases are
+not aborted, and `child_crash_lease_settlement` (`runtime.rs:1725-1733`) maps that
+observation to `LeaseSettlement::Completed`. There is no `ShutdownForce` to report
+in that case.
+
+Two of the three call sites supply a deadline:
+
+- `:1798`, inside `settle_leases_for_shutdown` — `Some(Instant::now() + SHUTDOWN_CALL_DEADLINE)`.
+- `:1718`, the second wait in `settle_leases_after_child_crash` — also `Some(…)`.
+  It looks like a crash-path wait and is not one: the function short-circuits at
+  `let observed = observed?;` (`:1714`), so `:1718` is reached only when a
+  shutdown is already in flight. It is a shutdown-tail wait, and it reaches the
+  retrying client, so leaving it unbounded would be a 153.75 s hole.
+- `:1705`, inside `cancel_and_wait` (`:1698-1706`) — `None`. This is the only
+  genuinely steady-state site. The parameter threads through `cancel_and_wait`'s
+  signature to reach it.
+
+Expiry aborts the lease tasks and returns forced, exactly as observing
+`ShutdownKind::Forced` does; it does **not** publish on the watch, so it does not
+force coordinators that are not overrunning.
 
 Two placements are ruled out, and each rules itself out for a different reason.
 
-*Arming `wait_or_force` unconditionally* arms all three call sites. The crash-path
-two run from `restart_after_child_exit` (`:771-796`) during ordinary operation, so
-a slow settlement after one worker crash would fold a `Forced` settlement into
+*Arming `wait_or_force` unconditionally* arms `:1705` as well, and that one runs
+from `restart_after_child_exit` (`:771-796`) during ordinary operation, so a slow
+settlement after one worker crash would fold a `Forced` settlement into
 `progress.forced` and terminate a healthy, running agent.
 
 *Putting the budget in `wait_for_coordinators`* — one arm mirroring the signal arm
@@ -138,30 +153,60 @@ before any shutdown tail exists.
 
 `tokio::time::Instant` throughout, so a paused-clock test advances them.
 
-### The coordinator wait that does not observe the shutdown
+### The waits that do not observe the shutdown, and the backstop
 
-The bound assumes every coordinator either finishes or is released once a
-shutdown begins. One does not. `restart_after_child_exit` awaits
-`set_worker_readiness` bare at `runtime.rs:781-790`, with no `select!` against
-the shutdown receiver, and that call goes through the retrying client — up to
-`production_request_budget()` = 153.75 s.
+The per-wait budgets bound the two waits the tail is *supposed* to spend its time
+in. They do not bound a wait nobody raced against the shutdown receiver, and
+`restart_after_child_exit` (`runtime.rs:772-819`) holds three:
 
-Reachable sequence: a worker child crashes; its coordinator blocks in that call
-against a control plane that has stopped answering; the operator sends `SIGTERM`.
-`wait_for_coordinators` cannot finish until the retry budget drains, so the tail
-runs ~154 s regardless of every budget above — past both the upstream 90 s and
-this host's 45 s — and the incarnation is left un-retired. That is #452's
-exposure, in the charter's own scenario.
+| Wait | Location | Unbounded cost |
+|---|---|---|
+| `set_worker_readiness(NotReady)` | `:781-790` | `production_request_budget()` = 153.75 s |
+| `restart_child` | `:804-806` | `RESTART_LIMIT` = 3 attempts × `startup_deadline.timeout(...)`; `STARTUP_TIMEOUT` 10 s, but `NVIDIA_STARTUP_TIMEOUT` 5 min (`child.rs:22-24`, `:247-250`) — up to ~15 min |
+| `set_worker_readiness(Ready)` | `:807-815` | `production_request_budget()` = 153.75 s |
 
-The readiness call is therefore raced against the shutdown receiver, the way the
-main coordinator loop already races its work at `:704-717`. A readiness update
-for a worker that is going away is not worth waiting on, and the shutdown
-handling immediately below it (`:793-798`) is where the coordinator then goes.
-The existing comment there — "Settling consumes any shutdown notification, so it
-must be returned instead of falling through to a restart" — is the constraint to
-respect: the observation must not be consumed in a way that leaves
-`settle_leases_after_child_crash` unable to see it. This changes nothing while no
-shutdown is in progress, because the receiver never fires.
+The coordinator does not consult the shutdown receiver again until it returns to
+the select at `:703-717`, so a `SIGTERM` landing anywhere in that window is not
+observed until the whole sequence drains — and `wait_for_coordinators` waits for
+every coordinator. On a node with an NVIDIA worker that crashed just before the
+signal, the tail is minutes, whatever the budgets above say.
+
+**Two responses, and both are needed.**
+
+*Race the readiness calls.* Both `set_worker_readiness` calls are raced against
+the shutdown receiver, the way the main coordinator loop already races its work
+at `:704-717`. A readiness update for a worker that is going away is not worth
+waiting on, and the shutdown handling immediately below (`:793-798`) is where the
+coordinator then goes. The existing comment there — "Settling consumes any
+shutdown notification, so it must be returned instead of falling through to a
+restart" — is the constraint to respect: the observation must not be consumed in
+a way that leaves `settle_leases_after_child_crash` unable to see it. This
+changes nothing while no shutdown is in progress, because the receiver never
+fires. `restart_child` is covered by the same race, since a shutdown observed
+before it starts returns rather than restarting.
+
+*Back the whole tail with a timeout.* Racing the waits I found is a claim that I
+found them all, and three review passes each found another. So
+`run_with_seeded_shutdowns` wraps its tail — `wait_for_coordinators` through
+`finish_shutdown_lifecycle` — in
+
+```rust
+tokio::time::timeout(shutdown_tail_budget(grace), tail).await
+```
+
+where `shutdown_tail_budget(grace) = 2 * SHUTDOWN_CALL_DEADLINE + grace + REAP_AFTER_KILL`
+— exactly the published total — returning `shutdown_deadline_error()` on expiry.
+Dropping that future drops the coordinator `JoinSet`, which aborts its tasks; a
+`RunningChild` aborted mid-reap is `start_kill`ed by its own `Drop`
+(`child.rs:216-231`), so no child is left un-signalled.
+
+Sizing it at exactly the sum is what keeps it a backstop rather than the
+mechanism: every inner bound expires strictly first, so an ordinary overrun is
+still attributed to the wait that caused it and still leaves the deactivation its
+own budget. The backstop fires only when an inner bound did not hold, which is a
+defect and is reported as one. What it buys is that the number the runbook
+publishes is an upper bound on the process, not on the waits this design happened
+to enumerate.
 
 ### What a deadline force does at `runtime.rs:315`
 
@@ -278,7 +323,11 @@ surface by explicit maintainer decisions on 2026-08-28, recorded in the amended
 | Settlement completes, deactivation blocked | The deactivation arm fires at its own budget and returns `shutdown_deadline_error()` directly. |
 | Second signal arrives before either budget | Unchanged: `forced_shutdown_error()`. |
 | Deactivation slower than 10 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
-| Worker crashes, then a shutdown arrives while its readiness update is blocked | `restart_after_child_exit`'s readiness call is released by the shutdown receiver instead of draining the retry budget. |
+| Worker crashes, then a shutdown arrives while its readiness update is blocked | `restart_after_child_exit`'s readiness calls are released by the shutdown receiver instead of draining the retry budget. |
+| Worker crashes, shutdown arrives mid-restart of an NVIDIA worker | Same race releases it; the 5-minute startup timeout is never entered, because a shutdown observed first returns instead of restarting. |
+| Second signal arrives after a deadline force is already recorded | The signal arm is disabled by its existing `!forced` guard, so the signal is consumed later in `deactivate_or_second_signal`. Outcome unchanged (`forced_shutdown_error()`, write skipped); latency is up to one budget plus a reap. Stated in ADR 0088. |
+| `shutdown_grace_seconds` above 24 on a 45 s stop timeout | The tail can exceed the platform default, `SIGKILL` lands, the write is skipped. #452's exposure, unfixed, inside the accepted configuration range. The runbook publishes the arithmetic so an operator can avoid it. |
+| An unraced wait not enumerated here | The tail backstop fires at the published total, aborts the coordinators (children `start_kill`ed by `Drop`), and returns `shutdown_deadline_error()`. |
 | Child does not die on `SIGKILL` (uninterruptible sleep) | The post-kill wait is abandoned at `REAP_AFTER_KILL`; `shutdown` returns a `ChildError` naming the child, which its caller discards. The agent exits; the process is reparented to init. |
 
 ## Testing
@@ -294,22 +343,38 @@ satisfied: the file references neither `SqlitePool` nor the exact identifier
 |---|---|---|---|
 | `shutdown_deadline_abandons_a_blocked_deactivation` | `runtime_test.rs` | R3, R5 | A gated `deactivate` that never returns yields `shutdown_deadline_error()`, wrapped in a `tokio::time::timeout` well past the budget so the pre-change build fails on `Elapsed` rather than hanging. |
 | `shutdown_deadline_forces_blocked_lease_settlement` | `runtime_test.rs` | R1, R5 | `wait_or_force` with a deadline, against leases that never settle, aborts them and reports `Deadline`; `settle_leases_for_shutdown` returns `LeaseSettlement::Forced(ShutdownForce::Deadline)`. |
-| `a_crashed_worker_release_does_not_wait_out_the_retry_budget` | `runtime_test.rs` | R1 | With `set_worker_readiness` gated the way `deactivate_gate` gates deactivation, a crashed child and then a shutdown releases `restart_after_child_exit` instead of draining `production_request_budget()`. This is the regression for the unobserved coordinator wait. |
+| `a_crashed_worker_release_does_not_wait_out_the_retry_budget` | `runtime_test.rs` | R1, **R5** | With `set_worker_readiness` gated the way `deactivate_gate` gates deactivation, a crashed child and then a shutdown releases `restart_after_child_exit` instead of draining `production_request_budget()`. This is the regression for the unobserved coordinator wait. |
 | `the_crash_settlement_path_is_not_armed` | `runtime_test.rs` | R1 | `settle_leases_after_child_crash` with a settlement far longer than `SHUTDOWN_CALL_DEADLINE` completes normally and does not force. This is the regression for the steady-state contamination that kept the budget out of `wait_or_force`. |
 | `a_settlement_deadline_expiry_reports_the_deadline_not_a_signal` | `runtime_test.rs` | R3 | `finish_shutdown_lifecycle` given `forced: Some(ShutdownForce::Deadline)` returns `shutdown_deadline_error()`, not `forced_shutdown_error()`. The mapping at `runtime.rs:315` is the reason the field is widened, so it gets its own test. |
 | `a_second_signal_still_outranks_the_shutdown_deadline` | `runtime_test.rs` | R4 | With a budget far in the future, a second signal still produces `forced_shutdown_error()` — the deadline did not replace the escape. |
+| `a_second_signal_after_a_deadline_force_still_forces` | `runtime_test.rs` | R4 | The deadline-then-signal ordering the previous test cannot reach: a `Deadline` force is recorded, then a second signal arrives, and the run still ends in `forced_shutdown_error()` with the write skipped. Asserts the outcome R4 protects, not the latency, which the failure-mode table records as changed. |
+| `the_tail_backstop_bounds_an_unraced_wait` | `runtime_test.rs` | R1 | A coordinator parked in a wait no receiver races still lets `run_with_seeded_shutdowns` return `shutdown_deadline_error()` at `shutdown_tail_budget(grace)`. Drives the backstop directly rather than relying on the enumeration above being complete. |
 | `a_full_shutdown_grace_is_not_a_forced_shutdown` | `runtime_test.rs` | R2 | A coordinator whose settlement is instant but whose reap outlasts `SHUTDOWN_CALL_DEADLINE` is **not** forced: the incarnation retires and `run_with_seeded_shutdowns` returns `Ok(())`. Nothing times the reap, and a routine stop must not exit non-zero. |
 | `a_deadline_forced_settlement_still_deactivates` | `runtime_test.rs` | R2, R3 | `finish_shutdown_lifecycle` given `forced: Some(ShutdownForce::Deadline)` deactivates, retires the incarnation, and *then* returns `shutdown_deadline_error()`. |
 | `an_unkillable_child_is_abandoned_at_the_reap_bound` | `child_test.rs` | R1 | A child that survives its grace and cannot be reaped inside the bound makes `shutdown` return a `ChildError` naming it rather than pending. An unkillable process cannot be constructed portably, so the test drives a near-zero bound instead, proving the timeout is wired rather than proving the kernel case. That needs a seam: `ChildSupervisor::with_timeouts` (`child.rs:276`, already `#[cfg(all(test, target_os = \"linux\"))]`) gains a reap parameter, and `RunningChild::shutdown` takes the bound as an argument beside `grace` rather than reading the constant directly. |
 | the shutdown rung | `tests/budget_ladder.rs` | R1 | `SHUTDOWN_CALL_DEADLINE` is below `production_request_budget()` — the named inversion — and `2 × SHUTDOWN_CALL_DEADLINE + 60 + REAP_AFTER_KILL` is under 90 s. Both constants are `pub` (`runtime::SHUTDOWN_CALL_DEADLINE`, `child::REAP_AFTER_KILL`) so this integration test reads them the way it already reads `client::REQUEST_TIMEOUT`. |
 
+Only two of these run red rather than failing to compile against the pre-change
+tree, and they are the ones R5 rests on:
+`shutdown_deadline_abandons_a_blocked_deactivation` (existing API plus the
+existing `deactivate_gate`, wrapped in an outer `tokio::time::timeout`, so it
+fails on `Elapsed`) and `a_crashed_worker_release_does_not_wait_out_the_retry_budget`
+(existing API plus one new gate on the fake; pre-change it drains the retry
+budget and exits `CoordinatorExit::Fatal`). Every other test names a type or
+parameter this change introduces, so pre-change it does not build — real coverage
+of the new behaviour, but not evidence for R5.
+
 The existing second-signal tests
 (`second_signal_interrupts_deactivation_only_after_reap`,
 `second_signal_interrupts_a_non_graceful_deactivation`,
 `restart_exhausted_deactivation_requires_a_genuine_second_signal`) get a
-far-future budget so the signal remains the cause under test. The five existing
-sites that read or construct `ShutdownProgress.forced` (`runtime_test.rs:107`,
-`:141`, `:969`, `:1051`, `:1136`) change with the field's type.
+far-future budget so the signal remains the cause under test. Two type changes ripple beyond the runtime. `ShutdownProgress.forced` becoming
+`Option<ShutdownForce>` touches `runtime_test.rs:107`, `:141`, `:969`, `:1051`
+and `:1136`. `LeaseSettlement::Forced` gaining a payload touches
+`child_crash_lease_settlement`'s construction of it (`runtime.rs:1725-1733`) and
+`runtime_test.rs:921`, `:947`, `:955`, `:1002`. The crash path is unarmed, so
+every construction there is `ShutdownForce::Signal`. The compiler finds all of
+them; they are listed so the change's size is not a surprise mid-build.
 
 R6 is `just ci`. Two things about it are specific to this change.
 

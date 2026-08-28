@@ -95,17 +95,43 @@ Both are `VoomError::ExternalSystemUnavailable`, so the exit code on a genuine
 failure is unchanged. The startup-failure deactivations take the same budget;
 they call the same function and were unbounded for the same reason.
 
-**One coordinator wait does not observe the shutdown, and it has to.** The bound
-above assumes every coordinator either finishes or is released once a shutdown
-begins. `restart_after_child_exit` breaks that: it awaits `set_worker_readiness`
-bare at `:781-790`, with no `select!` against the shutdown receiver. A worker
-crashes, its coordinator blocks there against a control plane that has stopped
-answering, the operator sends `SIGTERM` — and `wait_for_coordinators` cannot
-finish until the client's full 153.75 s retry budget drains, past every stop
-timeout in play. So that call is raced against the shutdown receiver, the way the
-main coordinator loop already races its work at `:704-717`: a readiness update
-for a worker that is going away is not worth waiting on, and the existing
-shutdown handling immediately below it is where the coordinator then goes.
+**A backstop makes the published total true by construction, because
+enumerating every wait is not something this record can promise.** The budgets
+above bound the two waits the tail is *supposed* to spend its time in. They do
+not bound a wait nobody raced against the shutdown receiver, and the review of
+this design found three: `settle_leases_after_child_crash`'s second
+`wait_or_force` (`runtime.rs:1718`), which reaches the retrying client; and,
+inside `restart_after_child_exit`, `restart_child` (`:804-806` — up to
+`RESTART_LIMIT` attempts of `NVIDIA_STARTUP_TIMEOUT`, five minutes each,
+`child.rs:22-24`) and the `Ready` readiness update at `:807-815`. Each was found
+by reading further, not by a rule, and the next one would be found the same way.
+
+So `run_with_seeded_shutdowns` wraps its whole tail — `wait_for_coordinators`
+through `finish_shutdown_lifecycle` — in a `tokio::time::timeout` equal to the
+published total, `2 × SHUTDOWN_CALL_DEADLINE + shutdown_grace_seconds +
+REAP_AFTER_KILL`, and returns `shutdown_deadline_error()` on expiry. Dropping
+that future drops the coordinator `JoinSet`, which aborts its tasks; a
+`RunningChild` aborted mid-reap is `start_kill`ed by its own `Drop`
+(`child.rs:216-231`), so no child is left un-signalled.
+
+The backstop is not the mechanism, and sizing it at exactly the sum is what keeps
+it from becoming one: every inner bound expires strictly first, so an ordinary
+overrun is still attributed to the wait that caused it and still leaves the
+deactivation its own budget. The backstop fires only when an inner bound did not
+hold — which is a defect, reported as one. What it buys is that the number in the
+runbook is an upper bound on the process, rather than an upper bound on the waits
+this record happened to enumerate.
+
+Two of those three waits are still raced directly, because a backstop that fires
+is a worse outcome than one that does not. `restart_after_child_exit`'s readiness
+calls are raced against the shutdown receiver, the way the main coordinator loop
+already races its work at `:704-717` — a readiness update for a worker that is
+going away is not worth waiting on, and the shutdown handling immediately below
+is where the coordinator then goes. And `:1718` takes the settlement budget:
+`settle_leases_after_child_crash` short-circuits at `let observed = observed?;`
+(`:1714`), so that second wait runs *only* when a shutdown is already in flight.
+It is a shutdown-tail wait, not a steady-state one. Only `:1705`, inside
+`cancel_and_wait`, is genuinely steady-state and stays unbounded.
 
 **10 s is derived from the guard the change has to prove itself under.**
 `crates/voom-node-agent/tests/lifecycle.rs:47` holds `HANG_GUARD` at 30 s, [ADR
@@ -195,6 +221,20 @@ than being as tight as the ceiling allows.
 Settlement being concurrent keeps its own budget generous: the coordinators run
 as a `JoinSet` and each settles its own leases as another, so settlement's wall
 clock is the slowest lease's, not the sum over up to 64 workers.
+
+**A second signal arriving after a deadline force is absorbed rather than
+immediate.** `wait_for_coordinators`' signal arm is guarded `signals_open &&
+!forced` (`runtime.rs:1838`), and today only a signal can force, so "first force
+wins" and "the signal wins" are the same sentence. They stop being the same once
+a `Deadline` force exists: with one recorded, the arm is disabled, so a genuine
+second signal is no longer consumed there and no longer publishes
+`ShutdownKind::Forced`. The remaining coordinators run out their own settlement
+budgets and their reaps before the queued signal is consumed in
+`deactivate_or_second_signal`. The end state is unchanged — `forced_shutdown_error()`,
+write skipped — but the operator's second signal is delayed by up to one budget
+plus a reap instead of acting at once. Criterion 4 holds for the outcome and not
+for the latency, and that distinction is stated here rather than left for an
+operator to discover.
 
 **An unreaped child is silent.** `shutdown_all` returns a `ChildError`, but both
 shutdown-path callers discard it (`let _ = supervisor.shutdown_all(…)`,
