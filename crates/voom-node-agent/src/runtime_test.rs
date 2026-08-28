@@ -2643,3 +2643,135 @@ async fn the_tail_backstop_bounds_a_wait_no_inner_budget_covers() {
         "the backstop must name itself as a defect, not reuse the deadline message: {error}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn wait_for_coordinators_does_not_time_the_reap() {
+    // R2's regression. Nothing may put a wall clock over the coordinator join: a
+    // coordinator does not return until its child reap has finished, so a deadline here
+    // would mark a routine stop forced whenever a worker used its grace — and since
+    // main returns Result, that stop would exit FAILURE and leave the unit in `failed`.
+    // This is why the settlement budget lives in wait_or_force. See ADR 0088.
+    let mut coordinators = JoinSet::new();
+    coordinators.spawn(async {
+        tokio::time::sleep(Duration::from_mins(5)).await;
+        CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+    });
+    let (shutdown_tx, _shutdown_rx) = watch::channel(ShutdownKind::User);
+    let (_signal_tx, mut signals) = mpsc::unbounded_channel();
+
+    let progress = wait_for_coordinators(
+        &mut coordinators,
+        &shutdown_tx,
+        &mut signals,
+        ShutdownSignalPhase::ForceEnabled,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        progress.forced, None,
+        "a slow reap must not be a forced shutdown"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_signal_after_a_deadline_force_still_forces() {
+    // R4 is the one criterion this change narrows: ratified as unchanged in outcome,
+    // explicitly changed in latency. A deadline force is recorded first, so the signal
+    // arm's existing guard holds the first force — the operator's signal is consumed
+    // later, in deactivate_or_second_signal, rather than here.
+    let mut coordinators = JoinSet::new();
+    // One coordinator forces on its own budget straight away; a second is still
+    // reaping. The signal arrives only after the first has been recorded, which is the
+    // ordering this test is about — queueing both up front would race the select arms.
+    coordinators.spawn(async {
+        CoordinatorExit::Shutdown(LeaseSettlement::Forced(ShutdownForce::Deadline))
+    });
+    coordinators.spawn(async {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+    });
+    let (shutdown_tx, _shutdown_rx) = watch::channel(ShutdownKind::User);
+    let (signal_tx, mut signals) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _ = signal_tx.send(());
+    });
+
+    let progress = wait_for_coordinators(
+        &mut coordinators,
+        &shutdown_tx,
+        &mut signals,
+        ShutdownSignalPhase::ForceEnabled,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        progress.forced,
+        Some(ShutdownForce::Deadline),
+        "first force recorded wins, exactly as before this change"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sigterm_exits_the_agent_when_the_control_plane_never_answers() {
+    // The charter's scenario end to end: one shutdown request, a control plane that
+    // never answers the deactivation, and an agent that must still exit.
+    //
+    // Deliberately built from names that predate this change — with_client,
+    // run_with_shutdowns, deactivate_gate — so it compiles against the pre-change tree
+    // and fails there on Elapsed. That is what makes it R5 evidence rather than
+    // coverage, and it is why it takes the default budgets and costs about 10s.
+    let fixture = ProcessWorkerFixture::new();
+    let control = Arc::new(FakeControlPlane::default());
+    // Never notified: the control plane does not answer.
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let runtime = AgentRuntime::with_client(
+        loaded_config_with_worker(fixture.worker(1)),
+        control.clone(),
+    );
+    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+    let running = tokio::spawn(async move { runtime.run_with_shutdowns(signal_rx).await });
+
+    let server = fixture.start_pending_server().await;
+    // Wait until the worker is ready, so the signal reaches the coordinator loop rather
+    // than the activation-retry path, which exits successfully by design.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if control
+                .events
+                .lock()
+                .await
+                .iter()
+                .any(|event| event == "readiness:ready")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    signal_tx.send(()).unwrap();
+
+    // Far above the 86s tail, so pre-change this fails on Elapsed rather than hanging
+    // the suite; post-change it returns at about one call budget.
+    let error = tokio::time::timeout(Duration::from_mins(2), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("shutdown budget"),
+        "the agent must exit naming the budget it gave up at: {error}"
+    );
+    assert_eq!(
+        control.deactivate_started_count.load(Ordering::SeqCst),
+        1,
+        "and it must have tried to retire the incarnation"
+    );
+    server.stop().await;
+}
