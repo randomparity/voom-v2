@@ -32,6 +32,12 @@ rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# The acceptance sweep for issue #592 counts the orphan `warn` that
+# voom_store::tx::begin_detached emits when its caller was already cancelled.
+# This binary links no global subscriber otherwise (voom-api's and voom-cli's
+# are in binaries this test does not link), so tracing::warn! would be a no-op
+# and the sweep's grep would return 0 on every run regardless of the code.
+tracing-subscriber = { workspace = true }
 voom-api = { workspace = true, features = ["test"] }
 voom-control-plane = { workspace = true, features = ["test"] }
 voom-store = { workspace = true, features = ["test"] }

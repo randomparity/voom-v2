@@ -46,8 +46,81 @@ use voom_test_support::TempDatabase;
 /// 6-9s loaded ceiling while still surfacing a hang promptly.
 const HANG_GUARD: Duration = Duration::from_secs(30);
 
+/// Install one process-wide `tracing` subscriber so `voom_store`'s warnings reach
+/// this binary's stderr.
+///
+/// Issue #592's acceptance sweep counts the orphan `warn` that
+/// `voom_store::tx::begin_detached` emits when its caller was already cancelled, and
+/// that count is the only evidence for the pool-occupancy residual the detach
+/// introduces. Nothing else installs a subscriber here: `voom-api`'s is in its binary
+/// and `voom-cli`'s in its own, and neither is linked into this test. Without this,
+/// `tracing::warn!` is a no-op that emits no bytes, so the sweep's grep would report
+/// zero orphans on every run whatever the code did — indistinguishable from an
+/// instrument that was never connected.
+///
+/// `OnceLock` rather than a bare `try_init` call so concurrent test entry cannot race,
+/// and a second call is a no-op rather than a panic. The writer is stderr because the
+/// sweep redirects both streams to one log.
+fn init_tracing() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // `voom_store` records are not silenceable from the environment, and dropping
+        // those directives is what makes that true — ordering alone does not.
+        // `EnvFilter::add_directive` replaces only an *exactly equal* target, so
+        // adding `voom_store=warn` last does not beat a `voom_store::tx=error` that
+        // arrived from RUST_LOG: that is a different, strictly more specific
+        // directive, it is inserted alongside rather than replacing, and specificity
+        // wins the match. `begin_detached`'s events carry target `voom_store::tx`,
+        // so the directive an operator debugging #592 would actually type is the one
+        // that gets through. Two earlier versions of this function lost to it — one
+        // by adding `voom_store=warn` first, one by adding it last.
+        //
+        // Silenced, the acceptance sweep reports `orphan_warns=0` on every run
+        // whatever the code does, which reads as "no orphans" rather than "nothing
+        // was listening". That is the zero-forever instrument this function exists to
+        // prevent, reached through the environment rather than the manifest.
+        //
+        // RUST_LOG otherwise applies as usual: `RUST_LOG=debug` still raises the
+        // global level and still lets hyper/rustls records through. That is what
+        // "RUST_LOG may add" means and it is not guarded against here.
+        let mut filter = tracing_subscriber::EnvFilter::default();
+        if let Ok(directives) = std::env::var("RUST_LOG") {
+            for directive in directives.split(',').map(str::trim) {
+                // The target is everything before the first `=` or `[`, so this drops
+                // `voom_store`, `voom_store=error` and `voom_store::tx[span]=off`
+                // alike, without matching an unrelated crate that merely shares the
+                // leading characters.
+                let target = directive
+                    .split(['=', '['])
+                    .next()
+                    .unwrap_or(directive)
+                    .trim_end();
+                if directive.is_empty()
+                    || target == "voom_store"
+                    || target.starts_with("voom_store::")
+                {
+                    continue;
+                }
+                if let Ok(parsed) = directive.parse() {
+                    filter = filter.add_directive(parsed);
+                }
+            }
+        }
+        filter = filter.add_directive(
+            "voom_store=warn"
+                .parse()
+                .expect("voom_store=warn is a valid directive"),
+        );
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
+    });
+}
+
 #[tokio::test]
 async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
+    init_tracing();
     assert_current_agent_version();
     let fixture = LiveFixture::start(None).await;
     let echo_worker = echo_worker_binary();
@@ -227,6 +300,12 @@ struct LiveFixture {
 
 impl LiveFixture {
     async fn start(delay: Option<Arc<DelayedAcquire>>) -> Self {
+        // Every test that starts a live fixture drives the BEGIN IMMEDIATE openers
+        // and can therefore orphan one, so the subscriber is installed here rather
+        // than in a single test. Installed from one test only, it would miss any
+        // orphan produced by a test that libtest happens to run earlier — which is
+        // the same disconnected-instrument defect one scope narrower.
+        init_tracing();
         let database = TempDatabase::new().unwrap();
         let database_url = voom_store::test_support::sqlite_url_for(database.path());
         voom_store::init(&database_url).await.unwrap();
