@@ -294,3 +294,131 @@ async fn bare_begin_immediate_still_leaks_the_write_lock_when_cancelled() {
          re-derive the poll range before trusting the fixed arm"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Orphan arm
+// ---------------------------------------------------------------------------
+
+/// `context` passed by the orphan arm, and the string its captured `warn` is matched
+/// on. It is unique to this arm deliberately: the fixed arm above can also orphan an
+/// open, and these tests share one process and one global subscriber, so matching on
+/// the message alone would let a concurrent arm satisfy this arm's assertion.
+const ORPHAN_CONTEXT: &str = "issue 592 orphan arm";
+
+/// How long the orphan arm gives its caller before cancelling it. Any value below
+/// the pool's 30s `busy_timeout` works: while the holder keeps the write lock the
+/// detached `BEGIN IMMEDIATE` physically cannot return, so the timeout is guaranteed
+/// to fire rather than merely likely to.
+const ORPHAN_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Poll interval while waiting for a captured log line.
+const CAPTURE_POLL: Duration = Duration::from_millis(20);
+
+/// A `tracing` writer that accumulates into a shared buffer the test can read.
+#[derive(Clone, Default)]
+struct CaptureBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureBuffer {
+    type Writer = Self;
+
+    fn make_writer(&self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Install the capture subscriber once and return its buffer.
+///
+/// Global because `tracing`'s dispatcher is, and `with_default` would not work here:
+/// it is thread-local, and the event this arm waits for is emitted from a spawned
+/// task on another worker thread.
+fn capture() -> &'static CaptureBuffer {
+    static CAPTURE: std::sync::OnceLock<CaptureBuffer> = std::sync::OnceLock::new();
+    CAPTURE.get_or_init(|| {
+        let buffer = CaptureBuffer::default();
+        let _ = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_env_filter(tracing_subscriber::EnvFilter::new("voom_store=warn"))
+            .with_ansi(false)
+            .try_init();
+        buffer
+    })
+}
+
+/// Wait for `needle` to appear in the captured log, up to `ceiling`.
+async fn wait_for_captured(needle: &str, ceiling: Duration) -> bool {
+    let deadline = Instant::now() + ceiling;
+    loop {
+        {
+            let bytes = capture().0.lock().unwrap();
+            if String::from_utf8_lossy(&bytes).contains(needle) {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(CAPTURE_POLL).await;
+    }
+}
+
+/// A caller cancelled *during* an open still has its transaction rolled back.
+///
+/// This arm exists because the poll sweep above cannot reach that case, and does not
+/// claim to: after the fix the caller's only await is on the channel, whose only
+/// wakeup fires *after* the open has returned, so every *N* in that sweep cancels a
+/// caller whose transaction is already fully open.
+///
+/// Determinism comes from `SQLite`'s lock rather than from timing. While the holder
+/// keeps the write lock the detached `BEGIN IMMEDIATE` physically cannot return, so
+/// the short timeout is guaranteed to drop the caller mid-open.
+///
+/// Waiting for the `warn` before probing the lock is what makes the arm mean
+/// anything, and it replaces an earlier claim that was measured false. The observer
+/// *can* slip in front of the detached opener — it did 20 times out of 20 — because
+/// the opener parks in `SQLite`'s busy handler, which sleeps. Probing first would
+/// therefore report a takeable lock while the orphan was still queued behind it,
+/// passing for a reason unrelated to the rollback.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_orphaned_open_rolls_itself_back() {
+    capture();
+
+    let database = TempDatabase::new().unwrap();
+    let pool = fresh_initialized_pool_at(database.path()).await.unwrap();
+    warm_up(&pool).await;
+
+    let holder = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+
+    let cancelled =
+        tokio::time::timeout(ORPHAN_TIMEOUT, begin_read_then_write(&pool, ORPHAN_CONTEXT)).await;
+    assert!(
+        cancelled.is_err(),
+        "the open returned while the holder still had the write lock, so this arm \
+         never orphaned anything and proves nothing"
+    );
+
+    holder.rollback().await.unwrap();
+
+    assert!(
+        wait_for_captured(ORPHAN_CONTEXT, FIXED_CEILING).await,
+        "no orphan warning naming {ORPHAN_CONTEXT:?} was captured within \
+         {FIXED_CEILING:?} of the holder releasing the lock; the detached open \
+         never noticed it had been abandoned"
+    );
+
+    assert!(
+        lock_becomes_takeable(database.path(), FIXED_CEILING).await,
+        "the orphaned open logged that it was rolling back, but the write lock was \
+         still held {FIXED_CEILING:?} later"
+    );
+}
