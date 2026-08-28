@@ -36,7 +36,7 @@ Each requirement traces to the frozen scope charter on issue #452.
 
 | # | Requirement | Source |
 |---|---|---|
-| R1 | A single shutdown signal makes the shutdown tail complete or abandon within a bounded, documented wall-clock deadline shorter than systemd's upstream 90 s `DefaultTimeoutStopSec`. **Residual:** the worst case is 81 s, so on a platform whose default is lower — Fedora ships 45 s — every `shutdown_grace_seconds` above 24 still exceeds it and is still `SIGKILL`ed with the write skipped. Accepted and recorded in ADR 0088; narrowing the validator was considered and rejected there. | charter criterion 1 |
+| R1 | A single shutdown signal makes the shutdown tail complete or abandon within a bounded, documented wall-clock deadline shorter than systemd's upstream 90 s `DefaultTimeoutStopSec`. **Residual:** the worst case is 86 s, so on a platform whose default is lower — Fedora ships 45 s — every `shutdown_grace_seconds` above 19 still exceeds it and is still `SIGKILL`ed with the write skipped. Accepted and recorded in ADR 0088; narrowing the validator was considered and rejected there. | charter criterion 1 |
 | R2 | When deactivation completes inside the deadline, the incarnation still reaches `Retired` with `GracefulShutdown`, and the settlement → child-reaping → deactivation ordering is preserved. | charter criterion 2 |
 | R3 | When the deadline expires, the agent exits promptly and reports the missed deactivation as an error naming the deadline, not a signal that did not arrive. | charter criterion 3; `AGENTS.md` Rule 12 |
 | R4 | The second-signal force path keeps working unchanged. | charter criterion 4 |
@@ -368,7 +368,7 @@ that satisfies the ordering.
 
 `docs/runbooks/operator-node-agent.md` told the operator to "Set the supervisor
 stop timeout above the configured shutdown grace". That understates the
-requirement now that the total is `shutdown_grace_seconds + 21`, and a runbook
+requirement now that the total is `shutdown_grace_seconds + 26`, and a runbook
 that fails when followed is a defect. It gets the arithmetic, the note that a
 distribution's default is often below the upstream 90 s (Fedora: 45 s) with the
 command to check, and the sentence that a shutdown blocked on an unresponsive
@@ -396,7 +396,7 @@ surface by explicit maintainer decisions on 2026-08-28, recorded in the amended
 | Worker crashes, then a shutdown arrives while its readiness update is blocked | `restart_after_child_exit`'s readiness calls are released by the shutdown receiver instead of draining the retry budget. |
 | Worker crashes, shutdown arrives mid-restart of an NVIDIA worker | Same race releases it; the 5-minute startup timeout is never entered, because a shutdown observed first returns instead of restarting. |
 | Second signal arrives after a deadline force is already recorded | The signal arm is disabled by its existing `!forced` guard, so the signal is consumed later in `deactivate_or_second_signal`. Outcome unchanged (`forced_shutdown_error()`, write skipped); latency is up to one budget plus a reap. Stated in ADR 0088. |
-| `shutdown_grace_seconds` above 24 on a 45 s stop timeout | The tail can exceed the platform default, `SIGKILL` lands, the write is skipped. #452's exposure, unfixed, inside the accepted configuration range. The runbook publishes the arithmetic so an operator can avoid it. |
+| `shutdown_grace_seconds` above 19 on a 45 s stop timeout | The tail can exceed the platform default, `SIGKILL` lands, the write is skipped. #452's exposure, unfixed, inside the accepted configuration range. The runbook publishes the arithmetic so an operator can avoid it. |
 | An unraced wait not enumerated here | The tail backstop fires at the published total, aborts the coordinators (children `start_kill`ed by `Drop`), and returns `shutdown_deadline_error()`. |
 | Child does not die on `SIGKILL` (uninterruptible sleep) | The post-kill wait is abandoned at `budgets.reap_after_kill`; `shutdown` returns a `ChildError` naming the child, which its caller discards. The agent exits; the process is reparented to init. |
 
