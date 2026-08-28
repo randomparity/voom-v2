@@ -65,17 +65,25 @@ survives into the next) rather than modifying the script.
 
 The compensation is itself constrained by this defect. Because `exec` reparents
 the hogs to init, they are not in the sweep loop's process tree, so the reap has
-to match on the command-line pattern host-wide (`pkill -f 'sh -c while :; do :;
-done'`). That kills *any* concurrent `run-constrained.sh` invocation's load
-generators too, silently. Until the script reaps its own, **no two
-`run-constrained.sh` users can share a host safely** — which is a second reason
-to fix it at the source rather than in every caller.
+to match on the command-line pattern host-wide (`pkill -f '^sh -c while :'`). That
+kills *any* concurrent `run-constrained.sh` invocation's load generators too,
+silently. Until the script reaps its own, **no two `run-constrained.sh` users can
+share a host safely** — which is a second reason to fix it at the source rather
+than in every caller.
+
+The anchor is load-bearing and was found the hard way. `pgrep -f`/`pkill -f` match
+the entire command line of every process, so an unanchored
+`'sh -c while :; do :; done'` also matches the shell running the reap, whose own
+command line contains the pattern as text. Measured with one real hog alive: the
+unanchored form counts **2**, the anchored form **1**. A caller compensating for
+this defect with the unanchored pattern gets a leak guard that fires when nothing
+leaked, and a reaper whose match set includes the process doing the reaping.
 
 ## What would resolve it
 
 `run-constrained.sh` reaps its own hogs on every exit path, plus a
 `run-constrained-selftest` case that spawns under `--load`, returns, and asserts
-no `sh -c while :` process survives. Done when that case fails against the
+no `^sh -c while :` process survives. Done when that case fails against the
 current script and passes against the fixed one.
 
 ## Provenance

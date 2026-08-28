@@ -14,11 +14,80 @@
 //! a fact the author knows while writing it and nothing downstream can recover
 //! cheaply. These names are how that fact is recorded. See [ADR 0086].
 //!
+//! **Opening a `BEGIN IMMEDIATE` transaction is cancellation-safe**: the open runs
+//! to completion whether or not its caller is still waiting, so a cancelled caller
+//! can no longer strand the write lock on a pooled connection. The two openers that
+//! issue a custom statement get that from [`begin_detached`]; the two deferred-`BEGIN`
+//! openers need nothing, because a deferred `BEGIN` takes no lock and the worker's
+//! rendezvous acknowledgement already rolls back a cancelled open. See [ADR 0087].
+//!
 //! [ADR 0083]: https://github.com/randomparity/voom-v2/blob/main/docs/adr/0083-read-then-write-transactions-begin-immediate.md
 //! [ADR 0086]: https://github.com/randomparity/voom-v2/blob/main/docs/adr/0086-transaction-openers-are-named-helpers.md
+//! [ADR 0087]: https://github.com/randomparity/voom-v2/blob/main/docs/adr/0087-cancellation-safe-begin-immediate.md
 
 use sqlx::{Sqlite, SqlitePool, Transaction};
+use tokio::sync::oneshot;
+use tracing::Instrument;
 use voom_core::VoomError;
+
+/// Open a transaction on a detached task and take its result over a channel.
+///
+/// This is the fix for issue #592. `sqlx` 0.8.6's `SqliteTransactionManager::begin`
+/// with a *custom* statement (`sqlx-sqlite-0.8.6/src/transaction.rs:19-30`) runs the
+/// statement on the worker thread — taking `SQLite`'s write lock — and only *then*
+/// awaits `conn.lock_handle()` to confirm `in_transaction()`. A caller dropped in
+/// that window leaves no `Transaction` value, so no `ROLLBACK` is ever queued;
+/// `return_to_pool` (`sqlx-core-0.8.6/src/pool/connection.rs:275-325`) only pings,
+/// so the connection returns to the idle pool still holding the lock and every
+/// subsequent writer blocks until the process exits.
+///
+/// Spawning breaks that: a spawned task outlives the future that spawned it, so a
+/// cancelled caller leaves a task that still constructs the `Transaction` — and then
+/// drops it, which queues the `ROLLBACK` the leak was missing.
+///
+/// The `oneshot` rather than the `JoinHandle` is what lets the detached side notice
+/// it was orphaned and say so. Dropping a `JoinHandle` also detaches and would fix
+/// the leak, but nothing there distinguishes a task whose caller is gone from one
+/// whose caller is still waiting, so there would be no place to log and no
+/// `send`-failure branch for a test to assert on. See ADR 0087.
+async fn begin_detached(
+    pool: &SqlitePool,
+    statement: &'static str,
+    context: &'static str,
+) -> Result<Transaction<'static, Sqlite>, VoomError> {
+    let pool = pool.clone();
+    let (sender, receiver) = oneshot::channel();
+
+    tokio::spawn(
+        async move {
+            let opened = pool.begin_with(statement).await;
+            // `send` returns the value back when the receiver is gone, which is
+            // exactly the orphan case: the caller was cancelled while this open was
+            // in flight. Dropping `unsent` here is what performs the rollback.
+            if let Err(unsent) = sender.send(opened) {
+                match &unsent {
+                    Ok(_) => tracing::warn!(
+                        context,
+                        "transaction open completed after its caller was cancelled; rolling back"
+                    ),
+                    Err(error) => tracing::warn!(
+                        context,
+                        %error,
+                        "transaction open failed for a caller that was already cancelled"
+                    ),
+                }
+            }
+        }
+        // Carry the caller's span so the orphan warning is attributable to the
+        // request that abandoned it rather than appearing at the root.
+        .instrument(tracing::Span::current()),
+    );
+
+    receiver
+        .await
+        .map_err(|e| VoomError::database_context(context, e))?
+        .map_err(|e| VoomError::database_context(context, e))
+}
 
 /// Open a transaction that reads before it writes.
 ///
@@ -37,9 +106,7 @@ pub async fn begin_read_then_write(
     pool: &SqlitePool,
     context: &'static str,
 ) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    pool.begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|e| VoomError::database_context(context, e))
+    begin_detached(pool, "BEGIN IMMEDIATE", context).await
 }
 
 /// Open a transaction whose first statement writes.
@@ -102,7 +169,5 @@ pub async fn begin_serialized_read(
     pool: &SqlitePool,
     context: &'static str,
 ) -> Result<Transaction<'static, Sqlite>, VoomError> {
-    pool.begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|e| VoomError::database_context(context, e))
+    begin_detached(pool, "BEGIN IMMEDIATE", context).await
 }

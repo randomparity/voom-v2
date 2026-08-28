@@ -615,7 +615,11 @@ design's own argument calls inconclusive. A single green `just ci` run does not
 discharge it either, for the reason above: at a 1-in-20-to-30 rate an unthrottled
 green run is indistinguishable from one that never entered the window.
 
-**Cost up front:** the full protocol is up to ~180 instrumented, throttled,
+**Cost up front, measured rather than estimated:** one run of this invocation
+on the design host (48 cores, throttled to `--cpus 0-3 --load 1 --write-bps 40M`)
+takes **~20s** wall clock, so the full protocol is roughly **an hour**, not the
+several this document first assumed. The full protocol is up to ~180 instrumented,
+throttled,
 `--test-threads=1` lifecycle runs. Report both counts either way; anything short
 of the full protocol is reported as what it is.
 
@@ -712,7 +716,7 @@ what the change does to that.
 
   **The trip condition is restated to what the instrument measures.** The charter
   words it as *"more than one concurrent orphan in any run"*. A `grep -c` over a
-  whole ~200s run's log yields one integer with no timestamps and no paired
+  whole run's log yields one integer with no timestamps and no paired
   release event, so it cannot distinguish two genuinely overlapping orphans from
   five spread across the run — and deciding which had occurred *after* seeing the
   number is exactly the charitable reading the pre-committed bar exists to

@@ -442,12 +442,26 @@ does not cover this: `--print-plan` exits at `:128`, before the hog block.
 than fixing the script, and the script bug is filed as
 `docs/debt/0006-run-constrained-leaks-load-hogs.md`.
 
+**The hog predicate is anchored, and an earlier draft of this plan was not.**
+`pgrep -f` and `pkill -f` match the *whole* command line of every process, and the
+shell running this loop has the pattern in its own command line — the `pkill` line
+below contains it literally. Measured on this host with one real hog alive:
+`pgrep -cf 'sh -c while :; do :; done'` returns **2** (the hog plus this loop's own
+shell), while `pgrep -cf '^sh -c while :'` returns **1**, the hog alone. Unanchored,
+the guard therefore aborts on run 1 of a 90-run arm with a leak that is not there,
+and the unanchored `pkill` is worse than useless: its match set includes the shell
+executing the sweep, so the reap can kill the run it is protecting. Anchoring at
+`^sh` fixes both, because the hogs are spawned as literal `sh -c while :; do :; done`
+while any wrapping shell's command line begins with its own interpreter path.
+Verified after the change: the anchored `pkill` removed the test hog and left the
+invoking shell alive.
+
 ```
 # $ARM is accept-prefix (T2b) or accept-postfix; each arm gets its own directory
 # so the second cannot overwrite the first arm's evidence. `.tmp*/` is already
 # gitignored; the repo root is not, and `*.log` is not ignored anywhere.
 mkdir -p .tmp/$ARM
-hogs() { pgrep -cf 'sh -c while :; do :; done' || true; }
+hogs() { pgrep -cf '^sh -c while :' || true; }   # anchored; see below
 executed=0
 for i in $(seq 90); do
   [ "$(hogs)" -eq 0 ] || { echo "ABORT: $(hogs) leaked hogs before run $i"; break; }
@@ -456,7 +470,11 @@ for i in $(seq 90); do
     cargo llvm-cov --no-report -p voom-node-agent --test lifecycle \
     --all-features -- --test-threads=1 --nocapture >"$log" 2>&1
   rc=$?
-  pkill -f 'sh -c while :; do :; done'          # the script will not
+  pkill -f '^sh -c while :'                     # the script will not
+  # llvm-cov --no-report leaves .profraw beside the crate, and they are not
+  # gitignored. Unswept, 90 runs bury `git status` in hundreds of untracked
+  # files and a later `git add -A` sweeps them into a commit.
+  find crates -name '*.profraw' -delete
   case $rc in
     0|101) ;;                                    # ran; 101 is a real test failure
     *) echo "ABORT: run $i exited $rc — not a run"; break ;;
@@ -583,7 +601,7 @@ is what stops the result being argued away; pre-committing to the *filing* would
 be this run acting on the operator's behalf on the one point it changed.
 
 The charter words the threshold as *"more than one **concurrent** orphan in any
-run"*, and the restatement above is deliberate: `grep -c` over a whole ~200s log
+run"*, and the restatement above is deliberate: `grep -c` over a whole run's log
 yields one integer with no timestamps and no paired release event, so it cannot
 tell two overlapping orphans from five spread across the run. Deciding which had
 occurred after seeing the number is exactly the after-the-fact reading this
@@ -600,7 +618,9 @@ reparented to init by the script's own `exec`, so they are not in this loop's
 process tree and cannot be reaped from it. A concurrent invocation would silently
 lose its load generators mid-run.
 
-Up to ~180 instrumented, throttled, serialized lifecycle runs. If it is not run
+Up to ~180 instrumented, throttled, serialized lifecycle runs, **measured at
+~20s each on the design host** — roughly an hour for the full protocol. If it is
+not run
 to completion, say so and say which criteria that leaves undischarged.
 
 ## Rollback
