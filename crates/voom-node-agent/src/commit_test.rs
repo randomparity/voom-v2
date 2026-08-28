@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rand::SeedableRng;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Notify, watch};
 use voom_core::ids::{ArtifactCommitIntentId, ArtifactCommitRecordId};
 use voom_core::{
     ArtifactAccessMode, ArtifactHandleId, LeaseId, NodeId, NodeIncarnationId, OperationKind,
@@ -87,6 +87,10 @@ struct FakeCommitControlPlane {
     /// When set, the complete route rejects with this conflict.
     complete_conflict: Mutex<Option<String>>,
     calls: Mutex<Vec<String>>,
+    /// When set, `commit_open` blocks on it, standing in for the retrying client
+    /// against an unresponsive control plane.
+    open_gate: Mutex<Option<Arc<Notify>>>,
+    open_started: Arc<Notify>,
     authorize_keys: Mutex<Vec<String>>,
     evidences: Mutex<Vec<CommitOutcomeEvidence>>,
     fences_sent_to_complete: Mutex<Vec<String>>,
@@ -163,6 +167,10 @@ impl ControlPlaneApi for FakeCommitControlPlane {
         _request: &RetryRequest<CommitOpenRequest>,
     ) -> Result<CommitOpenOutcome, VoomError> {
         self.calls.lock().await.push("open".to_owned());
+        self.open_started.notify_waiters();
+        if let Some(gate) = self.open_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         Ok(self
             .open_queue
             .lock()
@@ -798,4 +806,48 @@ fn sample_agent_config() -> AgentConfig {
             max_parallel: 1,
         }],
     }
+}
+
+#[tokio::test]
+async fn a_shutdown_releases_the_commit_coordinator_mid_call() {
+    // The commit coordinator shares the JoinSet that wait_for_coordinators joins, and
+    // drive_open_intents reaches the retrying client. Awaited bare, it holds the whole
+    // shutdown tail open for production_request_budget() = 153.75s — past every budget
+    // above it — so the tail ends at its backstop and never attempts the deactivation.
+    // Removing the until_shutdown wrapping must fail this. See ADR 0088.
+    let root = TempDir::new().unwrap();
+    let api = Arc::new(FakeCommitControlPlane::default());
+    // Never notified: the control plane does not answer commit_open.
+    *api.open_gate.lock().await = Some(Arc::new(Notify::new()));
+    let open_started = Arc::clone(&api.open_started);
+    let context = CommitCoordinatorContext {
+        api: Arc::clone(&api) as Arc<dyn ControlPlaneApi>,
+        node_id: NodeId(1),
+        incarnation_id: NodeIncarnationId::generate().unwrap(),
+        poll_interval: Duration::from_secs(50),
+        storage_roots: HashMap::from([(1_u64, root.path().to_path_buf())]),
+    };
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let notified = open_started.notified();
+    let joined = tokio::spawn(run_commit_coordinator(
+        context,
+        shutdown_rx,
+        StdRng::from_os_rng(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), notified)
+        .await
+        .unwrap();
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+
+    // Well under the retry budget this would otherwise take.
+    let exit = tokio::time::timeout(Duration::from_secs(10), joined)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        matches!(exit, CoordinatorExit::Shutdown(LeaseSettlement::Completed)),
+        "a shutdown must release a blocked commit_open, not wait it out: {exit:?}"
+    );
 }

@@ -182,6 +182,12 @@ SIGINT or SIGTERM stops acquisition, fails held leases as `user_cancellation`, c
 reaps every child (killing one after `shutdown_grace_seconds` if necessary), and deactivates
 the incarnation.
 
+**This bound covers the shutdown sequence, not agent startup.** A `SIGTERM` arriving while the
+agent is still starting children — an accelerator worker's probe alone can take five minutes — is
+queued and acted on once startup finishes, and the sum below starts from there. Size the stop
+timeout for a stop issued during steady state, and expect a stop issued seconds after a start to
+need longer.
+
 **Set the supervisor stop timeout above `shutdown_grace_seconds + 26`, in seconds.** Of that,
 2 × 10 s is one budget for each control-plane wait in the shutdown sequence — lease settlement
 and deactivation — 1 s bounds collecting a killed child's exit status, and 5 s is the margin on

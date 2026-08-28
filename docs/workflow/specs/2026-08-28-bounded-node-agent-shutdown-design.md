@@ -398,8 +398,15 @@ type inside the surface, and none changes behaviour:
 
 Rust requires every construction site to be updated in the same change, so this is
 an unavoidable consequence of a sourced criterion rather than absorbed adjacent
-work. It is recorded here rather than left for a reviewer to find, and neither
-`commit.rs` nor `media.rs` gains any new behaviour, control-plane call, or wait.
+work. It is recorded here rather than left for a reviewer to find.
+
+`commit.rs` subsequently gained a **behavioural** change as well, on a third
+maintainer amendment (2026-08-28): its poll loop's `drive_open_intents` is raced
+against the shutdown receiver. The branch review established that without it the
+tail's own bound is undeliverable in the charter's scenario, since that
+coordinator shares the `JoinSet` `wait_for_coordinators` joins. Its sibling test
+`a_shutdown_releases_the_commit_coordinator_mid_call` gates `commit_open` on the
+fake and fails on `Elapsed` if the race is removed.
 
 ## Failure modes
 
@@ -411,6 +418,7 @@ work. It is recorded here rather than left for a reviewer to find, and neither
 | Settlement completes, deactivation blocked | The deactivation arm fires at its own budget and returns `shutdown_deadline_error()` directly. |
 | Second signal arrives before either budget | Unchanged: `forced_shutdown_error()`. |
 | Deactivation slower than 10 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
+| A commit intent is open when the shutdown arrives | `run_commit_coordinator`'s `drive_open_intents` is raced against the shutdown receiver, so its task joins instead of holding the tail open for `production_request_budget()`. Without that race the tail ends at its backstop with no deactivation attempted. |
 | Worker crashes, then a shutdown arrives while its readiness update is blocked | `restart_after_child_exit`'s readiness calls are released by the shutdown receiver instead of draining the retry budget. |
 | Worker crashes, shutdown arrives mid-restart of an NVIDIA worker | Same race releases it; the 5-minute startup timeout is never entered, because a shutdown observed first returns instead of restarting. |
 | Second signal arrives after a deadline force is already recorded | The signal arm is disabled by its existing `!forced` guard, so the signal is consumed later in `deactivate_or_second_signal`. Outcome unchanged (`forced_shutdown_error()`, write skipped); latency is up to one budget plus a reap — 71 s at the maximum grace. R4's "unchanged" is ratified as outcome-only by explicit maintainer decision on 2026-08-28; the alternative (guarding on `forced != Some(Signal)`) was offered and declined. |

@@ -891,7 +891,10 @@ async fn run_coordinator(
 /// `shutdown.changed()` is its only escape, so consuming the notification here would
 /// strand it against the same unresponsive control plane. A clone tracks its own seen
 /// version, and `wait_for` checks the current value first.
-async fn until_shutdown<F, T>(shutdown: &watch::Receiver<ShutdownKind>, work: F) -> Option<T>
+pub(crate) async fn until_shutdown<F, T>(
+    shutdown: &watch::Receiver<ShutdownKind>,
+    work: F,
+) -> Option<T>
 where
     F: Future<Output = T>,
 {

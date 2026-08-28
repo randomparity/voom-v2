@@ -37,7 +37,7 @@ use crate::client::{
 };
 use crate::runtime::{
     ControlPlaneApi, CoordinatorExit, LeaseSettlement, RuntimeFatal, ShutdownForce, ShutdownKind,
-    centered_jitter, new_key,
+    centered_jitter, new_key, until_shutdown,
 };
 
 /// Prefix of the temp-sibling naming ported from the retired host-side
@@ -96,7 +96,20 @@ pub(crate) async fn run_commit_coordinator(
     // the control plane's replay path, which returns the same fence.
     let mut authorize_requests: HashMap<u64, RetryRequest<CommitAuthorizeRequest>> = HashMap::new();
     loop {
-        if let Err(error) = drive_open_intents(&context, &mut authorize_requests).await {
+        // Raced against the shutdown, not awaited bare. This task shares the `JoinSet`
+        // that `wait_for_coordinators` joins, and `drive_open_intents` reaches the
+        // retrying client — so an unraced call here holds the whole shutdown tail open
+        // for `production_request_budget()`, past every budget above it, and the tail
+        // ends at its backstop without ever attempting the deactivation. See ADR 0088.
+        let Some(driven) = until_shutdown(
+            &shutdown,
+            drive_open_intents(&context, &mut authorize_requests),
+        )
+        .await
+        else {
+            return CoordinatorExit::Shutdown(shutdown_settlement(*shutdown.borrow()));
+        };
+        if let Err(error) = driven {
             return CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error));
         }
         let delay = centered_jitter(context.poll_interval, &mut schedule_rng);
@@ -107,16 +120,22 @@ pub(crate) async fn run_commit_coordinator(
                 } else {
                     *shutdown.borrow()
                 };
-                // A published Forced kind only ever comes from wait_for_coordinators'
-                // signal arm; this coordinator has no budget of its own to expire.
-                return CoordinatorExit::Shutdown(if kind == ShutdownKind::Forced {
-                    LeaseSettlement::Forced(ShutdownForce::Signal)
-                } else {
-                    LeaseSettlement::Completed
-                });
+                return CoordinatorExit::Shutdown(shutdown_settlement(kind));
             }
             () = tokio::time::sleep(delay) => {}
         }
+    }
+}
+
+/// How this coordinator reports a shutdown it observed.
+///
+/// A published `Forced` kind only ever comes from `wait_for_coordinators`' signal arm;
+/// this coordinator has no budget of its own to expire.
+fn shutdown_settlement(kind: ShutdownKind) -> LeaseSettlement {
+    if kind == ShutdownKind::Forced {
+        LeaseSettlement::Forced(ShutdownForce::Signal)
+    } else {
+        LeaseSettlement::Completed
     }
 }
 
