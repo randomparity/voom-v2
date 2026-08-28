@@ -17,9 +17,10 @@
 //! **Opening a `BEGIN IMMEDIATE` transaction is cancellation-safe**: the open runs
 //! to completion whether or not its caller is still waiting, so a cancelled caller
 //! can no longer strand the write lock on a pooled connection. The two openers that
-//! issue a custom statement get that from [`begin_detached`]; the two deferred-`BEGIN`
-//! openers need nothing, because a deferred `BEGIN` takes no lock and the worker's
-//! rendezvous acknowledgement already rolls back a cancelled open. See [ADR 0087].
+//! issue a custom statement get that from the private `begin_detached` helper; the
+//! two deferred-`BEGIN` openers need nothing, because a deferred `BEGIN` takes no
+//! lock and the worker's rendezvous acknowledgement already rolls back a cancelled
+//! open. See [ADR 0087].
 //!
 //! [ADR 0083]: https://github.com/randomparity/voom-v2/blob/main/docs/adr/0083-read-then-write-transactions-begin-immediate.md
 //! [ADR 0086]: https://github.com/randomparity/voom-v2/blob/main/docs/adr/0086-transaction-openers-are-named-helpers.md
