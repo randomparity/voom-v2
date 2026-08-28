@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rand::SeedableRng;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Notify, watch};
 use voom_core::ids::{ArtifactCommitIntentId, ArtifactCommitRecordId};
 use voom_core::{
     ArtifactAccessMode, ArtifactHandleId, LeaseId, NodeId, NodeIncarnationId, OperationKind,
@@ -87,6 +87,14 @@ struct FakeCommitControlPlane {
     /// When set, the complete route rejects with this conflict.
     complete_conflict: Mutex<Option<String>>,
     calls: Mutex<Vec<String>>,
+    /// When set, `commit_open` blocks on it, standing in for the retrying client
+    /// against an unresponsive control plane.
+    open_gate: Mutex<Option<Arc<Notify>>>,
+    open_started: Arc<Notify>,
+    /// When set, `report_commit_outcome` blocks on it — a drive parked past the
+    /// `applying` receipt, where abandoning would wedge the commit slot.
+    outcome_gate: Mutex<Option<Arc<Notify>>>,
+    outcome_started: Arc<Notify>,
     authorize_keys: Mutex<Vec<String>>,
     evidences: Mutex<Vec<CommitOutcomeEvidence>>,
     fences_sent_to_complete: Mutex<Vec<String>>,
@@ -163,6 +171,10 @@ impl ControlPlaneApi for FakeCommitControlPlane {
         _request: &RetryRequest<CommitOpenRequest>,
     ) -> Result<CommitOpenOutcome, VoomError> {
         self.calls.lock().await.push("open".to_owned());
+        self.open_started.notify_waiters();
+        if let Some(gate) = self.open_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         Ok(self
             .open_queue
             .lock()
@@ -207,6 +219,10 @@ impl ControlPlaneApi for FakeCommitControlPlane {
         request: &RetryRequest<CommitOutcomeRequest>,
     ) -> Result<crate::client::CommitReceiptOutcome, VoomError> {
         self.calls.lock().await.push("outcome".to_owned());
+        self.outcome_started.notify_waiters();
+        if let Some(gate) = self.outcome_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         let body: serde_json::Value = serde_json::from_slice(request.body()).unwrap();
         let evidence: CommitOutcomeEvidence =
             serde_json::from_value(body["evidence"].clone()).unwrap();
@@ -305,7 +321,14 @@ impl Fixture {
 
     async fn drive(&self) -> Result<(), VoomError> {
         let mut authorize_requests = self.authorize_requests.lock().await;
-        drive_open_intents(&self.context, &mut authorize_requests).await
+        let (_shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+        let pass = drive_open_intents(&self.context, &shutdown_rx, &mut authorize_requests).await?;
+        assert_eq!(
+            pass,
+            DrivePass::Drained,
+            "a pass with no shutdown pending must drain the listing"
+        );
+        Ok(())
     }
 
     async fn calls(&self) -> Vec<String> {
@@ -767,7 +790,7 @@ async fn coordinator_exits_gracefully_then_forced_on_shutdown() {
     forced_tx.send(ShutdownKind::Forced).unwrap();
     assert!(matches!(
         joined.await.unwrap(),
-        CoordinatorExit::Shutdown(LeaseSettlement::Forced)
+        CoordinatorExit::Shutdown(LeaseSettlement::Forced(ShutdownForce::Signal))
     ));
 }
 
@@ -798,4 +821,104 @@ fn sample_agent_config() -> AgentConfig {
             max_parallel: 1,
         }],
     }
+}
+
+#[tokio::test]
+async fn a_shutdown_releases_the_commit_coordinator_mid_call() {
+    // The commit coordinator shares the JoinSet that wait_for_coordinators joins, and
+    // drive_open_intents reaches the retrying client. Awaited bare, it holds the whole
+    // shutdown tail open for production_request_budget() = 153.75s — past every budget
+    // above it — so the tail ends at its backstop and never attempts the deactivation.
+    // Removing the until_shutdown wrapping must fail this. See ADR 0088.
+    let root = TempDir::new().unwrap();
+    let api = Arc::new(FakeCommitControlPlane::default());
+    // Never notified: the control plane does not answer commit_open.
+    *api.open_gate.lock().await = Some(Arc::new(Notify::new()));
+    let open_started = Arc::clone(&api.open_started);
+    let context = CommitCoordinatorContext {
+        api: Arc::clone(&api) as Arc<dyn ControlPlaneApi>,
+        node_id: NodeId(1),
+        incarnation_id: NodeIncarnationId::generate().unwrap(),
+        poll_interval: Duration::from_secs(50),
+        storage_roots: HashMap::from([(1_u64, root.path().to_path_buf())]),
+    };
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let notified = open_started.notified();
+    let joined = tokio::spawn(run_commit_coordinator(
+        context,
+        shutdown_rx,
+        StdRng::from_os_rng(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), notified)
+        .await
+        .unwrap();
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+
+    // Well under the retry budget this would otherwise take.
+    let exit = tokio::time::timeout(Duration::from_secs(10), joined)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        matches!(exit, CoordinatorExit::Shutdown(LeaseSettlement::Completed)),
+        "a shutdown must release a blocked commit_open, not wait it out: {exit:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_shutdown_finishes_the_journaled_drive_and_starts_no_more() {
+    // The other half of the contract above. Once `applying` is journaled, cancelling
+    // the drive leaves the intent `Authorized` with an `Applying` receipt that no later
+    // incarnation can resume — it classifies `operator_required` and wedges the
+    // artifact's commit slot (ADR 0074). So the shutdown lands between intents instead:
+    // the journaled drive finishes, and the next one never starts. Widening the race
+    // back over the whole of `drive_open_intents` drops the "complete" call; dropping
+    // the between-intents check adds a second drive. See ADR 0088.
+    let bytes = b"artifact-bytes".to_vec();
+    let f = fixture_with_bytes(&bytes);
+    *f.api.authorize.lock().await = Some(authorize_outcome(&bytes));
+    let mut second = open_intent("pending", &bytes);
+    second.id = ArtifactCommitIntentId(INTENT_ID + 1);
+    f.api.open_queue.lock().await.push_back(CommitOpenOutcome {
+        intents: vec![open_intent("pending", &bytes), second],
+    });
+    let gate = Arc::new(Notify::new());
+    *f.api.outcome_gate.lock().await = Some(Arc::clone(&gate));
+    let outcome_started = Arc::clone(&f.api.outcome_started);
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let notified = outcome_started.notified();
+    let joined = tokio::spawn(run_commit_coordinator(
+        f.context.clone(),
+        shutdown_rx,
+        StdRng::from_os_rng(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), notified)
+        .await
+        .unwrap();
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    // Let the shutdown reach the coordinator while the drive is still parked. Releasing
+    // the gate in the same poll would make both arms of a widened race ready at once, and
+    // `select!` picks randomly — the fault this test exists to catch would land half the
+    // time. `notify_one` leaves a permit, so the release cannot be missed.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    gate.notify_one();
+
+    let exit = tokio::time::timeout(Duration::from_secs(10), joined)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        matches!(exit, CoordinatorExit::Shutdown(LeaseSettlement::Completed)),
+        "the coordinator must still report a completed settlement: {exit:?}"
+    );
+    assert_eq!(
+        f.calls().await,
+        vec!["open", "authorize", "applying", "outcome", "complete"],
+        "the journaled drive must complete and the second intent must never start"
+    );
+    assert_eq!(tokio::fs::read(f.target_path()).await.unwrap(), bytes);
 }

@@ -36,8 +36,8 @@ use crate::client::{
     CommitOutcomeUnknownEvidence, CommitReceiptOutcome, OpenCommitIntent, RetryRequest,
 };
 use crate::runtime::{
-    ControlPlaneApi, CoordinatorExit, LeaseSettlement, RuntimeFatal, ShutdownKind, centered_jitter,
-    new_key,
+    ControlPlaneApi, CoordinatorExit, LeaseSettlement, RuntimeFatal, ShutdownForce, ShutdownKind,
+    centered_jitter, new_key, until_shutdown,
 };
 
 /// Prefix of the temp-sibling naming ported from the retired host-side
@@ -96,8 +96,12 @@ pub(crate) async fn run_commit_coordinator(
     // the control plane's replay path, which returns the same fence.
     let mut authorize_requests: HashMap<u64, RetryRequest<CommitAuthorizeRequest>> = HashMap::new();
     loop {
-        if let Err(error) = drive_open_intents(&context, &mut authorize_requests).await {
-            return CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error));
+        match drive_open_intents(&context, &shutdown, &mut authorize_requests).await {
+            Ok(DrivePass::Drained) => {}
+            Ok(DrivePass::ShutdownObserved) => {
+                return CoordinatorExit::Shutdown(shutdown_settlement(*shutdown.borrow()));
+            }
+            Err(error) => return CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)),
         }
         let delay = centered_jitter(context.poll_interval, &mut schedule_rng);
         tokio::select! {
@@ -107,23 +111,65 @@ pub(crate) async fn run_commit_coordinator(
                 } else {
                     *shutdown.borrow()
                 };
-                return CoordinatorExit::Shutdown(if kind == ShutdownKind::Forced {
-                    LeaseSettlement::Forced
-                } else {
-                    LeaseSettlement::Completed
-                });
+                return CoordinatorExit::Shutdown(shutdown_settlement(kind));
             }
             () = tokio::time::sleep(delay) => {}
         }
     }
 }
 
+/// How this coordinator reports a shutdown it observed.
+///
+/// A published `Forced` kind only ever comes from `wait_for_coordinators`' signal arm;
+/// this coordinator has no budget of its own to expire.
+fn shutdown_settlement(kind: ShutdownKind) -> LeaseSettlement {
+    if kind == ShutdownKind::Forced {
+        LeaseSettlement::Forced(ShutdownForce::Signal)
+    } else {
+        LeaseSettlement::Completed
+    }
+}
+
+/// How a drive pass ended when it did not fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrivePass {
+    /// Every intent in the listing was driven.
+    Drained,
+    /// The pass stood down at a boundary where standing down costs nothing.
+    ShutdownObserved,
+}
+
+/// Drive one listing, standing down for a shutdown only where that is free.
+///
+/// The listing call is raced rather than awaited bare: this task shares the `JoinSet`
+/// that `wait_for_coordinators` joins, and `open_commit_intents` reaches the retrying
+/// client, so an unraced call holds the whole shutdown tail open for
+/// `production_request_budget()` — past every budget above it — and the tail ends at its
+/// backstop without ever attempting the deactivation.
+///
+/// A drive that has already journaled `applying` is not raced. Cancelling one leaves the
+/// intent `Authorized` carrying an `Applying` receipt, which no later incarnation can
+/// resume: the frozen idempotency key is per-incarnation stack state, so the replay path
+/// is gone and the intent classifies `operator_required`, wedging the artifact's commit
+/// slot until a human runs `voom artifact recover-commit` (ADR 0074).
+///
+/// It is not exempt from the bound, though. This task sits in the same `JoinSet`, so a
+/// drive still running when the tail backstop expires is aborted with it, and for a large
+/// artifact that is the ordinary case — promotion is a copy and two hashes of the bytes.
+/// So the narrowing shrinks the wedge's window from every shutdown to a shutdown the drive
+/// outlasts; it does not close it. See ADR 0088.
 async fn drive_open_intents(
     context: &CommitCoordinatorContext,
+    shutdown: &watch::Receiver<ShutdownKind>,
     authorize_requests: &mut HashMap<u64, RetryRequest<CommitAuthorizeRequest>>,
-) -> Result<(), VoomError> {
-    let listing = open_commit_intents(context).await?;
-    for intent in listing.intents {
+) -> Result<DrivePass, VoomError> {
+    let Some(listing) = until_shutdown(shutdown, open_commit_intents(context)).await else {
+        return Ok(DrivePass::ShutdownObserved);
+    };
+    for intent in listing?.intents {
+        if *shutdown.borrow() != ShutdownKind::Running {
+            return Ok(DrivePass::ShutdownObserved);
+        }
         match intent.state.as_str() {
             "pending" | "authorized" => {
                 drive_commit_intent(context, intent.id, authorize_requests).await?;
@@ -137,7 +183,7 @@ async fn drive_open_intents(
             }
         }
     }
-    Ok(())
+    Ok(DrivePass::Drained)
 }
 
 /// Drive one `pending`/`authorized` intent: authorize (replaying the frozen

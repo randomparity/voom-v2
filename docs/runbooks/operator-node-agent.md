@@ -180,13 +180,79 @@ The incarnation list is newest first. A normal replacement shows the new incarna
 
 SIGINT or SIGTERM stops acquisition, fails held leases as `user_cancellation`, closes and
 reaps every child (killing one after `shutdown_grace_seconds` if necessary), and deactivates
-the incarnation. Set the supervisor stop timeout above the configured shutdown grace. The
-first operator signal always begins or acknowledges ordered shutdown, even when an internal
+the incarnation.
+
+**This bound covers the shutdown sequence, not agent startup.** A `SIGTERM` arriving while the
+agent is still starting children — an accelerator worker's probe alone can take five minutes — is
+queued and acted on once startup finishes, and the sum below starts from there. Size the stop
+timeout for a stop issued during steady state, and expect a stop issued seconds after a start to
+need longer.
+
+**Set the supervisor stop timeout above `shutdown_grace_seconds + 26`, in seconds.** Of that,
+2 × 10 s is one budget for each control-plane wait in the shutdown sequence — lease settlement
+and deactivation — 1 s bounds collecting a killed child's exit status, and 5 s is the margin on
+the backstop that bounds the whole sequence. That sum is the worst case, so the example
+configuration above (`shutdown_grace_seconds = 10`) needs a stop timeout above 36 s. Check the
+one your supervisor actually applies rather than assuming the upstream 90 s:
+`systemctl show -p DefaultTimeoutStopUSec` reports 45 s on Fedora, which leaves no margin at
+`shutdown_grace_seconds = 19` (19 + 26 = 45 exactly) and is exceeded above it. A stop timeout below the sum means `SIGKILL`
+lands mid-shutdown and the incarnation is never marked retired. See
+[ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
+
+The first operator signal always begins or acknowledges ordered shutdown, even when an internal
 fatal error or restart-budget exhaustion already began it; that unconsumed first signal never
 forces settlement or deactivation. Only a genuine second operator signal, after the first has
 been consumed, cancels blocked lease settlement or deactivation and makes the process exit
-unsuccessfully. It still kills and reaps every child before exit, but forced shutdown can leave
-the incarnation or lease terminal state for TTL expiry/recovery to reconcile.
+unsuccessfully. A shutdown blocked on an unresponsive control plane no longer needs that second
+signal: the deadline abandons it and the process exits unsuccessfully on its own, reporting the
+deadline rather than a signal. Either way a forced shutdown can leave the incarnation or lease terminal state for TTL
+expiry/recovery to reconcile.
+
+**A `graceful_shutdown` retirement is not proof that the incarnation's leases were settled.**
+When the deadline abandons settlement, the agent still attempts the deactivation, so the
+incarnation can be recorded `retired` with reason `graceful_shutdown` while the leases it held
+were abandoned mid-settlement and stay live until the lease TTL expires. Nothing in the
+incarnation record distinguishes that from a clean stop. The signals are the agent's non-zero
+exit and its stderr naming a shutdown budget — and the agent has no log output, so a supervisor
+that records only exit status keeps no trace of which it was. When reading incarnation history,
+check for held leases rather than inferring them from the reason.
+
+**A child is not always reaped by the agent, and nothing logs it when it is not.** Two paths
+leave a worker process behind: a child the kernel cannot kill is abandoned 1 s after `SIGKILL`,
+and if the whole sequence overruns its bound the agent aborts mid-reap and the child is
+`SIGKILL`ed without its grace. In both cases the process is reparented to init, the error the
+supervisor returns is discarded, and the agent has no log output — so after an unexplained stop,
+or any exit reporting a shutdown budget or the tail bound, check for leftover worker processes
+holding a GPU, a mount, or a port before starting a replacement agent. See
+[ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
+
+**A commit already promoting bytes is not interrupted by the signal, but it is not exempt from
+the bound either — and raising the stop timeout will not help it.** The agent stops driving
+commit intents as soon as it sees the signal, and a drive that has already journaled its
+`applying` receipt is left to finish. If the whole sequence reaches its `shutdown_grace_seconds`
++ 26 bound first, the agent gives up and that drive is abandoned. Promotion is a copy and two
+hashes of the artifact's bytes, so for a large artifact that is the likely outcome. The bound is
+the agent's own, so a longer supervisor stop timeout does not extend it. Until an abandoned
+drive is recovered, its record holds the artifact's commit slot and the next commit to that
+artifact is refused.
+
+**Finding the affected artifacts takes a search, and the agent cannot narrow it for you.** An
+abandoned drive leaves the commit record `pending`, so `voom artifact show` reports the artifact
+as `staged` — indistinguishable from an ordinary staged artifact — and nothing is in
+`recovery_required` yet. That state is what `recover-commit` *sets*, not a state to wait for.
+After any stop that reports the tail bound:
+
+1. `voom artifact list --state staged` for the candidate set.
+2. For each candidate, check the target path's directory for a `.voom-tmp.`-prefixed sibling.
+   One is positive evidence that a promotion was interrupted. Its absence proves nothing — a
+   drive abandoned before the copy began leaves no sibling and is wedged just the same.
+3. `voom artifact recover-commit --artifact-handle-id <id>` on each candidate. It reports
+   whether the commit can be finished or needs a human, and it is the only thing that will tell
+   you which of the candidates was actually mid-commit.
+
+The agent has no log output and the backstop error names no artifact, so this search is the
+whole detection path. Keep the candidate set small by not stopping an agent during a large
+commit when that is avoidable.
 
 A signal that arrives while the agent is still retrying activation against an unreachable
 control plane stops it immediately and exits successfully. No child has started at that

@@ -87,3 +87,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0085](0085-contention-tests-at-the-use-case-level.md) | Contention tests race at the control-plane use-case level |
 | [0086](0086-transaction-openers-are-named-helpers.md) | Transaction openers are named helpers |
 | [0087](0087-cancellation-safe-begin-immediate.md) | Opening a `BEGIN IMMEDIATE` transaction is cancellation-safe |
+| [0088](0088-bounded-node-agent-shutdown.md) | Node-agent shutdown has a wall-clock deadline |

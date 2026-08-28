@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
+use std::future::Future;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
@@ -190,7 +191,11 @@ impl RunningChild {
         Ok(status)
     }
 
-    async fn shutdown(&mut self, grace: Duration) -> Result<(), ChildError> {
+    async fn shutdown(
+        &mut self,
+        grace: Duration,
+        reap_after_kill: Duration,
+    ) -> Result<(), ChildError> {
         drop(self.stdin.take());
         let Some(mut child) = self.child.take() else {
             return Ok(());
@@ -204,12 +209,34 @@ impl RunningChild {
             child.start_kill().map_err(|error| {
                 ChildError::shutdown(&name, format!("kill after shutdown timeout: {error}"))
             })?;
-            child.wait().await.map_err(|error| {
-                ChildError::shutdown(&name, format!("reap after kill: {error}"))
-            })?;
+            reap_within(child.wait(), reap_after_kill, &name).await?;
         }
         self.reaped = true;
         Ok(())
+    }
+}
+
+/// Collect a killed child's exit status, giving up after `bound`.
+///
+/// A `SIGKILL`ed child is already doomed and this wait only collects its status, so
+/// abandoning it orphans nothing `SIGKILL` had not already claimed: `launch` sets
+/// `.kill_on_drop(true)`, and init reaps the reparented process. Without the bound a
+/// child in uninterruptible sleep pends here forever and takes the whole shutdown
+/// tail with it. See `docs/adr/0088-bounded-node-agent-shutdown.md`.
+async fn reap_within<F>(wait: F, bound: Duration, name: &str) -> Result<(), ChildError>
+where
+    F: Future<Output = std::io::Result<ExitStatus>>,
+{
+    match tokio::time::timeout(bound, wait).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(ChildError::shutdown(
+            name,
+            format!("reap after kill: {error}"),
+        )),
+        Err(_) => Err(ChildError::shutdown(
+            name,
+            format!("reap after kill: not reaped within {bound:?}"),
+        )),
     }
 }
 
@@ -257,15 +284,17 @@ impl StartupDeadline {
 pub struct ChildSupervisor {
     startup_deadline: StartupDeadline,
     shutdown_grace: Duration,
+    reap_after_kill: Duration,
     restart_failures: HashMap<String, u8>,
 }
 
 impl ChildSupervisor {
     #[must_use]
-    pub fn new(shutdown_grace: Duration) -> Self {
+    pub fn new(shutdown_grace: Duration, reap_after_kill: Duration) -> Self {
         Self {
             startup_deadline: StartupDeadline::BackendSpecific,
             shutdown_grace,
+            reap_after_kill,
             restart_failures: HashMap::new(),
         }
     }
@@ -273,10 +302,15 @@ impl ChildSupervisor {
     // Gated exactly like the module that uses it: `child_test.rs` is Linux-only, so a plain
     // `cfg(test)` leaves this with no callers on other targets and fails the dead-code lint.
     #[cfg(all(test, target_os = "linux"))]
-    fn with_timeouts(startup_timeout: Duration, shutdown_grace: Duration) -> Self {
+    fn with_timeouts(
+        startup_timeout: Duration,
+        shutdown_grace: Duration,
+        reap_after_kill: Duration,
+    ) -> Self {
         Self {
             startup_deadline: StartupDeadline::Fixed(startup_timeout),
             shutdown_grace,
+            reap_after_kill,
             restart_failures: HashMap::new(),
         }
     }
@@ -357,7 +391,8 @@ impl ChildSupervisor {
         let mut shutdowns = JoinSet::new();
         for mut child in children {
             let grace = self.shutdown_grace;
-            shutdowns.spawn(async move { child.shutdown(grace).await });
+            let reap = self.reap_after_kill;
+            shutdowns.spawn(async move { child.shutdown(grace, reap).await });
         }
         let mut first_error = None;
         while let Some(joined) = shutdowns.join_next().await {

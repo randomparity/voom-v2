@@ -367,6 +367,7 @@ fn context(
         progress_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(50),
         shutdown_grace: Duration::from_secs(1),
+        budgets: crate::runtime::ShutdownBudgets::DEFAULT,
         worker: media_worker_config("ffmpeg", vec![OperationKind::TranscodeAudio]),
         endpoints,
         storage_roots,

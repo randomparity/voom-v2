@@ -84,8 +84,11 @@ async fn child_receives_direct_argv_and_exact_environment_then_exits_on_eof() {
         credentials.clone(),
         &["literal arg", "$(must-not-execute)", "semi;colon"],
     );
-    let supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(200));
+    let supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(200),
+        Duration::from_secs(1),
+    );
 
     let children = supervisor.start_all(vec![spec]).await.unwrap();
     assert_eq!(children.len(), 1);
@@ -132,8 +135,11 @@ async fn probe_child_receives_only_its_explicit_ffprobe_dependency() {
             ..WorkerDependencyPaths::default()
         },
     );
-    let supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(200));
+    let supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(200),
+        Duration::from_secs(1),
+    );
 
     let children = supervisor.start_all(vec![spec]).await.unwrap();
     let record = fixture.record();
@@ -171,8 +177,11 @@ async fn accelerator_child_reaches_ready_with_explicit_dependencies_and_cleared_
         ffprobe_bin: Some(fixture.write_dependency("ffprobe")),
         nvidia_smi_bin: Some(fixture.write_dependency("nvidia-smi")),
     };
-    let supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(200));
+    let supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(200),
+        Duration::from_secs(1),
+    );
     let children = supervisor
         .start_all(vec![fixture.spec_with_accelerator_and_dependencies(
             "ffmpeg",
@@ -267,8 +276,11 @@ async fn readiness_is_length_newline_time_and_address_bounded() {
     for (line, delay_ms, newline) in cases {
         let fixture = ChildFixture::new();
         fixture.write(&line, delay_ms, newline, false);
-        let supervisor =
-            ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(40));
+        let supervisor = ChildSupervisor::with_timeouts(
+            Duration::from_secs(1),
+            Duration::from_millis(40),
+            Duration::from_secs(1),
+        );
         let result = supervisor
             .start_all(vec![fixture.spec("bad", credentials(1, 0, "secret"), &[])])
             .await;
@@ -288,8 +300,11 @@ async fn protocol_and_identity_mismatch_kill_and_reap_the_child() {
         true,
         false,
     );
-    let supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(50));
+    let supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    );
     let error = supervisor
         .start_all(vec![protocol_fixture.spec(
             "protocol",
@@ -328,8 +343,11 @@ async fn partial_startup_failure_reaps_every_started_sibling() {
     valid.write(&format!("BOUND addr={}", server.bound()), 0, true, false);
     let invalid = ChildFixture::new();
     invalid.write("not readiness", 0, true, false);
-    let supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(100));
+    let supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+    );
 
     let result = supervisor
         .start_all(vec![
@@ -350,8 +368,11 @@ async fn shutdown_kills_and_reaps_a_child_that_ignores_stdin_eof() {
     let server = identity_server(credentials.clone()).await;
     let fixture = ChildFixture::new();
     fixture.write(&format!("BOUND addr={}", server.bound()), 0, true, true);
-    let supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(30));
+    let supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(30),
+        Duration::from_secs(1),
+    );
     let children = supervisor
         .start_all(vec![fixture.spec("stubborn", credentials, &[])])
         .await
@@ -372,8 +393,11 @@ async fn restart_preserves_identity_and_resets_only_after_full_startup() {
     let fixture = ChildFixture::new();
     fixture.write(&format!("BOUND addr={}", server.bound()), 0, true, false);
     let spec = fixture.spec("restart", credentials.clone(), &[]);
-    let mut supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(50));
+    let mut supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    );
     let initial = supervisor.start_all(vec![spec.clone()]).await.unwrap();
     supervisor.shutdown_all(initial).await.unwrap();
 
@@ -807,4 +831,19 @@ fn make_executable(path: &Path) {
 
 fn assert_reaped(pid: u32) {
     assert!(!Path::new(&format!("/proc/{pid}")).exists(), "pid {pid}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_child_that_cannot_be_reaped_is_abandoned_at_the_bound() {
+    // An unkillable process cannot be constructed portably, so this proves the timeout
+    // is wired, not the uninterruptible-sleep case. It does not race the kernel: the
+    // wait is `pending()`, so only the bound can resolve it. See ADR 0088.
+    // An unreapable child must be abandoned, not waited on.
+    let error = reap_within(std::future::pending(), Duration::from_secs(1), "stubborn")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("reap after kill"),
+        "error must name the unreaped child: {error}"
+    );
 }

@@ -37,6 +37,54 @@ use voom_core::ids::ArtifactCommitIntentId;
 
 const HEARTBEAT_DIVISOR: u32 = 3;
 const RESTART_DELAY: Duration = Duration::from_millis(250);
+/// Wall-clock budgets for the shutdown tail.
+///
+/// Threaded as values rather than read from constants at the point of use. Three
+/// existing tests gate `deactivate` with a [`tokio::sync::Notify`] that is never
+/// notified, so a real 10 s timer read in place would turn each of them into a
+/// wall-clock race.
+///
+/// See `docs/adr/0088-bounded-node-agent-shutdown.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownBudgets {
+    /// One control-plane wait in the shutdown tail.
+    pub call: Duration,
+    /// Collecting a killed child's exit status, after `SIGKILL`.
+    pub reap_after_kill: Duration,
+    /// Slack the tail backstop adds over the sum of the inner bounds.
+    pub backstop_margin: Duration,
+}
+
+impl ShutdownBudgets {
+    /// Production values.
+    ///
+    /// 10 s sits under the lifecycle suite's 30 s hang guard, so that guard stops
+    /// being the first thing to fire, and under one `REQUEST_TIMEOUT`, so a
+    /// shutdown blocked on a wedged control plane abandons rather than spending
+    /// another attempt. The 5 s margin covers the tail costs that fall outside
+    /// every inner bound — `wait_or_force`'s post-expiry lease drain, the
+    /// `JoinSet` spawn before each child's grace starts, and stopping the node
+    /// heartbeat — so that every inner bound expires before the backstop does.
+    pub const DEFAULT: Self = Self {
+        call: Duration::from_secs(10),
+        reap_after_kill: Duration::from_secs(1),
+        backstop_margin: Duration::from_secs(5),
+    };
+
+    /// Upper bound on the whole shutdown tail.
+    ///
+    /// This is the number `docs/runbooks/operator-node-agent.md` publishes, and
+    /// the bound the tail backstop enforces.
+    #[must_use]
+    pub fn tail(&self, grace: Duration) -> Duration {
+        self.call
+            .saturating_mul(2)
+            .saturating_add(grace)
+            .saturating_add(self.reap_after_kill)
+            .saturating_add(self.backstop_margin)
+    }
+}
+
 const VALIDATION_ATTEMPTS: u32 = 3;
 const CRASH_LIMIT: u32 = 3;
 const CRASH_WINDOW: Duration = Duration::from_mins(1);
@@ -102,6 +150,7 @@ pub struct AgentRuntime {
     /// Concrete HTTP transport for the scan-session pump; absent in tests
     /// that inject a fake [`ControlPlaneApi`], whose leases never route there.
     scan_client: Option<Arc<ControlPlaneClient>>,
+    budgets: ShutdownBudgets,
 }
 
 impl AgentRuntime {
@@ -117,15 +166,26 @@ impl AgentRuntime {
             config,
             scan_client: Some(Arc::clone(&client)),
             client,
+            budgets: ShutdownBudgets::DEFAULT,
         })
     }
 
     #[cfg(test)]
     fn with_client(config: LoadedAgentConfig, client: Arc<dyn ControlPlaneApi>) -> Self {
+        Self::with_client_and_budgets(config, client, ShutdownBudgets::DEFAULT)
+    }
+
+    #[cfg(test)]
+    fn with_client_and_budgets(
+        config: LoadedAgentConfig,
+        client: Arc<dyn ControlPlaneApi>,
+        budgets: ShutdownBudgets,
+    ) -> Self {
         Self {
             config,
             scan_client: None,
             client,
+            budgets,
         }
     }
 
@@ -221,19 +281,14 @@ impl AgentRuntime {
             .await?;
 
         let specs = self.child_specs(&activation)?;
-        let startup_supervisor = ChildSupervisor::new(self.shutdown_grace());
+        let startup_supervisor =
+            ChildSupervisor::new(self.shutdown_grace(), self.budgets.reap_after_kill);
         let children = match startup_supervisor.start_all(specs).await {
             Ok(children) => children,
             Err(error) => {
                 node_heartbeat.stop();
-                let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
-                self.deactivate_or_second_signal(
-                    incarnation_id,
-                    NodeIncarnationEndReason::ChildStartupFailed,
-                    &mut signals,
-                    &mut signal_phase,
-                )
-                .await?;
+                self.deactivate_after_startup_failure(incarnation_id, &mut signals)
+                    .await?;
                 return Err(VoomError::ExternalSystemUnavailable(format!(
                     "start node-agent children: {error}"
                 )));
@@ -245,14 +300,8 @@ impl AgentRuntime {
         {
             node_heartbeat.stop();
             let shutdown = startup_supervisor.shutdown_all(children).await;
-            let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
-            self.deactivate_or_second_signal(
-                incarnation_id,
-                NodeIncarnationEndReason::ChildStartupFailed,
-                &mut signals,
-                &mut signal_phase,
-            )
-            .await?;
+            self.deactivate_after_startup_failure(incarnation_id, &mut signals)
+                .await?;
             if let Err(shutdown_error) = shutdown {
                 return Err(VoomError::ExternalSystemUnavailable(format!(
                     "mark node-agent children ready: {error}; shut down children: {shutdown_error}"
@@ -288,11 +337,41 @@ impl AgentRuntime {
         let shutdown_kind = shutdown_kind_for_exit(&exit);
         let signal_phase = signal_phase_for_exit(&exit);
         let _ = shutdown_tx.send(shutdown_kind);
-        let settled =
-            wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals, signal_phase)
-                .await;
-        self.finish_shutdown_lifecycle(incarnation_id, exit, settled, node_heartbeat, &mut signals)
+        let bound = self.budgets.tail(self.shutdown_grace());
+        let tail = async {
+            let settled =
+                wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals, signal_phase)
+                    .await;
+            self.finish_shutdown_lifecycle(
+                incarnation_id,
+                exit,
+                settled,
+                node_heartbeat,
+                &mut signals,
+            )
             .await
+        };
+        run_shutdown_tail_within(bound, tail).await
+    }
+
+    /// Deactivate after a child-startup failure, within one call budget.
+    ///
+    /// Both startup-failure paths run this identically; they precede any shutdown tail,
+    /// so each takes its own budget from now rather than sharing the tail's.
+    async fn deactivate_after_startup_failure(
+        &self,
+        incarnation_id: NodeIncarnationId,
+        signals: &mut mpsc::UnboundedReceiver<()>,
+    ) -> Result<(), VoomError> {
+        let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
+        self.deactivate_or_second_signal(
+            incarnation_id,
+            NodeIncarnationEndReason::ChildStartupFailed,
+            signals,
+            &mut signal_phase,
+            Instant::now() + self.budgets.call,
+        )
+        .await
     }
 
     async fn finish_shutdown_lifecycle(
@@ -312,12 +391,26 @@ impl AgentRuntime {
             RuntimeExit::Fatal(_) => return Err(exit.into_error()),
             RuntimeExit::RestartExhausted => NodeIncarnationEndReason::ChildRestartExhausted,
         };
-        if progress.forced {
+        // A signal force is the operator saying stop, and skips the write as it always
+        // has. A deadline expiring is not that instruction: the write is what this whole
+        // bound exists to protect, and attempting it costs one more bounded call.
+        if progress.forced == Some(ShutdownForce::Signal) {
             return Err(forced_shutdown_error());
         }
         let mut signal_phase = progress.signal_phase;
-        self.deactivate_or_second_signal(incarnation_id, reason, signals, &mut signal_phase)
-            .await?;
+        self.deactivate_or_second_signal(
+            incarnation_id,
+            reason,
+            signals,
+            &mut signal_phase,
+            Instant::now() + self.budgets.call,
+        )
+        .await?;
+        if progress.forced == Some(ShutdownForce::Deadline) {
+            // The write may have landed; the settlement that preceded it did not, so the
+            // agent still exits unsuccessfully and names the budget rather than a signal.
+            return Err(shutdown_deadline_error());
+        }
         match exit {
             RuntimeExit::Graceful => Ok(()),
             RuntimeExit::RestartExhausted => Err(VoomError::ExternalSystemUnavailable(
@@ -485,6 +578,7 @@ impl AgentRuntime {
                 )),
                 poll_interval: Duration::from_millis(self.config.config.poll_interval_ms),
                 shutdown_grace: self.shutdown_grace(),
+                budgets: self.budgets,
                 worker: (*worker).clone(),
                 storage_roots: storage_roots.clone(),
                 fatal_tx: fatal_tx.clone(),
@@ -536,18 +630,26 @@ impl AgentRuntime {
     /// control plane is not answering. Every deactivation path uses this: the runbook
     /// promises a second signal cancels blocked deactivation, without qualifying which
     /// reason ended the incarnation.
+    ///
+    /// `deadline` is a parameter rather than a constant read here, because three
+    /// existing tests gate `deactivate` with a `Notify` that is never notified: a real
+    /// timer read in place would turn each of them into a wall-clock race.
     async fn deactivate_or_second_signal(
         &self,
         incarnation_id: NodeIncarnationId,
         reason: NodeIncarnationEndReason,
         signals: &mut mpsc::UnboundedReceiver<()>,
         signal_phase: &mut ShutdownSignalPhase,
+        deadline: Instant,
     ) -> Result<(), VoomError> {
         let deactivation = self.deactivate(incarnation_id, reason);
         tokio::pin!(deactivation);
         loop {
             tokio::select! {
                 result = &mut deactivation => return result,
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(shutdown_deadline_error());
+                }
                 signal = signals.recv() => {
                     let Some(()) = signal else {
                         return Err(forced_shutdown_error());
@@ -647,6 +749,7 @@ pub(crate) struct CoordinatorContext {
     pub(crate) progress_timeout: Duration,
     pub(crate) poll_interval: Duration,
     pub(crate) shutdown_grace: Duration,
+    pub(crate) budgets: ShutdownBudgets,
     pub(crate) worker: WorkerConfig,
     pub(crate) endpoints: ChildEndpointRegistry,
     /// Configured storage-root provider locators by root id (spawn-time
@@ -740,9 +843,16 @@ async fn run_coordinator(
             }
             CoordinatorEvent::Acquire(Err(error)) => return CoordinatorExit::Fatal(error),
             CoordinatorEvent::Shutdown(kind) => {
-                let settlement =
-                    settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
-                let supervisor = ChildSupervisor::new(context.shutdown_grace);
+                let settlement = settle_leases_for_shutdown(
+                    &cancel_tx,
+                    &mut leases,
+                    &mut shutdown,
+                    kind,
+                    Some(Instant::now() + context.budgets.call),
+                )
+                .await;
+                let supervisor =
+                    ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
                 let _ = supervisor.shutdown_all(vec![child]).await;
                 return CoordinatorExit::Shutdown(settlement);
             }
@@ -769,6 +879,43 @@ async fn run_coordinator(
     }
 }
 
+/// Await `work`, abandoning it once a shutdown is in flight.
+///
+/// The predicate runs on a **clone** of the receiver. `changed()` on the original
+/// would mark the value seen, and that value is sent exactly once; the
+/// `cancel_and_wait` wait immediately below is deliberately unbounded and
+/// `shutdown.changed()` is its only escape, so consuming the notification here would
+/// strand it against the same unresponsive control plane. A clone tracks its own seen
+/// version, and `wait_for` checks the current value first.
+pub(crate) async fn until_shutdown<F, T>(
+    shutdown: &watch::Receiver<ShutdownKind>,
+    work: F,
+) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    let mut watcher = shutdown.clone();
+    tokio::select! {
+        value = work => Some(value),
+        _ = watcher.wait_for(|kind| *kind != ShutdownKind::Running) => None,
+    }
+}
+
+/// Reap `child` and report the shutdown that interrupted a restart.
+async fn shutdown_during_restart(
+    context: &CoordinatorContext,
+    child: RunningChild,
+) -> CoordinatorExit {
+    // Mirrors the shutdown branch above: closed and reaped through the supervisor
+    // rather than left to `Drop`, which `SIGKILL`s. That matters most at the `Ready`
+    // call site, where the child is a freshly launched replacement that has not run
+    // and would otherwise lose its `shutdown_grace_seconds`; at the `restart_child`
+    // site the child has already exited and this only collects its status.
+    let supervisor = ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
+    let _ = supervisor.shutdown_all(vec![child]).await;
+    CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+}
+
 async fn restart_after_child_exit(
     child: RunningChild,
     context: &CoordinatorContext,
@@ -778,21 +925,30 @@ async fn restart_after_child_exit(
     crashes: &mut CrashBudget,
 ) -> Result<RunningChild, CoordinatorExit> {
     context.endpoints.unpublish(&context.worker.name);
-    if let Err(error) = set_worker_readiness(
-        context.client.as_ref(),
-        context.node_id,
-        context.incarnation_id,
-        context.worker_id,
-        WorkerReadiness::NotReady,
+    // A readiness update for a worker that is going away is not worth waiting on, and
+    // this call reaches the retrying client. Left unraced, a coordinator blocked here
+    // holds up the whole shutdown tail for the client's full retry budget.
+    let readiness = until_shutdown(
+        shutdown,
+        set_worker_readiness(
+            context.client.as_ref(),
+            context.node_id,
+            context.incarnation_id,
+            context.worker_id,
+            WorkerReadiness::NotReady,
+        ),
     )
-    .await
-    {
+    .await;
+    if let Some(Err(error)) = readiness {
         return Err(CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)));
     }
     // Settling consumes any shutdown notification, so it must be returned
     // instead of falling through to a restart waiting on an observed change.
-    if let Some(settlement) = settle_leases_after_child_crash(cancel_tx, leases, shutdown).await {
-        let supervisor = ChildSupervisor::new(context.shutdown_grace);
+    if let Some(settlement) =
+        settle_leases_after_child_crash(cancel_tx, leases, shutdown, context.budgets.call).await
+    {
+        let supervisor =
+            ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
         let _ = supervisor.shutdown_all(vec![child]).await;
         return Err(CoordinatorExit::Shutdown(settlement));
     }
@@ -801,18 +957,27 @@ async fn restart_after_child_exit(
     }
     tokio::time::sleep(RESTART_DELAY).await;
     let spec = child.spec().clone();
-    let restarted = restart_child(context, spec)
-        .await
-        .map_err(|_| CoordinatorExit::RestartExhausted)?;
-    set_worker_readiness(
-        context.client.as_ref(),
-        context.node_id,
-        context.incarnation_id,
-        context.worker_id,
-        WorkerReadiness::Ready,
+    // Restarting a worker the agent is shutting down is wasted work, and an accelerator
+    // launch can take three NVIDIA startup timeouts — minutes the tail cannot absorb.
+    let Some(restarted) = until_shutdown(shutdown, restart_child(context, spec)).await else {
+        return Err(shutdown_during_restart(context, child).await);
+    };
+    let restarted = restarted.map_err(|_| CoordinatorExit::RestartExhausted)?;
+    let readiness = until_shutdown(
+        shutdown,
+        set_worker_readiness(
+            context.client.as_ref(),
+            context.node_id,
+            context.incarnation_id,
+            context.worker_id,
+            WorkerReadiness::Ready,
+        ),
     )
-    .await
-    .map_err(|error| CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)))?;
+    .await;
+    let Some(readiness) = readiness else {
+        return Err(shutdown_during_restart(context, restarted).await);
+    };
+    readiness.map_err(|error| CoordinatorExit::Fatal(RuntimeFatal::ControlPlane(error)))?;
     publish_child_endpoint(context, &restarted);
     let _ = cancel_tx.send(LeaseCancellation::Running);
     Ok(restarted)
@@ -849,7 +1014,8 @@ async fn restart_child(
     context: &CoordinatorContext,
     spec: ChildSpec,
 ) -> Result<RunningChild, ChildErrorKind> {
-    let mut supervisor = ChildSupervisor::new(context.shutdown_grace);
+    let mut supervisor =
+        ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
     loop {
         match supervisor.restart(&spec).await {
             Ok(child) => return Ok(child),
@@ -1700,33 +1866,54 @@ async fn cancel_and_wait(
     reason: LeaseCancellation,
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
-) -> Option<ShutdownKind> {
+) -> Option<(ShutdownKind, Option<ShutdownForce>)> {
     let _ = cancellation.send(reason);
-    wait_or_force(leases, shutdown, true).await
+    // Deliberately unarmed: this is the one wait that runs in steady state.
+    wait_or_force(leases, shutdown, true, None).await
 }
 
+/// Settle a crashed child's leases, returning the settlement once a shutdown is seen.
+///
+/// Takes `budget` as a `Duration`, not an `Instant`, and stamps the deadline **after**
+/// the first wait. That first wait is `cancel_and_wait`, which is deliberately
+/// unbounded and can run for the client's whole retry budget; a deadline computed by
+/// the caller would reach the second wait already spent, so that wait's budget would be
+/// zero rather than `budget`.
 async fn settle_leases_after_child_crash(
     cancellation: &watch::Sender<LeaseCancellation>,
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
+    budget: Duration,
 ) -> Option<LeaseSettlement> {
     let observed = cancel_and_wait(cancellation, LeaseCancellation::Crash, leases, shutdown).await;
-    let observed = observed?;
+    let (observed, observed_force) = observed?;
+    // Reached only with a shutdown already in flight, so this second wait is a
+    // shutdown-tail wait and takes the budget.
+    let deadline = Some(Instant::now() + budget);
     // Finish settling with the force escape, but do not re-send a cancellation: these
     // leases died with the child, and overwriting `Crash` would record a crashed worker's
     // ticket as user-cancelled.
-    let final_observed = wait_or_force(leases, shutdown, false).await;
-    Some(child_crash_lease_settlement(observed, final_observed))
+    let final_observed = wait_or_force(leases, shutdown, false, deadline).await;
+    Some(child_crash_lease_settlement(
+        observed,
+        observed_force,
+        final_observed,
+    ))
 }
 
 fn child_crash_lease_settlement(
     observed: ShutdownKind,
-    final_observed: Option<ShutdownKind>,
+    observed_force: Option<ShutdownForce>,
+    final_observed: Option<(ShutdownKind, Option<ShutdownForce>)>,
 ) -> LeaseSettlement {
-    if observed == ShutdownKind::Forced || final_observed == Some(ShutdownKind::Forced) {
-        LeaseSettlement::Forced
-    } else {
-        LeaseSettlement::Completed
+    if observed == ShutdownKind::Forced {
+        return LeaseSettlement::Forced(observed_force.unwrap_or(ShutdownForce::Signal));
+    }
+    match final_observed {
+        Some((ShutdownKind::Forced, cause)) => {
+            LeaseSettlement::Forced(cause.unwrap_or(ShutdownForce::Signal))
+        }
+        _ => LeaseSettlement::Completed,
     }
 }
 
@@ -1741,45 +1928,71 @@ fn child_crash_lease_settlement(
 /// only escalates on `Forced`, so it ignores anything else and keeps waiting. Crash
 /// settlement has observed no shutdown at all, so it must report the first one and let the
 /// caller run the real settlement rather than restarting the child.
+///
+/// `deadline` bounds the wait. Only the two callers that run inside a shutdown supply
+/// one; `cancel_and_wait`'s steady-state call passes `None`, because arming it would
+/// terminate a healthy running agent after one slow worker-crash settlement. Expiry
+/// does locally what observing [`ShutdownKind::Forced`] does, and deliberately does
+/// **not** publish on the watch: a coordinator that is not overrunning is not forced.
+///
+/// The second tuple element is itself optional: with `report_any` a kind is reported
+/// without anything having been forced, and there is no cause to name for that.
 async fn wait_or_force(
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
     report_any: bool,
-) -> Option<ShutdownKind> {
+    deadline: Option<Instant>,
+) -> Option<(ShutdownKind, Option<ShutdownForce>)> {
     let observed = {
         let settlement = wait_for_leases(leases);
         tokio::pin!(settlement);
         loop {
             tokio::select! {
                 () = &mut settlement => break None,
+                () = async {
+                    match deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        // No deadline: never ready, so this arm never fires.
+                        None => std::future::pending().await,
+                    }
+                } => break Some((ShutdownKind::Forced, Some(ShutdownForce::Deadline))),
                 changed = shutdown.changed() => {
                     // A closed channel means the runtime is gone: treat it as forced rather
                     // than looping, since `changed()` then returns Err on every poll.
                     let Ok(()) = changed else {
-                        break Some(ShutdownKind::Forced);
+                        break Some((ShutdownKind::Forced, Some(ShutdownForce::Signal)));
                     };
                     let kind = *shutdown.borrow();
-                    if kind == ShutdownKind::Forced
-                        || (report_any && kind != ShutdownKind::Running)
-                    {
-                        break Some(kind);
+                    if kind == ShutdownKind::Forced {
+                        break Some((kind, Some(ShutdownForce::Signal)));
+                    }
+                    if report_any && kind != ShutdownKind::Running {
+                        break Some((kind, None));
                     }
                 }
             }
         }
     };
-    if observed == Some(ShutdownKind::Forced) {
+    if matches!(observed, Some((ShutdownKind::Forced, _))) {
         leases.abort_all();
         wait_for_leases(leases).await;
     }
     observed
 }
 
+/// Settle this coordinator's leases for a shutdown, within `deadline`.
+///
+/// This is the only hop that carries a [`ShutdownForce::Deadline`] out of a
+/// coordinator. Collapsing either arm below to `Signal` would compile, pass, and make
+/// the whole bound a no-op: [`ShutdownProgress::forced`] could then never hold
+/// `Deadline`, and `finish_shutdown_lifecycle` would skip the deactivation the bound
+/// exists to protect.
 async fn settle_leases_for_shutdown(
     cancellation: &watch::Sender<LeaseCancellation>,
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
     kind: ShutdownKind,
+    deadline: Option<Instant>,
 ) -> LeaseSettlement {
     let reason = if kind == ShutdownKind::User {
         LeaseCancellation::User
@@ -1790,15 +2003,17 @@ async fn settle_leases_for_shutdown(
     if kind == ShutdownKind::Forced {
         leases.abort_all();
         wait_for_leases(leases).await;
-        return LeaseSettlement::Forced;
+        // A published Forced kind only ever comes from wait_for_coordinators' signal arm.
+        return LeaseSettlement::Forced(ShutdownForce::Signal);
     }
     // Settlement calls the control plane on every path, not just the user-requested one, so
     // a fenced or restart-exhausted shutdown needs the same force escape. Without it a lease
     // stuck retrying an unreachable control plane hangs the coordinator with no way out.
-    if wait_or_force(leases, shutdown, false).await == Some(ShutdownKind::Forced) {
-        LeaseSettlement::Forced
-    } else {
-        LeaseSettlement::Completed
+    match wait_or_force(leases, shutdown, false, deadline).await {
+        Some((ShutdownKind::Forced, cause)) => {
+            LeaseSettlement::Forced(cause.unwrap_or(ShutdownForce::Signal))
+        }
+        _ => LeaseSettlement::Completed,
     }
 }
 
@@ -1813,14 +2028,14 @@ async fn wait_for_coordinators(
     signals: &mut mpsc::UnboundedReceiver<()>,
     mut signal_phase: ShutdownSignalPhase,
 ) -> Result<ShutdownProgress, VoomError> {
-    let mut forced = false;
+    let mut forced: Option<ShutdownForce> = None;
     let mut signals_open = true;
     while !coordinators.is_empty() {
         tokio::select! {
             joined = coordinators.join_next() => {
                 match joined {
-                    Some(Ok(CoordinatorExit::Shutdown(LeaseSettlement::Forced))) => {
-                        forced = true;
+                    Some(Ok(CoordinatorExit::Shutdown(LeaseSettlement::Forced(cause)))) => {
+                        forced.get_or_insert(cause);
                     }
                     Some(Ok(
                         CoordinatorExit::Shutdown(LeaseSettlement::Completed)
@@ -1835,13 +2050,13 @@ async fn wait_for_coordinators(
                     }
                 }
             }
-            signal = signals.recv(), if signals_open && !forced => {
+            signal = signals.recv(), if signals_open && forced.is_none() => {
                 let Some(()) = signal else {
                     signals_open = false;
                     continue;
                 };
                 if signal_phase.signal_forces() {
-                    forced = true;
+                    forced = Some(ShutdownForce::Signal);
                     let _ = shutdown.send(ShutdownKind::Forced);
                 }
             }
@@ -1917,7 +2132,17 @@ enum ShutdownSignalPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeaseSettlement {
     Completed,
-    Forced,
+    Forced(ShutdownForce),
+}
+
+/// What abandoned a shutdown wait.
+///
+/// Reporting a deadline expiry as "interrupted by a termination signal" would send
+/// an operator looking for a signal nobody sent, so the two travel separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownForce {
+    Signal,
+    Deadline,
 }
 
 impl ShutdownSignalPhase {
@@ -1935,7 +2160,7 @@ impl ShutdownSignalPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ShutdownProgress {
     signal_phase: ShutdownSignalPhase,
-    forced: bool,
+    forced: Option<ShutdownForce>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2070,6 +2295,54 @@ fn random_hex(byte_count: usize) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+/// Run the shutdown tail, giving up after `bound`.
+///
+/// The inner budgets bound the waits this design enumerated; this bounds the ones it
+/// did not. Dropping `tail` drops the coordinator [`JoinSet`], aborting its tasks — a
+/// child mid-reap is still `SIGKILL`ed, by `.kill_on_drop(true)` in `launch`, not by
+/// `RunningChild`'s `Drop`, which early-returns once `shutdown` has moved the handle
+/// out. Sized above the sum of the inner bounds, so each of those expires first and an
+/// ordinary overrun is still attributed to the wait that caused it.
+async fn run_shutdown_tail_within<F>(bound: Duration, tail: F) -> Result<(), VoomError>
+where
+    F: Future<Output = Result<(), VoomError>>,
+{
+    match tokio::time::timeout(bound, tail).await {
+        Ok(result) => result,
+        Err(_) => Err(shutdown_backstop_error(bound)),
+    }
+}
+
+/// The whole shutdown tail overran its published bound.
+///
+/// Deliberately distinct from [`shutdown_deadline_error`]: that one is an ordinary,
+/// documented abandon at a named budget. This one has exactly two causes, and neither
+/// is inferable from the other, so the message names both. One is enumerated and by
+/// design — a commit drive past its `applying` receipt, which nothing races and nothing
+/// bounds; the operator's action there is `voom artifact recover-commit`, and this error
+/// is the only channel that will tell them, since the crate logs nothing. The other is a
+/// wait nobody bounded, which is a defect.
+fn shutdown_backstop_error(bound: Duration) -> VoomError {
+    VoomError::ExternalSystemUnavailable(format!(
+        "node-agent shutdown exceeded its {bound:?} tail bound; a commit drive past its \
+         applying receipt, or a wait outside the shutdown budgets, did not complete — \
+         check for artifacts needing `voom artifact recover-commit`, and please report \
+         this if no commit was in flight"
+    ))
+}
+
+/// A shutdown-tail control-plane wait was abandoned at its own budget.
+///
+/// Distinct from [`forced_shutdown_error`] because no signal arrived: an operator
+/// told to look for one would be looking for something nobody sent.
+fn shutdown_deadline_error() -> VoomError {
+    VoomError::ExternalSystemUnavailable(
+        "node-agent shutdown abandoned a control-plane call at its shutdown budget; \
+         the control plane did not answer"
+            .to_owned(),
+    )
 }
 
 fn forced_shutdown_error() -> VoomError {
