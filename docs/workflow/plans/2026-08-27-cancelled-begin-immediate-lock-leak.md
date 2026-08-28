@@ -27,10 +27,22 @@ tests run on the pinned `.test-tmp/` root (ADR 0079).
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and the
   workspace denies `unwrap_used`, `panic`, `print_stdout`, `print_stderr`, and
   `allow_attributes`. So the test opens with `#![expect(clippy::unwrap_used, …)]`
-  — plus `clippy::expect_used` and `clippy::print_stderr` as it uses them — each
-  with a `reason =`, matching every other integration test in
-  `crates/voom-store/tests/`. `expect_used` is only `warn`, but `-D warnings`
-  makes that fatal. `#[allow]` is denied outright; it must be `#[expect]`.
+  — plus `clippy::expect_used` if it uses `.expect` — each with a `reason =`,
+  matching every other integration test in `crates/voom-store/tests/`.
+  `expect_used` is only `warn`, but `-D warnings` makes that fatal.
+  `#[allow]` is denied outright; it must be `#[expect]`.
+- **The `#![expect]` list must contain only lints the file provably trips.**
+  `[workspace.lints.rust] warnings = "deny"` makes `unfulfilled_lint_expectation`
+  fatal, so an over-broad expectation list fails `just lint` by itself — in the
+  same file the list was added to make lint pass. Add a member only after seeing
+  the lint fire.
+- **No skip notice.** The control arm's parallelism gate is a silent early
+  return. `libtest` prints a passing test's output only under
+  `--nocapture`/`--show-output`, which neither `just ci` nor the coverage job
+  passes, so an `eprintln!` would be invisible to every CI reader — and would
+  cost a `clippy::print_stderr` expectation that has to stay in sync with
+  whether the branch is taken. No tracked test in `crates/voom-store/tests/`
+  expects `print_stderr` today.
 - **Callers are untouched.** ~50 files call the two openers; the change is inside
   them. That is the ADR 0086 property being cashed in, and no call site moves.
 - **No production dependency changes.** `tokio` gains the `rt` *feature*;
@@ -57,9 +69,18 @@ at the version the workspace already pins for `voom-api`, `voom-control-plane`
 and `voom-cli`. `tracing` is already a normal dependency; `oneshot` is already
 covered by the `sync` feature.
 
-Verify: `cargo check -p voom-store --all-features`; `just deny`; `just audit`.
-No new entry appears in `Cargo.lock` beyond `tracing-subscriber`'s existing
-workspace graph (it is already built for three other crates).
+Verify: `cargo check -p voom-store --all-features --all-targets` — **`--all-targets`
+is required**; a bare `cargo check` builds the lib target only, resolves no
+dev-dependencies, and at T1 nothing calls `tokio::spawn` or references
+`tracing-subscriber` yet, so a missing or misspelled feature would pass here and
+surface two tasks later attributed to the wrong change. Then `just deny`,
+`just audit`.
+
+`Cargo.lock` gains exactly one `"tracing-subscriber"` line in the `voom-store`
+package's `dependencies` array and **no new `[[package]]` block** — the lock
+format merges normal and dev dependencies into one array (`voom-store` already
+lists `tempfile`, `voom-test-support` and `voom-control-plane` there), and
+`tracing-subscriber` 0.3.23 is already in the graph for three other crates.
 
 ## T2 — TDD red: the regression sweep and its positive control
 
@@ -84,12 +105,16 @@ spec's Testing section:
 - Fixed arm: sweep *N* in 1..=8, **5 repeats**, no blocked observation in any.
 - Control arm: same sweep through a bare `pool.begin_with("BEGIN IMMEDIATE")`
   written in the test, **5 repeats**, at least one blocked observation across
-  them. Gated on `available_parallelism() >= 4`; the fixed arm is **not** gated.
-  Skip notice via `eprintln!` under the file-level `expect`.
+  them. Gated on `available_parallelism() >= 4` as a **silent early return**; the
+  fixed arm is **not** gated.
 
 Verify (this is the red): `cargo test -p voom-store --test
 cancelled_begin_releases_write_lock --all-features` — the fixed arm fails, the
 control arm passes. Record which *N* blocked, for the PR body.
+
+Also run `just lint` at the end of T2, not only at T6: it is the only check that
+catches an over-broad `#![expect]` list, and deferring every lint signal to T6
+finds it three tasks after the file was written.
 
 ## T3 — TDD green: `begin_detached`
 
@@ -101,9 +126,10 @@ section, and route `begin_read_then_write` (`:40`) and `begin_serialized_read`
 a deferred `BEGIN` takes no write lock and the worker's rendezvous ack already
 rolls back a cancelled open.
 
-Needs `use tracing::Instrument;` for `.instrument(tracing::Span::current())`,
-which is what keeps the detached open inside the caller's span — `tokio::spawn`
-does not inherit one. Both `send`-failure arms log; the `Err` arm attributes an
+Needs two imports: `use tokio::sync::oneshot;` for the channel, and
+`use tracing::Instrument;` for `.instrument(tracing::Span::current())`, which is
+what keeps the detached open inside the caller's span — `tokio::spawn` does not
+inherit one. Both `send`-failure arms log; the `Err` arm attributes an
 `acquire_timeout` that fires for a caller answered 45s earlier.
 
 The module doc comment gains the cancellation-safety property, since the file's
@@ -136,12 +162,21 @@ after the holder's rollback while the detached opener is still parked in SQLite'
 busy handler sleep, with the `send` error branch not yet executed. Probe-only,
 this arm passes against a `begin_detached` that rolls nothing back.
 
-Verify it bites — the arm is not red pre-fix, so a revert does not test it.
-Controlled fault: in the spawned task, wrap the unsent `Transaction` in
+Verify it bites. The arm **is** red pre-fix — but at **step 4**, not step 5: the
+unfixed opener is an inline `pool.begin_with`, there is no spawned task and no
+`warn`, so the arm burns its 5s ceiling waiting for an event that never arrives.
+That is a real red, and it is the wrong one: a reverting reader who sees red and
+concludes "the arm bites" will never have exercised the lock probe, which is the
+assertion the arm exists for. So the revert does not substitute for the fault
+below — it only proves step 4 is wired.
+
+Controlled fault, which isolates step 5: in the spawned task, wrap the unsent
+`Transaction` in
 `std::mem::ManuallyDrop` so the `ROLLBACK` is never queued — **not**
 `std::mem::forget`, which clippy denies (`mem_forget = "deny"`), so the fault
-itself would fail `just lint` before it could be observed. The arm must go red on
-the lock probe. Revert the fault.
+itself would fail `just lint` before it could be observed. With the fault in
+place step 4 still passes — the `warn` fires — and the arm must go red on **the
+lock probe**. Revert the fault.
 
 ## T5 — `init.rs` joins the opener vocabulary
 
@@ -162,19 +197,52 @@ commit or drop, which is the only reason those lines existed; and
 `MIGRATOR.run_direct(&mut *tx)` and the ADR 0068 doc comment's substance are
 unchanged.
 
-Verify: `cargo test -p voom-store --test init --all-features`; the existing
-init/migration coverage is what exercises this, and no new test is written for it
-because the behaviour is unchanged and only the shape moved.
+It also gains `use crate::tx::begin_read_then_write;`.
+
+Verify: `cargo test -p voom-store --all-features init` — **both** targets.
+`--test init` alone runs only `tests/init.rs` (4 tests) and misses the coverage
+this task actually rests on, which lives in the lib target at
+`crates/voom-store/src/init_test.rs`. Three tests there must stay green, and each
+encodes an assumption about `run_migrations_on`'s *internal* acquire that T3
+moves onto a spawned task:
+
+- `busy_timeout_exhaustion_surfaces_database_error` (`:297`) — its own comment
+  calls the setup load-bearing: `conn2` is returned to the idle queue so
+  `run_migrations_on`'s internal `pool.acquire()` reuses that specific
+  `busy_timeout = 0` connection. Post-T3 that acquire happens inside
+  `begin_detached`'s spawned task against the same pool, so it should still draw
+  the same idle connection — but this is the test that says otherwise if it does
+  not.
+- `locked_migration_true_race_reports_zero_applied` (`:268`) — the held-lock race
+  ADR 0068 exists for.
+- `single_shot_replacement_has_no_polling` (`:214`) — a <25ms wall-clock bound on
+  the rollback-then-probe path, which now carries a task spawn.
+
+No new test is written for `init.rs` itself: the behaviour is unchanged and only
+the shape moved.
 
 ## T6 — Guardrails and the record
 
 Files: none beyond what T1–T5 touched; `docs/` already carries ADR 0087, its
 index row, the spec, and `docs/debt/0005`.
 
-- `./scripts/check-transaction-openers.sh crates` still exits 0, and
-  `rg -n 'begin_with' crates --type rust` now finds custom-statement opens only
-  in `crates/voom-store/src/tx.rs` and in test files — the non-regression
-  boundary `docs/debt/0005` states.
+- `./scripts/check-transaction-openers.sh crates` still exits 0, and the
+  non-regression boundary is this determinate predicate:
+
+  ```
+  rg -n 'begin_with' crates --type rust \
+    -g '!**/tests/**' -g '!**/*_test.rs' -g '!crates/voom-test-support/**'
+  ```
+
+  returns only `crates/voom-store/src/tx.rs`. The earlier wording — "only tx.rs
+  and test files" — could not distinguish success from failure: run on the tree
+  today it also returns `crates/voom-test-support/src/commit_node.rs:89,110` and
+  `staging_seed.rs:59`, which are `src/` files in a support crate, exempt from
+  `check-transaction-openers.sh` by its
+  `grep -Ev "/(voom-test-support|voom-fakes|…)/"` filter rather than by its
+  test-file filter, and untouched by T5. `docs/debt/0005`'s Non-regression
+  boundary section carries the same loose wording and is corrected to this
+  predicate in the same commit.
 - `just check-transaction-openers-selftest` passes (the rule is unchanged; this
   confirms the change did not weaken it).
 - `just ci` green.
@@ -182,14 +250,36 @@ index row, the spec, and `docs/debt/0005`.
 ## Acceptance run — completion criterion 5
 
 Separate from the guardrails and reported honestly whether or not it completes.
-Pre-fix control first and **gating**: the unfixed opener under
-`./scripts/run-constrained.sh --load 1 --write-bps 40M -- cargo llvm-cov
---no-report -p voom-node-agent --test lifecycle --all-features -- --test-threads=1`,
-stopping at the first reproduction or at 90 runs. If 90 unfixed runs do not
-reproduce, criterion 5 is reported **not discharged** — not as a green sweep.
-Then the same invocation post-fix, ≥90 runs. Report both counts and the pre-fix
-reproduction index; the (29/30)^90 = 0.047 figure is conditional on #592's rate
-transferring to this host, and the index is the host-local evidence for that.
+
+**The reproduction predicate is `HANG_GUARD` firing**, not a non-zero exit
+status. `HANG_GUARD` is 30s in `crates/voom-node-agent/tests/lifecycle.rs:47`,
+and any unrelated failure in the lifecycle binary also exits non-zero — so the
+loop greps the run's captured output for the guard's message and keys on that.
+Both the pre-fix stopping rule and the recorded reproduction index depend on
+telling those two apart.
+
+**The loop goes outside `run-constrained.sh`.** It wraps one command in its own
+cgroup v2 scope with the `--write-bps` cap applied to that scope, so
+`for i in $(seq 90); do ./scripts/run-constrained.sh … ; done` gives each run an
+identical, un-depleted write budget, while
+`run-constrained.sh … -- bash -c 'for i in …'` gives 90 runs one shared budget.
+#592 records the throttle as *required* to reproduce, so the two placements are
+not interchangeable and the outer one is the one this protocol means:
+
+```
+for i in $(seq 90); do
+  ./scripts/run-constrained.sh --load 1 --write-bps 40M -- \
+    cargo llvm-cov --no-report -p voom-node-agent --test lifecycle \
+    --all-features -- --test-threads=1 2>&1 | tee run-$i.log
+done
+```
+
+Pre-fix control first and **gating**, stopping at the first run whose log matches
+the guard predicate or at 90 runs. If 90 unfixed runs do not reproduce,
+criterion 5 is reported **not discharged** — not as a green sweep. Then the same
+invocation post-fix, ≥90 runs. Report both counts and the pre-fix reproduction
+index; the (29/30)^90 = 0.047 figure is conditional on #592's rate transferring
+to this host, and the index is the host-local evidence for that.
 
 Up to ~180 instrumented, throttled, serialized lifecycle runs. If it is not run
 to completion, say so and say which criteria that leaves undischarged.
@@ -199,4 +289,7 @@ to completion, say so and say which criteria that leaves undischarged.
 `git revert` the T3 and T5 commits. `begin_detached` is additive and the two
 openers keep their signatures, so reverting restores the prior behaviour without
 touching any of the ~50 call sites. The test file and the manifest change are
-inert without it — the fixed arm returns to red, which is the correct signal.
+inert without it, and **both** test arms go red: the fixed arm on a leaked lock,
+which is the correct signal, and the orphan arm on a missing `warn` after burning
+its 5s ceiling — a red that names the absent log line rather than the leak. Both
+are expected on a revert; neither indicates a broken test.

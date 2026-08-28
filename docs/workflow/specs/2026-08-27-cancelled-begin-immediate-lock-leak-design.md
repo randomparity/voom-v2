@@ -446,11 +446,16 @@ integration test, the regression proof.
   assertion can kill the detached task before it rolls back, so a test that does
   not wait for the branch does not reliably execute it either.
 
-  Note it is **not** red on the unfixed code: cancelling inside step 1 of
-  `SqliteTransactionManager::begin` lands in the window the worker already
-  self-heals (`worker.rs:234-252`), so pre-fix this arm passes. It is a coverage
-  arm, not a regression arm, and saying so is the difference between the two being
-  useful.
+  Note **which** red it gives on the unfixed code, because it is not the useful
+  one. Cancelling inside step 1 of `SqliteTransactionManager::begin` lands in the
+  window the worker already self-heals (`worker.rs:234-252`), so the lock probe
+  in step 5 would pass pre-fix. But step 4 fails there: the unfixed opener has no
+  spawned task and emits no `warn`, so the arm burns its 5s ceiling and goes red
+  on the missing event. A reader who reverts the fix, sees red, and concludes
+  "the arm bites" will never have exercised step 5 — which is the assertion the
+  arm is for. So this stays a **coverage** arm rather than a regression arm, and
+  the controlled fault described in the plan, not a revert, is what proves step 5
+  works.
 
   Cost: `tracing-subscriber` joins `crates/voom-store/Cargo.toml` as a
   **dev-dependency**, at the version the workspace already pins for `voom-api`,
@@ -460,7 +465,10 @@ integration test, the regression proof.
   depend on where the sqlx window falls — the open completes on the detached task
   at every *N*, on one core as on forty-eight — and the orphan arm's determinism
   comes from a held lock, not from scheduling. Only the control arm asks where
-  the window is, so only the control arm is host-dependent.
+  the window is, so only the control arm is host-dependent. The gate is a silent
+  early return: `libtest` hides a passing test's output under both CI
+  invocations anyway, and a skip notice would cost a `clippy::print_stderr`
+  expectation for a line no CI reader sees.
 
   The **control** arm is skipped when `std::thread::available_parallelism()`
   reports fewer than 4. On one core the unfixed open collapses into one or two

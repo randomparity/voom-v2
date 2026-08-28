@@ -45,8 +45,22 @@ which needs its own selftest case in `check-transaction-openers-selftest`.
 
 Issue #592's change must not add a production `conn.begin_with` or
 `conn.begin_with`-equivalent custom-statement open, and must not weaken
-`check-transaction-openers.sh`. After it lands, `rg -n 'begin_with' crates --type rust`
-finds custom-statement opens only in `crates/voom-store/src/tx.rs` and in test files.
+`check-transaction-openers.sh`. After it lands, this predicate returns only
+`crates/voom-store/src/tx.rs`:
+
+```
+rg -n 'begin_with' crates --type rust \
+  -g '!**/tests/**' -g '!**/*_test.rs' -g '!crates/voom-test-support/**'
+```
+
+The support-crate exclusion is not a loosening. `crates/voom-test-support/src/`
+holds three custom-statement opens (`commit_node.rs:89,110`,
+`staging_seed.rs:59`) which `check-transaction-openers.sh` exempts through its
+`grep -Ev "/(voom-test-support|voom-fakes|voom-fake-support|voom-conformance)/"`
+filter — a different mechanism from its `! -name '*_test.rs' ! -path '*/tests/*'`
+filter. An earlier wording of this section said "only `tx.rs` and in test files",
+which those three falsify, making the boundary unable to distinguish success from
+failure.
 
 ## What would resolve it
 
