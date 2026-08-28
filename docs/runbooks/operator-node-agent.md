@@ -188,8 +188,8 @@ and deactivation — 1 s bounds collecting a killed child's exit status, and 5 s
 the backstop that bounds the whole sequence. That sum is the worst case, so the example
 configuration above (`shutdown_grace_seconds = 10`) needs a stop timeout above 36 s. Check the
 one your supervisor actually applies rather than assuming the upstream 90 s:
-`systemctl show -p DefaultTimeoutStopUSec` reports 45 s on Fedora, and any
-`shutdown_grace_seconds` above 19 exceeds that. A stop timeout below the sum means `SIGKILL`
+`systemctl show -p DefaultTimeoutStopUSec` reports 45 s on Fedora, which leaves no margin at
+`shutdown_grace_seconds = 19` (19 + 26 = 45 exactly) and is exceeded above it. A stop timeout below the sum means `SIGKILL`
 lands mid-shutdown and the incarnation is never marked retired. See
 [ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
 
@@ -199,9 +199,17 @@ forces settlement or deactivation. Only a genuine second operator signal, after 
 been consumed, cancels blocked lease settlement or deactivation and makes the process exit
 unsuccessfully. A shutdown blocked on an unresponsive control plane no longer needs that second
 signal: the deadline abandons it and the process exits unsuccessfully on its own, reporting the
-deadline rather than a signal. Either way every child is killed and reaped before exit, and a
-forced shutdown can leave the incarnation or lease terminal state for TTL expiry/recovery to
-reconcile.
+deadline rather than a signal. Either way a forced shutdown can leave the incarnation or lease terminal state for TTL
+expiry/recovery to reconcile.
+
+**A child is not always reaped by the agent, and nothing logs it when it is not.** Two paths
+leave a worker process behind: a child the kernel cannot kill is abandoned 1 s after `SIGKILL`,
+and if the whole sequence overruns its bound the agent aborts mid-reap and the child is
+`SIGKILL`ed without its grace. In both cases the process is reparented to init, the error the
+supervisor returns is discarded, and the agent has no log output — so after an unexplained stop,
+or any exit reporting a shutdown budget or the tail bound, check for leftover worker processes
+holding a GPU, a mount, or a port before starting a replacement agent. See
+[ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
 
 A signal that arrives while the agent is still retrying activation against an unreachable
 control plane stops it immediately and exits successfully. No child has started at that

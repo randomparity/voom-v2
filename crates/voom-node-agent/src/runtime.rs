@@ -907,9 +907,11 @@ async fn shutdown_during_restart(
     context: &CoordinatorContext,
     child: RunningChild,
 ) -> CoordinatorExit {
-    // Mirrors the shutdown branch above: the child is closed and reaped through the
-    // supervisor rather than left to `Drop`, which would `SIGKILL` a freshly launched
-    // worker instead of honouring `shutdown_grace_seconds`.
+    // Mirrors the shutdown branch above: closed and reaped through the supervisor
+    // rather than left to `Drop`, which `SIGKILL`s. That matters most at the `Ready`
+    // call site, where the child is a freshly launched replacement that has not run
+    // and would otherwise lose its `shutdown_grace_seconds`; at the `restart_child`
+    // site the child has already exited and this only collects its status.
     let supervisor = ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
     let _ = supervisor.shutdown_all(vec![child]).await;
     CoordinatorExit::Shutdown(LeaseSettlement::Completed)
@@ -2296,10 +2298,6 @@ fn random_hex(byte_count: usize) -> String {
     encoded
 }
 
-/// A shutdown-tail control-plane wait was abandoned at its own budget.
-///
-/// Distinct from [`forced_shutdown_error`] because no signal arrived: an operator
-/// told to look for one would be looking for something nobody sent.
 /// Run the shutdown tail, giving up after `bound`.
 ///
 /// The inner budgets bound the waits this design enumerated; this bounds the ones it
@@ -2330,6 +2328,10 @@ fn shutdown_backstop_error(bound: Duration) -> VoomError {
     ))
 }
 
+/// A shutdown-tail control-plane wait was abandoned at its own budget.
+///
+/// Distinct from [`forced_shutdown_error`] because no signal arrived: an operator
+/// told to look for one would be looking for something nobody sent.
 fn shutdown_deadline_error() -> VoomError {
     VoomError::ExternalSystemUnavailable(
         "node-agent shutdown abandoned a control-plane call at its shutdown budget; \

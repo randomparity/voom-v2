@@ -383,6 +383,24 @@ This file and `tests/budget_ladder.rs` were added to the charter's permitted
 surface by explicit maintainer decisions on 2026-08-28, recorded in the amended
 `WORK:SCOPE` annotations on issue #452. The original surface included neither.
 
+### Three files outside the approved surface, and why
+
+`crates/voom-node-agent/src/commit.rs` (+8/-3), `commit_test.rs` (+1/-1) and
+`media_test.rs` (+1) are not runtime, child, client, or configuration modules, so
+they fall outside the charter's surface. Every line in them is compile-forced by a
+type inside the surface, and none changes behaviour:
+
+- `commit.rs:111` and `commit_test.rs` construct `LeaseSettlement::Forced`, which
+  gained a `ShutdownForce` payload. Both take `Signal`: the commit coordinator
+  observes a published `Forced` kind, and only `wait_for_coordinators`' signal arm
+  publishes one — that coordinator has no budget of its own to expire.
+- `media_test.rs` initialises a `CoordinatorContext`, which gained `budgets`.
+
+Rust requires every construction site to be updated in the same change, so this is
+an unavoidable consequence of a sourced criterion rather than absorbed adjacent
+work. It is recorded here rather than left for a reviewer to find, and neither
+`commit.rs` nor `media.rs` gains any new behaviour, control-plane call, or wait.
+
 ## Failure modes
 
 | Condition | Behaviour |

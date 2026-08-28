@@ -1507,6 +1507,9 @@ struct FakeControlPlane {
     deactivate_gate: Mutex<Option<Arc<Notify>>>,
     deactivate_started: Notify,
     deactivate_started_count: AtomicUsize,
+    readiness_gate: Mutex<Option<Arc<Notify>>>,
+    readiness_started: Notify,
+    readiness_started_count: AtomicUsize,
     complete_calls: AtomicUsize,
     reject_complete: AtomicBool,
     events: Mutex<Vec<String>>,
@@ -1538,6 +1541,9 @@ impl Default for FakeControlPlane {
             deactivate_gate: Mutex::new(None),
             deactivate_started: Notify::new(),
             deactivate_started_count: AtomicUsize::new(0),
+            readiness_gate: Mutex::new(None),
+            readiness_started: Notify::new(),
+            readiness_started_count: AtomicUsize::new(0),
             complete_calls: AtomicUsize::new(0),
             reject_complete: AtomicBool::new(false),
             events: Mutex::new(Vec::new()),
@@ -1579,6 +1585,11 @@ impl ControlPlaneApi for FakeControlPlane {
         worker_id: WorkerId,
         request: &RetryRequest<WorkerReadinessRequest>,
     ) -> Result<WorkerReadinessOutcome, VoomError> {
+        self.readiness_started_count.fetch_add(1, Ordering::SeqCst);
+        self.readiness_started.notify_waiters();
+        if let Some(gate) = self.readiness_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         let body: JsonValue = serde_json::from_slice(request.body()).unwrap();
         let incarnation_id = body["incarnation_id"].as_str().unwrap().parse().unwrap();
         let readiness: WorkerReadiness = serde_json::from_value(body["readiness"].clone()).unwrap();
@@ -2714,6 +2725,49 @@ async fn a_second_signal_after_a_deadline_force_still_forces() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_queued_signal_still_forces_after_a_deadline_force() {
+    // R4's ratified OUTCOME, one layer up from the guard. The layer above records
+    // Deadline and lets the queued signal through to deactivate_or_second_signal, where
+    // it must still force: forced_shutdown_error(), Retired write skipped. Only the
+    // latency changed. Asserting progress.forced alone would prove the signal was
+    // ignored, which is the opposite of what criterion 4 protects.
+    let control = Arc::new(FakeControlPlane::default());
+    // Never notified, so the signal is what resolves the call.
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    signal_tx.send(()).unwrap();
+
+    let error = runtime
+        .finish_shutdown_lifecycle(
+            incarnation(),
+            RuntimeExit::Graceful,
+            Ok(ShutdownProgress {
+                signal_phase: ShutdownSignalPhase::ForceEnabled,
+                forced: Some(ShutdownForce::Deadline),
+            }),
+            pending_heartbeat_handle(),
+            &mut signal_rx,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("termination signal"),
+        "the operator's second signal must still be the cause: {error}"
+    );
+    assert!(
+        !control
+            .events
+            .lock()
+            .await
+            .iter()
+            .any(|e| e == "deactivate"),
+        "and a signal force still skips the Retired write"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_sigterm_exits_the_agent_when_the_control_plane_never_answers() {
@@ -2772,6 +2826,68 @@ async fn a_sigterm_exits_the_agent_when_the_control_plane_never_answers() {
         control.deactivate_started_count.load(Ordering::SeqCst),
         1,
         "and it must have tried to retire the incarnation"
+    );
+    server.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_crashed_worker_release_does_not_wait_out_the_retry_budget() {
+    // The wiring point, not the helper. restart_after_child_exit holds three waits that
+    // reach the retrying client or a five-minute accelerator startup; without the
+    // until_shutdown wrappings a coordinator parked in one holds the whole shutdown tail
+    // open for production_request_budget(). Deleting any wrapping must fail this.
+    let fixture = ProcessWorkerFixture::new();
+    let control = Arc::new(FakeControlPlane::default());
+    // Never notified: the control plane does not answer the readiness update.
+    *control.readiness_gate.lock().await = Some(Arc::new(Notify::new()));
+    let supervisor = ChildSupervisor::new(Duration::from_millis(50), Duration::from_millis(50));
+    // The child binds and registers while the fixture's server is coming up, so these
+    // run together the way the runtime starts them.
+    let (children, server) = tokio::join!(
+        supervisor.start_all(vec![ChildSpec::from_worker(
+            &fixture.worker(1),
+            credentials()
+        )]),
+        fixture.start_pending_server(),
+    );
+    let child = children.unwrap().pop().unwrap();
+
+    let (cancel_tx, _cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let mut leases = JoinSet::new();
+    let mut crashes = CrashBudget::new();
+    let context = context(control.clone());
+
+    let restarting = restart_after_child_exit(
+        child,
+        &context,
+        &cancel_tx,
+        &mut leases,
+        &mut shutdown_rx,
+        &mut crashes,
+    );
+    tokio::pin!(restarting);
+    // The future is lazy, so it has to be polled while waiting for its readiness call
+    // to reach the fake.
+    tokio::select! {
+        exit = &mut restarting => panic!("returned before the readiness call: {exit:?}"),
+        result = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_count(&control.readiness_started, &control.readiness_started_count, 1),
+        ) => result.unwrap(),
+    }
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+
+    // Well under production_request_budget() = 153.75s, which is what this would take
+    // if the readiness call were not raced against the shutdown.
+    let exit = tokio::time::timeout(Duration::from_secs(10), restarting)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(exit, Err(CoordinatorExit::Shutdown(_))),
+        "a shutdown must release the readiness call and settle, not drain the retry budget"
     );
     server.stop().await;
 }
