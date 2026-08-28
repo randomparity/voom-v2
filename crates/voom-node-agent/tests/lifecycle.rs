@@ -64,14 +64,21 @@ const HANG_GUARD: Duration = Duration::from_secs(30);
 fn init_tracing() {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {
-        // `voom_store=warn` is unconditional, and RUST_LOG may only ADD to it.
-        // Deferring to `try_from_default_env` would let an ambient `RUST_LOG=error`
-        // silence the orphan warning the acceptance sweep counts — reintroducing the
-        // zero-forever instrument through the environment instead of the manifest —
-        // and an ambient `RUST_LOG=debug` would raise `log::set_max_level` and format
-        // every hyper/rustls record to stderr inside a HANG_GUARD-bounded test.
-        // `RUST_LOG=debug` is exactly what someone investigating this hang would set.
-        let mut filter = tracing_subscriber::EnvFilter::new("voom_store=warn");
+        // `voom_store=warn` survives whatever RUST_LOG says, and the ORDER here is
+        // what makes that true: `EnvFilter::add_directive` *replaces* a directive
+        // with the same target, so RUST_LOG is folded in first and `voom_store=warn`
+        // is added last. Built the other way round — the obvious way, and the way an
+        // earlier version of this function did it — `RUST_LOG=voom_store=error`
+        // overwrites the warn directive and the acceptance sweep reports
+        // `orphan_warns=0` on every run whatever the code does. That is the
+        // zero-forever instrument this function exists to prevent, reached through
+        // the environment rather than the manifest, and an operator debugging #592
+        // is exactly the person who sets RUST_LOG.
+        //
+        // RUST_LOG otherwise applies as usual: `RUST_LOG=debug` still raises the
+        // global level and still lets hyper/rustls records through. That is what
+        // "RUST_LOG may add" means and it is not guarded against here.
+        let mut filter = tracing_subscriber::EnvFilter::default();
         if let Ok(directives) = std::env::var("RUST_LOG") {
             for directive in directives.split(',').filter(|d| !d.trim().is_empty()) {
                 if let Ok(parsed) = directive.trim().parse() {
@@ -79,6 +86,11 @@ fn init_tracing() {
                 }
             }
         }
+        filter = filter.add_directive(
+            "voom_store=warn"
+                .parse()
+                .expect("voom_store=warn is a valid directive"),
+        );
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)

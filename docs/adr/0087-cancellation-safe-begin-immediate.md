@@ -251,10 +251,23 @@ orphan signal.
 
 The detach discharges the guarantee only while a runtime outlives the task. On a
 current-thread runtime whose `block_on` returns while the detached task sits
-between the two steps, the task is dropped there and the leak recurs. Several
-test harnesses run that shape (`crates/voom-test-support/src/commit_node.rs:349`,
-`crates/voom-cli/tests/support/owner_node.rs:102,139`); it is moot there because
-the pool dies with the runtime, but the condition belongs on the record.
+between the two steps, the task is dropped there and the leak recurs. Two test
+harnesses run that shape, and they are discharged by **different** reasons — an
+earlier draft of this record gave one reason for both, and it was false at one of
+them. At `crates/voom-cli/tests/support/owner_node.rs:102,139` each thread builds
+its own pool inside `block_on` (`voom_store::connect` at `:106`,
+`run_media_settlement` at `:141`), so the pool genuinely dies with the runtime. At
+`crates/voom-test-support/src/commit_node.rs:346-382` it does not:
+`install_and_spawn_driver` takes `pool: &SqlitePool` and clones it at `:347`, so
+the detached openers draw from the *caller's* pool, which outlives the driver
+runtime. What discharges that site is instead that its `block_on` body is an
+unterminated `loop` (`:362-379`) with no `break`, so it returns only by panic — by
+which point the harness is already failing.
+
+State the unsafe shape plainly, because it is the one a future harness author
+needs to test against: **a current-thread runtime that borrows a pool from a
+longer-lived owner and whose `block_on` can return normally.** Neither existing
+harness is that; a new one could be.
 
 The deferred openers stay safe by way of `sqlx` worker behaviour this record
 cites but does not control. If that behaviour changed, a cancelled deferred open

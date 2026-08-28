@@ -61,7 +61,14 @@ async fn begin_detached(
 
     tokio::spawn(
         async move {
+            // Timed because the orphan `warn` is this design's only observable for
+            // the pool-slot residual it accepts, and a bare count cannot tell a
+            // microsecond open under no contention from one parked in `SQLite`'s busy
+            // handler for the full `busy_timeout`. Those are the benign and the
+            // worrying case, and without a duration they log identically.
+            let started = std::time::Instant::now();
             let opened = pool.begin_with(statement).await;
+            let held_ms = started.elapsed().as_millis();
             // `send` returns the value back when the receiver is gone, which is
             // exactly the orphan case: the caller was cancelled while this open was
             // in flight. Dropping `unsent` here is what performs the rollback.
@@ -69,10 +76,12 @@ async fn begin_detached(
                 match &unsent {
                     Ok(_) => tracing::warn!(
                         context,
+                        held_ms,
                         "transaction open completed after its caller was cancelled; rolling back"
                     ),
                     Err(error) => tracing::warn!(
                         context,
+                        held_ms,
                         %error,
                         "transaction open failed for a caller that was already cancelled"
                     ),

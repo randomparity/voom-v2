@@ -497,9 +497,22 @@ integration test, the regression proof.
   above), which would make the control red on a 1-vCPU container for a reason
   that has nothing to do with the defect. Four is the lowest parallelism
   *sampled* to reproduce deterministically, including with a busy loop per core —
-  a sampled point, not a located boundary — measured under
-  `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`, which the test
-  carries, so the gate and the measurement are about the same thing.
+  a sampled point, not a located boundary.
+
+  **The gate is a host-parallelism precondition, not a restatement of the
+  measurement's runtime shape**, and an earlier draft of this paragraph claimed
+  otherwise. That draft said the measurement was taken under
+  `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` "which the test
+  carries"; the shipped arms are plain
+  `#[tokio::test(flavor = "multi_thread")]` (`:239`, `:275`, `:420`), which sizes
+  the runtime from `available_parallelism()` — 48 worker threads on the design
+  host, 4 on a 4-vCPU runner. So the gate constrains the *host*, while the
+  runtime's width follows the host rather than being pinned. The threshold still
+  holds on its own evidence: the table above records a deterministic leak at
+  *N* = 3 in 8 of 8 runs on 4 cores with a busy loop per core, and the control
+  arm passes under `taskset -c 0-3`. Pinning `worker_threads = 4` was considered
+  and not done — it would change the shape the serialized cost was measured in,
+  and that cost is already at 14.9s against a 15s budget.
 
   This split is what keeps the skip from mattering. `libtest` captures a passing
   test's output and prints it only under `--nocapture` / `--show-output`, and
