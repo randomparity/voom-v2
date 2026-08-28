@@ -288,9 +288,14 @@ index row, the spec, and `docs/debt/0005`.
     -g '!**/tests/**' -g '!**/*_test.rs' -g '!crates/voom-test-support/**'
   ```
 
-  returns only `crates/voom-store/src/tx.rs`. **Today** it returns `tx.rs:5`
-  (a module doc comment), `tx.rs:40`, `tx.rs:105` and `init.rs:55`; after T5 the
-  `init.rs` line goes and the three `tx.rs` lines remain.
+  returns only `crates/voom-store/src/tx.rs` — **stated at file granularity, and
+  deliberately.** A line-level expectation does not survive this change: today the
+  predicate returns `tx.rs:5` (a module doc comment), `tx.rs:40`, `tx.rs:105` and
+  `init.rs:55`, but T3 routes `:40` and `:105` through `begin_detached`, so
+  neither line contains `begin_with` afterwards. What matches in `tx.rs` post-T3
+  is the doc comment plus the single `pool.begin_with(statement)` inside
+  `begin_detached` — two lines, at different numbers. `docs/debt/0005` states the
+  boundary at file granularity for exactly this reason.
 
   The `crates/voom-test-support/**` glob is load-bearing **even though nothing it
   excludes appears in either output** — that is the point of it. Drop the glob and
@@ -329,33 +334,79 @@ different `HANG_GUARD` site firing is a different failure, not a reproduction**,
 and a non-zero exit is not evidence either — any unrelated failure in the
 lifecycle binary also exits non-zero.
 
-**The loop goes outside `run-constrained.sh`.** It wraps one command in its own
-cgroup v2 scope with the `--write-bps` cap applied to that scope, so
-`for i in $(seq 90); do ./scripts/run-constrained.sh … ; done` gives each run an
-identical, un-depleted write budget, while
-`run-constrained.sh … -- bash -c 'for i in …'` gives 90 runs one shared budget.
-#592 records the throttle as *required* to reproduce, so the two placements are
-not interchangeable and the outer one is the one this protocol means:
+**The loop goes outside `run-constrained.sh`** — but not for the reason an
+earlier draft gave. `IOWriteBandwidthMax` (`run-constrained.sh:174`) maps to
+cgroup v2 `io.max wbps`, a continuously enforced **rate limit with nothing to
+deplete**, so 90 sequential runs inside one scope would each get the same 40M/s
+that 90 separate scopes give them. The throttle is unaffected by placement. The
+outer loop is chosen because each run gets its own `MemoryMax` accounting and its
+own load setup, and because it is the exact per-run invocation #592 records as
+reproducing.
+
+**Reap the load hogs between runs.** `run-constrained.sh` leaks them:
+`trap cleanup EXIT INT TERM` at `:150`, hogs spawned at `:152-160`, then `exec
+systemd-run …` at `:177` replaces the shell and discards the trap, so every
+`--load` process is reparented to init and spins forever. Reproduced on this
+host: `./scripts/run-constrained.sh --cpus 0 --load 1 -- true` returns 0 and
+leaves `sh -c while :; do :; done` alive. At the protocol's defaults (`--cpus
+0-3`, `--load 1`) that is **four orphans per invocation** — ~360 spinning
+processes by the end of the pre-fix arm, with the post-fix arm starting on top of
+them. The sweep's runs would get monotonically heavier, which destroys the very
+comparability the outer placement is for, and CPU starvation can trip
+`HANG_GUARD` for reasons unrelated to the defect — indistinguishable in the log,
+because the predicate *is* a `HANG_GUARD` message. `run-constrained-selftest`
+does not cover this: `--print-plan` exits at `:128`, before the hog block.
+
+`scripts/` is outside this issue's frozen surface, so the loop compensates rather
+than fixing the script, and the script bug is filed as
+`docs/debt/0006-run-constrained-leaks-load-hogs.md`.
 
 ```
 # $ARM is accept-prefix (T2b) or accept-postfix; each arm gets its own directory
 # so the second cannot overwrite the first arm's evidence. `.tmp*/` is already
 # gitignored; the repo root is not, and `*.log` is not ignored anywhere.
 mkdir -p .tmp/$ARM
+hogs() { pgrep -cf 'sh -c while :; do :; done' || true; }
+executed=0
 for i in $(seq 90); do
+  [ "$(hogs)" -eq 0 ] || { echo "ABORT: $(hogs) leaked hogs before run $i"; break; }
   log=.tmp/$ARM/run-$i.log
   ./scripts/run-constrained.sh --load 1 --write-bps 40M -- \
     cargo llvm-cov --no-report -p voom-node-agent --test lifecycle \
     --all-features -- --test-threads=1 >"$log" 2>&1
+  rc=$?
+  pkill -f 'sh -c while :; do :; done'          # the script will not
+  case $rc in
+    0|101) ;;                                    # ran; 101 is a real test failure
+    *) echo "ABORT: run $i exited $rc — not a run"; break ;;
+  esac
+  grep -q 'test result:' "$log" || { echo "ABORT: run $i never ran the suite"; break; }
+  executed=$((executed + 1))
   if grep -q 'second agent graceful-shutdown lifecycle did not complete' "$log"
   then echo "reproduced at run $i"; break; fi
 done
+echo "executed=$executed"
 ```
 
-The `break` is what makes T2b's stopping rule executable; without it the pre-fix
-arm runs all 90 iterations regardless. The post-fix arm runs the same loop with
-`$ARM=accept-postfix` and **no** break — it must complete ≥90 runs — and any
-match is a failure, not a stop.
+**Every iteration must prove it ran**, because the grep alone cannot tell "90
+clean runs" from "90 runs that never started". `run-constrained.sh` exits 2 or 3
+on six preconditions (`:132-141`, `:169-174` — not Linux, no `systemd-run`, no
+`taskset`, cgroup v1, memory controller not delegated, unresolvable device), and
+a compile error, an OOM kill under `MemoryMax=16G`, or a transient scope failure
+all exit non-zero with no `HANG_GUARD` text. Without the `rc` check and the
+`test result:` requirement, the **post-fix arm's success condition — ≥90 runs,
+no match — is satisfied exactly by 90 instantaneous failures**, and criteria 2
+and 5 get reported discharged on a sweep that never ran. The partial case is
+likelier and quieter: a few failed iterations shrink the real run count while the
+loop still counts to 90, inflating the stated confidence.
+
+Report `executed` next to the 90 the (29/30)^90 figure assumes. If they differ,
+the figure does not apply.
+
+The `break` on a match is what makes T2b's stopping rule executable; without it
+the pre-fix arm runs all 90 regardless. The post-fix arm runs the same loop with
+`$ARM=accept-postfix`, must reach `executed=90`, and treats any match as a
+**failure**, not a stop.
 
 Report both counts and the pre-fix reproduction index. The (29/30)^90 = 0.047
 figure is conditional on #592's rate transferring to this host, and that index is
@@ -366,10 +417,15 @@ to completion, say so and say which criteria that leaves undischarged.
 
 ## Rollback
 
-`git revert` the T3 and T5 commits. `begin_detached` is additive and the two
-openers keep their signatures, so reverting restores the prior behaviour without
-touching any of the ~50 call sites. The test file and the manifest change are
-inert without it, and **both** test arms go red: the fixed arm on a leaked lock,
-which is the correct signal, and the orphan arm on a missing `warn` after burning
-its 5s ceiling — a red that names the absent log line rather than the leak. Both
-are expected on a revert; neither indicates a broken test.
+`git revert` the **T2, T3, T4 and T5** commits — the fix *and* the tests.
+`begin_detached` is additive and the two openers keep their signatures, so
+reverting restores the prior behaviour without touching any of the ~50 call
+sites. T1 stays: the manifest change genuinely is inert, and `rt` is enabled
+through sqlx regardless.
+
+The tests must go with the fix. They exist only to prove it and are meaningless
+without it — reverting T3 and T5 alone leaves **both** arms red (the fixed arm on
+a leaked lock, the orphan arm on a missing `warn` after burning its 5s ceiling)
+and therefore `just test` and `just ci` permanently failing. That is a rollback
+plus a broken gate, in a section that gets read under time pressure after
+something went wrong.
