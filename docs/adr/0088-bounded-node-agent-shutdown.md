@@ -225,7 +225,8 @@ what changes is that the sum exists at all, which is why
 supervisor stop timeout above the configured shutdown grace". Narrowing the
 validator's grace range would close the gap without operator action and is not
 done here: it would invalidate configurations that are legal today, for a ceiling
-that varies by distribution and unit file.
+that varies by distribution and unit file. That residual is owned by
+[#597](https://github.com/randomparity/voom-v2/issues/597).
 
 **A routine stop is unchanged, including a slow one.** Nothing times the child
 reap, so a graceful stop whose worker uses its full `shutdown_grace_seconds`
