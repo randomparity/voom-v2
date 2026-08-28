@@ -481,8 +481,11 @@ for i in $(seq 90); do
   esac
   grep -q 'test result:' "$log" || { echo "ABORT: run $i never ran the suite"; break; }
   executed=$((executed + 1))
-  orphans=$(grep -c 'completed after its caller was cancelled' "$log" || true)
-  echo "run $i: orphan_warns=$orphans"
+  # BOTH branches. begin_detached emits two different messages and the failure
+  # branch is the one that occupied a connection longest — see below.
+  orphans=$(grep -cE 'after its caller was cancelled|for a caller that was already cancelled' "$log" || true)
+  failed=$(grep -c 'for a caller that was already cancelled' "$log" || true)
+  echo "run $i: orphan_warns=$orphans orphan_failed=$failed"
   if grep -q 'second agent graceful-shutdown lifecycle did not complete' "$log"
   then echo "reproduced at run $i"; break; fi
 done
@@ -498,6 +501,20 @@ large fraction of its 153.75s budget, on exactly the path completion criterion 2
 is judged on. No measurement of that case exists, here or anywhere. The sweep
 runs the real workload under the real throttle, so it is where "occupancy decays"
 stops being an argument and becomes an observation. Report the counts.
+
+**Count both orphan branches, and report the failure branch separately.**
+`begin_detached` emits two different messages: the `Ok` branch reads *"transaction
+open completed after its caller was cancelled; rolling back"*, the `Err` branch
+*"transaction open failed for a caller that was already cancelled"*. An earlier
+predicate here matched only the first, and that is the wrong half to lose. The `Err`
+branch is reached when `pool.begin_with` returns an error for an already-cancelled
+caller, and the dominant errors under this sweep's own conditions are `SQLITE_BUSY`
+after the full 30s `busy_timeout` and `PoolTimedOut` after the 45s `acquire_timeout`
+— the orphan that held a pooled connection for the *entire* wait, which is precisely
+the maximum-occupancy case the `--write-bps 40M` throttle exists to produce. The
+counted `Ok`-branch orphan is one whose open succeeded, which uncontended means it
+held the connection for microseconds. Under the old predicate a run in which the
+residual behaved worst could report the lowest count.
 
 **The count is worthless unless the subscriber is wired, which is T1b's job.**
 Without it `tracing::warn!` emits no bytes and this `grep` returns `0` on every
@@ -581,6 +598,16 @@ arm calibrates the *confidence* attachable to criterion 5, and the post-fix arm
 supplies the residual evidence regardless of what the pre-fix arm found. **A
 `executed=90` post-fix arm is required before criterion 2 is reported at all**,
 discharged or not.
+
+**Re-derived after the predicate was fixed, from the retained logs rather than a
+re-run.** The post-fix sweep at `904982e0` had already executed 500 runs under the
+old `Ok`-branch-only predicate. Recounting `.tmp/accept-postfix/*.log` for both
+branches gives **`Ok` 38, `Err` 0, total 38**, with a per-run maximum of 1 across all
+500 runs — identical to what the incomplete predicate reported, because the failure
+branch never fired in this sweep. So the reported result stands as an upper bound,
+and it now stands on a count that could have found the other class had it occurred.
+The pre-fix arm's logs contain no orphan lines of either kind, as expected:
+`begin_detached` did not exist on that tree.
 
 **Pre-commit to the split threshold.** If any single run reports **more than one
 orphan `warn`**, that is the multi-opener occupancy the spec names. Decide that

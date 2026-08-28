@@ -640,12 +640,19 @@ one transitively. `tracing::warn!` with no subscriber installed is a no-op that
 emits no bytes, so the sweep's
 
 ```
-grep -c 'completed after its caller was cancelled' "$log"
+grep -cE 'after its caller was cancelled|for a caller that was already cancelled' "$log"
 ```
 
 would have returned `0` on every run whatever the code did. That is worse than no
 instrument: `orphan_warns=0` across ~90 runs reads as *no orphans occurred* and is
 indistinguishable from *the instrument was never connected*.
+
+That predicate also has to match **both** orphan messages. `begin_detached`'s `Ok`
+branch reads *"…completed after its caller was cancelled; rolling back"* and its `Err`
+branch *"…failed for a caller that was already cancelled"*, and an earlier version of
+this predicate matched only the first — losing exactly the orphan that waited out the
+full `busy_timeout` or `acquire_timeout` and therefore held its pooled connection
+longest. The plan carries the reasoning and the re-derived counts.
 
 So the test binary installs one global subscriber, once, and the sweep verifies it
 against a real emitted line before it starts — the same discipline already applied
@@ -680,12 +687,37 @@ what the change does to that.
   transport-level disconnect propagates into a dropped handler future. This
   design adds no boundary and widens none; it removes a consequence of an
   existing one.
-- **Actor.** An authenticated node agent holding a node token
-  (`crates/voom-control-plane/src/node_auth.rs` governs admission). Not anonymous
-  — a disconnect only reaches a handler that authentication already admitted.
-  Every deployment's agents are in this set, and an agent does not have to be
-  malicious to trigger it: being fenced, or hitting its own 30s per-attempt
-  timeout, is enough.
+- **Actor.** **Any network-reachable party**, not an authenticated node agent. An
+  earlier draft of this section claimed the opposite — "a disconnect only reaches a
+  handler that authentication already admitted" — and that is false for the code
+  this change modifies. The token check needs a database read, so it happens
+  *inside* the transaction the opener has already opened:
+  `crates/voom-control-plane/src/cases/execution/remote_execution/acquire.rs:60`
+  opens via `begin_read_then_write` and only `:61-69` calls
+  `require_remote_incarnation_fence_in_tx` with the token; `heartbeat.rs` has the
+  same ordering at `:28`/`:33`. What runs before the open is
+  `crates/voom-api/src/execution.rs:576-588`, which shape-checks only — an
+  `Authorization` header, valid UTF-8, a `Bearer ` prefix, a non-empty remainder,
+  and no comparison against any stored hash. So a well-formed body plus any
+  non-empty bearer string is enough to make the control plane take the write lock.
+  `node_auth.rs` governs what a request may *do*; it does not govern whether a
+  request reaches `BEGIN IMMEDIATE`.
+
+  Authenticated agents remain in the set and need not be malicious — being fenced,
+  or hitting a 30s per-attempt client timeout, is enough. **And the control plane
+  is its own third source:** `voom-api` cancels its own handlers at
+  `REQUEST_PROCESSING_SECONDS = 30s` (`crates/voom-api/src/config.rs:12`, layered
+  by `bounded_router`, `server.rs:344-352`), the same 30s as `busy_timeout`, so
+  under contention orphans arise with no disconnecting client at all.
+
+  This corrects the record rather than reporting a hole this change opened. The
+  pre-change permanent wedge was equally unauthenticated and strictly worse — a
+  durable denial of service versus a bounded 75s residual — so the direction of
+  the change is an improvement. What was wrong is that the residual below was
+  *accepted against an actor model the code contradicts*. Moving the token check
+  ahead of the write lock is a real question and a separate one: it is outside
+  this issue's outcome and is deferred to
+  `docs/debt/0007-write-lock-is-taken-before-the-node-token-is-verified.md`.
 - **Control.** Today: none — a disconnect inside the window wedges every writer
   against that database until the process restarts, which is a durable denial of
   service from a single well-timed connection drop. After this change: the

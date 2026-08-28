@@ -192,7 +192,22 @@ is bounded by `POOL_ACQUIRE_BUDGET` on top, so worst-case termination is 75s, no
 30s. So the pool drains on its own at a rate that does not depend on arrival rate — it degrades under a burst
 and cannot wedge. No measurement of the acquire-cancellation case is offered
 here; the argument is the two constants and the fact that a detached open has no
-unbounded wait in it. Spawning only after the caller holds the connection would
+unbounded wait in it.
+
+**Who can drive that residual is broader than an earlier draft of this record
+implied.** The token check reads from the database, so it runs *inside* the
+transaction the opener has already opened
+(`cases/execution/remote_execution/acquire.rs:60` opens, `:61-69` verifies;
+`heartbeat.rs:28`/`:33` likewise), and what runs before the open shape-checks the
+`Authorization` header without comparing it to anything
+(`voom-api/src/execution.rs:576-588`). So the residual is reachable by any
+network-reachable party, not only by an admitted node agent, and `voom-api`'s own
+30s `REQUEST_PROCESSING_SECONDS` timeout generates orphans with no client
+disconnect at all. The pre-change behaviour was reachable by exactly the same
+party and was strictly worse — a permanent wedge rather than a 75s residual — so
+this is a correction to the record, not a regression introduced here. Reordering
+the check is deferred to
+`docs/debt/0007-write-lock-is-taken-before-the-node-token-is-verified.md`. Spawning only after the caller holds the connection would
 remove the residual entirely, and that needs `Transaction::begin` and
 `MaybePoolConnection` — the same `#[doc(hidden)]` surface the `after_release`
 bullets below decline to reach for.
@@ -299,7 +314,8 @@ that calls `pool.begin_with` itself is outside this invariant.
   operational signal. A pool slot held on behalf of a request answered thirty
   seconds ago is otherwise indistinguishable from one held by a live request, and
   this design's accepted residual — a detached opener holding a slot for up to
-  75s on the node agent's shutdown path — has no other observable.
+  75s, on the node agent's shutdown path and on any other route that reaches these
+  openers — has no other observable.
 
   That second reason is contingent on a subscriber existing where the count is
   read, and it very nearly was not. `tracing::warn!` with no subscriber installed
