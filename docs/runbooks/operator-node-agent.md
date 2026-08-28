@@ -183,8 +183,8 @@ reaps every child (killing one after `shutdown_grace_seconds` if necessary), and
 the incarnation.
 
 **Set the supervisor stop timeout above `shutdown_grace_seconds + 21`, in seconds.** Of that,
-20 s is `SHUTDOWN_DEADLINE`, the wall-clock budget shared by the two control-plane waits in
-the shutdown sequence — lease settlement and deactivation — and 1 s is `REAP_AFTER_KILL`, the
+2 × 10 s is `SHUTDOWN_CALL_DEADLINE`, the wall-clock budget each control-plane wait in the
+shutdown sequence gets — lease settlement and deactivation — and 1 s is `REAP_AFTER_KILL`, the
 bound on collecting a killed child's exit status. That sum is the worst case, so the example
 configuration above (`shutdown_grace_seconds = 10`) needs a stop timeout above 31 s. Check the
 one your supervisor actually applies rather than assuming the upstream 90 s:
