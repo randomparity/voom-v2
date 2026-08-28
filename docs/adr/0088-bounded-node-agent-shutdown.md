@@ -47,13 +47,10 @@ tail begins and passed to both waits: `wait_for_coordinators` and
 `deactivate_or_second_signal` each gain one `sleep_until` arm. Expiry does what a
 second signal already does, so no new teardown path exists.
 
-Each arm is guarded so it fires once. `sleep_until` on an elapsed `Instant` is
-immediately ready, and `wait_for_coordinators` loops `while
-!coordinators.is_empty()` — the deadline deliberately does not leave that loop, so
-that the reap still completes. An unguarded arm would therefore be ready on every
-subsequent poll and spin the select hot for the whole reap window, on exactly the
-oversubscribed host this defect appears under. The signal arm's existing
-`if signals_open && !forced` (`runtime.rs:1838`) is the pattern.
+Each arm is guarded so it fires once, the way the signal arm already is
+(`if signals_open && !forced`, `runtime.rs:1838`): the deadline deliberately does
+not leave `wait_for_coordinators`' loop, and an elapsed `sleep_until` is ready on
+every poll.
 
 **20 s is derived from the guard the change has to prove itself under, not chosen
 for roundness.** `crates/voom-node-agent/tests/lifecycle.rs:47` holds
@@ -71,7 +68,7 @@ rather than spend a further attempt.
 coordinator tasks.** A coordinator reaps its child after settlement, so aborting
 it at the deadline would leave the worker process running. The watch is observed
 by `wait_or_force` inside settlement, which abandons the control-plane wait, and
-the reap then runs to completion inside `shutdown_grace_seconds`.
+the reap then runs to completion inside its own bounds below.
 
 **Each wait reports its own cause, because they do not share a channel.**
 Reporting a deadline expiry as "interrupted by a termination signal" would send
@@ -85,6 +82,15 @@ its deadline arm returns a new `shutdown_deadline_error()` beside the existing
 `forced_shutdown_error()`. Both are `VoomError::ExternalSystemUnavailable`, so
 the exit code is unchanged.
 
+The single site that reads the field must branch on it, which is the whole reason
+for widening it: `runtime.rs:315` is `if progress.forced { return
+Err(forced_shutdown_error()); }` today, and the smallest mechanical edit —
+`if progress.forced.is_some()` — would report a termination signal on a
+settlement-path deadline expiry, the exact message this decision exists to
+prevent, on the only deadline path that is reachable during settlement. It maps
+instead: `Some(Signal)` to `forced_shutdown_error()`, `Some(Deadline)` to
+`shutdown_deadline_error()`.
+
 The startup-failure deactivations take the same bound; they call the same
 `deactivate_or_second_signal` and were unbounded for the same reason. They run
 before any shutdown tail exists, so each captures its own
@@ -92,45 +98,69 @@ before any shutdown tail exists, so each captures its own
 the tail's, and each reports through the same `shutdown_deadline_error()` — there
 is no `ShutdownProgress` on those paths at all.
 
-Nothing new bounds the child reap. It is bounded by `shutdown_grace_seconds`
-already and was never the part that hung.
+**The reap needs one bound of its own, because `shutdown_grace_seconds` does not
+supply the one this record's arithmetic assumed.** `RunningChild::shutdown`
+(`crates/voom-node-agent/src/child.rs:193-213`) wraps only the polite wait in
+`tokio::time::timeout(grace, child.wait())` at `:199`; when that expires it calls
+`start_kill()` at `:204` and then `child.wait().await` at `:207` with no timeout.
+A child the kernel cannot kill — a worker parked in uninterruptible sleep on a
+hung mount — leaves that wait pending forever, and `wait_for_coordinators` is
+still joining. So the post-kill wait gets `REAP_AFTER_KILL`, 1 s: the child is
+already doomed at that point and the wait only collects its exit status, so
+abandoning it orphans nothing that `SIGKILL` had not already claimed — the
+process is reparented and reaped by init. On expiry `shutdown_all` reports the
+unreaped child through the `ChildError` it already returns.
+
+The reap was not the stall. Issue #452's body named `ChildSupervisor::shutdown_all`
+as an unisolated suspect, and its 2026-08-27 reopening comment ruled it out:
+"Both are ruled out. The agent reaches `deactivate` and behaves correctly. It is
+the **control plane** that deadlocks." The bound above exists to make the
+arithmetic below true, not to close the reported hang.
 
 ## Consequences
 
 Graceful shutdown becomes finite and computable:
-`SHUTDOWN_DEADLINE + shutdown_grace_seconds`. The configuration validator holds
-`shutdown_grace_seconds` to 1..=60 (`crates/voom-node-agent/src/config.rs:159`),
-so the worst case is 80 s and the common case — the runbook's example
-`shutdown_grace_seconds = 10` — is 30 s.
+`SHUTDOWN_DEADLINE + shutdown_grace_seconds + REAP_AFTER_KILL`. The deadline runs
+concurrently with the coordinators, so the worst case is a settlement that spends
+the whole budget followed by a full grace and a full post-kill wait. The
+configuration validator holds `shutdown_grace_seconds` to 1..=60
+(`crates/voom-node-agent/src/config.rs:159`), so that worst case is 81 s and the
+common case — the runbook's example `shutdown_grace_seconds = 10` — is 31 s.
 
-**80 s fits systemd's upstream 90 s `DefaultTimeoutStopSec` and not every
+**81 s fits systemd's upstream 90 s `DefaultTimeoutStopSec` and not every
 distribution's, and where it does not fit the change does not deliver its
 outcome.** Fedora 44 ships 45 s (`systemctl show -p DefaultTimeoutStopUSec` →
 `DefaultTimeoutStopUSec=45s`). On that default, any `shutdown_grace_seconds`
-above 25 — a configuration the validator accepts — still produces a tail longer
+above 24 — a configuration the validator accepts — still produces a tail longer
 than the stop timeout, so systemd still sends `SIGKILL` and the deactivation
 write is still skipped. That is #452's original exposure, unfixed, inside the
-accepted range. The agent cannot read its unit's `TimeoutStopSec`, so keeping
-`shutdown_grace_seconds + 20 s` inside it remains the operator's job; what
-changes is that the sum is now finite and computable, which is why
-`docs/runbooks/operator-node-agent.md` gains the arithmetic in place of "set the
-supervisor stop timeout above the configured shutdown grace". Narrowing the
-validator's grace range would close the gap without operator action and is not
-done here: it would invalidate configurations that are legal today, for a ceiling
-that varies by distribution and unit file.
+accepted range. The agent cannot read its unit's `TimeoutStopSec`, so keeping the
+sum inside it remains the operator's job; what changes is that the sum exists at
+all, which is why `docs/runbooks/operator-node-agent.md` gains the arithmetic in
+place of "set the supervisor stop timeout above the configured shutdown grace".
+Narrowing the validator's grace range would close the gap without operator action
+and is not done here: it would invalidate configurations that are legal today,
+for a ceiling that varies by distribution and unit file.
 
-**A deadline expiry during settlement skips deactivation entirely**, and the
-trigger is not the one an earlier draft of this record named. `finish_shutdown_lifecycle`
-returns at `runtime.rs:315` as soon as `progress.forced` is set, so the
-deactivation arm is reachable only when settlement finished inside the budget.
-Any condition that keeps settlement from completing in 20 s therefore costs the
-`Retired` write — not only a control plane answering slowly. Settlement is
-concurrent, so the exposure is smaller than a per-lease reading suggests: the
-coordinators run as a `JoinSet` and each settles its own leases as another, so
-the wall clock is the slowest lease's, not the sum over up to 64 workers. The
-resulting state is not new either — it is what the second-signal force already
-produced, and the runbook already records that a forced shutdown can leave the
-incarnation or lease terminal state for TTL expiry to reconcile.
+**A deadline expiry during settlement skips deactivation entirely, and that is a
+new way to lose the `Retired` write.** `finish_shutdown_lifecycle` returns at
+`runtime.rs:315` as soon as `progress.forced` is set, so the deactivation arm is
+reachable only when settlement finished inside the budget. Any condition that
+keeps settlement from completing in 20 s therefore costs the write — not only a
+control plane answering slowly. A shutdown that is slow but working loses
+something it used to get: a settlement that took 25 s retired the incarnation
+before this change and abandons it after, and the startup-failure deactivations
+inherit the same bound, so a slow control plane can now leave an incarnation
+activated and never deactivated where it previously succeeded. The resulting
+state is not new — it is what the second-signal force already produced, and the
+runbook records that a forced shutdown leaves terminal state for TTL expiry to
+reconcile — but the way of reaching it is. That is the price of the bound, and
+the reason 20 s is sized to clear a healthy shutdown rather than to be as tight
+as the ceiling allows.
+
+Settlement being concurrent is what keeps that price small. The coordinators run
+as a `JoinSet` and each settles its own leases as another, so settlement's wall
+clock is the slowest lease's, not the sum over up to 64 workers.
 
 **The lifecycle suite fails differently, not less.** [ADR
 0066](0066-observe-graceful-shutdown-as-one-bounded-lifecycle.md) binds the agent
@@ -154,11 +184,30 @@ budget.
   `SIGKILL` at the stop timeout (`systemctl show -p DefaultTimeoutStopUSec` →
   `DefaultTimeoutStopUSec=45s`, Fedora 44; 90 s upstream). judgment: an escape only a
   human at a terminal can take is not an escape for a supervised service.
-- **Shorten the client's retry budget on the shutdown path.** verified:
-  `production_request_budget` (`client.rs:450`) bounds one logical call, and the tail
-  makes one settlement call per held lease plus the deactivation, so a per-call bound
-  leaves the total proportional to the lease count. judgment: the same client serves
-  acquisition and heartbeats, which are not the defect.
+- **Give the shutdown path its own, shorter per-call retry budget.** The closest
+  alternative to this decision, and cheaper: no shared `Instant` threaded through two
+  functions, no guarded `sleep_until` arms, no widened `ShutdownProgress`. verified: a
+  per-call budget bounds calls, and the tail does not wait on calls — it waits on
+  *tasks*. `wait_for_coordinators` joins coordinator tasks (`runtime.rs:1810`), each of
+  which drains a lease `JoinSet` through `wait_for_leases` (`:1694`) and then reaps its
+  child (`:746`). None of the reap and none of a lease task's non-call work falls under
+  any client budget, so the tail would still have no total — which is the thing #452
+  asks for. judgment: it would also have to be threaded to the shutdown call sites as a
+  second client configuration, so it is not the cheaper option it first appears to be.
+  (An earlier ground for this bullet — that a per-call bound leaves the total
+  proportional to the lease count — was wrong: settlement is concurrent, as the
+  Consequences state.)
+- **Bound the whole tail, reap included, at `SHUTDOWN_DEADLINE`.** It would deliver the
+  outcome unconditionally: 20 s fits every stop timeout in play, including the 45 s
+  measured above, for every configuration the validator accepts — and it would remove
+  the operator arithmetic this change adds to the runbook instead. verified: the
+  validator accepts `shutdown_grace_seconds` up to 60 (`config.rs:159`), so a 20 s total
+  would cut a configured grace short in every configuration above 20. judgment: the
+  grace is the operator's statement of how long a worker may take to finish cleanly, and
+  a global bound that silently overrides it while still accepting the value is worse
+  than an arithmetic they can check. The bound the reap does get is
+  `REAP_AFTER_KILL`, which starts after `SIGKILL` and so overrides nothing the operator
+  asked for.
 - **Bound the deactivation only.** verified: `run_coordinator`'s shutdown arm calls
   `settle_leases_for_shutdown` (`runtime.rs:744`) before the agent reaches
   `finish_shutdown_lifecycle` at all, so the wait that would stay unbounded is the
@@ -167,11 +216,16 @@ budget.
   its child with `ChildSupervisor::shutdown_all` (`runtime.rs:746`) after settlement,
   so an abort there drops the reap. judgment: trading a hung agent for orphaned worker
   processes is not a fix.
-- **Make the deadline configurable.** judgment: the range it could usefully take is
-  boxed by the stop-timeout ceiling this record targets, and
-  `#[tokio::test(start_paused = true)]` — already used in
-  `crates/voom-node-agent/src/runtime_test.rs` — makes a constant instant under test,
-  so the knob buys neither operator control worth a validation rule nor a test seam.
+- **Make the deadline configurable.** verified: it buys no test seam —
+  `#[tokio::test(start_paused = true)]` is already used in
+  `crates/voom-node-agent/src/runtime_test.rs`, so a constant costs no wall clock under
+  test. The operator-control half is a real loss and is stated rather than denied: a
+  deployment whose control plane legitimately needs more than 20 s to settle would keep
+  retiring cleanly with a knob and loses that write without one. judgment: it is not
+  taken because the ceiling a knob has to fit inside is the unit's `TimeoutStopSec`,
+  which the knob cannot raise — an operator who needs a longer shutdown must edit the
+  unit file either way, and a control plane needing over 20 s during shutdown is a
+  condition to fix rather than to wait on.
 - **Raise the lifecycle suite's `HANG_GUARD`.** verified: #452 measured the same
   expiry rate at 10 s, 60 s and 150 s guards, with each failing run consuming its whole
   budget (67.6/67.6/67.7 s at 60 s; 156.2/157.8 s at 150 s) — the bound moves and the

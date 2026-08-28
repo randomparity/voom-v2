@@ -62,10 +62,11 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(20);
 ```
 
 A constant, not configuration. Total shutdown becomes
-`SHUTDOWN_DEADLINE + shutdown_grace_seconds`; the configuration validator holds
+`SHUTDOWN_DEADLINE + shutdown_grace_seconds + REAP_AFTER_KILL` (the second
+constant is introduced below); the configuration validator holds
 `shutdown_grace_seconds` to 1..=60 (`crates/voom-node-agent/src/config.rs:159`),
-so the worst case is 80 s and the runbook's example configuration
-(`shutdown_grace_seconds = 10`) gives 30 s. No existing configuration becomes
+so the worst case is 81 s and the runbook's example configuration
+(`shutdown_grace_seconds = 10`) gives 31 s. No existing configuration becomes
 invalid, because no configuration field changes.
 
 20 s is derived from `HANG_GUARD`, the 30 s bound the lifecycle suite applies to
@@ -121,6 +122,32 @@ worker processes.
 () = tokio::time::sleep_until(deadline) => return Err(shutdown_deadline_error()),
 ```
 
+### The reap's own bound
+
+`RunningChild::shutdown` (`crates/voom-node-agent/src/child.rs:193-213`) applies
+`grace` only to the polite wait at `:199`. On expiry it calls `start_kill()` at
+`:204` and then `child.wait().await` at `:207` with **no timeout**, so a child the
+kernel cannot kill — a worker parked in uninterruptible sleep on a hung mount —
+leaves the whole tail pending, with `wait_for_coordinators` still joining and its
+deadline arm already spent.
+
+```rust
+/// Bound on collecting a killed child's exit status.
+const REAP_AFTER_KILL: Duration = Duration::from_secs(1);
+```
+
+The post-kill wait is wrapped in `tokio::time::timeout(REAP_AFTER_KILL, child.wait())`.
+Abandoning it orphans nothing `SIGKILL` had not already claimed: the child is
+doomed and the wait only collects its exit status, so the process is reparented
+to init and reaped there. On expiry `shutdown` returns the `ChildError` it
+already returns for the other failures on this path, naming the unreaped child.
+
+`ChildSupervisor::shutdown_all`'s result is discarded at its shutdown call site
+(`let _ = supervisor.shutdown_all(vec![child]).await`, `runtime.rs:746`), so an
+unreaped child is reported through that error and no further. Changing that
+discard would change coordinator exit semantics for every existing failure on the
+path; it is a pre-existing residual this change records rather than alters.
+
 ### What the operator sees
 
 The two waits report through different mechanisms because they do not share a
@@ -174,6 +201,7 @@ decision on 2026-08-28, recorded in the amended `WORK:SCOPE` annotation on issue
 | Control plane unresponsive, second signal arrives first | Unchanged: `forced_shutdown_error()`. |
 | Control plane slower than 20 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
 | Deadline expires while a child is mid-reap | The reap completes. The deadline forces through the `ShutdownKind` watch, which settlement observes and reaping does not. |
+| Child does not die on `SIGKILL` (uninterruptible sleep) | The post-kill wait is abandoned at `REAP_AFTER_KILL`; `shutdown` returns a `ChildError` naming the child, the coordinator joins, and the agent exits. The process is reparented to init. |
 | Deadline already elapsed when `deactivate_or_second_signal` is entered | The `sleep_until` arm is ready immediately, so deactivation is abandoned without being attempted. Correct: the budget for the tail is spent. |
 
 ## Testing
@@ -190,6 +218,14 @@ satisfied: the file references neither `SqlitePool` nor the exact identifier
 | `shutdown_deadline_abandons_a_blocked_deactivation` | R3, R5 | A gated `deactivate` that never returns yields `shutdown_deadline_error()`, wrapped in a `tokio::time::timeout` well past the deadline so the pre-change build fails on `Elapsed` rather than hanging. |
 | `shutdown_deadline_forces_lease_settlement` | R1, R5 | `wait_for_coordinators`, against a coordinator that never settles, returns `ShutdownProgress { forced: Some(ShutdownForce::Deadline), .. }` and publishes `ShutdownKind::Forced`. |
 | `a_second_signal_still_outranks_the_shutdown_deadline` | R4 | With a deadline far in the future, a second signal still produces `forced_shutdown_error()` — the deadline did not replace the escape. |
+| `a_settlement_deadline_expiry_reports_the_deadline_not_a_signal` | R3 | `finish_shutdown_lifecycle` given `ShutdownProgress { forced: Some(ShutdownForce::Deadline) }` returns `shutdown_deadline_error()`, not `forced_shutdown_error()`. The mapping at `runtime.rs:315` is the whole reason the field is widened, so it gets its own test. |
+
+A fourth test covers the reap bound, in `crates/voom-node-agent/src/child_test.rs`:
+a child that ignores `SIGTERM` and cannot be reaped inside `REAP_AFTER_KILL` must
+make `shutdown` return a `ChildError` naming it rather than pending forever. An
+unkillable process cannot be constructed portably, so the test drives the bound
+with a near-zero `REAP_AFTER_KILL` against a child that survives its grace,
+proving the timeout is wired rather than proving the kernel case.
 
 R2 is covered by the existing tests that assert the ordered graceful path; they
 must keep passing unmodified apart from the new argument. The existing

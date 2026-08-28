@@ -182,13 +182,14 @@ SIGINT or SIGTERM stops acquisition, fails held leases as `user_cancellation`, c
 reaps every child (killing one after `shutdown_grace_seconds` if necessary), and deactivates
 the incarnation.
 
-**Set the supervisor stop timeout above `shutdown_grace_seconds + 20`, in seconds.** The 20 s
-is `SHUTDOWN_DEADLINE`, the wall-clock budget shared by the two control-plane waits in the
-shutdown sequence — lease settlement and deactivation. That sum is the worst case, so the
-example configuration above (`shutdown_grace_seconds = 10`) needs a stop timeout above 30 s.
-Check the one your supervisor actually applies rather than assuming the upstream 90 s:
+**Set the supervisor stop timeout above `shutdown_grace_seconds + 21`, in seconds.** Of that,
+20 s is `SHUTDOWN_DEADLINE`, the wall-clock budget shared by the two control-plane waits in
+the shutdown sequence — lease settlement and deactivation — and 1 s is `REAP_AFTER_KILL`, the
+bound on collecting a killed child's exit status. That sum is the worst case, so the example
+configuration above (`shutdown_grace_seconds = 10`) needs a stop timeout above 31 s. Check the
+one your supervisor actually applies rather than assuming the upstream 90 s:
 `systemctl show -p DefaultTimeoutStopUSec` reports 45 s on Fedora, and any
-`shutdown_grace_seconds` above 25 exceeds that. A stop timeout below the sum means `SIGKILL`
+`shutdown_grace_seconds` above 24 exceeds that. A stop timeout below the sum means `SIGKILL`
 lands mid-shutdown and the incarnation is never marked retired. See
 [ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
 
