@@ -336,8 +336,12 @@ integration test, the regression proof.
   return on a held lock, it sleeps, so "blocked" would be observable only as a
   wall-clock expiry and would be indistinguishable from a slow host. At 0 a held
   lock returns `SQLITE_BUSY` immediately: each attempt is an observable,
-  attributable error. The observer then retries on `SQLITE_BUSY` for up to **5s**
-  and reports whether the lock ever became takeable.
+  attributable error. The observer then retries on `SQLITE_BUSY` and reports
+  whether the lock ever became takeable, bounded at **5s in the fixed and orphan
+  arms** and **1s in the control arm**. The control's is shorter because at a
+  leaking *N* it necessarily burns its whole ceiling, and this test runs in the
+  serialized instrumented `coverage` job whose duration is this issue's subject;
+  the bound is not what discriminates there, the repeated `SQLITE_BUSY` is.
 - **Two named constants, and what makes each safe.** A **100ms settle** between
   the cancellation and the first observer attempt, and the **5s** retry bound
   above. The settle is what stops the observer from taking and releasing the lock

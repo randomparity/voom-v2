@@ -69,12 +69,27 @@ at the version the workspace already pins for `voom-api`, `voom-control-plane`
 and `voom-cli`. `tracing` is already a normal dependency; `oneshot` is already
 covered by the `sync` feature.
 
-Verify: `cargo check -p voom-store --all-features --all-targets` — **`--all-targets`
-is required**; a bare `cargo check` builds the lib target only, resolves no
-dev-dependencies, and at T1 nothing calls `tokio::spawn` or references
-`tracing-subscriber` yet, so a missing or misspelled feature would pass here and
-surface two tasks later attributed to the wrong change. Then `just deny`,
-`just audit`.
+Verify with **two** commands, because they prove different things and only one of
+them can catch a wrong `rt`:
+
+- `cargo check -p voom-store --all-features` — **lib only, and this is the
+  detector.** An earlier draft of this plan said the opposite. `--all-targets` is
+  precisely the invocation that *cannot* see a missing `rt`: voom-store's
+  dev-dependency already carries `tokio = { features = ["rt-multi-thread",
+  "macros"] }` (`Cargo.toml:42`), `rt-multi-thread` implies `rt`, and any build
+  that compiles test targets unifies dev-dependency features into the lib
+  compile. Measured on a probe crate with this exact feature shape and the pinned
+  toolchain: bare `cargo check` exits 101 with `E0425 cannot find function
+  spawn`; `cargo check --all-targets` exits 0; `cargo build --release` exits 101;
+  `cargo doc` exits 0 because it does not type-check bodies. Every `just ci` step
+  that compiles voom-store passes `--all-targets` or is `cargo doc`, so **no
+  guardrail in this repository detects an omitted `rt`** — this one command is
+  it. Re-run it at the end of T3, where `tokio::spawn` first appears; at T1
+  nothing uses the feature yet, so T1's run proves only that the manifest parses.
+- `cargo check -p voom-store --all-features --all-targets` — proves the
+  `tracing-subscriber` dev-dependency resolves and compiles. That much it does do.
+
+Then `just deny`, `just audit`.
 
 `Cargo.lock` gains exactly one `"tracing-subscriber"` line in the `voom-store`
 package's `dependencies` array and **no new `[[package]]` block** — the lock
@@ -100,8 +115,20 @@ spec's Testing section:
   or a file with another.
 - Observer: a raw `SqliteConnectOptions` connection with `busy_timeout(0)` —
   **not** `voom_store::connect`, whose 30s would turn "blocked" into a
-  wall-clock expiry. Retries on `SQLITE_BUSY` up to 5s. 100ms settle after the
-  cancellation before the first attempt.
+  wall-clock expiry. 100ms settle after the cancellation before the first
+  attempt, then retries on `SQLITE_BUSY` up to **5s in the fixed arm** and
+  **1s in the control arm**.
+- **Budget the wall clock, because this test lands in the job #592 is about.**
+  At a leaking *N* the observer necessarily burns its whole ceiling — the lock is
+  held until the pool drops — and the warm fixture leaks at *N* = 3 in 40 of 40
+  sweeps. A uniform 5s ceiling would cost ≥25s of guaranteed sleeping in the
+  control arm alone; 1s costs ≥5s. Add 100ms × 8 *N* × 5 repeats × 2 arms = 8s of
+  settle and the orphan arm's bounded wait: roughly **15s** expected, paid twice
+  in CI — by `just test` and by the serialized instrumented `coverage` job whose
+  duration is this issue's subject. The shorter control ceiling costs nothing:
+  the spec establishes that "the bound is not what discriminates, the repeated
+  `SQLITE_BUSY` is". Measure the real figure on the first green run and report it
+  with T2's result; if it is materially above 15s, cut the repeats.
 - Fixed arm: sweep *N* in 1..=8, **5 repeats**, no blocked observation in any.
 - Control arm: same sweep through a bare `pool.begin_with("BEGIN IMMEDIATE")`
   written in the test, **5 repeats**, at least one blocked observation across
@@ -115,6 +142,25 @@ control arm passes. Record which *N* blocked, for the PR body.
 Also run `just lint` at the end of T2, not only at T6: it is the only check that
 catches an over-broad `#![expect]` list, and deferring every lint signal to T6
 finds it three tasks after the file was written.
+
+## T2b — The pre-fix acceptance control (gating, and it runs **here**)
+
+Files: none. This task exists for its position in the order.
+
+The pre-fix arm of the acceptance run must execute against the *unfixed* openers,
+and this is the last point at which they exist: T3 detaches them. Running it here
+costs nothing extra — `crates/voom-node-agent` and the openers are both untouched
+at T2 — whereas running it after T6 needs a revert, a `git stash`, or
+`git worktree add ../voom-592-prefix <merge-base>`, and each of those invalidates
+the `llvm-cov` instrumented build, adding two full instrumented rebuilds of
+`voom-node-agent` and its graph to a protocol already priced at ~180 runs.
+
+Run the loop from *Acceptance run* below, unfixed, into `.tmp/accept-prefix/`.
+Stop at the first log matching the predicate, or at 90 runs. Record the
+**reproduction index** — the run number that first reproduced — because that
+index is the host-local evidence the whole post-fix sweep's confidence rests on.
+If 90 runs do not reproduce, criterion 5 is reported **not discharged**, and that
+verdict is reached here rather than discovered at the end.
 
 ## T3 — TDD green: `begin_detached`
 
@@ -136,9 +182,11 @@ The module doc comment gains the cancellation-safety property, since the file's
 existing doc explains *why these four functions exist* and this adds a second
 reason.
 
-Verify: T2 goes green, both arms. `just lint` clean (the `pedantic` group over a
-new async fn returning `Result` is the likely source of noise). Reverting T3
-alone must put T2's fixed arm back to red.
+Verify: T2 goes green, both arms. **`cargo check -p voom-store --all-features`
+(lib only)** — this is where the `rt` feature is first exercised and the only
+place in the repository a missing one is detectable; see T1. `just lint` clean
+(the `pedantic` group over a new async fn returning `Result` is the likely source
+of noise). Reverting T3 alone must put T2's fixed arm back to red.
 
 ## T4 — The orphan arm
 
@@ -240,9 +288,10 @@ index row, the spec, and `docs/debt/0005`.
   `staging_seed.rs:59`, which are `src/` files in a support crate, exempt from
   `check-transaction-openers.sh` by its
   `grep -Ev "/(voom-test-support|voom-fakes|…)/"` filter rather than by its
-  test-file filter, and untouched by T5. `docs/debt/0005`'s Non-regression
-  boundary section carries the same loose wording and is corrected to this
-  predicate in the same commit.
+  test-file filter, and untouched by T5. `docs/debt/0005` **already carries this
+  exact predicate** under its Non-regression boundary section, corrected when
+  this plan was reviewed; T6 re-runs it and confirms the result is `tx.rs` alone.
+  Leave that record unmodified — T6 touches no files.
 - `just check-transaction-openers-selftest` passes (the rule is unchanged; this
   confirms the change did not weaken it).
 - `just ci` green.
@@ -251,12 +300,24 @@ index row, the spec, and `docs/debt/0005`.
 
 Separate from the guardrails and reported honestly whether or not it completes.
 
-**The reproduction predicate is `HANG_GUARD` firing**, not a non-zero exit
-status. `HANG_GUARD` is 30s in `crates/voom-node-agent/tests/lifecycle.rs:47`,
-and any unrelated failure in the lifecycle binary also exits non-zero — so the
-loop greps the run's captured output for the guard's message and keys on that.
-Both the pre-fix stopping rule and the recorded reproduction index depend on
-telling those two apart.
+**The reproduction predicate is one specific `HANG_GUARD` expiry**, not a
+non-zero exit status and not any guard firing. `HANG_GUARD` is 30s
+(`crates/voom-node-agent/tests/lifecycle.rs:47`) and bounds **seven** waits in
+that file (`:100, :163, :439, :460, :508, :531, :553`), each with its own message
+— the file header at `:5-9` records that as deliberate, because "a bare
+`Elapsed(())` panic reports only a line number, which is how #446 was filed
+against the wrong wait". The expiry #592 reports surfaces through
+`wait_for_graceful_shutdown` (`:452-491`) and panics at `:110`. So the literal
+predicate is:
+
+```
+grep -q 'second agent graceful-shutdown lifecycle did not complete' "$log"
+```
+
+Verify that string against one real expiry before starting the sweep. **A
+different `HANG_GUARD` site firing is a different failure, not a reproduction**,
+and a non-zero exit is not evidence either — any unrelated failure in the
+lifecycle binary also exits non-zero.
 
 **The loop goes outside `run-constrained.sh`.** It wraps one command in its own
 cgroup v2 scope with the `--write-bps` cap applied to that scope, so
@@ -267,19 +328,28 @@ identical, un-depleted write budget, while
 not interchangeable and the outer one is the one this protocol means:
 
 ```
+# $ARM is accept-prefix (T2b) or accept-postfix; each arm gets its own directory
+# so the second cannot overwrite the first arm's evidence. `.tmp*/` is already
+# gitignored; the repo root is not, and `*.log` is not ignored anywhere.
+mkdir -p .tmp/$ARM
 for i in $(seq 90); do
+  log=.tmp/$ARM/run-$i.log
   ./scripts/run-constrained.sh --load 1 --write-bps 40M -- \
     cargo llvm-cov --no-report -p voom-node-agent --test lifecycle \
-    --all-features -- --test-threads=1 2>&1 | tee run-$i.log
+    --all-features -- --test-threads=1 >"$log" 2>&1
+  if grep -q 'second agent graceful-shutdown lifecycle did not complete' "$log"
+  then echo "reproduced at run $i"; break; fi
 done
 ```
 
-Pre-fix control first and **gating**, stopping at the first run whose log matches
-the guard predicate or at 90 runs. If 90 unfixed runs do not reproduce,
-criterion 5 is reported **not discharged** — not as a green sweep. Then the same
-invocation post-fix, ≥90 runs. Report both counts and the pre-fix reproduction
-index; the (29/30)^90 = 0.047 figure is conditional on #592's rate transferring
-to this host, and the index is the host-local evidence for that.
+The `break` is what makes T2b's stopping rule executable; without it the pre-fix
+arm runs all 90 iterations regardless. The post-fix arm runs the same loop with
+`$ARM=accept-postfix` and **no** break — it must complete ≥90 runs — and any
+match is a failure, not a stop.
+
+Report both counts and the pre-fix reproduction index. The (29/30)^90 = 0.047
+figure is conditional on #592's rate transferring to this host, and that index is
+the host-local evidence for it.
 
 Up to ~180 instrumented, throttled, serialized lifecycle runs. If it is not run
 to completion, say so and say which criteria that leaves undischarged.
