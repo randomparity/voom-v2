@@ -39,7 +39,7 @@ Each requirement traces to the frozen scope charter on issue #452.
 | R1 | A single shutdown signal makes the shutdown tail complete or abandon within a bounded, documented wall-clock deadline shorter than systemd's upstream 90 s `DefaultTimeoutStopSec`. **Residual:** the worst case is 86 s, so on a platform whose default is lower — Fedora ships 45 s — every `shutdown_grace_seconds` above 19 still exceeds it and is still `SIGKILL`ed with the write skipped. Accepted and recorded in ADR 0088; narrowing the validator was considered and rejected there. | charter criterion 1 |
 | R2 | When deactivation completes inside the deadline, the incarnation still reaches `Retired` with `GracefulShutdown`, and the settlement → child-reaping → deactivation ordering is preserved. | charter criterion 2 |
 | R3 | When the deadline expires, the agent exits promptly and reports the missed deactivation as an error naming the deadline, not a signal that did not arrive. | charter criterion 3; `AGENTS.md` Rule 12 |
-| R4 | The second-signal force path keeps working unchanged. | charter criterion 4 |
+| R4 | The second-signal force path keeps working unchanged **in outcome**. Its latency after a `Deadline` force is already recorded is not: the signal is consumed one budget plus a reap later. Ratified as outcome-only by maintainer decision, 2026-08-28. | charter criterion 4; maintainer ratification 2026-08-28 |
 | R5 | A deterministic regression fails against the pre-change behaviour. Only a test that *compiles* against the pre-change tree can supply this: a test naming a new type or parameter fails to build, which is different evidence. | charter criterion 5; `AGENTS.md` Rule 9 |
 | R6 | `just ci` is green. | charter criterion 6 |
 
@@ -299,7 +299,7 @@ The site branches instead:
   leases were abandoned mid-settlement.
 - `None` — unchanged.
 
-### The reap's own bound### The reap's own bound
+### The reap's own bound
 
 `RunningChild::shutdown` (`crates/voom-node-agent/src/child.rs:193-213`) applies
 `grace` only to the polite wait at `:199`. On expiry it calls `start_kill()` at
@@ -395,9 +395,9 @@ surface by explicit maintainer decisions on 2026-08-28, recorded in the amended
 | Deactivation slower than 10 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
 | Worker crashes, then a shutdown arrives while its readiness update is blocked | `restart_after_child_exit`'s readiness calls are released by the shutdown receiver instead of draining the retry budget. |
 | Worker crashes, shutdown arrives mid-restart of an NVIDIA worker | Same race releases it; the 5-minute startup timeout is never entered, because a shutdown observed first returns instead of restarting. |
-| Second signal arrives after a deadline force is already recorded | The signal arm is disabled by its existing `!forced` guard, so the signal is consumed later in `deactivate_or_second_signal`. Outcome unchanged (`forced_shutdown_error()`, write skipped); latency is up to one budget plus a reap. Stated in ADR 0088. |
+| Second signal arrives after a deadline force is already recorded | The signal arm is disabled by its existing `!forced` guard, so the signal is consumed later in `deactivate_or_second_signal`. Outcome unchanged (`forced_shutdown_error()`, write skipped); latency is up to one budget plus a reap — 71 s at the maximum grace. R4's "unchanged" is ratified as outcome-only by explicit maintainer decision on 2026-08-28; the alternative (guarding on `forced != Some(Signal)`) was offered and declined. |
 | `shutdown_grace_seconds` above 19 on a 45 s stop timeout | The tail can exceed the platform default, `SIGKILL` lands, the write is skipped. #452's exposure, unfixed, inside the accepted configuration range. The runbook publishes the arithmetic so an operator can avoid it. |
-| An unraced wait not enumerated here | The tail backstop fires at the published total, aborts the coordinators (children `start_kill`ed by `Drop`), and returns `shutdown_deadline_error()`. |
+| An unraced wait not enumerated here | The tail backstop fires at the published total, aborts the coordinators (children `SIGKILL`ed by `.kill_on_drop(true)`, `child.rs:404` — **not** by `RunningChild::Drop`), and returns the distinct `shutdown_backstop_error()`. |
 | Child does not die on `SIGKILL` (uninterruptible sleep) | The post-kill wait is abandoned at `budgets.reap_after_kill`; `shutdown` returns a `ChildError` naming the child, which its caller discards. The agent exits; the process is reparented to init. |
 
 ## Testing
@@ -425,15 +425,23 @@ satisfied: the file references neither `SqlitePool` nor the exact identifier
 | `the_backstop_error_names_a_defect` | `runtime_test.rs` | R3 | The backstop returns `shutdown_backstop_error()`, distinct from `shutdown_deadline_error()`, so an operator can tell an unenumerated wait from a documented abandon. |
 | the shutdown rung | `tests/budget_ladder.rs` | R1 | `budgets.call` is below `production_request_budget()` — the named inversion — and `2 × SHUTDOWN_CALL_DEADLINE + 60 + REAP_AFTER_KILL` is under 90 s. `ShutdownBudgets` is `pub` with a `pub const DEFAULT`, so this integration test reads it the way it already reads `client::REQUEST_TIMEOUT`. |
 
-Only two of these run red rather than failing to compile against the pre-change
-tree, and they are the ones R5 rests on:
-`shutdown_deadline_abandons_a_blocked_deactivation` (existing API plus the
-existing `deactivate_gate`, wrapped in an outer `tokio::time::timeout`, so it
-fails on `Elapsed`) and `a_crashed_worker_release_does_not_wait_out_the_retry_budget`
-(existing API plus one new gate on the fake; pre-change it drains the retry
-budget and exits `CoordinatorExit::Fatal`). Every other test names a type or
-parameter this change introduces, so pre-change it does not build — real coverage
-of the new behaviour, but not evidence for R5.
+**R5's witnesses are the two tests that compile against the pre-change tree.**
+`shutdown_deadline_abandons_a_blocked_deactivation` is *not* one of them: the plan
+gives `deactivate_or_second_signal` a `deadline` parameter, and that test passes it
+as an argument, so pre-change it does not build. The witnesses are:
+
+- `a_sigterm_exits_the_agent_when_the_control_plane_never_answers`, driven through
+  `AgentRuntime::with_client` and `run_until` — both pre-existing — taking the
+  **default** budgets and wrapped in an outer `tokio::time::timeout` well above the
+  86 s tail. Pre-change the gated deactivation never returns and the test fails on
+  `Elapsed`; post-change it returns the deadline error at about 10 s. This is the
+  one that covers the charter's headline behaviour.
+- `a_crashed_worker_release_does_not_wait_out_the_retry_budget`, existing API plus
+  one new gate on the fake; pre-change it drains the retry budget and exits
+  `CoordinatorExit::Fatal`.
+
+Every other test names a type or parameter this change introduces, so pre-change it
+does not build — real coverage of the new behaviour, but not evidence for R5.
 
 The existing second-signal tests
 (`second_signal_interrupts_deactivation_only_after_reap`,
@@ -470,10 +478,12 @@ second-signal tests take a far-future `call`, so none of them gains a timer.
 `tests/lifecycle.rs` runs on real time under a 30 s `HANG_GUARD` and arranges no
 blocked control-plane wait, so the budgets never elapse there.
 
-Expected added `just test` wall clock is therefore under a second. That is a
+Expected added `just test` wall clock is therefore **about 10 seconds**, almost
+all of it the one R5 witness that must take the default budgets to compile
+against the pre-change tree; everything else is under a second. That is a
 prediction to check on the first real run, not an assumption: if it moves
-materially, the cause is a suite reaching a budget it was not meant to reach, or
-a new test that took the defaults by mistake.
+further, the cause is another suite reaching a budget it was not meant to reach,
+or a new test that took the defaults by mistake.
 
 ## Threat model
 

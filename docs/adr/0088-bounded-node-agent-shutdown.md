@@ -127,6 +127,16 @@ aborted before it reaches `shutdown_all`. The distinction matters because
 removing it would silently reintroduce an orphaned worker on every backstop
 expiry.
 
+**The backstop is expected to be unreachable, and is kept anyway.** Once the
+enumerated waits are raced and bounded, no wait this design knows about can
+outlast every inner bound — so in a correct implementation the backstop never
+fires, and its tests drive the wrapper with a never-ready future rather than
+driving the system. That is the honest description of what it is: insurance
+against an enumeration this record declines to certify, bought because the review
+of this design found a further unraced wait on each of three passes. Its price is
+5 s on the number the runbook instructs operators to configure against. Kept by
+explicit maintainer decision on 2026-08-28, after a scope audit put the question.
+
 The margin is what makes the backstop a backstop. The inner bounds are sequential
 and sum to `2 × call + grace + reap_after_kill` exactly, and the tail carries
 costs outside all of them: `wait_or_force`'s post-expiry
@@ -252,9 +262,13 @@ second signal is no longer consumed there and no longer publishes
 budgets and their reaps before the queued signal is consumed in
 `deactivate_or_second_signal`. The end state is unchanged — `forced_shutdown_error()`,
 write skipped — but the operator's second signal is delayed by up to one budget
-plus a reap instead of acting at once. Criterion 4 holds for the outcome and not
-for the latency, and that distinction is stated here rather than left for an
-operator to discover.
+plus a reap instead of acting at once — 71 s at the maximum grace. Criterion 4
+holds for the outcome and not for the latency, and that narrower reading was
+ratified by explicit maintainer decision on 2026-08-28. The alternative — guarding
+the signal arm on `forced != Some(ShutdownForce::Signal)` so a second signal still
+acts at once — restores the original latency at the cost of the "first force
+recorded wins" semantics this change otherwise leaves untouched; it was offered
+and declined.
 
 **An unreaped child is silent.** `shutdown_all` returns a `ChildError`, but both
 shutdown-path callers discard it (`let _ = supervisor.shutdown_all(…)`,

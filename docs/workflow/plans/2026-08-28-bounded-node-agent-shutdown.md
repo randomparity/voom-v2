@@ -254,18 +254,12 @@ async fn a_child_that_cannot_be_reaped_is_abandoned_at_the_bound() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_child_reaped_inside_the_bound_is_not_an_error() {
-    reap_within(std::future::ready(Ok(exit_status_ok())), Duration::from_secs(1), "quick")
-        .await
-        .expect("a child that reaps in time is not a failure");
-}
 ```
 
-   `exit_status_ok()` is a small local helper returning
-   `std::io::Result<std::process::ExitStatus>`; on Unix,
-   `std::os::unix::process::ExitStatusExt::from_raw(0)`. Gate it and both tests
-   the way the file's other process tests are gated if it needs `cfg(unix)`.
+   The happy path needs no test of its own: `tokio::time::timeout` passing a ready
+   future through is that crate's contract, and
+   `shutdown_kills_and_reaps_a_child_that_ignores_stdin_eof` already covers it
+   against a real process.
 
    The existing real-child coverage stays as it is:
    `shutdown_kills_and_reaps_a_child_that_ignores_stdin_eof`
@@ -449,10 +443,23 @@ fn shutdown_deadline_error() -> VoomError {
    - **`:1718`, inside `settle_leases_after_child_crash`.** This looks like a
      crash-path wait and is not one: `let observed = observed?;` at `:1714`
      returns unless a shutdown was already observed, so `:1718` runs only with a
-     shutdown already in flight. Add `deadline: Option<Instant>` to
-     `settle_leases_after_child_crash` (declared `:1708-1712`) and pass it at
-     `:1718`. Its caller is `restart_after_child_exit` (`:772`), which has
-     `context` and passes `Some(Instant::now() + context.budgets.call)`.
+     shutdown already in flight. Give
+     `settle_leases_after_child_crash` (declared `:1708-1712`) a
+     **`budget: Duration`** parameter, not an `Instant`, and build the deadline
+     *inside* it, immediately after the `observed?` short-circuit:
+     `let deadline = Some(Instant::now() + budget);`. Its caller
+     `restart_after_child_exit` (`:772`) passes `context.budgets.call`.
+
+     **Passing an `Instant` computed in the caller would be a bug**, and a quiet
+     one. `settle_leases_after_child_crash` runs `cancel_and_wait` first
+     (`:1713`), which is the wait this design deliberately leaves unbounded and
+     which can sit for up to `production_request_budget()` = 153.75 s. A deadline
+     stamped before it arrives at `:1718` already expired, so the second wait
+     forces instantly — aborting leases that may have been one round-trip from
+     settling, recording `Forced(Deadline)`, and exiting non-zero. The budget
+     there would not be shortened; it would be zero. Every other deadline site in
+     this plan (`:743`, `:230`, `:249`, `:319`) computes immediately before its
+     own call, which is why they are correct as written.
    - **`:1705`, inside `cancel_and_wait`.** Pass `None` — literally, at the call
      site inside `cancel_and_wait` (declared `:1698-1703`). `cancel_and_wait`
      gains **no** parameter: it has exactly one caller
@@ -541,6 +548,26 @@ async fn shutdown_deadline_forces_blocked_lease_settlement() {
         observed,
         Some((ShutdownKind::Forced, Some(ShutdownForce::Deadline))),
         "an overrunning settlement must be abandoned at its own budget, and say so"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_crash_settlement_budget_starts_when_its_own_wait_does() {
+    // Regression for the deadline-stamped-too-early bug: the first wait is unbounded,
+    // so a budget computed before it would arrive at the second wait already expired.
+    let (cancel_tx, mut leases, mut shutdown_rx) = leases_settling_after(Duration::from_secs(30));
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    let settlement = settle_leases_after_child_crash(
+        &cancel_tx,
+        &mut leases,
+        &mut shutdown_rx,
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(
+        settlement,
+        Some(LeaseSettlement::Completed),
+        "a 60s budget must still be 60s when the second wait starts, not zero"
     );
 }
 
@@ -809,10 +836,22 @@ where
    records why settlement must run and be returned.
 
 3. Wrap the `restart_child` call at `:804` and the `Ready` readiness call at
-   `:807` the same way, returning
-   `Err(CoordinatorExit::Shutdown(LeaseSettlement::Completed))` on `None` — at
-   that point the leases are already settled and the child is going away, so
-   nothing is abandoned mid-flight.
+   `:807` the same way. **Both new early returns must reap the child first**,
+   mirroring the existing shutdown branch immediately above (`:794-798`):
+
+```rust
+        let supervisor = ChildSupervisor::new(context.shutdown_grace, context.budgets.reap_after_kill);
+        let _ = supervisor.shutdown_all(vec![child]).await;
+        return Err(CoordinatorExit::Shutdown(LeaseSettlement::Completed));
+```
+
+   Without it the child falls to `RunningChild::Drop` (`child.rs:216-231`), which
+   `start_kill`s it — and at `:807` the child is `restarted`, freshly launched and
+   alive, so it would be `SIGKILL`ed instead of getting its stdin closed and its
+   `shutdown_grace_seconds` honoured. Criterion R2 preserves the
+   settlement → child-reaping → deactivation ordering, and this is that reaping
+   step on a newly reachable path. At `:807` the binding to reap is `restarted`,
+   not the original `child`, which has already been consumed by `restart_child`.
 
 4. Add to `runtime_test.rs`:
 
@@ -936,7 +975,8 @@ where
    `exit` and `node_heartbeat` move into the async block, so the borrow checker
    requires them to be constructed before it; they already are.
 
-4. Add to `runtime_test.rs`:
+4. Add to `runtime_test.rs`. Only the firing case is worth a test; the
+   pass-through case is `tokio::time::timeout`'s own contract:
 
 ```rust
 #[tokio::test(start_paused = true)]
@@ -953,12 +993,6 @@ async fn the_tail_backstop_bounds_a_wait_no_inner_budget_covers() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn the_tail_backstop_is_transparent_to_a_tail_that_finishes() {
-    run_shutdown_tail_within(Duration::from_secs(30), std::future::ready(Ok(())))
-        .await
-        .expect("a tail inside its bound passes its own result through");
-}
 ```
 
 5. Add the rung to `crates/voom-node-agent/tests/budget_ladder.rs`. Extend the
@@ -977,18 +1011,13 @@ fn the_shutdown_budgets_deliberately_invert_the_ladder() {
     );
 }
 
-#[test]
-fn the_shutdown_tail_stays_inside_the_default_stop_timeout() {
-    // config.rs holds shutdown_grace_seconds to 1..=60.
-    assert!(
-        ShutdownBudgets::DEFAULT.tail(Duration::from_secs(60)) < Duration::from_secs(90),
-        "the tail must fit systemd's upstream DefaultTimeoutStopSec"
-    );
-}
 ```
 
    Import `ShutdownBudgets` as `use voom_node_agent::runtime::ShutdownBudgets;`,
-   beside the existing `voom_node_agent::client` import.
+   beside the existing `voom_node_agent::client` import. The 90 s ceiling is
+   asserted once, in Task 1's `runtime_test.rs` test; do not repeat it here.
+   `budget_ladder.rs` owns the ordering relationship, `runtime_test.rs` owns the
+   magnitudes.
 
 6. Run `cargo test -p voom-node-agent --test budget_ladder`. Expect all tests
    passing.
@@ -1015,9 +1044,22 @@ new parameter, so against the pre-change tree they do not *fail*, they do not
 *build*. That is real coverage of the new behaviour and it is not the same
 evidence.
 
-**Exactly one test discharges R5**, and it is Task 5's
-`a_crashed_worker_release_does_not_wait_out_the_retry_budget`. It touches no new
-production name: it drives `restart_after_child_exit` with its existing
+**Two tests discharge R5**, and neither is
+`shutdown_deadline_abandons_a_blocked_deactivation` — Task 4 gives
+`deactivate_or_second_signal` a `deadline` parameter and that test passes it, so
+pre-change it does not build.
+
+The first is this task's
+`a_sigterm_exits_the_agent_when_the_control_plane_never_answers`, and it is the
+one that covers the charter's headline behaviour. It must therefore be built from
+**pre-existing names only**: `AgentRuntime::with_client`, `run_until`, and the
+existing `deactivate_gate` — **not** `with_client_and_budgets`, which this change
+introduces. That means it takes the default budgets and costs about 10 s of real
+wall clock. That cost is the price of having a witness at all, and the spec's
+wall-clock section is corrected to predict it.
+
+The second is Task 5's `a_crashed_worker_release_does_not_wait_out_the_retry_budget`.
+It touches no new production name: it drives `restart_after_child_exit` with its existing
 signature, and its only new machinery is a `readiness_gate` on
 `FakeControlPlane`, which is test-support and compiles against the pre-change
 tree. Pre-change, the gated readiness call drains the client's retry budget and
@@ -1038,27 +1080,26 @@ the commit message.
 #[cfg(unix)]
 async fn a_sigterm_exits_the_agent_when_the_control_plane_never_answers() {
     // The charter's scenario end to end: one shutdown request, a control plane that
-    // does not answer the deactivation, and an agent that must still exit. Budgets
-    // in milliseconds so this costs well under a second on real time; the defaults
-    // would make it 26 s.
+    // does not answer the deactivation, and an agent that must still exit.
+    //
+    // Deliberately built from pre-existing names only — with_client, run_until, and
+    // deactivate_gate — so it compiles against the pre-change tree and fails there on
+    // Elapsed. That is what makes it R5 evidence rather than coverage, and it is why
+    // it takes the default budgets and costs about 10 s instead of milliseconds.
     let control = Arc::new(FakeControlPlane::default());
     *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
-    let budgets = ShutdownBudgets {
-        call: Duration::from_millis(100),
-        reap_after_kill: Duration::from_millis(50),
-        backstop_margin: Duration::from_millis(100),
-    };
-    let runtime = AgentRuntime::with_client_and_budgets(
+    let runtime = AgentRuntime::with_client(
         loaded_config_with_worker(fixture_worker()),
         control.clone(),
-        budgets,
     );
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let running = tokio::spawn(async move { runtime.run_until(async { let _ = stop_rx.await; }).await });
     // … wait for readiness the way ProcessWorkerFixture-based tests do …
     stop_tx.send(()).unwrap();
 
-    let error = tokio::time::timeout(Duration::from_secs(10), running)
+    // Well above the 86 s tail, so pre-change this fails on Elapsed rather than
+    // hanging the suite, and post-change it returns at about 10 s.
+    let error = tokio::time::timeout(Duration::from_secs(120), running)
         .await
         .expect("the agent must exit on one shutdown request")
         .unwrap()
@@ -1071,7 +1112,10 @@ async fn a_sigterm_exits_the_agent_when_the_control_plane_never_answers() {
    tests already build; reuse theirs rather than adding one.
 
 2. Run `cargo test -p voom-node-agent a_sigterm_exits_the_agent`. Expect
-   `test result: ok. 1 passed`, in under two seconds.
+   `test result: ok. 1 passed`, in roughly 10 s — the default `call` budget.
+   Before committing, verify the pre-change failure the same way Task 5 requires:
+   `git stash` the production change, confirm the test fails on `Elapsed`,
+   restore, confirm it passes. Record both results in the commit message.
 3. Run `cargo test -p voom-node-agent` and `just lint`. Expect green.
 4. Commit: `test(node-agent): cover the SIGTERM exposure end to end`.
 
@@ -1079,8 +1123,9 @@ async fn a_sigterm_exits_the_agent_when_the_control_plane_never_answers() {
 
 - One shutdown request against an unanswering control plane exits the agent with
   an error naming the budget, in well under the default tail bound.
-- The R5 witness's pre-change failure has been observed, not assumed, and the
-  observation is in the commit message.
+- The test uses no name this change introduces, so it compiles pre-change.
+- Both R5 witnesses' pre-change failures have been observed, not assumed, and the
+  observations are in their commit messages.
 
 ## Final verification
 
