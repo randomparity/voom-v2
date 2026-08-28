@@ -141,6 +141,18 @@ impl ShutdownBudgets {
    (`runtime.rs:99`). Set it to `ShutdownBudgets::DEFAULT` in both `new`
    (`:113`) and `with_client` (`:124`).
 
+2a. **Add `budgets: ShutdownBudgets` to `CoordinatorContext` too.** It is declared
+   at `runtime.rs:639-658` (duration fields `lease_ttl`, `progress_timeout`,
+   `poll_interval`, `shutdown_grace` at `:645-649`) and has no budget field today.
+   Every later task that needs a budget inside a coordinator reads
+   `context.budgets`, so without this they do not compile. Populate it in
+   `spawn_coordinators` beside `shutdown_grace: self.shutdown_grace()` (`:487`)
+   with `budgets: self.budgets()`, and in the `context()` test helper
+   (`runtime_test.rs:2088-2104`) with `budgets: ShutdownBudgets::DEFAULT`. Do not
+   read `ShutdownBudgets::DEFAULT` anywhere inside the coordinator: that would
+   defeat the `#[cfg(test)]` override this task exists to provide and reintroduce
+   the wall-clock races.
+
 3. Add, beside `with_client`:
 
 ```rust
@@ -183,12 +195,12 @@ fn the_published_tail_bound_is_the_sum_of_every_inner_bound_plus_margin() {
 
 5. Run `cargo test -p voom-node-agent the_published_tail_bound`. Expect
    `test result: ok. 1 passed`.
-6. Run `just lint`. Expect no output before the final `Finished` line, exit 0.
-   An unused-field warning on `budgets` would fail the build under
-   `-D warnings`; if it appears, this task is incomplete only in that later
-   tasks consume it — silence it for this commit by ordering Task 2 into the
-   same commit rather than by adding an allow.
-7. Commit: `feat(node-agent): add the shutdown budget values`.
+6. Run `just lint`. Under `-D warnings` an unread `budgets` field is a build
+   failure, and nothing reads it until Task 2. **Do not add an `allow` and do not
+   commit this task on its own** — run Task 2 and commit the two together as
+   `feat(node-agent): add shutdown budgets and bound the reap`. That is the
+   smallest commit that builds clean, and it is one logical change: the values
+   and their first consumer.
 
 ### Acceptance criteria
 
@@ -221,38 +233,78 @@ impl ChildSupervisor { pub fn new(shutdown_grace: Duration, reap_after_kill: Dur
 
 ### Steps
 
-1. Write the failing test first, in `child_test.rs`, beside the existing
-   shutdown tests:
+1. Write the failing test first, in `child_test.rs`. **It does not use a real
+   child**, and that is deliberate: a real `child.wait()` immediately after
+   `start_kill()` may or may not be ready on the first poll, so asserting a
+   `Duration::ZERO` budget expires would race the kernel and flake. Test the
+   bound where it lives instead, against a wait that is guaranteed never ready:
 
 ```rust
-#[tokio::test]
-async fn an_unkillable_child_is_abandoned_at_the_reap_bound() {
-    // An unkillable process cannot be constructed portably, so drive the bound
-    // itself: a zero reap budget expires before any wait4 can complete, which
-    // proves the timeout is wired. It does not prove the uninterruptible-sleep
-    // case, and is not claimed to.
-    let mut child = launch_sleeper().await;
-    let error = child
-        .shutdown(Duration::from_millis(10), Duration::ZERO)
+#[tokio::test(start_paused = true)]
+async fn a_child_that_cannot_be_reaped_is_abandoned_at_the_bound() {
+    // An unkillable process cannot be constructed portably, so this proves the
+    // timeout is wired, not the uninterruptible-sleep case. It does not race the
+    // kernel: the wait is `pending()`, so only the bound can resolve it.
+    let error = reap_within(std::future::pending(), Duration::from_secs(1), "stubborn")
         .await
-        .expect_err("a zero reap budget must abandon rather than pend");
+        .expect_err("an unreapable child must be abandoned, not waited on");
     assert!(
         error.to_string().contains("reap after kill"),
         "error must name the unreaped child: {error}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_child_reaped_inside_the_bound_is_not_an_error() {
+    reap_within(std::future::ready(Ok(exit_status_ok())), Duration::from_secs(1), "quick")
+        .await
+        .expect("a child that reaps in time is not a failure");
+}
 ```
 
-   `launch_sleeper` is whatever helper the surrounding tests already use to
-   produce a `RunningChild` that ignores stdin EOF; reuse it rather than adding
-   one. If none exists, build the child through `ChildSupervisor::with_timeouts`
-   the way the neighbouring tests do.
+   `exit_status_ok()` is a small local helper returning
+   `std::io::Result<std::process::ExitStatus>`; on Unix,
+   `std::os::unix::process::ExitStatusExt::from_raw(0)`. Gate it and both tests
+   the way the file's other process tests are gated if it needs `cfg(unix)`.
 
-2. Run `cargo test -p voom-node-agent an_unkillable_child`. Expect a compile
-   error — `shutdown` takes one argument. That is the red state for this step.
+   The existing real-child coverage stays as it is:
+   `shutdown_kills_and_reaps_a_child_that_ignores_stdin_eof`
+   (`child_test.rs:348-366`) already exercises the polite-wait-expiry →
+   `start_kill` → reap path end to end with `ChildFixture`,
+   `ChildSupervisor::with_timeouts` and `assert_reaped`, and it must keep
+   passing unchanged apart from the supervisor's new arity.
 
-3. Change `RunningChild::shutdown` (`child.rs:193`) to take the second argument
-   and wrap the post-kill wait:
+2. Run `cargo test -p voom-node-agent a_child_that_cannot_be_reaped`. Expect a
+   compile error — `reap_within` does not exist. That is the red state.
+
+3. Add the helper the test names, and have `shutdown` call it. Extracting it is
+   what makes the bound testable without a process:
+
+```rust
+/// Collect a killed child's exit status, giving up after `bound`.
+///
+/// A `SIGKILL`ed child is already doomed and this wait only collects its status,
+/// so abandoning it orphans nothing `SIGKILL` had not already claimed — `launch`
+/// sets `.kill_on_drop(true)`, and init reaps the reparented process. Without the
+/// bound, a child in uninterruptible sleep pends here forever and takes the whole
+/// shutdown tail with it.
+async fn reap_within<F>(wait: F, bound: Duration, name: &str) -> Result<(), ChildError>
+where
+    F: Future<Output = std::io::Result<std::process::ExitStatus>>,
+{
+    match tokio::time::timeout(bound, wait).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(ChildError::shutdown(name, format!("reap after kill: {error}"))),
+        Err(_) => Err(ChildError::shutdown(
+            name,
+            format!("reap after kill: not reaped within {bound:?}"),
+        )),
+    }
+}
+```
+
+4. Change `RunningChild::shutdown` (`child.rs:193`) to take the second argument
+   and call it:
 
 ```rust
     async fn shutdown(
@@ -273,55 +325,39 @@ async fn an_unkillable_child_is_abandoned_at_the_reap_bound() {
             child.start_kill().map_err(|error| {
                 ChildError::shutdown(&name, format!("kill after shutdown timeout: {error}"))
             })?;
-            // A SIGKILLed child is already doomed; this wait only collects its exit
-            // status. Abandoning it orphans nothing SIGKILL had not already claimed —
-            // `launch` sets `.kill_on_drop(true)`, and init reaps the reparented
-            // process. Without the bound, a child in uninterruptible sleep pends here
-            // forever and takes the whole shutdown tail with it.
-            match tokio::time::timeout(reap_after_kill, child.wait()).await {
-                Ok(result) => {
-                    result.map_err(|error| {
-                        ChildError::shutdown(&name, format!("reap after kill: {error}"))
-                    })?;
-                }
-                Err(_) => {
-                    return Err(ChildError::shutdown(
-                        &name,
-                        format!("reap after kill: not reaped within {reap_after_kill:?}"),
-                    ));
-                }
-            }
+            reap_within(child.wait(), reap_after_kill, &name).await?;
         }
         self.reaped = true;
         Ok(())
     }
 ```
 
-4. Add `reap_after_kill: Duration` to `ChildSupervisor` (`child.rs:256`), to
-   `new` (`:264`) and to `with_timeouts` (`:276`), and pass it at the
-   `child.shutdown(grace).await` call inside `shutdown_all` (`:360`):
+5. Add `reap_after_kill: Duration` to `ChildSupervisor` (declared `child.rs:256`),
+   to `pub fn new` (`:264`) and to `fn with_timeouts` (declared `:276`, behind the
+   `#[cfg(all(test, target_os = "linux"))]` attribute at `:274`), and pass it at
+   the `child.shutdown(grace).await` call inside `shutdown_all` (`:360`):
    `child.shutdown(grace, reap).await`, where `reap` is captured beside `grace`
-   the same way.
+   the same way. Update `with_timeouts`' existing caller in `child_test.rs`
+   (`:353` and the other startup tests) to the new arity.
 
-5. Fix every `ChildSupervisor::new` call site. There are **four**:
+6. Fix every `ChildSupervisor::new` call site. There are **four**:
    `runtime.rs:224`, `:745`, `:795` and `:852` (inside `restart_child`) —
    `grep -n 'ChildSupervisor::new' crates/voom-node-agent/src/*.rs` is the census,
    and missing `:852` is the easy mistake because the other three cluster. Pass
    `self.budgets().reap_after_kill` at `:224`, and `context.reap_after_kill` at
-   the other three: add that field to `CoordinatorContext` beside the existing
-   `pub(crate) shutdown_grace: Duration` (declared `runtime.rs:649`, populated
-   `:487`) and set it from `self.budgets().reap_after_kill` in
-   `spawn_coordinators`.
+   the other three, reading `context.budgets.reap_after_kill` — the field Task 1
+   step 2a added. No new `CoordinatorContext` field is needed here.
 
-6. Run `cargo test -p voom-node-agent an_unkillable_child`. Expect
-   `test result: ok. 1 passed`.
-7. Run `cargo test -p voom-node-agent` and `just lint`. Expect all green.
-8. Commit: `fix(node-agent): bound the wait that collects a killed child`.
+7. Run `cargo test -p voom-node-agent reaped`. Expect both new tests passing.
+8. Run `cargo test -p voom-node-agent` and `just lint`. Expect all green, with
+   `shutdown_kills_and_reaps_a_child_that_ignores_stdin_eof` still passing.
+9. Commit Tasks 1 and 2 together:
+   `feat(node-agent): add shutdown budgets and bound the reap`.
 
 ### Acceptance criteria
 
-- A zero `reap_after_kill` makes `shutdown` return a `ChildError` naming the
-  child rather than pending.
+- `reap_within` against a never-ready wait returns a `ChildError` naming the
+  child, deterministically, with no process involved.
 - The polite-wait path and its error text are unchanged.
 - No call site of `ChildSupervisor::new` is left on the old arity.
 
@@ -402,23 +438,60 @@ fn shutdown_deadline_error() -> VoomError {
    `if observed == Some(ShutdownKind::Forced) { leases.abort_all(); … }` post-step,
    matching on the tuple's first element.
 
-4. Supply the deadline at two of the three call sites:
-   - `:1798`, inside `settle_leases_for_shutdown` — add a `deadline: Option<Instant>`
-     parameter to that function and pass it through; its caller
-     (`run_coordinator`'s `CoordinatorEvent::Shutdown` arm, `:744`) computes
-     `Some(Instant::now() + context.budgets.call)`.
-   - `:1718`, inside `settle_leases_after_child_crash` — this looks like a
-     crash-path wait and is not one: `let observed = observed?;` at `:1714`
-     returns unless a shutdown was already observed, so `:1718` runs only during
-     a shutdown. Compute `Some(Instant::now() + context.budgets.call)` there too;
-     thread the budget in as a parameter rather than reading a constant.
-   - `:1705`, inside `cancel_and_wait` — pass `None`. Add the parameter to
-     `cancel_and_wait`'s signature so `settle_leases_after_child_crash` can pass
-     it explicitly, and pass `None` there. This is the only genuinely
-     steady-state site; arming it would terminate a healthy running agent after
-     one slow worker-crash settlement.
+4. Supply the deadline at two of the three call sites. `Instant` throughout is
+   `tokio::time::Instant`, so a paused clock advances it.
 
-   `Instant` here is `tokio::time::Instant`, so a paused clock advances it.
+   - **`:1798`, inside `settle_leases_for_shutdown`.** Add
+     `deadline: Option<Instant>` to that function's signature
+     (declared `runtime.rs:1778-1783`). Its only caller is `run_coordinator`'s
+     `CoordinatorEvent::Shutdown` arm (`:743-744`), which has `context` in scope
+     and passes `Some(Instant::now() + context.budgets.call)`.
+   - **`:1718`, inside `settle_leases_after_child_crash`.** This looks like a
+     crash-path wait and is not one: `let observed = observed?;` at `:1714`
+     returns unless a shutdown was already observed, so `:1718` runs only with a
+     shutdown already in flight. Add `deadline: Option<Instant>` to
+     `settle_leases_after_child_crash` (declared `:1708-1712`) and pass it at
+     `:1718`. Its caller is `restart_after_child_exit` (`:772`), which has
+     `context` and passes `Some(Instant::now() + context.budgets.call)`.
+   - **`:1705`, inside `cancel_and_wait`.** Pass `None` — literally, at the call
+     site inside `cancel_and_wait` (declared `:1698-1703`). `cancel_and_wait`
+     gains **no** parameter: it has exactly one caller
+     (`settle_leases_after_child_crash:1713`) and that caller always wants the
+     unarmed behaviour. This is the only genuinely steady-state site; arming it
+     would terminate a healthy running agent after one slow worker-crash
+     settlement.
+
+4a. **Rewrite the two `LeaseSettlement::Forced` constructions in
+   `settle_leases_for_shutdown` — this is the hop that carries `Deadline` out of
+   the coordinator, and it is the one place the whole feature can be silently
+   nullified.** The function body (`:1784-1803`) has both:
+
+```rust
+    if kind == ShutdownKind::Forced {
+        leases.abort_all();
+        wait_for_leases(leases).await;
+        // A published Forced kind only ever comes from wait_for_coordinators'
+        // signal arm, so this force is a signal.
+        return LeaseSettlement::Forced(ShutdownForce::Signal);
+    }
+    match wait_or_force(leases, shutdown, false, deadline).await {
+        Some((ShutdownKind::Forced, cause)) => {
+            LeaseSettlement::Forced(cause.unwrap_or(ShutdownForce::Signal))
+        }
+        _ => LeaseSettlement::Completed,
+    }
+```
+
+   The old code was `if wait_or_force(...).await == Some(ShutdownKind::Forced)`,
+   which stops typechecking against the new tuple return. **The obvious way to
+   satisfy the compiler is `LeaseSettlement::Forced(ShutdownForce::Signal)` at
+   both sites, and that would compile, pass every test in this task, and make the
+   feature a no-op** — `ShutdownProgress.forced` could never hold `Deadline`, the
+   new arm in `finish_shutdown_lifecycle` would be unreachable, and a settlement
+   abandoned at its budget would report a signal force and skip the deactivation.
+   Task 3's second-to-last test exists to catch exactly that, and it must obtain
+   its `ShutdownProgress` from `wait_for_coordinators` rather than constructing
+   one.
 
 5. In `finish_shutdown_lifecycle` (`:298`), replace
    `if progress.forced { return Err(forced_shutdown_error()); }` at `:315` with:
@@ -442,9 +515,12 @@ fn shutdown_deadline_error() -> VoomError {
         }
 ```
 
-6. Fix the mechanical fallout the compiler names: `child_crash_lease_settlement`
-   (`:1722`) constructs `LeaseSettlement::Forced(ShutdownForce::Signal)` — the
-   crash path's `:1705` wait is unarmed, so a force there is always a signal;
+6. Fix the remaining mechanical fallout the compiler names.
+   `child_crash_lease_settlement` (`:1722-1731`) takes
+   `final_observed: Option<(ShutdownKind, Option<ShutdownForce>)>` and constructs
+   `LeaseSettlement::Forced(ShutdownForce::Deadline)` when that tuple's cause is
+   `Deadline` — `:1718` **is** armed — and `Forced(ShutdownForce::Signal)`
+   otherwise;
    `wait_for_coordinators`' join arm (`:1822`) becomes
    `Some(Ok(CoordinatorExit::Shutdown(LeaseSettlement::Forced(cause)))) => { forced.get_or_insert(cause); }`;
    its signal arm (`:1838`) guard `!forced` becomes `forced.is_none()` and its
@@ -478,6 +554,30 @@ async fn the_crash_settlement_path_is_not_armed() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_deadline_forced_settlement_reaches_finish_as_a_deadline() {
+    // Obtained from the code under test, not hand-constructed: the whole feature is
+    // nullified if settle_leases_for_shutdown collapses every force to Signal, and a
+    // hand-built ShutdownProgress cannot see that.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::User);
+    let (_cancel_tx, mut leases) = never_settling_leases();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let settlement = settle_leases_for_shutdown(
+        &watch::channel(LeaseCancellation::Running).0,
+        &mut leases,
+        &mut shutdown_rx,
+        ShutdownKind::User,
+        Some(deadline),
+    )
+    .await;
+    drop(shutdown_tx);
+    assert_eq!(
+        settlement,
+        LeaseSettlement::Forced(ShutdownForce::Deadline),
+        "a settlement abandoned at its budget must not report itself as a signal force"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_deadline_forced_settlement_still_deactivates() {
     let control = Arc::new(FakeControlPlane::default());
     let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
@@ -507,9 +607,14 @@ async fn a_deadline_forced_settlement_still_deactivates() {
 }
 ```
 
-   `never_settling_leases` and `leases_settling_after` are new local helpers
-   modelled on the existing lease-fixture helpers in that file; build them from
-   whatever the neighbouring `settle_leases_for_shutdown` tests already use.
+   `never_settling_leases` and `leases_settling_after` are new local helpers.
+   Build them from the lease-`JoinSet` setup the existing
+   `settle_leases_for_shutdown` tests already use — the ones around
+   `runtime_test.rs:920-1010` that construct a `JoinSet<()>`, a
+   `watch::channel(LeaseCancellation::Running)` and a
+   `watch::channel(ShutdownKind::Running)` by hand. `never_settling_leases`
+   spawns one task that awaits `std::future::pending()`;
+   `leases_settling_after(d)` spawns one that sleeps `d`.
 
 8. Run `cargo test -p voom-node-agent`. Expect all green.
 9. Run `just lint`. Expect exit 0.
@@ -518,7 +623,8 @@ async fn a_deadline_forced_settlement_still_deactivates() {
 ### Acceptance criteria
 
 - A settlement overrunning `budgets.call` is abandoned and reported as
-  `Deadline`, and still reaches the deactivation.
+  `Deadline` **by `settle_leases_for_shutdown` itself**, and still reaches the
+  deactivation.
 - `wait_or_force` with `deadline: None` never forces on time alone.
 - A signal force still returns `forced_shutdown_error()` before deactivating.
 
@@ -559,18 +665,41 @@ impl AgentRuntime {
                 }
 ```
 
-   A parameter rather than a constant read in place: three existing tests
-   (`runtime_test.rs:1009`, `:1040`, `:1085`) are plain `#[tokio::test]` on real
-   time and gate `deactivate` with a `Notify` that is never notified. A real 10 s
-   timer read here would make each of them a wall-clock race.
+   A parameter rather than a constant read in place: several existing tests are
+   plain `#[tokio::test]` on real time and gate `deactivate` with a `Notify` that
+   is never notified, so a real 10 s timer read here would make each a wall-clock
+   race.
 
 2. Pass `Instant::now() + self.budgets().call` at all three call sites —
    `:230`, `:249` and `:319`. The first two are startup-failure paths that run
    before any shutdown tail exists, so each computes its own.
 
-3. Give the three existing second-signal tests a far-future deadline:
-   `tokio::time::Instant::now() + Duration::from_secs(3_600)`. They are testing
-   the signal, not the budget.
+3. Fix the existing tests. `rg -n 'deactivate_or_second_signal' crates/voom-node-agent/src/runtime_test.rs`
+   is the census, and it returns **two** direct call sites, not three. They split
+   into two groups needing two different remedies:
+
+   **Direct callers — give them a far-future deadline argument**
+   (`tokio::time::Instant::now() + Duration::from_secs(3_600)`; they test the
+   signal, not the budget):
+   - `:1019`, in `second_signal_interrupts_deactivation_only_after_reap` (`:1009`);
+   - `:1228`, in `second_signal_interrupts_a_non_graceful_deactivation` (`:1218`).
+     This one is easy to miss — it is not adjacent to the other — and it will
+     fail to compile on the new arity.
+
+   **Indirect callers — give them far-future *budgets* instead.** These reach
+   deactivation through a function that computes the deadline internally, so
+   there is no argument to pass:
+   - `restart_exhausted_deactivation_requires_a_genuine_second_signal` (`:1040`)
+     calls `runtime.finish_shutdown_lifecycle(...)` at `:1045`;
+   - `child_startup_failure_deactivation_requires_a_genuine_second_signal`
+     (`:1085`) calls `runtime.run_with_shutdowns(signal_rx)` at `:1090`, reaching
+     the `:230` startup-failure deactivation.
+
+     Build both runtimes with `AgentRuntime::with_client_and_budgets(...)` and a
+     `call` of `Duration::from_secs(3_600)`. That is what Task 1's seam is for.
+     Left alone they would inherit a real 10 s timer and race their own
+     `timeout(Duration::from_millis(50), ...)` assertions (`:1101-1106`) — the
+     exact wall-clock race the parameter exists to avoid.
 
 4. Add to `runtime_test.rs`:
 
@@ -751,7 +880,30 @@ fn shutdown_backstop_error(bound: Duration) -> VoomError {
 }
 ```
 
-2. In `run_with_seeded_shutdowns` (`:202`), wrap the tail. Replace the existing
+2. Extract the wrapper so the backstop is testable without fault injection. Once
+   Tasks 3-5 land, no *reachable* wait can outlast every inner bound — which is
+   the point, and which means a test cannot park a real coordinator anywhere the
+   backstop would fire. Test the wrapper directly instead:
+
+```rust
+/// Run the shutdown tail, giving up after `bound`.
+///
+/// Dropping `tail` drops the coordinator `JoinSet`, aborting its tasks. A child
+/// mid-reap is still `SIGKILL`ed, by `.kill_on_drop(true)` in `launch`
+/// (`child.rs:404`) — not by `RunningChild::Drop`, which early-returns once
+/// `shutdown` has moved the handle out at `child.rs:195`.
+async fn run_shutdown_tail_within<F>(bound: Duration, tail: F) -> Result<(), VoomError>
+where
+    F: Future<Output = Result<(), VoomError>>,
+{
+    match tokio::time::timeout(bound, tail).await {
+        Ok(result) => result,
+        Err(_) => Err(shutdown_backstop_error(bound)),
+    }
+}
+```
+
+3. In `run_with_seeded_shutdowns` (`:202`), wrap the tail. Replace the existing
 
 ```rust
         let settled =
@@ -778,40 +930,38 @@ fn shutdown_backstop_error(bound: Duration) -> VoomError {
             )
             .await
         };
-        // Dropping this future drops the coordinator JoinSet, aborting its tasks. A child
-        // mid-reap is still SIGKILLed, by `.kill_on_drop(true)` in `launch` — not by
-        // RunningChild::Drop, which early-returns once `shutdown` has moved the handle out.
-        match tokio::time::timeout(bound, tail).await {
-            Ok(result) => result,
-            Err(_) => Err(shutdown_backstop_error(bound)),
-        }
+        run_shutdown_tail_within(bound, tail).await
 ```
 
    `exit` and `node_heartbeat` move into the async block, so the borrow checker
    requires them to be constructed before it; they already are.
 
-3. Add to `runtime_test.rs`:
+4. Add to `runtime_test.rs`:
 
 ```rust
-#[tokio::test]
-#[cfg(unix)]
-async fn the_tail_backstop_bounds_an_unraced_wait() {
-    // Millisecond budgets, so this costs well under a second on real time.
-    let budgets = ShutdownBudgets {
-        call: Duration::from_millis(50),
-        reap_after_kill: Duration::from_millis(10),
-        backstop_margin: Duration::from_millis(50),
-    };
-    // … build a runtime whose coordinator parks in a wait nothing races …
-    let error = runtime.run_until(async {}).await.expect_err("the backstop must fire");
+#[tokio::test(start_paused = true)]
+async fn the_tail_backstop_bounds_a_wait_no_inner_budget_covers() {
+    // `pending()` stands in for a wait nobody raced. After Tasks 3-5 no reachable
+    // wait is like that — which is the design working — so the backstop is tested
+    // at the function that implements it rather than through fault injection.
+    let error = run_shutdown_tail_within(Duration::from_secs(30), std::future::pending())
+        .await
+        .expect_err("the backstop must fire");
     assert!(
         error.to_string().contains("please report this"),
         "the backstop must name itself as a defect, not reuse the deadline message: {error}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_tail_backstop_is_transparent_to_a_tail_that_finishes() {
+    run_shutdown_tail_within(Duration::from_secs(30), std::future::ready(Ok(())))
+        .await
+        .expect("a tail inside its bound passes its own result through");
+}
 ```
 
-4. Add the rung to `crates/voom-node-agent/tests/budget_ladder.rs`. Extend the
+5. Add the rung to `crates/voom-node-agent/tests/budget_ladder.rs`. Extend the
    module doc's ladder diagram with a line recording the inversion, then:
 
 ```rust
@@ -840,19 +990,97 @@ fn the_shutdown_tail_stays_inside_the_default_stop_timeout() {
    Import `ShutdownBudgets` as `use voom_node_agent::runtime::ShutdownBudgets;`,
    beside the existing `voom_node_agent::client` import.
 
-5. Run `cargo test -p voom-node-agent --test budget_ladder`. Expect all tests
+6. Run `cargo test -p voom-node-agent --test budget_ladder`. Expect all tests
    passing.
-6. Run `cargo test -p voom-node-agent` and `just lint`. Expect green.
-7. Commit: `fix(node-agent): back the shutdown tail with a bound`.
+7. Run `cargo test -p voom-node-agent` and `just lint`. Expect green.
+8. Commit: `fix(node-agent): back the shutdown tail with a bound`.
 
 ### Acceptance criteria
 
-- A coordinator parked in an unraced wait still lets the runtime return, with
-  `shutdown_backstop_error`.
+- `run_shutdown_tail_within` returns `shutdown_backstop_error` on a tail that
+  never finishes, and passes a finished tail's result through unchanged.
 - The backstop's message is distinguishable from the deadline's.
 - `budget_ladder.rs` records the inversion and the 90 s ceiling.
 
 ---
+
+## Task 7 — the end-to-end regression, and what actually discharges R5
+
+**Modifies:** `crates/voom-node-agent/src/runtime_test.rs`.
+
+R5 asks for "a deterministic regression that fails against the pre-change
+behaviour". Most of the tests above cannot supply it: they name
+`ShutdownBudgets`, `ShutdownForce`, `reap_within`, `run_shutdown_tail_within` or a
+new parameter, so against the pre-change tree they do not *fail*, they do not
+*build*. That is real coverage of the new behaviour and it is not the same
+evidence.
+
+**Exactly one test discharges R5**, and it is Task 5's
+`a_crashed_worker_release_does_not_wait_out_the_retry_budget`. It touches no new
+production name: it drives `restart_after_child_exit` with its existing
+signature, and its only new machinery is a `readiness_gate` on
+`FakeControlPlane`, which is test-support and compiles against the pre-change
+tree. Pre-change, the gated readiness call drains the client's retry budget and
+the outer `timeout(Duration::from_secs(5), …)` fails on `Elapsed`. Post-change
+the shutdown releases it. **Verify this claim rather than asserting it:** before
+committing Task 5, `git stash` the production change, run the test, and confirm
+it fails on `Elapsed`; then restore and confirm it passes. Record both results in
+the commit message.
+
+### Steps
+
+1. Add the end-to-end test. It uses the Task 1 seam, so it is coverage rather
+   than R5 evidence, and it is what a reader looks for when asking whether the
+   charter's own scenario is covered:
+
+```rust
+#[tokio::test]
+#[cfg(unix)]
+async fn a_sigterm_exits_the_agent_when_the_control_plane_never_answers() {
+    // The charter's scenario end to end: one shutdown request, a control plane that
+    // does not answer the deactivation, and an agent that must still exit. Budgets
+    // in milliseconds so this costs well under a second on real time; the defaults
+    // would make it 26 s.
+    let control = Arc::new(FakeControlPlane::default());
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let budgets = ShutdownBudgets {
+        call: Duration::from_millis(100),
+        reap_after_kill: Duration::from_millis(50),
+        backstop_margin: Duration::from_millis(100),
+    };
+    let runtime = AgentRuntime::with_client_and_budgets(
+        loaded_config_with_worker(fixture_worker()),
+        control.clone(),
+        budgets,
+    );
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(async move { runtime.run_until(async { let _ = stop_rx.await; }).await });
+    // … wait for readiness the way ProcessWorkerFixture-based tests do …
+    stop_tx.send(()).unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("the agent must exit on one shutdown request")
+        .unwrap()
+        .expect_err("and must report why it could not retire");
+    assert!(error.to_string().contains("shutdown budget"), "{error}");
+}
+```
+
+   `fixture_worker()` is the `WorkerConfig` the file's `ProcessWorkerFixture`
+   tests already build; reuse theirs rather than adding one.
+
+2. Run `cargo test -p voom-node-agent a_sigterm_exits_the_agent`. Expect
+   `test result: ok. 1 passed`, in under two seconds.
+3. Run `cargo test -p voom-node-agent` and `just lint`. Expect green.
+4. Commit: `test(node-agent): cover the SIGTERM exposure end to end`.
+
+### Acceptance criteria
+
+- One shutdown request against an unanswering control plane exits the agent with
+  an error naming the budget, in well under the default tail bound.
+- The R5 witness's pre-change failure has been observed, not assumed, and the
+  observation is in the commit message.
 
 ## Final verification
 
