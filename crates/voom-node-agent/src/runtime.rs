@@ -189,10 +189,6 @@ impl AgentRuntime {
         }
     }
 
-    fn budgets(&self) -> ShutdownBudgets {
-        self.budgets
-    }
-
     /// Run until SIGINT or SIGTERM requests an orderly shutdown.
     ///
     /// # Errors
@@ -286,7 +282,7 @@ impl AgentRuntime {
 
         let specs = self.child_specs(&activation)?;
         let startup_supervisor =
-            ChildSupervisor::new(self.shutdown_grace(), self.budgets().reap_after_kill);
+            ChildSupervisor::new(self.shutdown_grace(), self.budgets.reap_after_kill);
         let children = match startup_supervisor.start_all(specs).await {
             Ok(children) => children,
             Err(error) => {
@@ -341,7 +337,7 @@ impl AgentRuntime {
         let shutdown_kind = shutdown_kind_for_exit(&exit);
         let signal_phase = signal_phase_for_exit(&exit);
         let _ = shutdown_tx.send(shutdown_kind);
-        let bound = self.budgets().tail(self.shutdown_grace());
+        let bound = self.budgets.tail(self.shutdown_grace());
         let tail = async {
             let settled =
                 wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals, signal_phase)
@@ -373,7 +369,7 @@ impl AgentRuntime {
             NodeIncarnationEndReason::ChildStartupFailed,
             signals,
             &mut signal_phase,
-            Instant::now() + self.budgets().call,
+            Instant::now() + self.budgets.call,
         )
         .await
     }
@@ -407,7 +403,7 @@ impl AgentRuntime {
             reason,
             signals,
             &mut signal_phase,
-            Instant::now() + self.budgets().call,
+            Instant::now() + self.budgets.call,
         )
         .await?;
         if progress.forced == Some(ShutdownForce::Deadline) {
@@ -582,7 +578,7 @@ impl AgentRuntime {
                 )),
                 poll_interval: Duration::from_millis(self.config.config.poll_interval_ms),
                 shutdown_grace: self.shutdown_grace(),
-                budgets: self.budgets(),
+                budgets: self.budgets,
                 worker: (*worker).clone(),
                 storage_roots: storage_roots.clone(),
                 fatal_tx: fatal_tx.clone(),
