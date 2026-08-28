@@ -68,6 +68,18 @@ so the worst case is 80 s and the runbook's example configuration
 (`shutdown_grace_seconds = 10`) gives 30 s. No existing configuration becomes
 invalid, because no configuration field changes.
 
+20 s is derived from `HANG_GUARD`, the 30 s bound the lifecycle suite applies to
+the agent join and the `Retired` observation together
+(`crates/voom-node-agent/tests/lifecycle.rs:47`, [ADR
+0066](../../adr/0066-observe-graceful-shutdown-as-one-bounded-lifecycle.md)),
+which this charter forbids raising. A deadline at or near 30 s would leave the
+guard firing first — the bound would move and the symptom would not. Issue #452
+measured loaded passing runs of that suite at 6–9 s, so 20 s clears a healthy
+shutdown by a wide margin and leaves the guard room for that progress plus a 1 s
+reap. It is also below one `REQUEST_TIMEOUT` (30 s) on purpose: a shutdown
+blocked on a wedged control plane should abandon rather than spend another
+attempt.
+
 ### Where the deadline is captured
 
 `tokio::time::Instant`, so a paused-clock test advances it. Captured once at
@@ -111,7 +123,10 @@ worker processes.
 
 ### What the operator sees
 
-`ShutdownProgress.forced` changes from `bool` to `Option<ShutdownForce>`:
+The two waits report through different mechanisms because they do not share a
+channel. `ShutdownProgress` is produced only by `wait_for_coordinators` and read
+only at `runtime.rs:315`, so it carries the settlement wait's cause and nothing
+else — `forced` changes from `bool` to `Option<ShutdownForce>`:
 
 ```rust
 enum ShutdownForce { Signal, Deadline }
@@ -121,8 +136,15 @@ enum ShutdownForce { Signal, Deadline }
 `forced_shutdown_error()` ("node-agent shutdown interrupted by a termination
 signal"); `Deadline` returns a new `shutdown_deadline_error()` naming the
 operation, the bound, and the fix — the control plane did not answer inside the
-shutdown deadline. Both are `VoomError::ExternalSystemUnavailable`, so the exit
-code is unchanged.
+shutdown deadline.
+
+`deactivate_or_second_signal` never constructs a `ShutdownProgress`; it returns
+its error directly, so its deadline arm returns `shutdown_deadline_error()`
+itself. The same holds at the two startup-failure call sites, which have no
+`ShutdownProgress` on their path at all.
+
+Both errors are `VoomError::ExternalSystemUnavailable`, so the exit code is
+unchanged.
 
 No `tracing` call is added. `voom-node-agent` has no `tracing` dependency (only a
 dev-dependency on `tracing-subscriber`, added by #592's acceptance sweep), and
@@ -130,19 +152,25 @@ the returned error already reaches the operator through the binary's exit path.
 
 ### Documentation
 
-`docs/runbooks/operator-node-agent.md` currently tells the operator to "Set the
-supervisor stop timeout above the configured shutdown grace". That understates
-the requirement now that the total is `shutdown_grace_seconds + 20 s`, and a
-runbook that fails when followed is a defect. It gets the arithmetic, and the
-sentence that a shutdown blocked on an unresponsive control plane now ends at
-the deadline rather than waiting for a second signal.
+`docs/runbooks/operator-node-agent.md` told the operator to "Set the supervisor
+stop timeout above the configured shutdown grace". That understates the
+requirement now that the total is `shutdown_grace_seconds + 20 s`, and a runbook
+that fails when followed is a defect. It gets the arithmetic, the note that a
+distribution's default is often below the upstream 90 s (Fedora: 45 s) with the
+command to check, and the sentence that a shutdown blocked on an unresponsive
+control plane now ends at the deadline rather than waiting for a second signal.
+
+This file was added to the charter's permitted surface by an explicit maintainer
+decision on 2026-08-28, recorded in the amended `WORK:SCOPE` annotation on issue
+#452. The original surface did not include `docs/runbooks/`.
 
 ## Failure modes
 
 | Condition | Behaviour |
 |---|---|
 | Control plane healthy | Unchanged. Settlement, reap, deactivation, `Retired`/`GracefulShutdown`, `Ok(())`. |
-| Control plane unresponsive, no second signal | Settlement forced at the deadline; children reaped inside grace; deactivation abandoned; `shutdown_deadline_error()`. |
+| Control plane unresponsive, no second signal | Settlement forced at the deadline; children reaped inside grace; deactivation **not attempted** — `finish_shutdown_lifecycle` returns at `runtime.rs:315` as soon as `progress.forced` is set, exactly as it does on a second-signal force. `shutdown_deadline_error()`. |
+| Settlement completes inside the deadline, deactivation does not | The deactivation arm fires and returns `shutdown_deadline_error()` directly. This is the only path on which that arm is reachable. |
 | Control plane unresponsive, second signal arrives first | Unchanged: `forced_shutdown_error()`. |
 | Control plane slower than 20 s but healthy | The `Retired` write is lost and TTL expiry reconciles it — the same outcome the second-signal force already produced. Accepted; recorded in ADR 0088's consequences. |
 | Deadline expires while a child is mid-reap | The reap completes. The deadline forces through the `ShutdownKind` watch, which settlement observes and reaping does not. |

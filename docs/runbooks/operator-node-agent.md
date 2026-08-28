@@ -180,13 +180,27 @@ The incarnation list is newest first. A normal replacement shows the new incarna
 
 SIGINT or SIGTERM stops acquisition, fails held leases as `user_cancellation`, closes and
 reaps every child (killing one after `shutdown_grace_seconds` if necessary), and deactivates
-the incarnation. Set the supervisor stop timeout above the configured shutdown grace. The
-first operator signal always begins or acknowledges ordered shutdown, even when an internal
+the incarnation.
+
+**Set the supervisor stop timeout above `shutdown_grace_seconds + 20`, in seconds.** The 20 s
+is `SHUTDOWN_DEADLINE`, the wall-clock budget shared by the two control-plane waits in the
+shutdown sequence — lease settlement and deactivation. That sum is the worst case, so the
+example configuration above (`shutdown_grace_seconds = 10`) needs a stop timeout above 30 s.
+Check the one your supervisor actually applies rather than assuming the upstream 90 s:
+`systemctl show -p DefaultTimeoutStopUSec` reports 45 s on Fedora, and any
+`shutdown_grace_seconds` above 25 exceeds that. A stop timeout below the sum means `SIGKILL`
+lands mid-shutdown and the incarnation is never marked retired. See
+[ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
+
+The first operator signal always begins or acknowledges ordered shutdown, even when an internal
 fatal error or restart-budget exhaustion already began it; that unconsumed first signal never
 forces settlement or deactivation. Only a genuine second operator signal, after the first has
 been consumed, cancels blocked lease settlement or deactivation and makes the process exit
-unsuccessfully. It still kills and reaps every child before exit, but forced shutdown can leave
-the incarnation or lease terminal state for TTL expiry/recovery to reconcile.
+unsuccessfully. A shutdown blocked on an unresponsive control plane no longer needs that second
+signal: the deadline abandons it and the process exits unsuccessfully on its own, reporting the
+deadline rather than a signal. Either way every child is killed and reaped before exit, and a
+forced shutdown can leave the incarnation or lease terminal state for TTL expiry/recovery to
+reconcile.
 
 A signal that arrives while the agent is still retrying activation against an unreachable
 control plane stops it immediately and exits successfully. No child has started at that
