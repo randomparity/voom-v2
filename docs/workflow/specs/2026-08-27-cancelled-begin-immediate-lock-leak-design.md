@@ -654,7 +654,20 @@ what the change does to that.
 - **Issue #452.** The same defect seen from the agent side. This change may make
   it resolvable; closing it is its owner's call.
 - **The lock-free opener ring buffer** issue #592 proposes as the next
-  diagnostic. Its question — which transaction holds the lock — is answered.
+  diagnostic. Owner: **the operator**, 2026-08-27 — this exclusion was taken by
+  this run and is now recorded in the charter
+  (https://github.com/randomparity/voom-v2/issues/592#issuecomment-5447684231).
+  Its question — which transaction holds the lock — is answered from `sqlx` 0.8.6
+  sources plus a deterministic isolated reproduction, and under the mechanism
+  found there is no returned `Transaction` at all, so the instrument's
+  rollback-on-drop half would have recorded nothing.
+
+  **What that means for criterion 1, stated plainly:** the holder is named by
+  mechanism-from-sources plus isolated reproduction, consistent with the issue's
+  `gdb` evidence. It is *not* observed in #592's own failing run. Attribution to
+  that run is carried by the before/after acceptance sweep, not by direct
+  observation, and the pull request says so in those words rather than implying
+  the stronger claim.
 - **Reporting the window upstream to `sqlx`.** Worth doing, and not a
   precondition for un-redding `main`. Carrying a `[patch.crates-io]` fork instead
   is rejected in ADR 0087.
