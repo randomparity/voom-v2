@@ -224,9 +224,13 @@ commit intents as soon as it sees the signal, and a drive that has already journ
 + 26 bound first, the agent gives up and that drive is abandoned. Promotion is a copy and two
 hashes of the artifact's bytes, so for a large artifact that is the likely outcome. The bound is
 the agent's own, so a longer supervisor stop timeout does not extend it. After any stop that
-reports the tail bound, check the affected artifacts for a `recovery_required` state and run
-`voom artifact recover-commit` before the next commit to them, alongside the leftover-process
-check above.
+reports the tail bound, run `voom artifact recover-commit --artifact-handle-id <id>` for the
+artifacts that were committing, alongside the leftover-process check above. Do not wait for a
+`recovery_required` state to appear: an abandoned drive leaves the commit record `pending` and
+`voom artifact show` reports the artifact as `staged`, so nothing distinguishes it from an
+ordinary staged artifact. `recover-commit` is what moves it to `recovery_required`, and it
+reports whether the commit can be finished or needs a human. Until it runs, the stuck record
+holds the artifact's commit slot and the next commit to that artifact is refused.
 
 A signal that arrives while the agent is still retrying activation against an unreachable
 control plane stops it immediately and exits successfully. No child has started at that

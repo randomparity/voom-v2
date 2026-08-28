@@ -455,9 +455,10 @@ satisfied: the file references neither `SqlitePool` nor the exact identifier
 
 | Test | File | Requirement | Proves |
 |---|---|---|---|
-| `shutdown_deadline_abandons_a_blocked_deactivation` | `runtime_test.rs` | R3, R5 | A gated `deactivate` that never returns yields `shutdown_deadline_error()`, wrapped in a `tokio::time::timeout` well past the budget so the pre-change build fails on `Elapsed` rather than hanging. |
-| `shutdown_deadline_forces_blocked_lease_settlement` | `runtime_test.rs` | R1, R5 | `wait_or_force` with a deadline, against leases that never settle, aborts them and reports `Deadline`; `settle_leases_for_shutdown` returns `LeaseSettlement::Forced(ShutdownForce::Deadline)`. |
-| `a_crashed_worker_release_does_not_wait_out_the_retry_budget` | `runtime_test.rs` | R1, **R5** | With `set_worker_readiness` gated the way `deactivate_gate` gates deactivation, a crashed child and then a shutdown releases `restart_after_child_exit` instead of draining `production_request_budget()`. This is the regression for the unobserved coordinator wait. |
+| `shutdown_deadline_abandons_a_blocked_deactivation` | `runtime_test.rs` | R3 | A gated `deactivate` that never returns yields `shutdown_deadline_error()`. It passes `deactivate_or_second_signal` a deadline argument, so the pre-change tree does not build it — coverage of the new behaviour, not R5 evidence. |
+| `a_sigterm_exits_the_agent_when_the_control_plane_never_answers` | `runtime_test.rs` | R1, R3, **R5** | The charter's scenario end to end: one shutdown request, a control plane that never answers the deactivation, an agent that must still exit. Built only from names that predate this change — `with_client`, `run_with_shutdowns`, `deactivate_gate` — so it compiles against the pre-change tree and fails there on `Elapsed`. The one R5 witness. |
+| `shutdown_deadline_forces_blocked_lease_settlement` | `runtime_test.rs` | R1 | `wait_or_force` with a deadline, against leases that never settle, aborts them and reports `Deadline`; `settle_leases_for_shutdown` returns `LeaseSettlement::Forced(ShutdownForce::Deadline)`. |
+| `a_crashed_worker_release_does_not_wait_out_the_retry_budget` | `runtime_test.rs` | R1 | With `set_worker_readiness` gated the way `deactivate_gate` gates deactivation, a crashed child and then a shutdown releases `restart_after_child_exit` instead of draining `production_request_budget()`. This is the regression for the unobserved coordinator wait. |
 | `the_crash_settlement_path_is_not_armed` | `runtime_test.rs` | R1 | `settle_leases_after_child_crash` with a settlement far longer than `budgets.call` completes normally and does not force. This is the regression for the steady-state contamination that kept the budget out of `wait_or_force`. |
 | `a_deadline_forced_settlement_reports_deadline` | `runtime_test.rs` | R3 | `finish_shutdown_lifecycle` given `forced: Some(ShutdownForce::Deadline)` returns `shutdown_deadline_error()`, not `forced_shutdown_error()`. The mapping at `runtime.rs:315` is the reason the field is widened, so it gets its own test. |
 | `a_queued_signal_still_forces_after_a_deadline_force` | `runtime_test.rs` | R4 | A `Deadline` force is recorded, then a signal that was queued rather than consumed still ends the run in `forced_shutdown_error()` with the write skipped — the deadline did not replace the escape. Asserts R4's ratified outcome, not the latency. |
@@ -482,7 +483,7 @@ main:crates/voom-node-agent/src/child.rs`, `pub fn new(shutdown_grace: Duration)
 It is real coverage of the wiring point, not evidence for R5.
 
 The witness is `a_sigterm_exits_the_agent_when_the_control_plane_never_answers`,
-driven through `AgentRuntime::with_client` and `run_until` — both pre-existing —
+driven through `AgentRuntime::with_client` and `run_with_shutdowns` — both pre-existing —
 taking the **default** budgets and wrapped in an outer `tokio::time::timeout` well
 above the 86 s tail. Verified in a temporary worktree against `main` at `6fd4ece7`
 with only that test added: it compiles and fails on `Elapsed` after 120.04 s.
@@ -508,20 +509,19 @@ R6 is `just ci`. Two things about it are specific to this change.
 `check-adr-index` is included, so ADR 0088 needs its `docs/adr/README.md` row —
 already present on this branch.
 
-The new budgets are real time in any suite that does not pause the clock, and
-two of the specified tests cannot pause it. `the_tail_backstop_bounds_an_unraced_wait`
+The new budgets are real time in any suite that does not pause the clock, and two
+delivered tests cannot pause it. `a_sigterm_exits_the_agent_when_the_control_plane_never_answers`
 and `a_crashed_worker_release_does_not_wait_out_the_retry_budget` both need a real
 coordinator, which means a `RunningChild` from `ChildSupervisor::start_all` and
 therefore a real process; every existing test in `runtime_test.rs` that does this
 (`child_crash_restarts_only_after_every_held_lease_settles` at `:634-648`,
 `graceful_shutdown_settles_before_child_reap_and_deactivation` at `:744-760`) is
-`#[cfg(unix)] #[tokio::test]` on real time via `ProcessWorkerFixture`. Neither pays the
-default budgets in practice: `the_tail_backstop_bounds_a_wait_no_inner_budget_covers`
-calls `run_shutdown_tail_within` directly under `start_paused`, and
-`a_crashed_worker_release_does_not_wait_out_the_retry_budget` never reaches a
-shutdown-tail budget at all. The struct is justified by the three `Notify`-gated
-deactivation tests named above, which take a far-future `call` so the signal stays
-the cause under test.
+`#[cfg(unix)] #[tokio::test]` on real time via `ProcessWorkerFixture`. Only the first
+pays a default budget, and it must: taking `ShutdownBudgets::DEFAULT` is what keeps it
+buildable against the pre-change tree, and it is where the suite's added ten seconds
+go. The other never reaches a shutdown-tail budget at all. The struct is justified by
+the three `Notify`-gated deactivation tests named above, which take a far-future `call`
+so the signal stays the cause under test.
 
 Everything else pauses. `runtime_test.rs` already uses
 `#[tokio::test(start_paused = true)]` widely, and the three existing real-time
