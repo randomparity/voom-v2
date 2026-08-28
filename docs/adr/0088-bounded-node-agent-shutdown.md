@@ -191,9 +191,17 @@ ruled out. The agent reaches `deactivate` and behaves correctly. It is the
 **control plane** that deadlocks." The bound exists to make the arithmetic true,
 not to close the reported hang.
 
-**Both constants are `pub`**, in `runtime` and `child` respectively, because
-`crates/voom-node-agent/tests/budget_ladder.rs` is an integration test and reads
-them the way it already reads `client::REQUEST_TIMEOUT`.
+**The three values are fields of one `pub struct ShutdownBudgets` in `runtime`,
+with a `pub const DEFAULT`** — `call`, `reap_after_kill`, `backstop_margin` — read
+by `crates/voom-node-agent/tests/budget_ladder.rs` the way it already reads
+`client::REQUEST_TIMEOUT`. `child` gains no public constant: its bound arrives as
+an argument. A struct rather than bare constants because three existing tests
+gate `deactivate` with a `Notify` that is never notified, so a constant read at
+the point of use would turn each into a wall-clock race; the struct carries a
+`#[cfg(test)]` constructor that shrinks them. Where this record names
+`SHUTDOWN_CALL_DEADLINE`, `REAP_AFTER_KILL` or `BACKSTOP_MARGIN`, read
+`budgets.call`, `budgets.reap_after_kill` and `budgets.backstop_margin`; the
+names are kept in the arithmetic because they read better there.
 
 **The shutdown budgets invert `budget_ladder.rs`'s ordering rule, deliberately,
 and are recorded there as a rung.** That file's rule is that an observer's budget

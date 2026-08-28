@@ -541,7 +541,7 @@ fn shutdown_deadline_error() -> VoomError {
 ```rust
 #[tokio::test(start_paused = true)]
 async fn shutdown_deadline_forces_blocked_lease_settlement() {
-    let (_cancel_tx, mut leases, mut shutdown_rx) = never_settling_leases();
+    let (_cancel_tx, mut leases, _shutdown_tx, mut shutdown_rx) = never_settling_leases();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let observed = wait_or_force(&mut leases, &mut shutdown_rx, false, Some(deadline)).await;
     assert_eq!(
@@ -555,7 +555,8 @@ async fn shutdown_deadline_forces_blocked_lease_settlement() {
 async fn the_crash_settlement_budget_starts_when_its_own_wait_does() {
     // Regression for the deadline-stamped-too-early bug: the first wait is unbounded,
     // so a budget computed before it would arrive at the second wait already expired.
-    let (cancel_tx, mut leases, mut shutdown_rx) = leases_settling_after(Duration::from_secs(30));
+    let (cancel_tx, mut leases, shutdown_tx, mut shutdown_rx) =
+        leases_settling_after(Duration::from_secs(30));
     shutdown_tx.send(ShutdownKind::User).unwrap();
     let settlement = settle_leases_after_child_crash(
         &cancel_tx,
@@ -575,28 +576,27 @@ async fn the_crash_settlement_budget_starts_when_its_own_wait_does() {
 async fn the_crash_settlement_path_is_not_armed() {
     // wait_or_force with no deadline must wait, whatever the clock does: arming the
     // crash path would terminate a healthy running agent after one slow settlement.
-    let (_cancel_tx, mut leases, mut shutdown_rx) = leases_settling_after(Duration::from_secs(60));
+    let (_cancel_tx, mut leases, _shutdown_tx, mut shutdown_rx) =
+        leases_settling_after(Duration::from_secs(60));
     let observed = wait_or_force(&mut leases, &mut shutdown_rx, false, None).await;
     assert_eq!(observed, None, "an unarmed wait must settle, not force");
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_deadline_forced_settlement_reaches_finish_as_a_deadline() {
+async fn a_deadline_forced_settlement_reports_deadline() {
     // Obtained from the code under test, not hand-constructed: the whole feature is
     // nullified if settle_leases_for_shutdown collapses every force to Signal, and a
     // hand-built ShutdownProgress cannot see that.
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::User);
-    let (_cancel_tx, mut leases) = never_settling_leases();
+    let (cancel_tx, mut leases, _shutdown_tx, mut shutdown_rx) = never_settling_leases();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let settlement = settle_leases_for_shutdown(
-        &watch::channel(LeaseCancellation::Running).0,
+        &cancel_tx,
         &mut leases,
         &mut shutdown_rx,
         ShutdownKind::User,
         Some(deadline),
     )
     .await;
-    drop(shutdown_tx);
     assert_eq!(
         settlement,
         LeaseSettlement::Forced(ShutdownForce::Deadline),
@@ -634,7 +634,19 @@ async fn a_deadline_forced_settlement_still_deactivates() {
 }
 ```
 
-   `never_settling_leases` and `leases_settling_after` are new local helpers.
+   **Both helpers return the same four-tuple**, so every call site destructures
+   identically:
+
+```rust
+fn never_settling_leases()
+    -> (watch::Sender<LeaseCancellation>, JoinSet<()>, watch::Sender<ShutdownKind>, watch::Receiver<ShutdownKind>);
+fn leases_settling_after(after: Duration)
+    -> (watch::Sender<LeaseCancellation>, JoinSet<()>, watch::Sender<ShutdownKind>, watch::Receiver<ShutdownKind>);
+```
+
+   The `Sender` is returned as well as the `Receiver` because the tests need to
+   publish a kind and to keep the channel open. `never_settling_leases` and
+   `leases_settling_after` are new local helpers.
    Build them from the lease-`JoinSet` setup the existing
    `settle_leases_for_shutdown` tests already use — the ones around
    `runtime_test.rs:920-1010` that construct a `JoinSet<()>`, a
@@ -642,6 +654,42 @@ async fn a_deadline_forced_settlement_still_deactivates() {
    `watch::channel(ShutdownKind::Running)` by hand. `never_settling_leases`
    spawns one task that awaits `std::future::pending()`;
    `leases_settling_after(d)` spawns one that sleeps `d`.
+
+7a. Add the R2 regression, in `runtime_test.rs`. Nothing existing covers it:
+   `loaded_config` sets `shutdown_grace_seconds: 1` (`runtime_test.rs:2076`) and
+   `context()` sets `shutdown_grace: Duration::from_secs(1)` (`:2103`), so no test
+   has a reap that outlasts a call budget. This is the hazard the ADR's rejection
+   of the `wait_for_coordinators` placement turns on — "a unit in `failed` on
+   every `systemctl stop`" — and without it nothing catches a regression back to
+   it:
+
+```rust
+#[tokio::test]
+#[cfg(unix)]
+async fn a_full_shutdown_grace_is_not_a_forced_shutdown() {
+    // A worker that uses its whole grace, against a healthy control plane. The reap
+    // outlasts `budgets.call`, and that must not mark the shutdown forced: the
+    // incarnation retires and the process exits 0. Real time and a real child, so
+    // the budgets are milliseconds and the grace is longer than `call`.
+    let budgets = ShutdownBudgets {
+        call: Duration::from_millis(50),
+        reap_after_kill: Duration::from_millis(50),
+        backstop_margin: Duration::from_secs(30),
+    };
+    // … a worker that ignores stdin EOF, and a config whose shutdown_grace_seconds
+    // exceeds 50ms — ProcessWorkerFixture, as
+    // `graceful_shutdown_settles_before_child_reap_and_deactivation` (:746) builds it …
+    let result = runtime.run_until(async { let _ = stop_rx.await; }).await;
+    assert!(result.is_ok(), "a routine stop must not exit non-zero: {result:?}");
+    assert!(
+        control.events.lock().await.contains(&"deactivate".to_owned()),
+        "and must still retire the incarnation"
+    );
+}
+```
+
+   `backstop_margin` is deliberately large here: the backstop must not fire, so
+   that a failure points at the settlement placement rather than at the backstop.
 
 8. Run `cargo test -p voom-node-agent`. Expect all green.
 9. Run `just lint`. Expect exit 0.
@@ -980,6 +1028,29 @@ where
 
 ```rust
 #[tokio::test(start_paused = true)]
+async fn a_second_signal_after_a_deadline_force_still_forces() {
+    // Criterion 4 is the one criterion whose semantics this change narrows — ratified
+    // as unchanged in outcome, explicitly changed in latency — so the new ordering
+    // gets its own test. A Deadline force is recorded first; the operator's second
+    // signal then arrives, and the run must still end in forced_shutdown_error() with
+    // the write skipped. Only the latency moved.
+    let (_cancel_tx, mut coordinators, shutdown_tx, _shutdown_rx) = coordinators_forcing_on_deadline();
+    let (signal_tx, mut signals) = mpsc::unbounded_channel();
+    signal_tx.send(()).unwrap();
+    let progress = wait_for_coordinators(
+        &mut coordinators,
+        &shutdown_tx,
+        &mut signals,
+        ShutdownSignalPhase::ForceEnabled,
+    )
+    .await
+    .unwrap();
+    // First force recorded wins — the signal arm's existing guard is unchanged — so the
+    // cause stays Deadline and finish_shutdown_lifecycle still reaches deactivation.
+    assert_eq!(progress.forced, Some(ShutdownForce::Deadline));
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_tail_backstop_bounds_a_wait_no_inner_budget_covers() {
     // `pending()` stands in for a wait nobody raced. After Tasks 3-5 no reachable
     // wait is like that — which is the design working — so the backstop is tested
@@ -1029,7 +1100,10 @@ fn the_shutdown_budgets_deliberately_invert_the_ladder() {
 - `run_shutdown_tail_within` returns `shutdown_backstop_error` on a tail that
   never finishes, and passes a finished tail's result through unchanged.
 - The backstop's message is distinguishable from the deadline's.
-- `budget_ladder.rs` records the inversion and the 90 s ceiling.
+- `budget_ladder.rs` records the inversion **only**. The 90 s ceiling is asserted
+  once, in Task 1's `runtime_test.rs` test — `budget_ladder.rs` owns the ordering
+  relationship, `runtime_test.rs` owns the magnitudes.
+- The deadline-then-signal ordering criterion 4 was narrowed to has a test.
 
 ---
 
