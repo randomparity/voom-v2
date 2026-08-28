@@ -398,31 +398,42 @@ integration test, the regression proof.
   would therefore go red about a quarter of the time for a reason unrelated to
   upstream — and would send a reader to exactly the wrong place, since this spec
   reads a red control as "check whether upstream closed the window". So the
-  control runs the sweep **5 times and requires at least one blocked observation
+  control runs the sweep **3 times and requires at least one blocked observation
   across the repeats**: at the worst measured per-sweep miss rate that is
-  0.275^5 = 0.0016. The fixed arm runs the same 5 repeats and requires **no**
-  blocked observation in any of them.
+  0.275^3 = 0.021. The fixed arm runs **5** repeats and requires **no** blocked
+  observation in any of them. Both counts started at 5; the control's was cut to
+  3 when the serialized wall clock came in 32% over this design's own budget, and
+  the plan records that measurement and the trade it bought.
 - Note what the control does *not* buy: the two arms count different clocks, so a
   red control means "check whether upstream closed the window", not "the fixed arm
   stopped covering".
-- **The poll sweep cannot cancel a post-fix open, and the fixed arm does not
-  claim to.** Post-fix the caller's only await is `receiver.await`, and its only
-  wakeup source is the `oneshot` send — which happens *after* `pool.begin_with`
-  has returned. So at *N* = 1 the helper is re-entered by the completion wakeup
-  itself and drops a future whose value is already in the channel; at *N* >= 2 the
-  open completed on an earlier poll. At every *N* in the sweep the transaction is
-  fully open before the caller goes away. An earlier draft of this spec asserted
-  "at least one *N* actually cancelled" as an anti-vacuity guard; that assertion
-  is unsatisfiable in the sense intended and reports true in exactly the
-  degenerate case it was meant to catch, so it is **removed**. It was also a flake
-  risk in the other direction: on a many-core host the detached task can finish
-  before the parent's first poll of the receiver, making *N* = 1 resolve `Ready`
-  immediately and turning the guard spuriously red.
+- **Post-fix the sweep exercises *N* = 1 and nothing else.** The caller's only
+  await is `receiver.await`, and its only wakeup source is the `oneshot` send —
+  which happens *after* `pool.begin_with` has returned. The poll helper skips its
+  wakeup wait on the last iteration, so at *N* = 1 it polls once, gets `Pending`,
+  and drops the caller **while the open is still in flight**: a genuine mid-open
+  cancellation that runs the `send`-failure branch. At *N* >= 2 the first poll's
+  wait is satisfied by the send itself, so the second poll is `Ready`, the helper
+  returns early and nothing is cancelled at all. The arm therefore covers more
+  than an earlier draft of this spec credited it with at *N* = 1, and nothing
+  above it — 35 of its 40 iterations cannot fail. That is priced deliberately: the
+  range stays 1..=8 because the *control* needs it, the control being the arm
+  whose pre-fix `pool.begin_with` has await points across the whole range.
+  An earlier draft of this spec asserted
+  "at least one *N* actually cancelled" as an anti-vacuity guard. It is **removed**,
+  but not for the reason that draft gave: the guard is satisfiable, and *N* = 1
+  satisfies it on every run this design has measured. What sinks it is the flake
+  risk in the other direction — on a many-core host the detached task can finish
+  before the parent's first poll of the receiver, making even *N* = 1 resolve
+  `Ready` and turning the guard spuriously red. A sweep-wide guard would then be
+  reporting host scheduling, which is what the orphan arm was built to stop
+  depending on.
 
   What the fixed arm is, then, is a **regression** assertion and nothing more: it
   is red on the unfixed code at *N* = 3 and green after the fix, which is
-  completion criterion 3. Cancellation *during* an open is covered by the orphan
-  arm below, deterministically, instead of being hoped for here.
+  completion criterion 3. The assertion that a caller really can vanish *during*
+  an open belongs to the orphan arm below, which forces that state rather than
+  relying on a poll count to land in it.
 - **Orphan arm — deterministic, no poll counting, no host dependence.** This is
   the arm that exercises a caller vanishing while the open is genuinely in
   flight, and it gets its determinism from SQLite's lock rather than from timing:
@@ -461,8 +472,9 @@ integration test, the regression proof.
   back. What the holder's lock *does* still guarantee is that the timeout in
   step 2 fires; that half of the argument survives.
 
-  This is the only coverage the `sender.send` error branch will ever get, and
-  that branch is the whole point of the design. It also needs the wait for a
+  This is the only coverage that *asserts* on the `sender.send` error branch, and
+  that branch is the whole point of the design. The fixed arm reaches it too, once
+  per repeat at *N* = 1, but asserts nothing about it. It also needs the wait for a
   second reason: a `#[tokio::test]` runtime torn down immediately after its last
   assertion can kill the detached task before it rolls back, so a test that does
   not wait for the branch does not reliably execute it either.
@@ -604,6 +616,12 @@ whether the rate transferred. Making 0.047 load-bearing instead would mean
 running the pre-fix arm to the full 90 and deriving the bound from the
 reproduction count actually observed — more than this criterion is worth, and
 stated here so the choice is visible rather than silent.
+
+**Outcome: the condition did not hold, and this is where that mattered.** The
+pre-fix arm reproduced at run **90 of 90**, implying a host rate near 1/90, so
+0.047 does not apply. The post-fix arm was run to 500 instead of 90, which puts
+the conditional false-negative at 0.004. The plan's measured-results section
+carries the numbers; nothing downstream should quote 0.047.
 
 **The pre-fix control gates the sweep.** Reproduction is configuration-sensitive,
 not merely rare — #592 records that 101 unthrottled runs did not reproduce and

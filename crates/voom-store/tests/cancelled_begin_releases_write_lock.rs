@@ -231,11 +231,20 @@ async fn fresh_fixture() -> (TempDatabase, SqlitePool) {
 
 /// The fix: a cancelled open through the opener always leaves the lock takeable.
 ///
-/// This is a regression assertion and nothing more. It does not claim to cancel a
-/// post-fix open mid-flight — it cannot: after the fix the caller's only await is on
-/// the channel, whose only wakeup source fires *after* the open has returned. So at
-/// every *N* in this sweep the transaction is fully open before the caller goes away.
-/// Cancellation *during* an open is covered deterministically by the orphan arm.
+/// This is a regression assertion and nothing more. What the sweep exercises after
+/// the fix is *N* = 1 and nothing else, because the caller's only await is then on
+/// the channel and the send is its only wakeup source. At *N* = 1
+/// [`poll_n_then_drop`] skips its wait and drops after a single poll, so the caller
+/// goes away mid-open and the detached task takes the `send`-failure branch; at
+/// *N* >= 2 the second poll finds the channel ready, so the open completes and
+/// nothing is cancelled. Both outcomes are asserted the same way, which is the point
+/// of a regression sweep — but only the first one can fail.
+///
+/// The sweep is kept at 1..=8 for the control arm's sake: pre-fix the opener is an
+/// inline `pool.begin_with`, which has await points across the whole range, and
+/// finding the leak there is what shows this arm still straddles the window.
+/// Cancellation *during* an open is asserted deterministically by the orphan arm
+/// rather than left to whichever *N* happens to land there.
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_open_through_the_opener_leaves_the_write_lock_takeable() {
     for repeat in 1..=REPEATS {

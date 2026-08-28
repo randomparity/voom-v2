@@ -64,24 +64,44 @@ const HANG_GUARD: Duration = Duration::from_secs(30);
 fn init_tracing() {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {
-        // `voom_store=warn` survives whatever RUST_LOG says, and the ORDER here is
-        // what makes that true: `EnvFilter::add_directive` *replaces* a directive
-        // with the same target, so RUST_LOG is folded in first and `voom_store=warn`
-        // is added last. Built the other way round — the obvious way, and the way an
-        // earlier version of this function did it — `RUST_LOG=voom_store=error`
-        // overwrites the warn directive and the acceptance sweep reports
-        // `orphan_warns=0` on every run whatever the code does. That is the
-        // zero-forever instrument this function exists to prevent, reached through
-        // the environment rather than the manifest, and an operator debugging #592
-        // is exactly the person who sets RUST_LOG.
+        // `voom_store` records are not silenceable from the environment, and dropping
+        // those directives is what makes that true — ordering alone does not.
+        // `EnvFilter::add_directive` replaces only an *exactly equal* target, so
+        // adding `voom_store=warn` last does not beat a `voom_store::tx=error` that
+        // arrived from RUST_LOG: that is a different, strictly more specific
+        // directive, it is inserted alongside rather than replacing, and specificity
+        // wins the match. `begin_detached`'s events carry target `voom_store::tx`,
+        // so the directive an operator debugging #592 would actually type is the one
+        // that gets through. Two earlier versions of this function lost to it — one
+        // by adding `voom_store=warn` first, one by adding it last.
+        //
+        // Silenced, the acceptance sweep reports `orphan_warns=0` on every run
+        // whatever the code does, which reads as "no orphans" rather than "nothing
+        // was listening". That is the zero-forever instrument this function exists to
+        // prevent, reached through the environment rather than the manifest.
         //
         // RUST_LOG otherwise applies as usual: `RUST_LOG=debug` still raises the
         // global level and still lets hyper/rustls records through. That is what
         // "RUST_LOG may add" means and it is not guarded against here.
         let mut filter = tracing_subscriber::EnvFilter::default();
         if let Ok(directives) = std::env::var("RUST_LOG") {
-            for directive in directives.split(',').filter(|d| !d.trim().is_empty()) {
-                if let Ok(parsed) = directive.trim().parse() {
+            for directive in directives.split(',').map(str::trim) {
+                // The target is everything before the first `=` or `[`, so this drops
+                // `voom_store`, `voom_store=error` and `voom_store::tx[span]=off`
+                // alike, without matching an unrelated crate that merely shares the
+                // leading characters.
+                let target = directive
+                    .split(['=', '['])
+                    .next()
+                    .unwrap_or(directive)
+                    .trim_end();
+                if directive.is_empty()
+                    || target == "voom_store"
+                    || target.starts_with("voom_store::")
+                {
+                    continue;
+                }
+                if let Ok(parsed) = directive.parse() {
                     filter = filter.add_directive(parsed);
                 }
             }

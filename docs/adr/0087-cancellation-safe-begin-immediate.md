@@ -151,10 +151,15 @@ a notice from a passing test cannot be surfaced under either invocation — the
 point is that the record should not let a green macOS run be read as the control
 passing.
 
-A third arm covers what the poll sweep cannot. Post-fix, the caller's only wakeup
-is the `oneshot` send, which fires after the open has already returned, so no
-poll count cancels an open *in flight* — the sweep proves the regression, not the
-cancellation. The orphan arm gets that deterministically from SQLite instead of
+A third arm covers what the poll sweep cannot be relied on for. Post-fix, the
+caller's only wakeup is the `oneshot` send, which fires after the open has
+returned, so the sweep collapses to its first step: at *N* = 1 the poll helper
+drops the caller after a single `Pending` poll and does cancel an open in flight,
+and at *N* >= 2 the send makes the next poll `Ready` and nothing is cancelled.
+One in-flight cancellation per repeat, at a fixed *N*, contingent on the detached
+task not winning the race — that proves the regression, and it is too thin a
+thread to hang the cancellation guarantee on. The orphan arm gets that
+deterministically from SQLite instead of
 from scheduling: a holder connection keeps the write lock, so the detached
 `BEGIN IMMEDIATE` cannot return, so a short timeout is guaranteed to drop the
 caller mid-open. The arm then waits for the orphan `warn` — proving the open
@@ -162,8 +167,9 @@ completed and found no receiver — and only then probes the lock, proving the
 resulting drop rolled back. The wait is not ceremony: with the holder's lock
 released, the observer beat the detached opener to the lock in 20 of 20 measured
 runs, so a probe-only assertion passes without the rollback having happened. It
-is the only coverage the `sender.send` error branch will ever get, and that
-branch is the decision.
+is the only coverage that *asserts* on the `sender.send` error branch — the fixed
+arm's *N* = 1 iterations run that branch too, but assert nothing about it — and
+that branch is the decision.
 
 What the control buys is not that the fixed arm's range still brackets anything —
 the two arms count different clocks, and the fix is what decouples them, so the
@@ -207,7 +213,12 @@ is bounded by `POOL_ACQUIRE_BUDGET` on top, so worst-case termination is 75s, no
 30s. So the pool drains on its own at a rate that does not depend on arrival rate — it degrades under a burst
 and cannot wedge. No measurement of the acquire-cancellation case is offered
 here; the argument is the two constants and the fact that a detached open has no
-unbounded wait in it.
+unbounded wait in it. Note the asymmetry between that bound and its instrument:
+the orphan `warn` carries `open_ms`, which spans both steps, so a large value
+does not say which clause it fell under. Separating them needs `Pool::acquire`
+plus `Transaction::begin` — the `#[doc(hidden)]` surface this record declines to
+reach for below — so the field is named for what it measures rather than for the
+clause a reader might want.
 
 **Who can drive that residual is broader than an earlier draft of this record
 implied.** The token check reads from the database, so it runs *inside* the
@@ -251,10 +262,15 @@ orphan signal.
 
 The detach discharges the guarantee only while a runtime outlives the task. On a
 current-thread runtime whose `block_on` returns while the detached task sits
-between the two steps, the task is dropped there and the leak recurs. Two test
-harnesses run that shape, and they are discharged by **different** reasons — an
-earlier draft of this record gave one reason for both, and it was false at one of
-them. At `crates/voom-cli/tests/support/owner_node.rs:102,139` each thread builds
+between the two steps, the task is dropped there and the leak recurs.
+The test suites run that shape in several places — `rg -n new_current_thread
+crates --type rust` is the census, and it is deliberately not reproduced here,
+because a count in a record goes stale the first time a harness is added and an
+earlier draft of this record shipped one that was already wrong. What follows is
+the predicate to apply to any of them, worked through the two sites where the
+answer is not immediate. They are discharged by **different** reasons; that same
+earlier draft gave one reason for both, and it was false at one of them. At
+`crates/voom-cli/tests/support/owner_node.rs:102,139` each thread builds
 its own pool inside `block_on` (`voom_store::connect` at `:106`,
 `run_media_settlement` at `:141`), so the pool genuinely dies with the runtime. At
 `crates/voom-test-support/src/commit_node.rs:346-382` it does not:
@@ -263,11 +279,15 @@ the detached openers draw from the *caller's* pool, which outlives the driver
 runtime. What discharges that site is instead that its `block_on` body is an
 unterminated `loop` (`:362-379`) with no `break`, so it returns only by panic — by
 which point the harness is already failing.
+`crates/voom-control-plane/tests/commit_use_lease_gate.rs:277-300` is the same
+borrowed-pool shape resting on the same unterminated `loop`.
 
 State the unsafe shape plainly, because it is the one a future harness author
 needs to test against: **a current-thread runtime that borrows a pool from a
-longer-lived owner and whose `block_on` can return normally.** Neither existing
-harness is that; a new one could be.
+longer-lived owner and whose `block_on` can return normally.** No harness in the
+tree today is that — the borrowed-pool ones never return, and the rest own the
+pool they use — but a new one could be, and the two halves of that predicate are
+what to check rather than this list.
 
 The deferred openers stay safe by way of `sqlx` worker behaviour this record
 cites but does not control. If that behaviour changed, a cancelled deferred open

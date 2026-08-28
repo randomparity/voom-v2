@@ -66,9 +66,15 @@ async fn begin_detached(
             // microsecond open under no contention from one parked in `SQLite`'s busy
             // handler for the full `busy_timeout`. Those are the benign and the
             // worrying case, and without a duration they log identically.
+            //
+            // `open_ms`, not `held_ms`: this spans both of `begin_with`'s steps —
+            // waiting for a pooled connection and then running the statement — and
+            // ADR 0087 bounds those separately, because an opener still queued in
+            // `acquire()` holds no connection at all. A large value means the open
+            // was slow, not that a pool slot was occupied that long.
             let started = std::time::Instant::now();
             let opened = pool.begin_with(statement).await;
-            let held_ms = started.elapsed().as_millis();
+            let open_ms = started.elapsed().as_millis();
             // `send` returns the value back when the receiver is gone, which is
             // exactly the orphan case: the caller was cancelled while this open was
             // in flight. Dropping `unsent` here is what performs the rollback.
@@ -76,12 +82,12 @@ async fn begin_detached(
                 match &unsent {
                     Ok(_) => tracing::warn!(
                         context,
-                        held_ms,
+                        open_ms,
                         "transaction open completed after its caller was cancelled; rolling back"
                     ),
                     Err(error) => tracing::warn!(
                         context,
-                        held_ms,
+                        open_ms,
                         %error,
                         "transaction open failed for a caller that was already cancelled"
                     ),

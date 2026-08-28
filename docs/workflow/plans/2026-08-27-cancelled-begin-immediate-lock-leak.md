@@ -211,9 +211,11 @@ spec's Testing section:
   with T2's result; if it is materially above 15s, cut the repeats.
 - Fixed arm: sweep *N* in 1..=8, **5 repeats**, no blocked observation in any.
 - Control arm: same sweep through a bare `pool.begin_with("BEGIN IMMEDIATE")`
-  written in the test, **5 repeats**, at least one blocked observation across
+  written in the test, **3 repeats**, at least one blocked observation across
   them. Gated on `available_parallelism() >= 4` as a **silent early return**; the
-  fixed arm is **not** gated.
+  fixed arm is **not** gated. It was written as 5 here and cut to 3 by the
+  measured-result clause above — see *T2 measured result* below for the wall clock
+  that forced it and the miss rate it costs.
 
 Verify (this is the red): `cargo test -p voom-store --test
 cancelled_begin_releases_write_lock --all-features` — the fixed arm fails, the
@@ -607,10 +609,20 @@ The serialized figure is the one that governs, because the `coverage` job runs
 15s threshold *before* instrumentation — in the job whose duration is this issue's
 subject. So the budget clause was exercised rather than waived: `CONTROL_REPEATS`
 is 3 while the fixed arm keeps 5, which brings the serialized figure to **14.9s**
-(three runs: 15.53s, 14.99s, 15.03s wall including build check). The control
+(three runs: 15.53s, 14.99s, 15.03s wall including build check; re-measured later
+at 15.28s binary time). The control
 dominates because at a leaking *N* its observer necessarily burns its whole
 ceiling; the fixed arm's *N* values return promptly. At three repeats the
 per-sweep miss rate is 0.275^3 = 0.021.
+
+The figure sits *at* the 15s threshold rather than under it, and the honest
+reading is that the threshold was met by rounding. If it is revisited, the
+repeats are the wrong place to look a second time: post-fix the fixed arm does
+real work only at *N* = 1, so 35 of its 40 iterations each pay a fresh database,
+pool, warm-up and settle to assert something that cannot fail. Narrowing its
+sweep would buy back more than the control's repeats did and would let the
+control return to 5 and its 0.0016 miss rate. That is a change to the test's
+shape, so it is recorded here rather than taken.
 
 **The orphan counts cover the tests a subscriber was installed for.** An earlier
 version of `lifecycle.rs` called `init_tracing()` from one test, and libtest runs
@@ -622,6 +634,37 @@ narrower: an instrument not connected where the count is read. The call is now i
 500-run counts below were gathered before that change and therefore cover
 `live_agent_fences_prior_incarnation_and_retires_orderly` only; they are a lower
 bound over the binary, not a count of the whole run.
+
+**The sweep result, recorded here because `.tmp/` is gitignored and this plan
+required it reported.** Both arms ran #592's recipe under `run-constrained.sh`
+(`--load 1 --write-bps 40M`, `--test-threads=1`, `cargo llvm-cov --no-report`) on
+the design host, 48 cores.
+
+| arm | tree | executed | reproduced | orphan `warn`s |
+|---|---|---|---|---|
+| pre-fix | openers unfixed | 90 | **yes, at run 90** | 0 (`begin_detached` did not exist) |
+| post-fix | `904982e0` | **500** | no | 38 total, per-run max 1 |
+
+**The reproduction index is 90 of 90, and it changes the arithmetic.** The
+stopping rule was "first reproduction or 90 runs, whichever comes first", so the
+arm reproduced on its last permitted run. The maximum-likelihood host rate is
+therefore about **1/90**, roughly three times rarer than the 1-in-20-to-30 the
+issue records and below the `p >= 1/30` that this plan's `(29/30)^90 = 0.047`
+assumes. **That figure does not apply and must not be quoted.**
+
+What replaces it is a stronger result reached by a different route: the post-fix
+arm ran 500 runs rather than the 90 required, so at `p = 1/90` the conditional
+false-negative probability is `(89/90)^500` = **0.004**. Criteria 2, 4 and 5 are
+discharged against that figure and no other. Ninety post-fix runs at the measured
+rate would have left 0.37 — which is why the extra runs were bought.
+
+Criterion 4 specifically: `HANG_GUARD` is what bounds
+`wait_for_graceful_shutdown`, so the pre-fix arm's single reproduction *is* a
+`HANG_GUARD` expiry — that is the defect, not a separate observation. Post-fix,
+none of the 500 runs failed at all (`grep -l 'test result: FAILED'` matches 0 of
+500; pre-fix it matches exactly `run-90.log`). The guard not firing is the
+default observation, so it carries only the confidence the executed count above
+supports.
 
 **Re-derived after the predicate was fixed, from the retained logs rather than a
 re-run.** The post-fix sweep at `904982e0` had already executed 500 runs under the
