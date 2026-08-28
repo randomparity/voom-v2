@@ -18,10 +18,9 @@ signal → shutdown_tx.send(kind)
                                           → deactivate_or_second_signal()  ← control plane, unbounded
 ```
 
-"Unbounded" here means bounded only by the client's retry policy, roughly 154 s
-per logical call (`production_request_budget`, `crates/voom-node-agent/src/client.rs:450`),
-and the tail makes one settlement call per held lease before it makes the
-deactivation call.
+"Unbounded" here means bounded only by the client's retry policy, 153.75 s
+per logical call (`production_request_budget`, `crates/voom-node-agent/src/client.rs:450`,
+asserted at `crates/voom-node-agent/tests/budget_ladder.rs:97-99`).
 
 The only escape is a *second* termination signal. An init system does not send
 one: it sends `SIGTERM`, waits its stop timeout, then sends `SIGKILL` — which
@@ -86,26 +85,43 @@ rather than spend an attempt.
 Each budget goes where its wait is, and the placement is the load-bearing part of
 the design.
 
-**Settlement — `wait_or_force` (`runtime.rs:1744`), not `wait_for_coordinators`.**
-`wait_or_force` is the function `settle_leases_for_shutdown` blocks in, so a
-budget there times the control-plane wait and nothing else. A budget in
-`wait_for_coordinators` would not: it joins whole coordinator tasks, and a
-coordinator returns only after `settle_leases_for_shutdown` *and*
-`ChildSupervisor::shutdown_all` (`:742-747`). With `shutdown_grace_seconds = 30`,
-a worker that uses its grace, and a healthy control plane, such a budget fires on
-the reap, sets `forced`, and loses the `Retired` write — #452's exposure
-re-created. `wait_for_coordinators` therefore gains no arm at all.
-
-`wait_or_force` gains one, guarded so it fires once:
+**Settlement — one `sleep_until` arm in `wait_for_coordinators`, mirroring the
+signal arm beside it.** That arm already reads
 
 ```rust
-() = tokio::time::sleep_until(deadline), if forced.is_none() => { … }
+signal = signals.recv(), if signals_open && !forced => {
+    …
+    if signal_phase.signal_forces() {
+        forced = true;
+        let _ = shutdown.send(ShutdownKind::Forced);
+    }
+}
 ```
 
-Each coordinator computes `Instant::now() + SHUTDOWN_CALL_DEADLINE` when it
-observes the shutdown event. They observe it within microseconds of each other,
-so the budgets are effectively common without threading an instant through
-`spawn_coordinators`.
+at `runtime.rs:1838-1846`, and the new arm does the same on its timer, guarded so
+it fires once:
+
+```rust
+() = tokio::time::sleep_until(deadline), if forced.is_none() => {
+    forced = Some(ShutdownForce::Deadline);
+    let _ = shutdown.send(ShutdownKind::Forced);
+}
+```
+
+Sending on the watch rather than leaving the `while !coordinators.is_empty()`
+loop is what keeps the reap whole. `wait_or_force` (`:1798`) observes `Forced`
+and abandons the control-plane wait; `ChildSupervisor::shutdown_all` does not
+observe it and runs to completion at the operator's full `shutdown_grace_seconds`.
+
+**Not in `wait_or_force` itself**, even though that is where the settlement wait
+literally blocks. It has three call sites — `runtime.rs:1705` and `:1718` inside
+`settle_leases_after_child_crash`, and `:1798` inside
+`settle_leases_for_shutdown`. Only the last is the shutdown tail; the other two
+are reached from `restart_after_child_exit` (`:771-796`) on an ordinary worker
+crash with no shutdown in progress. An arm in `wait_or_force` arms all three, so
+a crash whose lease settlement ran past 10 s would fold a `Forced` settlement
+into `progress.forced` and terminate a healthy, running agent with a
+shutdown-deadline error.
 
 **Deactivation — `deactivate_or_second_signal`.** One arm:
 
@@ -118,6 +134,34 @@ begins. The two startup-failure call sites capture theirs the same way; they run
 before any shutdown tail exists.
 
 `tokio::time::Instant` throughout, so a paused-clock test advances them.
+
+### What a deadline force does at `runtime.rs:315`
+
+`finish_shutdown_lifecycle` returns before deactivating on any force today:
+
+```rust
+if progress.forced {
+    return Err(forced_shutdown_error());
+}
+```
+
+The smallest mechanical edit — `if progress.forced.is_some()` — is wrong, and
+this is the defect that moved the budget's placement. The deadline elapses on
+wall clock regardless of what the coordinators are doing, and a coordinator does
+not return until both `settle_leases_for_shutdown` and `shutdown_all` have
+finished (`:742-747`). So with `shutdown_grace_seconds = 30`, a worker that uses
+its grace, and a fully healthy control plane, the flag is set by the reap's
+duration alone — and skipping the write there re-creates #452's exposure.
+
+The site branches instead:
+
+- `Some(ShutdownForce::Signal)` — return `forced_shutdown_error()`, exactly as
+  today. The operator said stop; charter criterion R4 holds this unchanged.
+- `Some(ShutdownForce::Deadline)` — fall through to the deactivation, which has
+  its own budget, then return `shutdown_deadline_error()` whether or not the
+  write landed. A timer expiring is not an instruction to skip the write, and
+  attempting it costs a bounded 10 s.
+- `None` — unchanged.
 
 ### The reap's own bound
 
@@ -148,21 +192,29 @@ an operator looking for a signal nobody sent, so each wait reports its own cause
 `deactivate_or_second_signal` returns its error directly, so its arm returns a new
 `shutdown_deadline_error()` naming the operation and the bound.
 
-The settlement cause travels further. `wait_or_force` can already distinguish the
-two: it breaks out on the `ShutdownKind::Forced` watch for a signal force, and on
-its own timer for a deadline. `LeaseSettlement::Forced` carries that as a
-`ShutdownForce`:
+The settlement cause is decided where the arm fires, so nothing travels.
+`ShutdownProgress.forced` changes from `bool` to `Option<ShutdownForce>`:
 
 ```rust
 enum ShutdownForce { Signal, Deadline }
 ```
 
-through `CoordinatorExit::Shutdown` into `ShutdownProgress.forced`, which changes
-from `bool` to `Option<ShutdownForce>`. `finish_shutdown_lifecycle` maps it at
-`runtime.rs:315`: `Some(Signal)` to today's `forced_shutdown_error()`,
-`Some(Deadline)` to `shutdown_deadline_error()`. Leaving that site as
-`if progress.forced.is_some()` would report a signal on the deadline path, which
-is the whole reason the field is widened.
+`wait_for_coordinators` writes it directly — `Signal` from the signal arm,
+`Deadline` from the new one. `LeaseSettlement` and `CoordinatorExit` are
+unchanged.
+
+With up to 64 coordinators (`config.rs:165`) both arms can fire, and the field is
+single-valued, so precedence is stated rather than left to `join_next()` order:
+**a signal force outranks a deadline force.** It is the operator's explicit
+instruction, and it is the arm whose behaviour R4 holds unchanged. So the signal
+arm overwrites a recorded `Deadline`; the deadline arm's `if forced.is_none()`
+guard already prevents the reverse.
+
+The join arm (`:1822-1824`), which sets the flag when a coordinator reports
+`LeaseSettlement::Forced`, becomes `forced.get_or_insert(ShutdownForce::Signal)`.
+Both local arms set a cause *before* sending `Forced`, so an ordinary force is
+always already attributed; that path is reachable only through `wait_or_force`'s
+watch-closed case (`:1755-1760`), where `Signal` preserves today's message.
 
 Both errors are `VoomError::ExternalSystemUnavailable`, so the exit code is
 unchanged. No `tracing` call is added; the returned error reaches the operator
@@ -224,10 +276,12 @@ satisfied: the file references neither `SqlitePool` nor the exact identifier
 | Test | File | Requirement | Proves |
 |---|---|---|---|
 | `shutdown_deadline_abandons_a_blocked_deactivation` | `runtime_test.rs` | R3, R5 | A gated `deactivate` that never returns yields `shutdown_deadline_error()`, wrapped in a `tokio::time::timeout` well past the budget so the pre-change build fails on `Elapsed` rather than hanging. |
-| `shutdown_deadline_forces_blocked_lease_settlement` | `runtime_test.rs` | R1, R5 | `wait_or_force` against leases that never settle returns `Some(ShutdownKind::Forced)` at the budget and `settle_leases_for_shutdown` reports `LeaseSettlement::Forced(ShutdownForce::Deadline)`. |
+| `shutdown_deadline_forces_blocked_lease_settlement` | `runtime_test.rs` | R1, R5 | `wait_for_coordinators`, against a coordinator that never settles, publishes `ShutdownKind::Forced` at the budget and returns `forced: Some(ShutdownForce::Deadline)`. |
+| `a_second_signal_outranks_a_recorded_deadline_force` | `runtime_test.rs` | R3, R4 | A deadline force already recorded is overwritten by a subsequent forcing signal, so the exit names the signal. Precedence is asserted, not left to join order. |
+| `the_crash_settlement_path_is_not_armed` | `runtime_test.rs` | R1 | `settle_leases_after_child_crash` with a settlement far longer than `SHUTDOWN_CALL_DEADLINE` completes normally and does not force. This is the regression for the steady-state contamination that kept the budget out of `wait_or_force`. |
 | `a_settlement_deadline_expiry_reports_the_deadline_not_a_signal` | `runtime_test.rs` | R3 | `finish_shutdown_lifecycle` given `forced: Some(ShutdownForce::Deadline)` returns `shutdown_deadline_error()`, not `forced_shutdown_error()`. The mapping at `runtime.rs:315` is the reason the field is widened, so it gets its own test. |
 | `a_second_signal_still_outranks_the_shutdown_deadline` | `runtime_test.rs` | R4 | With a budget far in the future, a second signal still produces `forced_shutdown_error()` — the deadline did not replace the escape. |
-| `a_full_shutdown_grace_does_not_trip_the_settlement_deadline` | `runtime_test.rs` | R2 | A coordinator whose settlement is instant but whose reap outlasts `SHUTDOWN_CALL_DEADLINE` still reaches deactivation and retires the incarnation. This is the regression for the defect that moved the budget out of `wait_for_coordinators`. |
+| `a_full_shutdown_grace_still_retires_the_incarnation` | `runtime_test.rs` | R2 | A coordinator whose settlement is instant but whose reap outlasts `SHUTDOWN_CALL_DEADLINE` sets `forced: Some(Deadline)` and *still* reaches deactivation and retires the incarnation. This is the regression for the defect at `runtime.rs:315`. |
 | `an_unkillable_child_is_abandoned_at_the_reap_bound` | `child_test.rs` | R1 | A child that survives its grace and cannot be reaped inside `REAP_AFTER_KILL` makes `shutdown` return a `ChildError` naming it rather than pending. An unkillable process cannot be constructed portably, so the test drives the bound with a near-zero `REAP_AFTER_KILL`, proving the timeout is wired rather than proving the kernel case. |
 | the shutdown rung | `tests/budget_ladder.rs` | R1 | `SHUTDOWN_CALL_DEADLINE` is below `production_request_budget()` — the named inversion — and `2 × SHUTDOWN_CALL_DEADLINE + 60 + REAP_AFTER_KILL` is under 90 s. |
 
