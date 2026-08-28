@@ -118,7 +118,10 @@ inside the open is not, and depends on the pinned `sqlx`, `flume`, and `tokio`.
 The test sweeps *N* from 1 to 8 twice — once through `begin_read_then_write`,
 which must leave an independent connection able to take the write lock at every
 *N*, and once through a bare `pool.begin_with("BEGIN IMMEDIATE")` written in the
-test itself, which must leak at some *N*.
+test itself, which must leak at some *N*. Where it lands also depends on the
+*fixture*: measured on one host, a warm pool leaks at *N* = 3 in 40 of 40 sweeps
+while a cold one leaks at 5 or 6 and not at all in 11 of 40. So the fixture is
+pinned and the control asserts across 5 repeats rather than within one sweep.
 
 Only the control is host-dependent, and only the control is gated on host
 parallelism. That split is deliberate — a skip notice from a passing test is
@@ -131,9 +134,13 @@ poll count cancels an open *in flight* — the sweep proves the regression, not 
 cancellation. The orphan arm gets that deterministically from SQLite instead of
 from scheduling: a holder connection keeps the write lock, so the detached
 `BEGIN IMMEDIATE` cannot return, so a short timeout is guaranteed to drop the
-caller mid-open; releasing the holder then lets the open complete, find no
-receiver, and roll back. It is the only coverage the `sender.send` error branch
-will ever get, and that branch is the decision.
+caller mid-open. The arm then waits for the orphan `warn` — proving the open
+completed and found no receiver — and only then probes the lock, proving the
+resulting drop rolled back. The wait is not ceremony: with the holder's lock
+released, the observer beat the detached opener to the lock in 20 of 20 measured
+runs, so a probe-only assertion passes without the rollback having happened. It
+is the only coverage the `sender.send` error branch will ever get, and that
+branch is the decision.
 
 What the control buys is not that the fixed arm's range still brackets anything —
 the two arms count different clocks, and the fix is what decouples them, so the

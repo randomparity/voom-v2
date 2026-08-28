@@ -84,9 +84,25 @@ pool on the same file to write:
 | 3 | no | **blocked** |
 | 4 | yes | ok |
 
-Three polls lands in the window, and it is the only value that does: two is
-before the write lock is taken, four is after the `Transaction` is constructed.
-No load, no throttle, no elapsed-time assertion.
+Three polls lands in the window **in this fixture**: two is before the write lock
+is taken, four is after the `Transaction` is constructed. No load, no throttle,
+no elapsed-time assertion.
+
+**"Only 3" is a property of the fixture, not of the code, and an earlier draft of
+this design overclaimed it.** Measured on the same 48-core host, same compiled
+binary, varying only whether the pool's connection had already been returned to
+the idle queue before the cancellation:
+
+| fixture | N at which the write lock leaks (40 sweeps each) |
+|---|---|
+| warm — connection already idle in the pool | `{3: 40}` — N = 3, every sweep |
+| cold — `acquire()` must establish the connection | `{5: 18, 6: 15}`, and **no leaking N at all in 11 of 40** |
+
+Two consequences the "only value that does" reasoning did not predict: the window
+is not always one poll wide (4 of the 29 non-empty cold sweeps blocked at both 5
+and 6), and roughly a quarter of cold sweeps never enter it. This is why the test
+below pins its fixture explicitly and repeats its sweep, rather than resting an
+assertion on a poll index.
 
 The count is **not** a version constant, and the first draft of this design said
 it was. `conn.worker.begin` awaits a channel fed by a separate OS thread
@@ -231,6 +247,16 @@ openers do:
   the panic hook and not the call site, which sees a `DB_UNREACHABLE`-shaped
   error whose source reads "channel closed".
 
+There is a third case, and the two bullets above read as an exhaustive
+enumeration without it: if the **tokio runtime is torn down** while a detached
+opener is in flight, the spawned task is dropped mid-`pool.begin_with` — the
+original leak window again, now with no owner at all. The control plane's
+graceful-shutdown grace is 30s (`SHUTDOWN_GRACE_SECONDS`,
+`crates/voom-api/src/config.rs:14`), comfortably inside a 75s detached open under
+contention. Accepted without machinery: the process is exiting and the file lock
+dies with the handle. It has teeth in *tests* rather than in production, which is
+why the orphan arm waits for its `warn` instead of asserting and returning.
+
 The residual the detach adds is bounded and stated in ADR 0087, in two clauses
 because `Pool::begin_with` is two steps. At most `max_connections` detached
 openers *hold a pooled connection* at once, each releasing it within
@@ -289,6 +315,20 @@ integration test, the regression proof.
   connection** on the same database file to execute a write. Independent is what
   makes the assertion honest: a write issued back through the *same* pool can be
   handed the leaked connection and silently join its open transaction.
+- **The fixture is pinned, and it is load-bearing.** Every *N*, in every arm, gets
+  a **freshly created temporary database file, its own pool, and its own observer
+  connection**; no arm shares a pool or a file with another. Two contamination
+  paths make this a correctness requirement rather than hygiene. An abandoned lock
+  is held until the process exits, so within a shared file the control arm's first
+  leaking *N* poisons every later *N* — and the fixed arm too, if they share —
+  turning the regression proof red for a reason unrelated to the fix. And the
+  poisoned connection goes back to the idle pool, so a later `BEGIN IMMEDIATE`
+  handed that connection fails at once with `InvalidSavePointStatement`
+  (`worker.rs:210-222`) **without taking any lock**, making the observer report
+  "not blocked" for a reason that has nothing to do with the window. The pool is
+  built by `voom_store::connect` (`max_connections = 8`), and the sweep performs
+  its warm-up — one completed transaction through the pool — before the
+  cancellation, because the measured N table only reproduces in the warm shape.
 - **The observer sets `busy_timeout(0)`**, built from a raw
   `SqliteConnectOptions` in the test rather than through `voom_store::connect`
   — which sets `busy_timeout = LOCK_WAIT_BUDGET` (30s,
@@ -308,9 +348,10 @@ integration test, the regression proof.
   - *control arm*: the settle is validated by the arm having to go red. The
     unfixed open runs inline on the caller's task, so a settle too short to let
     the lock be taken would make the control go green and fail the test.
-  - *orphan arm*: no settle is needed at all. The holder owns the write lock
-    across the whole cancellation, so the observer cannot slip in front of the
-    detached opener by construction.
+  - *orphan arm*: no settle is needed, but not for the reason an earlier draft
+    gave — the observer *can* slip in front of the detached opener, and measured
+    20/20 does. The arm does not need a settle because it does not rely on
+    timing at all: it waits for the orphan `warn` before probing the lock.
   - *fixed arm*: the settle is **not** validated by the control, and an earlier
     draft claimed it was. The post-fix timeline is strictly longer and
     structurally different — task spawn, `pool.acquire()`, worker round trip —
@@ -323,15 +364,26 @@ integration test, the regression proof.
   queued statement on a worker thread, not a lock wait; it does not discriminate
   between the arms, because the control's failure is now `SQLITE_BUSY` on every
   attempt rather than the bound expiring.
-- **Two sweeps.** Through `begin_read_then_write`, the independent write must
-  succeed at every *N*. Through a bare `pool.begin_with("BEGIN IMMEDIATE")`
-  written in the test itself, it must fail at some *N* — that is the positive
-  control, and it is what keeps the first sweep honest. Without it the test is
-  green whether or not the sweep still straddles a vulnerable window, so a
+- **Two sweeps, each repeated.** Through `begin_read_then_write`, the independent
+  write must succeed at every *N*. Through a bare `pool.begin_with("BEGIN
+  IMMEDIATE")` written in the test itself, it must fail at some *N* — that is the
+  positive control, and it is what keeps the first sweep honest. Without it the
+  test is green whether or not the sweep still straddles a vulnerable window, so a
   dependency bump that moved the window outside 1..=8 would leave an assertion
-  that passes while proving nothing. Note what the control does *not* buy: the
-  two arms count different clocks, so a red control means "check whether upstream
-  closed the window", not "the fixed arm stopped covering".
+  that passes while proving nothing.
+- **The control asserts across repeats, not within one sweep.** A single sweep is
+  not a reliable observation: in the cold fixture measured above, 11 of 40 sweeps
+  contained no leaking *N* at all. Asserting "fails at some *N*" on one sweep
+  would therefore go red about a quarter of the time for a reason unrelated to
+  upstream — and would send a reader to exactly the wrong place, since this spec
+  reads a red control as "check whether upstream closed the window". So the
+  control runs the sweep **5 times and requires at least one blocked observation
+  across the repeats**: at the worst measured per-sweep miss rate that is
+  0.275^5 = 0.0016. The fixed arm runs the same 5 repeats and requires **no**
+  blocked observation in any of them.
+- Note what the control does *not* buy: the two arms count different clocks, so a
+  red control means "check whether upstream closed the window", not "the fixed arm
+  stopped covering".
 - **The poll sweep cannot cancel a post-fix open, and the fixed arm does not
   claim to.** Post-fix the caller's only await is `receiver.await`, and its only
   wakeup source is the `oneshot` send — which happens *after* `pool.begin_with`
@@ -361,17 +413,48 @@ integration test, the regression proof.
      and drop the caller mid-open. This is a physical guarantee from SQLite, not
      a race that happens to land.
   3. The holder rolls back, releasing the lock.
-  4. The detached open now completes, finds no receiver, warns, and drops the
-     `Transaction` — which queues the `ROLLBACK`.
-  5. An independent `busy_timeout(0)` connection must be able to take the write
-     lock within the 5s bound.
+  4. **Wait for the orphan `warn` to fire**, with a `tracing-subscriber` capture
+     layer installed by the test, bounded by the 5s ceiling. This is the step that
+     makes the arm mean anything, and it replaces a claim that was measured false
+     (below).
+  5. Only then: an independent `busy_timeout(0)` connection must be able to take
+     the write lock.
+
+  Steps 4 and 5 are what discriminate. The `warn` proves the detached open
+  *completed and found no receiver* — the `sender.send` error branch ran. The
+  lock probe after it proves the resulting drop *rolled back*. Neither alone is
+  enough, and asserting the lock probe alone is what the earlier draft did.
+
+  **Why step 4 is not optional — a measured refutation.** The earlier draft
+  claimed the holder's lock meant "the observer cannot slip in front of the
+  detached opener by construction". That is false. While the holder owns the lock
+  the detached opener is parked in SQLite's busy handler, which *sleeps* between
+  retries in an increasing delay sequence up to 100ms; a freshly opened observer
+  asking for the lock inside that sleep window simply gets it. Measured against
+  this design's own `begin_detached`, 20 runs: the observer took the lock on its
+  **first** attempt in 20/20, 0.36–0.67ms after the holder's rollback, with the
+  `sender.send` error branch still not executed at assertion time in 20/20 (it ran
+  within a further 500ms). So the arm as first written passed without the detached
+  open ever having taken or released the lock — it would have passed equally
+  against a `begin_detached` whose spawned task was aborted and rolled nothing
+  back. What the holder's lock *does* still guarantee is that the timeout in
+  step 2 fires; that half of the argument survives.
 
   This is the only coverage the `sender.send` error branch will ever get, and
-  that branch is the whole point of the design. Note it is **not** red on the
-  unfixed code: cancelling inside step 1 of `SqliteTransactionManager::begin`
-  lands in the window the worker already self-heals (`worker.rs:234-252`), so
-  pre-fix this arm passes. It is a coverage arm, not a regression arm, and saying
-  so is the difference between the two being useful.
+  that branch is the whole point of the design. It also needs the wait for a
+  second reason: a `#[tokio::test]` runtime torn down immediately after its last
+  assertion can kill the detached task before it rolls back, so a test that does
+  not wait for the branch does not reliably execute it either.
+
+  Note it is **not** red on the unfixed code: cancelling inside step 1 of
+  `SqliteTransactionManager::begin` lands in the window the worker already
+  self-heals (`worker.rs:234-252`), so pre-fix this arm passes. It is a coverage
+  arm, not a regression arm, and saying so is the difference between the two being
+  useful.
+
+  Cost: `tracing-subscriber` joins `crates/voom-store/Cargo.toml` as a
+  **dev-dependency**, at the version the workspace already pins for `voom-api`,
+  `voom-control-plane`, and `voom-cli`. No production dependency changes.
 - **The parallelism precondition gates the control arm only.** The **fixed and
   orphan arms run on every host.** The fixed arm's post-fix outcome does not
   depend on where the sqlx window falls — the open completes on the detached task
@@ -411,11 +494,18 @@ integration test, the regression proof.
   everywhere, so what is lost in that case is the meta-check, not the coverage.
   The first CI run on this branch should have its observed
   `available_parallelism()` recorded here in place of the documented figures.
-- **What the fixed arm alone does not establish.** It proves the lock is not held
-  indefinitely; on its own it does not distinguish "opened and rolled back" from
-  "never opened". The orphan arm settles that on every host — the holder's lock
-  guarantees the open was in flight — and the control arm establishes that the
-  *unfixed* window is still real at these *N*.
+- **Which arm establishes what.** The fixed arm proves the lock is not held
+  indefinitely after a cancellation, and is red against the unfixed opener — that
+  is completion criterion 3, and nothing else discharges it. It does *not*
+  distinguish "opened and rolled back" from "never opened", and the poll sweep
+  cannot be made to. **The orphan arm is the sole home of "a cancelled open is
+  rolled back"**, which is the entire behavioural change this design introduces
+  and the premise the Error-handling residual is derived from; it establishes it
+  through the `warn`-then-probe pair in steps 4–5, on every host. The control arm
+  establishes only that the *unfixed* window is still real. Stated this way
+  because an earlier draft assigned the rollback discrimination to an arm whose
+  assertion did not observe it, leaving the design's central behaviour unproven by
+  any arm.
 - Test files are exempt from `check-transaction-openers.sh`
   (`! -name '*_test.rs' ! -path '*/tests/*'`), so the control's raw
   `pool.begin_with` is allowed where it lives.
