@@ -23,10 +23,13 @@ Add one multi-thread Tokio test to
 3. Spawn twelve heartbeat calls against the held lease. A thirteen-party barrier releases the
    tasks together so the test does not mistake spawn order for contention.
 4. With a bounded `tokio::time::timeout`, yield until `pool.size() == 8` and
-   `pool.num_idle() == 0`. This is the anti-vacuity check: one connection holds the writer, seven
-   heartbeat transactions wait for its lock, and the remaining callers cannot acquire a pooled
-   connection. Assert no task has completed while that state and the writer lock coexist.
-5. Commit the writer, join every task, and require every heartbeat to return the same held lease
+   `pool.num_idle() == 0`. Capture, rather than immediately assert, the observation result and the
+   number of finished tasks. The anti-vacuity contract has three parts: all eight connections are
+   checked out; none of the twelve heartbeats completed while the writer was held; and twelve is
+   greater than the seven connections available beside the writer. The last two facts prove that
+   at least five callers were waiting for pool admission rather than merely waiting on SQLite.
+5. Commit the writer unconditionally and join every task before asserting the captured saturation
+   observation or any task result. Then require every heartbeat to return the same held lease
    identity without a database or conflict error.
 6. Read the lease and assert it remains held, its deadline is at least the original deadline, its
    last-heartbeat timestamp equals the fixed supplied value, and its epoch increased exactly
@@ -43,15 +46,17 @@ the state is observed.
 A task panic, join error, `DB_UNREACHABLE`, lease conflict, early task completion while the writer
 is held, failure to observe all eight connections checked out, a shortened deadline, an expired or
 released lease, or an incorrect epoch fails the test. All spawned tasks are joined after writer
-release so a failed assertion does not strand lock waiters.
+release before any captured observation or task-result assertion can fire, so a red test does not
+strand lock waiters.
 
 ## Verification
 
 - Run the focused test and require it to pass in under ten seconds.
 - Run it through `just test-repeat voom-store pool_saturation 25` and require all repetitions to
   pass.
-- Verify the test bites by temporarily reducing the caller count to seven, observe the saturation
-  assertion fail, restore twelve, and rerun green.
+- Verify the test bites by temporarily reducing the caller count to seven, observe the explicit
+  caller-count-versus-available-slots assertion fail after cleanup, restore twelve, and rerun
+  green.
 - Run `just fmt-check`, `just lint`, `just check-test-layout`, `just check-paused-time-db`,
   `just check-transaction-openers`, and `just test` before shipping.
 - No target architecture is declared; the host is x86_64 and the test is architecture-neutral.

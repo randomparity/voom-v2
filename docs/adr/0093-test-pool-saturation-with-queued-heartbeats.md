@@ -20,8 +20,10 @@ transaction, and has an observable durable epoch and deadline.
 
 Test saturation in the lease repository with twelve concurrent heartbeats against one held lease.
 Hold a `BEGIN IMMEDIATE` transaction open, release all heartbeat tasks together, and wait until the
-pool reports all eight connections checked out. Assert that no heartbeat completes while the lock
-is held, then commit the writer and require every heartbeat to succeed.
+pool reports all eight connections checked out. Require the caller count to exceed the seven
+connections available beside the held writer; together with no completed heartbeat, that proves at
+least one caller is waiting for pool admission. Capture any failed observation without asserting,
+commit the writer, join every task, and only then report the observation or task failure.
 
 Use one fixed domain timestamp before the lease deadline for every heartbeat. After the tasks
 finish, assert the lease remains held, its deadline was not shortened, its last-heartbeat time is
@@ -34,6 +36,7 @@ pool saturation; do not shorten production lock or pool-acquire budgets.
 ## Consequences
 
 - The test exercises both occupied SQLite connections and callers queued at the pool boundary.
+- Failure diagnostics do not strand a held writer or detached heartbeat tasks.
 - Lease liveness is decided by the supplied domain timestamp, not by time spent waiting in the
   pool, so transient queueing cannot manufacture expiry.
 - The test proves the success arm of issue #580's succeed-or-typed-error contract by releasing the
