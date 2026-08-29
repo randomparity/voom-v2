@@ -27,8 +27,9 @@ any database error, including surfaced `SQLITE_BUSY`, fails the test. After ever
 assert the operation's durable mutation and events occurred exactly once. Also assert all
 successful outcomes identify the same lease.
 
-Use more than two contenders so the tests cover repeated losers without exceeding the pool's
-eight-connection bound. The tests remain in the default suite and use real time; they do not pause
+Run each path once with two contenders and again with six contenders. Two is the minimal race;
+six covers repeated losers without exceeding the pool's eight-connection bound. Each cardinality
+uses a fresh fixture. The tests remain in the default suite and use real time; they do not pause
 Tokio time around SQLite.
 
 ## Consequences

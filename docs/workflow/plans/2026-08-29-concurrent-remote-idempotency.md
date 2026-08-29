@@ -20,7 +20,8 @@ Tech stack: Rust, Tokio multi-thread tests, sqlx SQLite, existing `voom-test-sup
 - Modify only
   `crates/voom-control-plane/src/cases/execution/remote_execution/mod_test.rs`, plus the existing
   design records. Production edits are transient only for the bite check and must be restored.
-- Use six contenders, a seven-party `tokio::sync::Barrier`,
+- Run independently initialized races with two and six contenders, each using a
+  `tokio::sync::Barrier` sized to the contenders plus the test,
   `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`, the existing real on-disk SQLite
   fixture, and real Tokio time.
 - Accept only a successful stored outcome or `VoomError::Conflict` whose message contains
@@ -46,16 +47,18 @@ Interfaces:
 
 Steps:
 
-1. Add the multi-thread Tokio test. Create one ready ticket, capture its pre-race `attempt`, build
-   `Arc<Barrier>` with `CONTENDERS + 1`, and spawn six tasks. Each task clones the `ControlPlane`,
-   input, and barrier, waits, then calls `remote_acquire`.
-2. Release the barrier from the test, await all handles, and classify every result without
-   asserting until all handles have joined. Collect leased dispatches. Count only the exact
-   in-progress conflict as acceptable; panic after collection for any other error or outcome.
-3. Assert at least one leased result, every leased result is identical, and every dispatch names
-   the prepared ticket. Query durable state and assert one lease row, one scheduler-decision row,
-   one ticket attempt increment, and one `LeaseAcquired` event. Assert the sole decision id equals
-   every successful dispatch's `scheduler_decision_id`.
+1. Add the multi-thread Tokio test and iterate over `[2_usize, 6]`. For each count create a fresh
+   fixture and ready ticket, capture its pre-race `attempt`, build `Arc<Barrier>` with
+   `contenders + 1`, and spawn that many tasks. Each task clones the `ControlPlane`, input, and
+   barrier, waits, then calls `remote_acquire`.
+2. For each count release the barrier from the test, await all handles, and classify every result
+   without asserting until all handles have joined. Collect leased dispatches. Count only the
+   exact in-progress conflict as acceptable; panic after collection for any other error or
+   outcome.
+3. For each count assert at least one leased result, every leased result is identical, and every
+   dispatch names the prepared ticket. Query durable state and assert one lease row, one
+   scheduler-decision row, one ticket attempt increment, and one `LeaseAcquired` event. Assert the
+   sole decision id equals every successful dispatch's `scheduler_decision_id`.
 4. Run
    `cargo test -p voom-control-plane concurrent_same_key_remote_acquire_mutates_once`; expect one
    passed test.
@@ -64,7 +67,7 @@ Steps:
 
 Acceptance:
 
-- Six calls begin from the same barrier release.
+- Both two and six calls begin from their own barrier release against fresh fixtures.
 - No database error is accepted or converted to a conflict.
 - Durable lease, ticket-attempt, event, and scheduler-decision observations each prove one
   mutation while successful callers share the same stored outcome.
@@ -86,14 +89,16 @@ Interfaces:
 
 Steps:
 
-1. Add the multi-thread test. Start from `leased_fixture`, capture its lease id, clone one
-   same-key/same-hash completion input into six barrier-released tasks, and call
-   `remote_complete` from each task.
-2. Join every task before asserting. Collect successful outcomes and exact in-progress conflicts;
-   record every other error as an unexpected result that fails the test after collection.
-3. Assert at least one success, all successes equal the first outcome, and every success names the
-   original lease. Assert the lease has one release timestamp, its ticket is `Succeeded`, its
-   artifact plan is `Consumed`, and `LeaseReleased` plus `TicketSucceeded` event counts are one.
+1. Add the multi-thread test and iterate over `[2_usize, 6]`. For each count start from a fresh
+   `leased_fixture`, capture its lease id, clone one same-key/same-hash completion input into that
+   many barrier-released tasks, and call `remote_complete` from each task.
+2. For each count join every task before asserting. Collect successful outcomes and exact
+   in-progress conflicts; record every other error as an unexpected result that fails the test
+   after collection.
+3. For each count assert at least one success, all successes equal the first outcome, and every
+   success names the original lease. Assert the lease has one release timestamp, its ticket is
+   `Succeeded`, its artifact plan is `Consumed`, and `LeaseReleased` plus `TicketSucceeded` event
+   counts are one.
 4. Run
    `cargo test -p voom-control-plane concurrent_same_key_remote_complete_mutates_once`; expect one
    passed test.
@@ -101,7 +106,7 @@ Steps:
 
 Acceptance:
 
-- More than two completion callers start together against one held lease and key.
+- Both two and six completion callers start together against fresh held leases and keys.
 - Every loser is a stored success replay or the clean in-progress conflict.
 - Durable completion state and events prove the completion mutation happened once.
 

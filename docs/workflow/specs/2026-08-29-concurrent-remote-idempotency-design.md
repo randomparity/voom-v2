@@ -16,22 +16,26 @@ Add two tests to
 `crates/voom-control-plane/src/cases/execution/remote_execution/mod_test.rs`, beside the existing
 sequential replay tests:
 
-1. Acquire: create one ready ticket, clone one same-key/same-hash input into six tasks, and release
-   them with a seven-party barrier (six tasks plus the test). Classify every result after all tasks
-   join. A successful result must be `Leased`, and every success must name the same lease. A failure
+1. Acquire: for contender counts two and six, create a fresh fixture and ready ticket, clone one
+   same-key/same-hash input into that many tasks, and release them with a barrier containing the
+   tasks plus the test. Classify every result after all tasks join. A successful result must be
+   `Leased`, and every success must name the same lease. A failure
    is acceptable only when its public code is `CONFLICT` and its message identifies an idempotency
    key already in progress. Then assert one lease row, one `LeaseAcquired` event, exactly one
    scheduler-decision row, and one ticket attempt. Every successful/replayed outcome must reference
    that same durable scheduler decision; an in-progress conflict creates no decision.
-2. Complete: start from one held lease, race six clones of one same-key/same-hash completion input
-   through the same barrier pattern, and classify all results after join. Successful outcomes must
+2. Complete: for contender counts two and six, start from a fresh held lease and race that many
+   clones of one same-key/same-hash completion input through the same barrier pattern. Classify all
+   results after join. Successful outcomes must
    be identical and name the original lease; only the clean in-progress conflict is acceptable.
    Then assert the lease was released once, the ticket succeeded, the artifact access plan is
    consumed, and the `LeaseReleased` and `TicketSucceeded` events each occur once.
 
 Both tests use `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`, the existing
-`TempDatabase`-backed fixture, and real Tokio time. A local helper may classify the one permitted
-conflict only if it is used by both tests; otherwise keep the assertions inline.
+`TempDatabase`-backed fixture, and real Tokio time. Each test may use a test-local async helper or
+block to repeat its complete race and assertion set for the two cardinalities; no production or
+cross-module helper is introduced. A local helper may classify the one permitted conflict only if
+it is used by both tests; otherwise keep the assertions inline.
 
 ## Failure contract
 
