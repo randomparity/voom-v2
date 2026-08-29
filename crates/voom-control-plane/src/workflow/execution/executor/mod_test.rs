@@ -809,7 +809,13 @@ async fn cancelling_job_stops_external_capacity_wait_without_failure_events() {
         .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
         .await;
     let job_id = fixture.open_workflow_job().await;
-    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let sync = CapacityDeferredTestSync {
+        observed: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    };
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.capacity_deferred_sync = Some(sync.clone());
+    let executor = fixture.executor_with_options(options);
     let plan = fixture.plan.clone();
     let run = tokio::spawn(async move {
         executor
@@ -822,11 +828,16 @@ async fn cancelling_job_stops_external_capacity_wait_without_failure_events() {
             .await
     });
     let ticket = fixture.wait_for_workflow_ticket().await;
+    tokio::time::timeout(Duration::from_secs(5), sync.observed.notified())
+        .await
+        .unwrap();
+    assert!(!run.is_finished());
     fixture
         .cp
         .cancel_job(job_id, "operator cancelled wait".to_owned(), T0)
         .await
         .unwrap();
+    sync.resume.notify_one();
 
     let error = tokio::time::timeout(Duration::from_secs(1), run)
         .await
