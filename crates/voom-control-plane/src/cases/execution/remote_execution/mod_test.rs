@@ -611,12 +611,12 @@ async fn concurrent_same_key_remote_acquire_mutates_once() {
         let mut in_progress_conflicts = 0_usize;
         let mut unexpected = Vec::new();
         for handle in handles {
-            match handle.await.unwrap() {
-                Ok(RemoteAcquireOutcome::Leased(dispatch)) => leased.push(dispatch),
-                Ok(outcome) => {
+            match handle.await {
+                Ok(Ok(RemoteAcquireOutcome::Leased(dispatch))) => leased.push(dispatch),
+                Ok(Ok(outcome)) => {
                     unexpected.push(format!("unexpected successful outcome: {outcome:?}"));
                 }
-                Err(error)
+                Ok(Err(error))
                     if error.error_code() == ErrorCode::Conflict
                         && error
                             .to_string()
@@ -624,9 +624,22 @@ async fn concurrent_same_key_remote_acquire_mutates_once() {
                 {
                     in_progress_conflicts += 1;
                 }
-                Err(error) => unexpected.push(format!("unexpected error: {error:?}")),
+                Ok(Err(error)) => unexpected.push(format!("unexpected error: {error:?}")),
+                Err(error) => unexpected.push(format!("contender task failed: {error:?}")),
             }
         }
+
+        let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+            .fetch_one(fixture.cp.pool_for_test())
+            .await
+            .unwrap();
+        let lease_acquired_count = count(&fixture.cp, EventKind::LeaseAcquired).await;
+        let decisions = fixture
+            .cp
+            .scheduler_decisions(SchedulerDecisionFilter::default())
+            .await
+            .unwrap();
+        let after = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
 
         assert!(unexpected.is_empty(), "{unexpected:?}");
         assert!(
@@ -640,27 +653,14 @@ async fn concurrent_same_key_remote_acquire_mutates_once() {
                 .iter()
                 .all(|dispatch| dispatch.ticket_id == ticket_id)
         );
-
-        let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
-            .fetch_one(fixture.cp.pool_for_test())
-            .await
-            .unwrap();
         assert_eq!(lease_count, 1);
-        assert_eq!(count(&fixture.cp, EventKind::LeaseAcquired).await, 1);
-
-        let decisions = fixture
-            .cp
-            .scheduler_decisions(SchedulerDecisionFilter::default())
-            .await
-            .unwrap();
+        assert_eq!(lease_acquired_count, 1);
         assert_eq!(decisions.len(), 1);
         assert!(
             leased
                 .iter()
                 .all(|dispatch| dispatch.scheduler_decision_id == decisions[0].id)
         );
-
-        let after = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
         assert_eq!(after.attempt, before.attempt + 1);
     }
 }
@@ -1636,9 +1636,9 @@ async fn concurrent_same_key_remote_complete_mutates_once() {
         let mut in_progress_conflicts = 0_usize;
         let mut unexpected = Vec::new();
         for handle in handles {
-            match handle.await.unwrap() {
-                Ok(outcome) => completed.push(outcome),
-                Err(error)
+            match handle.await {
+                Ok(Ok(outcome)) => completed.push(outcome),
+                Ok(Err(error))
                     if error.error_code() == ErrorCode::Conflict
                         && error
                             .to_string()
@@ -1646,9 +1646,34 @@ async fn concurrent_same_key_remote_complete_mutates_once() {
                 {
                     in_progress_conflicts += 1;
                 }
-                Err(error) => unexpected.push(format!("unexpected error: {error:?}")),
+                Ok(Err(error)) => unexpected.push(format!("unexpected error: {error:?}")),
+                Err(error) => unexpected.push(format!("contender task failed: {error:?}")),
             }
         }
+
+        let (lease_state, released_at, ticket_id): (String, Option<String>, i64) =
+            sqlx::query_as("SELECT state, released_at, ticket_id FROM leases WHERE id = ?")
+                .bind(i64::try_from(lease_id.0).unwrap())
+                .fetch_one(fixture.cp.pool_for_test())
+                .await
+                .unwrap();
+        let ticket = fixture
+            .cp
+            .tickets()
+            .get(TicketId(u64::try_from(ticket_id).unwrap()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let plan = fixture
+            .cp
+            .artifact_access_plans()
+            .get_by_lease(lease_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let lease_released_count = count(&fixture.cp, EventKind::LeaseReleased).await;
+        let ticket_succeeded_count = count(&fixture.cp, EventKind::TicketSucceeded).await;
 
         assert!(unexpected.is_empty(), "{unexpected:?}");
         assert!(
@@ -1658,37 +1683,12 @@ async fn concurrent_same_key_remote_complete_mutates_once() {
         assert_eq!(completed.len() + in_progress_conflicts, contenders);
         assert!(completed.iter().all(|outcome| outcome == &completed[0]));
         assert!(completed.iter().all(|outcome| outcome.lease_id == lease_id));
-
-        let (lease_state, released_at, ticket_id): (String, Option<String>, i64) =
-            sqlx::query_as("SELECT state, released_at, ticket_id FROM leases WHERE id = ?")
-                .bind(i64::try_from(lease_id.0).unwrap())
-                .fetch_one(fixture.cp.pool_for_test())
-                .await
-                .unwrap();
         assert_eq!(lease_state, "released");
         assert!(released_at.is_some());
-        assert_eq!(
-            fixture
-                .cp
-                .tickets()
-                .get(TicketId(u64::try_from(ticket_id).unwrap()))
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            TicketState::Succeeded
-        );
-
-        let plan = fixture
-            .cp
-            .artifact_access_plans()
-            .get_by_lease(lease_id)
-            .await
-            .unwrap()
-            .unwrap();
+        assert_eq!(ticket.state, TicketState::Succeeded);
         assert_eq!(plan.status, ArtifactAccessPlanStatus::Consumed);
-        assert_eq!(count(&fixture.cp, EventKind::LeaseReleased).await, 1);
-        assert_eq!(count(&fixture.cp, EventKind::TicketSucceeded).await, 1);
+        assert_eq!(lease_released_count, 1);
+        assert_eq!(ticket_succeeded_count, 1);
     }
 }
 
