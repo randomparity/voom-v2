@@ -2401,25 +2401,21 @@ async fn dispatch_to_child_forwards_owner_local_plan_and_normalized_operation() 
 }
 
 #[test]
-#[expect(
-    clippy::duration_suboptimal_units,
-    reason = "60 here is the validator's shutdown_grace_seconds cap, in seconds               (config.rs:159-164); from_mins(1) would hide what the number is"
-)]
 fn the_published_tail_bound_is_the_sum_of_every_inner_bound_plus_margin() {
     let budgets = ShutdownBudgets::DEFAULT;
-    // docs/runbooks/operator-node-agent.md tells operators to set the supervisor stop
-    // timeout above `shutdown_grace_seconds + 26`. If this changes, that runbook is wrong.
+    // docs/runbooks/operator-node-agent.md publishes the tail as
+    // `shutdown_grace_seconds + 26`. If this changes, that runbook is wrong.
     assert_eq!(
         budgets.tail(Duration::from_secs(10)),
         Duration::from_secs(36)
     );
-    // config.rs caps shutdown_grace_seconds at 60, and the worst case must stay inside
-    // systemd's upstream 90s DefaultTimeoutStopSec. See ADR 0088.
+    // config.rs caps shutdown_grace_seconds at 18, and the worst case must finish before
+    // the supported 45-second supervisor stop timeout. See ADR 0090.
     assert_eq!(
-        budgets.tail(Duration::from_secs(60)),
-        Duration::from_secs(86)
+        budgets.tail(Duration::from_secs(18)),
+        Duration::from_secs(44)
     );
-    assert!(budgets.tail(Duration::from_secs(60)) < Duration::from_secs(90));
+    assert!(budgets.tail(Duration::from_secs(18)) < Duration::from_secs(45));
 }
 
 /// A lease `JoinSet` whose one task never finishes, with its cancellation and
