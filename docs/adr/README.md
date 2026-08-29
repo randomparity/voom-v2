@@ -90,3 +90,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0088](0088-bounded-node-agent-shutdown.md) | Node-agent shutdown has a wall-clock deadline |
 | [0089](0089-heartbeat-watchdog-wins-equal-deadlines.md) | Heartbeat watchdog wins equal deadlines |
 | [0090](0090-bound-node-agent-grace-to-supported-stop-timeout.md) | Bound node-agent grace to the supported stop timeout |
+| [0092](0092-synchronize-capacity-cancellation-tests-at-deferral.md) | Synchronize capacity-cancellation tests at deferral |
