@@ -32,8 +32,9 @@ A timeout waiting for `observed` is an actionable setup failure. The test must a
 
 ## Verification
 
-- Demonstrate the old ordering failure with a transient small capacity timeout and no sync gate;
-  restore the file before the fix.
+- Demonstrate the old ordering failure once with a transient 1 ms capacity timeout and a 10 ms
+  delay between ticket observation and cancellation, requiring the exact already-failed
+  cancellation conflict. Restore and verify the original file before the fix.
 - Run the focused test, then `just test-repeat voom-control-plane
   cancelling_job_stops_external_capacity_wait_without_failure_events 50`.
 - Run `just test-serial`, `just test-parallel`, and `just ci` because the defect appears only under
