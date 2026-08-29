@@ -22,7 +22,8 @@ Tech stack: Rust, Tokio multi-thread tests, sqlx SQLite, existing `voom-test-sup
   Tokio time around the SQLite pool.
 - Use twelve heartbeat callers and one held `BEGIN IMMEDIATE` writer. Do not shorten production
   lock-wait or pool-acquire budgets and do not add a pool constructor.
-- Capture the saturation observation and writer commit result, consume the writer, and join all
+- Poll every heartbeat future once after the barrier, count only first polls that return `Pending`,
+  capture the saturation observation and writer commit result, consume the writer, and join all
   tasks before asserting any captured failure.
 - Guardrails: `cargo test -p voom-store pool_saturation_queues_heartbeats_until_writer_releases`;
   `just test-repeat voom-store pool_saturation_queues_heartbeats_until_writer_releases 25`;
@@ -54,6 +55,8 @@ Steps:
    ```rust
    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
    async fn pool_saturation_queues_heartbeats_until_writer_releases() {
+       use std::future::Future as _;
+
        const CALLERS: usize = 12;
        let (pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
        let lease = lrepo
@@ -68,23 +71,45 @@ Steps:
        let writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
        let lease_id = lease.id;
        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
+       let first_pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
        let heartbeat_at = T0 + Duration::seconds(10);
        let mut handles = Vec::with_capacity(CALLERS);
        for _ in 0..CALLERS {
            let lrepo = lrepo.clone();
            let barrier = std::sync::Arc::clone(&barrier);
+           let first_pending = std::sync::Arc::clone(&first_pending);
            handles.push(tokio::spawn(async move {
                barrier.wait().await;
-               lrepo
-                   .heartbeat(lease_id, Duration::seconds(60), heartbeat_at)
-                   .await
+               let heartbeat = lrepo.heartbeat(
+                   lease_id,
+                   Duration::seconds(60),
+                   heartbeat_at,
+               );
+               tokio::pin!(heartbeat);
+               let completed = std::future::poll_fn(|cx| {
+                   match heartbeat.as_mut().poll(cx) {
+                       std::task::Poll::Pending => {
+                           first_pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                           std::task::Poll::Ready(None)
+                       }
+                       std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+                   }
+               })
+               .await;
+               match completed {
+                   Some(result) => result,
+                   None => heartbeat.await,
+               }
            }));
        }
        barrier.wait().await;
 
        let saturated = tokio::time::timeout(std::time::Duration::from_secs(5), async {
            loop {
-               if pool.size() == 8 && pool.num_idle() == 0 {
+               if first_pending.load(std::sync::atomic::Ordering::SeqCst) == CALLERS
+                   && pool.size() == 8
+                   && pool.num_idle() == 0
+               {
                    return;
                }
                tokio::task::yield_now().await;
@@ -102,8 +127,9 @@ Steps:
        writer_result.expect("held writer must commit before heartbeat assertions");
        saturated.unwrap_or_else(|error| {
            panic!(
-               "pool did not saturate while the writer was held: size={}, idle={}, \
+               "pool did not saturate while the writer was held: pending={}, size={}, idle={}, \
                 finished={finished_while_locked}, error={error}",
+               first_pending.load(std::sync::atomic::Ordering::SeqCst),
                pool.size(),
                pool.num_idle()
            )
@@ -162,8 +188,9 @@ Steps:
 Acceptance:
 
 - Twelve tasks are released together while one writer holds the SQLite write lock.
-- The test observes eight checked-out connections, zero idle connections, zero completed
-  heartbeats, and more callers than the seven non-writer slots before releasing the writer.
+- The test observes twelve heartbeat futures return `Pending` on their first poll, eight checked-out
+  connections, zero idle connections, zero completed heartbeats, and more callers than the seven
+  non-writer slots before releasing the writer.
 - Writer commit is captured, all task handles are joined, and only then can assertions panic.
 - Every heartbeat succeeds; the lease stays held, does not shorten its deadline, records the fixed
   heartbeat time, and increments its epoch once per caller.
@@ -173,7 +200,8 @@ Acceptance:
 
 ## Durable workflow checkpoint
 
-- Current phase: design complete; next phase: scope audit, then TDD build.
+- Current phase: operator-approved forge review correction; re-review and scope audit precede the
+  fix wave.
 - Branch: `feat/pool-saturation-test-580`; base branch: `main`.
 - Scope token: `q580-fc6e0258`.
 - Open findings and deferrals: none. Spec-review suppression: ADR 0093 settles the arithmetic
