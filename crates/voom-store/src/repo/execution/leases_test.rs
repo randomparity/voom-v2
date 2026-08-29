@@ -1074,6 +1074,8 @@ async fn expire_due_waits_out_a_concurrent_writer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pool_saturation_queues_heartbeats_until_writer_releases() {
+    use std::future::Future as _;
+
     const CALLERS: usize = 12;
     let (pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
     let lease = lrepo
@@ -1088,23 +1090,39 @@ async fn pool_saturation_queues_heartbeats_until_writer_releases() {
     let writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let lease_id = lease.id;
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
+    let first_pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let heartbeat_at = T0 + Duration::seconds(10);
     let mut handles = Vec::with_capacity(CALLERS);
     for _ in 0..CALLERS {
         let lrepo = lrepo.clone();
         let barrier = std::sync::Arc::clone(&barrier);
+        let first_pending = std::sync::Arc::clone(&first_pending);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            lrepo
-                .heartbeat(lease_id, Duration::seconds(60), heartbeat_at)
-                .await
+            let heartbeat = lrepo.heartbeat(lease_id, Duration::seconds(60), heartbeat_at);
+            tokio::pin!(heartbeat);
+            let completed = std::future::poll_fn(|cx| match heartbeat.as_mut().poll(cx) {
+                std::task::Poll::Pending => {
+                    first_pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::task::Poll::Ready(None)
+                }
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+            })
+            .await;
+            match completed {
+                Some(result) => result,
+                None => heartbeat.await,
+            }
         }));
     }
     barrier.wait().await;
 
     let saturated = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if pool.size() == 8 && pool.num_idle() == 0 {
+            if first_pending.load(std::sync::atomic::Ordering::SeqCst) == CALLERS
+                && pool.size() == 8
+                && pool.num_idle() == 0
+            {
                 return;
             }
             tokio::task::yield_now().await;
@@ -1122,8 +1140,9 @@ async fn pool_saturation_queues_heartbeats_until_writer_releases() {
     writer_result.expect("held writer must commit before heartbeat assertions");
     saturated.unwrap_or_else(|error| {
         panic!(
-            "pool did not saturate while the writer was held: size={}, idle={}, \
+            "pool did not saturate while the writer was held: pending={}, size={}, idle={}, \
              finished={finished_while_locked}, error={error}",
+            first_pending.load(std::sync::atomic::Ordering::SeqCst),
             pool.size(),
             pool.num_idle()
         )
