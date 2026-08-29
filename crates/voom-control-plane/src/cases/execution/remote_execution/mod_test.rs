@@ -583,6 +583,88 @@ async fn remote_acquire_replay_returns_original_scheduler_decision_without_resco
     assert_eq!(decision_count, 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_same_key_remote_acquire_mutates_once() {
+    for contenders in [2_usize, 6] {
+        let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+        let ticket_id = fixture.ready_ticket(OP).await;
+        let before = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
+        let input = fixture.acquire_input(
+            &format!("concurrent-same-key-{contenders}"),
+            &format!("hash-concurrent-same-key-{contenders}"),
+        );
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(contenders + 1));
+        let mut handles = Vec::with_capacity(contenders);
+
+        for _ in 0..contenders {
+            let cp = fixture.cp.clone();
+            let input = input.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cp.remote_acquire(input).await
+            }));
+        }
+        barrier.wait().await;
+
+        let mut leased = Vec::new();
+        let mut in_progress_conflicts = 0_usize;
+        let mut unexpected = Vec::new();
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(RemoteAcquireOutcome::Leased(dispatch)) => leased.push(dispatch),
+                Ok(outcome) => {
+                    unexpected.push(format!("unexpected successful outcome: {outcome:?}"));
+                }
+                Err(error)
+                    if error.error_code() == ErrorCode::Conflict
+                        && error
+                            .to_string()
+                            .contains("idempotency key is already in progress") =>
+                {
+                    in_progress_conflicts += 1;
+                }
+                Err(error) => unexpected.push(format!("unexpected error: {error:?}")),
+            }
+        }
+
+        assert!(unexpected.is_empty(), "{unexpected:?}");
+        assert!(
+            !leased.is_empty(),
+            "at least one caller must receive the stored outcome"
+        );
+        assert_eq!(leased.len() + in_progress_conflicts, contenders);
+        assert!(leased.iter().all(|dispatch| dispatch == &leased[0]));
+        assert!(
+            leased
+                .iter()
+                .all(|dispatch| dispatch.ticket_id == ticket_id)
+        );
+
+        let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+            .fetch_one(fixture.cp.pool_for_test())
+            .await
+            .unwrap();
+        assert_eq!(lease_count, 1);
+        assert_eq!(count(&fixture.cp, EventKind::LeaseAcquired).await, 1);
+
+        let decisions = fixture
+            .cp
+            .scheduler_decisions(SchedulerDecisionFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert!(
+            leased
+                .iter()
+                .all(|dispatch| dispatch.scheduler_decision_id == decisions[0].id)
+        );
+
+        let after = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
+        assert_eq!(after.attempt, before.attempt + 1);
+    }
+}
+
 #[tokio::test]
 async fn remote_acquire_uses_scored_priority_then_tie_breaker() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
