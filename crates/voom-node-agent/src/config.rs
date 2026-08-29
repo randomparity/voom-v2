@@ -14,6 +14,7 @@ use voom_worker_protocol::VideoAcceleratorDescriptor;
 /// every staged commit run out its convergence deadline and report
 /// `CommitFailure`.
 const MAX_COMMIT_POLL_INTERVAL_MS: u64 = 5_000;
+const MAX_SHUTDOWN_GRACE_SECONDS: u32 = 18;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,12 +157,15 @@ impl AgentConfig {
             5,
             3_600,
         )?;
-        validate_bound(
-            "shutdown_grace_seconds",
-            u64::from(self.shutdown_grace_seconds),
-            1,
-            60,
-        )?;
+        if !(1..=MAX_SHUTDOWN_GRACE_SECONDS).contains(&self.shutdown_grace_seconds) {
+            return Err(config_error(format!(
+                "shutdown_grace_seconds must be between 1 and {MAX_SHUTDOWN_GRACE_SECONDS}; \
+                 got {}. The supported supervisor stop timeout is 45 seconds, and the bounded \
+                 shutdown tail is shutdown_grace_seconds + 26 seconds. If a worker needs more \
+                 grace, change the worker's shutdown behavior",
+                self.shutdown_grace_seconds
+            )));
+        }
         if !(1..=64).contains(&self.workers.len()) {
             return Err(config_error(format!(
                 "workers must contain between 1 and 64 entries; got {}",

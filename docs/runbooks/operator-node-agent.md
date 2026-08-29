@@ -188,16 +188,22 @@ queued and acted on once startup finishes, and the sum below starts from there. 
 timeout for a stop issued during steady state, and expect a stop issued seconds after a start to
 need longer.
 
-**Set the supervisor stop timeout above `shutdown_grace_seconds + 26`, in seconds.** Of that,
-2 × 10 s is one budget for each control-plane wait in the shutdown sequence — lease settlement
-and deactivation — 1 s bounds collecting a killed child's exit status, and 5 s is the margin on
-the backstop that bounds the whole sequence. That sum is the worst case, so the example
-configuration above (`shutdown_grace_seconds = 10`) needs a stop timeout above 36 s. Check the
-one your supervisor actually applies rather than assuming the upstream 90 s:
-`systemctl show -p DefaultTimeoutStopUSec` reports 45 s on Fedora, which leaves no margin at
-`shutdown_grace_seconds = 19` (19 + 26 = 45 exactly) and is exceeded above it. A stop timeout below the sum means `SIGKILL`
-lands mid-shutdown and the incarnation is never marked retired. See
-[ADR 0088](../adr/0088-bounded-node-agent-shutdown.md).
+**Configure the supervisor stop timeout to at least 45 seconds.** The node agent accepts
+`shutdown_grace_seconds` from 1 through 18. Its bounded shutdown tail is
+`shutdown_grace_seconds + 26` seconds: 2 × 10 s for the lease-settlement and deactivation
+control-plane waits, 1 s to collect a killed child's exit status, and a 5 s backstop margin.
+The maximum accepted grace therefore produces a 44 s tail, ordered one second before the
+supported supervisor deadline. The example configuration above (`shutdown_grace_seconds = 10`)
+has a 36 s tail but uses the same fixed supervisor setting.
+
+Set the timeout explicitly rather than relying on a distribution default. For systemd, configure
+`TimeoutStopSec=45s` or greater and verify the effective unit value with
+`systemctl show -p TimeoutStopUSec voom-node-agent.service`. A lower timeout is unsupported:
+`SIGKILL` can land mid-shutdown before the incarnation is marked retired. A worker that needs more
+than 18 s of polite shutdown must change its shutdown behavior; raising `TimeoutStopSec` does not
+make a larger grace value an accepted node-agent configuration. See
+[ADR 0088](../adr/0088-bounded-node-agent-shutdown.md) and
+[ADR 0090](../adr/0090-bound-node-agent-grace-to-supported-stop-timeout.md).
 
 The first operator signal always begins or acknowledges ordered shutdown, even when an internal
 fatal error or restart-budget exhaustion already began it; that unconsumed first signal never

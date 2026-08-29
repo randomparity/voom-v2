@@ -247,7 +247,7 @@ fn config_rejects_unknown_fields_and_invalid_numeric_bounds() {
         ("progress_idle_timeout_seconds", "4"),
         ("progress_idle_timeout_seconds", "3601"),
         ("shutdown_grace_seconds", "0"),
-        ("shutdown_grace_seconds", "61"),
+        ("shutdown_grace_seconds", "19"),
     ] {
         fixture.rewrite(&replace_assignment(&fixture.document, field, value));
         assert!(
@@ -257,6 +257,34 @@ fn config_rejects_unknown_fields_and_invalid_numeric_bounds() {
     }
     fixture.rewrite(&format!("{}\nunknown = true\n", fixture.document));
     assert!(AgentConfig::load(&fixture.config_path).is_err());
+}
+
+#[test]
+fn shutdown_grace_fits_the_supported_supervisor_stop_timeout() {
+    let fixture = ConfigFixture::new("token");
+    fixture.rewrite(&replace_assignment(
+        &fixture.document,
+        "shutdown_grace_seconds",
+        "18",
+    ));
+    assert!(AgentConfig::load(&fixture.config_path).is_ok());
+
+    fixture.rewrite(&replace_assignment(
+        &fixture.document,
+        "shutdown_grace_seconds",
+        "19",
+    ));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    let diagnostic = error.to_string();
+    for required in [
+        "shutdown_grace_seconds must be between 1 and 18; got 19",
+        "supported supervisor stop timeout is 45 seconds",
+        "shutdown_grace_seconds + 26",
+        "change the worker's shutdown behavior",
+    ] {
+        assert!(diagnostic.contains(required), "{diagnostic}");
+    }
 }
 
 /// The commit coordinator must converge inside the control plane's
