@@ -24,6 +24,8 @@ pool reports all eight connections checked out. Require the caller count to exce
 connections available beside the held writer; together with no completed heartbeat, that proves at
 least one caller is waiting for pool admission. Capture any failed observation without asserting,
 commit the writer, join every task, and only then report the observation or task failure.
+Capture the commit result too: consume the transaction, join every task regardless of that result,
+and only then assert that commit succeeded.
 
 Use one fixed domain timestamp before the lease deadline for every heartbeat. After the tasks
 finish, assert the lease remains held, its deadline was not shortened, its last-heartbeat time is

@@ -28,9 +28,11 @@ Add one multi-thread Tokio test to
    checked out; none of the twelve heartbeats completed while the writer was held; and twelve is
    greater than the seven connections available beside the writer. The last two facts prove that
    at least five callers were waiting for pool admission rather than merely waiting on SQLite.
-5. Commit the writer unconditionally and join every task before asserting the captured saturation
-   observation or any task result. Then require every heartbeat to return the same held lease
-   identity without a database or conflict error.
+5. Attempt to commit the writer and retain its `Result` without `?`, `unwrap`, `expect`, or an
+   assertion; the commit consumes the transaction on either outcome. Join every task regardless of
+   the commit result. Only then assert that commit succeeded, assert the captured saturation
+   observation, and require every heartbeat to return the same held lease identity without a
+   database or conflict error.
 6. Read the lease and assert it remains held, its deadline is at least the original deadline, its
    last-heartbeat timestamp equals the fixed supplied value, and its epoch increased exactly
    twelve times. Issue one more heartbeat and require its epoch to advance, proving convergence
@@ -46,8 +48,8 @@ the state is observed.
 A task panic, join error, `DB_UNREACHABLE`, lease conflict, early task completion while the writer
 is held, failure to observe all eight connections checked out, a shortened deadline, an expired or
 released lease, or an incorrect epoch fails the test. All spawned tasks are joined after writer
-release before any captured observation or task-result assertion can fire, so a red test does not
-strand lock waiters.
+release before any commit-result, captured-observation, or task-result assertion can fire, so a red
+test does not strand lock waiters.
 
 ## Verification
 
