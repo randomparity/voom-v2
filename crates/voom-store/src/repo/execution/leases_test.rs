@@ -1072,6 +1072,89 @@ async fn expire_due_waits_out_a_concurrent_writer() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pool_saturation_queues_heartbeats_until_writer_releases() {
+    const CALLERS: usize = 12;
+    let (pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let lease_id = lease.id;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
+    let heartbeat_at = T0 + Duration::seconds(10);
+    let mut handles = Vec::with_capacity(CALLERS);
+    for _ in 0..CALLERS {
+        let lrepo = lrepo.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            lrepo
+                .heartbeat(lease_id, Duration::seconds(60), heartbeat_at)
+                .await
+        }));
+    }
+    barrier.wait().await;
+
+    let saturated = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if pool.size() == 8 && pool.num_idle() == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let finished_while_locked = handles.iter().filter(|handle| handle.is_finished()).count();
+
+    let writer_result = writer.commit().await;
+    let mut heartbeat_results = Vec::with_capacity(CALLERS);
+    for handle in handles {
+        heartbeat_results.push(handle.await);
+    }
+
+    writer_result.expect("held writer must commit before heartbeat assertions");
+    saturated.unwrap_or_else(|error| {
+        panic!(
+            "pool did not saturate while the writer was held: size={}, idle={}, \
+             finished={finished_while_locked}, error={error}",
+            pool.size(),
+            pool.num_idle()
+        )
+    });
+    let available_beside_writer = usize::try_from(pool.size()).unwrap() - 1;
+    assert!(
+        CALLERS > available_beside_writer,
+        "{CALLERS} callers must exceed {available_beside_writer} non-writer connections"
+    );
+    assert_eq!(finished_while_locked, 0);
+    for result in heartbeat_results {
+        let heartbeat = result
+            .expect("heartbeat task panicked")
+            .expect("heartbeat must wait for the writer and succeed");
+        assert_eq!(heartbeat.id, lease_id);
+        assert_eq!(heartbeat.state, LeaseState::Held);
+    }
+
+    let stored = lrepo.get(lease_id).await.unwrap().unwrap();
+    assert_eq!(stored.state, LeaseState::Held);
+    assert!(stored.expires_at >= lease.expires_at);
+    assert_eq!(stored.last_heartbeat_at, heartbeat_at);
+    assert_eq!(stored.epoch, lease.epoch + u64::try_from(CALLERS).unwrap());
+
+    let converged = lrepo
+        .heartbeat(lease_id, Duration::seconds(60), T0 + Duration::seconds(20))
+        .await
+        .unwrap();
+    assert_eq!(converged.epoch, stored.epoch + 1);
+}
+
 /// A pool whose connections refuse to wait, so contention is an immediate error
 /// rather than a 30-second block. Every pooled connection is pragma'd, because
 /// `busy_timeout` is connection-local and the one that matters is whichever the
