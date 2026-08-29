@@ -1608,6 +1608,90 @@ async fn remote_complete_reuses_success_path_and_replays_same_idempotency_key() 
     assert_eq!(plan.status, ArtifactAccessPlanStatus::Consumed);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_same_key_remote_complete_mutates_once() {
+    for contenders in [2_usize, 6] {
+        let fixture = leased_fixture().await;
+        let lease_id = fixture_lease_id(&fixture).await;
+        let input = fixture.complete_input(
+            lease_id,
+            &format!("concurrent-complete-{contenders}"),
+            &format!("hash-concurrent-complete-{contenders}"),
+        );
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(contenders + 1));
+        let mut handles = Vec::with_capacity(contenders);
+
+        for _ in 0..contenders {
+            let cp = fixture.cp.clone();
+            let input = input.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cp.remote_complete(input).await
+            }));
+        }
+        barrier.wait().await;
+
+        let mut completed = Vec::new();
+        let mut in_progress_conflicts = 0_usize;
+        let mut unexpected = Vec::new();
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(outcome) => completed.push(outcome),
+                Err(error)
+                    if error.error_code() == ErrorCode::Conflict
+                        && error
+                            .to_string()
+                            .contains("idempotency key is already in progress") =>
+                {
+                    in_progress_conflicts += 1;
+                }
+                Err(error) => unexpected.push(format!("unexpected error: {error:?}")),
+            }
+        }
+
+        assert!(unexpected.is_empty(), "{unexpected:?}");
+        assert!(
+            !completed.is_empty(),
+            "at least one caller must receive the stored outcome"
+        );
+        assert_eq!(completed.len() + in_progress_conflicts, contenders);
+        assert!(completed.iter().all(|outcome| outcome == &completed[0]));
+        assert!(completed.iter().all(|outcome| outcome.lease_id == lease_id));
+
+        let (lease_state, released_at, ticket_id): (String, Option<String>, i64) =
+            sqlx::query_as("SELECT state, released_at, ticket_id FROM leases WHERE id = ?")
+                .bind(i64::try_from(lease_id.0).unwrap())
+                .fetch_one(fixture.cp.pool_for_test())
+                .await
+                .unwrap();
+        assert_eq!(lease_state, "released");
+        assert!(released_at.is_some());
+        assert_eq!(
+            fixture
+                .cp
+                .tickets()
+                .get(TicketId(u64::try_from(ticket_id).unwrap()))
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            TicketState::Succeeded
+        );
+
+        let plan = fixture
+            .cp
+            .artifact_access_plans()
+            .get_by_lease(lease_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.status, ArtifactAccessPlanStatus::Consumed);
+        assert_eq!(count(&fixture.cp, EventKind::LeaseReleased).await, 1);
+        assert_eq!(count(&fixture.cp, EventKind::TicketSucceeded).await, 1);
+    }
+}
+
 #[tokio::test]
 async fn remote_complete_rejects_incomplete_or_mismatched_artifact_evidence() {
     // The plan proves absence of declared byte work (declaration-free ticket),
