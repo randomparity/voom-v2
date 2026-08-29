@@ -15,7 +15,7 @@ use super::executor::WorkflowChaosOptions;
 use super::executor::{WorkflowDispatchOptions, WorkflowStreamOptions, WorkflowTimingOptions};
 use super::leases::{
     fail_if_watchdog_elapsed, fail_lease_and_return, failure_class_for_error,
-    heartbeat_workflow_lease, release_lease_with_retry,
+    heartbeat_workflow_lease, next_watchdog_deadline, release_lease_with_retry,
 };
 use super::operation_adapters::{TicketDispatchContext, dispatch_control_plane_ticket};
 use super::runtime::WorkerRuntime;
@@ -164,14 +164,15 @@ async fn consume_dispatch_stream(
 ) -> Result<(), VoomError> {
     #[cfg(not(test))]
     let _ = operation;
-    let mut last_progress = Instant::now();
-    let mut last_heartbeat = Instant::now();
+    let stream_started = Instant::now();
+    let mut last_progress = stream_started;
+    let mut last_heartbeat = stream_started;
     let mut heartbeat = tokio::time::interval(options.timing.heartbeat_interval);
     loop {
-        let progress_deadline = sleep_until(last_progress + options.timing.progress_idle_timeout);
-        let heartbeat_deadline = sleep_until(last_heartbeat + options.timing.heartbeat_timeout);
-        tokio::pin!(progress_deadline);
-        tokio::pin!(heartbeat_deadline);
+        let (watchdog_deadline, _) =
+            next_watchdog_deadline(last_heartbeat, last_progress, &options.timing);
+        let watchdog_deadline = sleep_until(watchdog_deadline);
+        tokio::pin!(watchdog_deadline);
         #[cfg(test)]
         let heartbeat_tick = async {
             if options.chaos.suppresses_heartbeats_for(operation) {
@@ -228,20 +229,9 @@ async fn consume_dispatch_stream(
                     }
                 }
             }
-            () = &mut heartbeat_deadline => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    FailureClass::WorkerTimeout,
-                    VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
-                ).await;
-            }
-            () = &mut progress_deadline => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    FailureClass::ProgressTimeout,
-                    VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
+            () = &mut watchdog_deadline => {
+                return fail_if_watchdog_elapsed(
+                    control, lease_id, last_heartbeat, last_progress, &options.timing,
                 ).await;
             }
             _ = heartbeat_tick => {
