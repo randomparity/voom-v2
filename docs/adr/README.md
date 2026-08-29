@@ -89,3 +89,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0087](0087-cancellation-safe-begin-immediate.md) | Opening a `BEGIN IMMEDIATE` transaction is cancellation-safe |
 | [0088](0088-bounded-node-agent-shutdown.md) | Node-agent shutdown has a wall-clock deadline |
 | [0089](0089-heartbeat-watchdog-wins-equal-deadlines.md) | Heartbeat watchdog wins equal deadlines |
+| [0090](0090-bound-node-agent-grace-to-supported-stop-timeout.md) | Bound node-agent grace to the supported stop timeout |
