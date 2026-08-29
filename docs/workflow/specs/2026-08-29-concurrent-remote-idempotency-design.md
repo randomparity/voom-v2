@@ -20,8 +20,9 @@ sequential replay tests:
    them with a seven-party barrier (six tasks plus the test). Classify every result after all tasks
    join. A successful result must be `Leased`, and every success must name the same lease. A failure
    is acceptable only when its public code is `CONFLICT` and its message identifies an idempotency
-   key already in progress. Then assert one lease row, one `LeaseAcquired` event, one scheduler
-   decision per successful/replayed call, and one ticket attempt.
+   key already in progress. Then assert one lease row, one `LeaseAcquired` event, exactly one
+   scheduler-decision row, and one ticket attempt. Every successful/replayed outcome must reference
+   that same durable scheduler decision; an in-progress conflict creates no decision.
 2. Complete: start from one held lease, race six clones of one same-key/same-hash completion input
    through the same barrier pattern, and classify all results after join. Successful outcomes must
    be identical and name the original lease; only the clean in-progress conflict is acceptable.
