@@ -92,3 +92,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0090](0090-bound-node-agent-grace-to-supported-stop-timeout.md) | Bound node-agent grace to the supported stop timeout |
 | [0091](0091-test-idempotency-at-the-remote-use-case-boundary.md) | Test idempotency at the remote use-case boundary |
 | [0092](0092-synchronize-capacity-cancellation-tests-at-deferral.md) | Synchronize capacity-cancellation tests at deferral |
+| [0093](0093-test-pool-saturation-with-queued-heartbeats.md) | Test pool saturation with queued heartbeats |
