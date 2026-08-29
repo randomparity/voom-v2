@@ -44,11 +44,9 @@ executor load delays polling until both deadlines have passed.
 failure side effect and error text. This deliberately changes only the helper's
 late-check case where unequal deadlines are both elapsed: the earlier absolute
 deadline replaces the former unconditional heartbeat-first result.
-`consume_dispatch_stream` replaces the two
-timer branches with one `wait_for_watchdog` future. That production helper gets
-the deadline from the shared deadline-selection helper, sleeps once, and returns
-the selected class; the select branch then calls the existing failure helper.
-The stream/frame
+`consume_dispatch_stream` replaces the two timer branches with one inline sleep
+at the deadline returned by the shared selector; the branch then calls the
+existing failure helper. The stream/frame
 branch stays first and all mutation, frame validation, heartbeat, and terminal
 handling order remains unchanged.
 
@@ -75,10 +73,9 @@ full asynchronous path; `just ci` covers the workspace and guardrails.
 
 The direct deadline-selection tests are the deterministic pre-fix proof for the
 production seam: before the change, the symbol does not exist and the focused
-test must fail with that missing-symbol diagnostic. The green implementation
-is complemented by a direct paused-time test of `wait_for_watchdog`: before the
-change that production helper is absent, and afterward the stream consumer calls
-the tested helper rather than owning competing timer branches.
+test must fail with that missing-symbol diagnostic. The existing executor
+regression covers the asynchronous production path and persisted class; its
+explicit one-nanosecond controlled fault proves the shared-start wiring bites.
 
 ## Durable execution context
 

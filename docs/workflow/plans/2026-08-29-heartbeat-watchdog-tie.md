@@ -29,18 +29,18 @@ delegates classification and lease failure to the existing helper path.
 | `crates/voom-control-plane/src/workflow/execution/leases.rs` | deterministic classifier and existing failure side effect |
 | `crates/voom-control-plane/src/workflow/execution/leases_test.rs` | direct deadline-order regression tests |
 | `crates/voom-control-plane/src/workflow/execution/dispatch.rs` | shared stream-start instant and one earliest-deadline timer branch |
-| `crates/voom-control-plane/src/workflow/execution/dispatch_test.rs` | direct production wait-seam regression |
 | `crates/voom-control-plane/src/workflow/execution/executor/mod_test.rs` | persisted-class end-to-end regression |
 
-## Task 1 — Specify deterministic classification
+## Task 1 — Implement deterministic watchdog classification
 
 **Interfaces.** Add
-`fn next_watchdog_deadline(last_heartbeat: Instant, last_progress: Instant,
+`pub(super) fn next_watchdog_deadline(last_heartbeat: Instant, last_progress: Instant,
 timing: &WorkflowTimingOptions) -> (Instant, FailureClass)` and
 `fn elapsed_watchdog_class(now: Instant, last_heartbeat: Instant,
 last_progress: Instant, timing: &WorkflowTimingOptions) -> Option<FailureClass>`
-inside `leases.rs`. The elapsed helper consumes the first; Task 2 consumes the
-first directly; `fail_if_watchdog_elapsed` consumes the second.
+inside `leases.rs`. The elapsed helper consumes the first;
+`consume_dispatch_stream` consumes the first directly;
+`fail_if_watchdog_elapsed` consumes the second.
 
 1. Append `#[cfg(test)]`, `#[path = "leases_test.rs"]`, and `mod tests;` to
    `leases.rs`, then add the sibling test file. Add unit tests constructing one
@@ -57,43 +57,25 @@ first directly; `fail_if_watchdog_elapsed` consumes the second.
    `fail_if_watchdog_elapsed` to use its result while retaining the existing
    failure class/error mapping.
 4. Run the same focused command; expect all deadline/classifier tests to pass.
+5. Capture one stream-start instant for both initial observation values. Replace
+   the two watchdog select branches with one branch that sleeps inline at the
+   deadline returned by `next_watchdog_deadline` and then calls
+   `fail_if_watchdog_elapsed`; do not reorder the frame branch or classify
+   directly in `dispatch.rs`.
+6. Strengthen `heartbeat_timeout_wins_when_watchdog_deadlines_tie` to exercise
+   the production wait seam, shared startup instant, and persisted failure
+   class. Run the focused tie test and existing heartbeat/progress timeout
+   tests; expect all to pass.
 
 Acceptance: equal returns `WorkerTimeout`; strict progress-first returns
 `ProgressTimeout`; strict heartbeat-first returns `WorkerTimeout`; neither
-elapsed returns `None`.
-
-## Task 2 — Use one asynchronous deadline
-
-**Interfaces.** Add
-`async fn wait_for_watchdog(last_heartbeat: Instant, last_progress: Instant,
-timing: &WorkflowTimingOptions) -> FailureClass`, consuming
-`next_watchdog_deadline`. `consume_dispatch_stream` consumes this helper and
-`fail_if_watchdog_elapsed`; initialize both last-observed instants from one
-`stream_started` value.
-
-1. Append `#[cfg(test)]`, `#[path = "dispatch_test.rs"]`, and `mod tests;` to
-   `dispatch.rs`. Add a paused-time unit test that calls `wait_for_watchdog`
-   with equal absolute deadlines and expects `WorkerTimeout`.
-2. Run `cargo test -p voom-control-plane wait_for_watchdog`; require the compiler
-   diagnostic to name missing `wait_for_watchdog` and no unrelated failure.
-3. Implement `wait_for_watchdog` as one sleep at the deadline returned by
-   `next_watchdog_deadline`, returning that helper's class. Capture one
-   stream-start instant for both initial observation values. Replace the two
-   watchdog select branches with one branch that awaits `wait_for_watchdog` and
-   then calls `fail_if_watchdog_elapsed`; do not reorder the frame branch or
-   classify directly in `dispatch.rs`.
-4. Strengthen `heartbeat_timeout_wins_when_watchdog_deadlines_tie` to exercise
-   the production wait seam, shared startup instant, and persisted failure
-   class. Run the direct wait test, focused tie test, and existing
-   heartbeat/progress timeout tests; expect all to pass.
-
-Acceptance: the timer branch has one readiness source and all timeout
+elapsed returns `None`. The timer branch has one readiness source and all timeout
 classification flows through the deterministic helper. As a controlled fault,
 initialize `last_heartbeat` to `stream_started + Duration::from_nanos(1)` and
 confirm the tie regression fails with persisted `progress_timeout`, then restore
 the shared instant and confirm it passes.
 
-## Task 3 — Verify and commit
+## Task 2 — Verify and commit
 
 **Interfaces.** No new interfaces.
 
