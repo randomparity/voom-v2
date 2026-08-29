@@ -79,6 +79,30 @@ pub(super) async fn heartbeat_lease_with_retry(
     .await
 }
 
+pub(super) fn next_watchdog_deadline(
+    last_heartbeat: Instant,
+    last_progress: Instant,
+    timing: &WorkflowTimingOptions,
+) -> (Instant, FailureClass) {
+    let heartbeat_deadline = last_heartbeat + timing.heartbeat_timeout;
+    let progress_deadline = last_progress + timing.progress_idle_timeout;
+    if heartbeat_deadline <= progress_deadline {
+        (heartbeat_deadline, FailureClass::WorkerTimeout)
+    } else {
+        (progress_deadline, FailureClass::ProgressTimeout)
+    }
+}
+
+fn elapsed_watchdog_class(
+    now: Instant,
+    last_heartbeat: Instant,
+    last_progress: Instant,
+    timing: &WorkflowTimingOptions,
+) -> Option<FailureClass> {
+    let (deadline, class) = next_watchdog_deadline(last_heartbeat, last_progress, timing);
+    (now >= deadline).then_some(class)
+}
+
 pub(super) async fn fail_if_watchdog_elapsed(
     control: &ControlPlane,
     lease_id: LeaseId,
@@ -86,26 +110,22 @@ pub(super) async fn fail_if_watchdog_elapsed(
     last_progress: Instant,
     timing: &WorkflowTimingOptions,
 ) -> Result<(), VoomError> {
-    let now = Instant::now();
-    if now.duration_since(last_heartbeat) >= timing.heartbeat_timeout {
-        return fail_lease_and_return(
-            control,
-            lease_id,
-            FailureClass::WorkerTimeout,
-            VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
-        )
-        .await;
-    }
-    if now.duration_since(last_progress) >= timing.progress_idle_timeout {
-        return fail_lease_and_return(
-            control,
-            lease_id,
-            FailureClass::ProgressTimeout,
-            VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
-        )
-        .await;
-    }
-    Ok(())
+    let Some(class) = elapsed_watchdog_class(Instant::now(), last_heartbeat, last_progress, timing)
+    else {
+        return Ok(());
+    };
+    let timeout = if class == FailureClass::WorkerTimeout {
+        "heartbeat"
+    } else {
+        "progress"
+    };
+    fail_lease_and_return(
+        control,
+        lease_id,
+        class,
+        VoomError::WorkerTimeout(format!("{timeout} timeout for lease {lease_id}")),
+    )
+    .await
 }
 
 pub(super) async fn heartbeat_workflow_lease(
@@ -150,3 +170,7 @@ pub(super) fn time_duration(duration: Duration) -> Result<time::Duration, VoomEr
 fn is_database_locked(err: &VoomError) -> bool {
     matches!(err, VoomError::Database { message, .. } if message.contains("database is locked"))
 }
+
+#[cfg(test)]
+#[path = "leases_test.rs"]
+mod tests;
