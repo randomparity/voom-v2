@@ -147,6 +147,39 @@ fn scripted_exit(child_id: ChildId) -> ChildExit {
     }
 }
 
+struct PendingOuterOwner<T> {
+    supervisor: ProcessSupervisor,
+    completion: Result<T, JoinError>,
+}
+
+struct ReapedOuterOwner<T> {
+    exits: Vec<ChildExit>,
+    completion: Result<T, JoinError>,
+}
+
+impl<T> PendingOuterOwner<T> {
+    async fn shutdown(self) -> Result<ReapedOuterOwner<T>, ProcessSupervisorError> {
+        let exits = self.supervisor.shutdown().await?;
+        Ok(ReapedOuterOwner {
+            exits,
+            completion: self.completion,
+        })
+    }
+}
+
+impl<T> ReapedOuterOwner<T> {
+    fn exits(&self) -> &[ChildExit] {
+        &self.exits
+    }
+
+    fn into_join_error(self) -> JoinError {
+        match self.completion {
+            Ok(_) => panic!("inner caller unexpectedly completed"),
+            Err(error) => error,
+        }
+    }
+}
+
 #[tokio::test]
 async fn readiness_success_reports_child_identity_and_loopback_bound_address() {
     let supervisor = ProcessSupervisor::start();
@@ -374,13 +407,17 @@ async fn abort_while_awaiting_readiness_reaps_before_propagating_cancellation() 
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     inner.abort();
-    let cancellation = inner.await.unwrap_err();
-    assert!(cancellation.is_cancelled());
-
+    let completion = inner.await;
     let supervisor = Arc::try_unwrap(supervisor).ok().unwrap();
-    let exits = supervisor.shutdown().await.unwrap();
+    let owner = PendingOuterOwner {
+        supervisor,
+        completion,
+    };
+    let reaped = owner.shutdown().await.unwrap();
+    let exits = reaped.exits();
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0].code, Some(33));
+    let cancellation = reaped.into_join_error();
     assert!(cancellation.is_cancelled());
 }
 
@@ -399,14 +436,18 @@ async fn abort_while_awaiting_exit_reaps_before_propagating_cancellation() {
     });
     let child_id = spawned_rx.await.unwrap();
     inner.abort();
-    let cancellation = inner.await.unwrap_err();
-    assert!(cancellation.is_cancelled());
-
+    let completion = inner.await;
     let supervisor = Arc::try_unwrap(supervisor).ok().unwrap();
-    let exits = supervisor.shutdown().await.unwrap();
+    let owner = PendingOuterOwner {
+        supervisor,
+        completion,
+    };
+    let reaped = owner.shutdown().await.unwrap();
+    let exits = reaped.exits();
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0].child_id, child_id);
     assert_eq!(exits[0].code, Some(19));
+    let cancellation = reaped.into_join_error();
     assert!(cancellation.is_cancelled());
 }
 
@@ -424,13 +465,17 @@ async fn panic_after_spawn_reaps_before_propagating_panic() {
         panic!("injected post-spawn panic");
     });
     let child_id = spawned_rx.await.unwrap();
-    let panic = inner.await.unwrap_err();
-    assert!(panic.is_panic());
-
+    let completion = inner.await;
     let supervisor = Arc::try_unwrap(supervisor).ok().unwrap();
-    let exits = supervisor.shutdown().await.unwrap();
+    let owner = PendingOuterOwner {
+        supervisor,
+        completion,
+    };
+    let reaped = owner.shutdown().await.unwrap();
+    let exits = reaped.exits();
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0].child_id, child_id);
     assert_eq!(exits[0].code, Some(0));
+    let panic = reaped.into_join_error();
     assert!(panic.is_panic());
 }
