@@ -56,7 +56,9 @@ until the existing control-plane recovery path expires it.
 The integration harness starts one dedicated supervisor task for the whole prelude. Every spawn is
 registered before readiness is awaited. A successful crash is explicitly waited and removed. Any
 error or command-channel closure runs `shutdown_all`: close retained stdin, wait up to five
-seconds, issue kill for a still-running child, then wait up to five seconds for reap. Cleanup
+seconds, issue kill for a still-running child, then retain ownership and wait until that controlled
+child is reaped. The final wait is intentionally not abandoned behind a second timeout: returning
+without the wait would contradict the issue's child-reaping criterion. Cleanup
 accumulates child-specific errors and still attempts every child. A non-cancellable outer test
 owner runs the harness body in an inner task, then always requests shutdown and joins the
 supervisor before returning, propagating a body panic/cancellation only after the registry is
@@ -71,9 +73,13 @@ failure remains diagnosable.
 
 Seed the workload before starting synthetic sessions. The selected process tickets are independent
 roots placed first in deterministic seed order and carry the chaos crash payload; dependency
-generation begins after that prefix and never points a selected ticket at a prerequisite. This
-guarantees the whole configured crash count is initially leasable even at the maximum dependency
-percentage. Start and reap
+generation begins after that prefix and never points a selected ticket at a prerequisite. Keep
+every non-selected ticket pending while the prelude runs, then call the existing readiness
+transition for the remainder only after every selected lease has been acquired and its child
+reaped. Each prelude acquisition must name a member of the selected set that has not already been
+observed; any mismatch stops dispatch and cleans up. This isolation, rather than seed order or
+priority, guarantees the whole configured crash count is initially leasable even at the maximum
+dependency percentage. Start and reap
 their dedicated workers sequentially, recording the acquired leases. Then create the ordinary
 synthetic sessions and enter the existing drain loop. Its first recovery wave snapshots the
 process-crashed leases, advances the injected domain clock past their actual deadlines, and
@@ -117,9 +123,11 @@ not defend against a malicious locally substituted build artifact or a hostile l
    child wait completed before the outcome propagates.
 4. Run a small real-process cell and assert process count, non-zero exits, recorded lease identity,
    exact expiry, reassignment, terminal settlement, and zero supervised children.
-5. Inject a duplicate terminal observation into the reused conservation input, observe the
+5. Seed higher-priority non-selected tickets and prove they remain pending until the selected crash
+   set is acquired; inject a mismatched acquired ticket and require cleanup before dispatch.
+6. Inject a duplicate terminal observation into the reused conservation input, observe the
    existing duplicate diagnostic, revert, and rerun green.
-6. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
+7. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
    first real-process run configuration, duration, counts, and findings in the pull request.
 
 ## Durable workflow checkpoint

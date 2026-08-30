@@ -20,7 +20,8 @@ also replace its incarnation and fence earlier workers.
 Add a process-crash prelude to the opt-in stress harness. Before the ordinary synthetic node
 sessions start, create one registered remote node per configured crash attempt. Seed every ticket
 selected for this prelude as an independent ready root, regardless of the configured dependency
-mix; generate dependencies only among the remaining workload. For each crash node,
+mix; generate dependencies only among the remaining workload, and withhold every non-selected
+ticket from readiness until the prelude has acquired the complete selected set. For each crash node,
 activate one worker, launch one `chaos-worker` subprocess using that activated worker identity,
 acquire one lease, and dispatch it over the worker protocol with crash mode. Require the child to
 exit non-zero only after dispatch has begun, await and record its exit, and leave the acquired
@@ -35,7 +36,7 @@ assertion unchanged.
 
 Own every child in a dedicated supervisor task rather than in the cancellable harness future. The
 supervisor retains every child handle, closes stdin, waits for normal exit, escalates to kill on a
-bounded timeout, and waits again. Dropping the harness-side command sender is itself a shutdown
+bounded timeout, and then owns the final wait until the controlled child is reaped. Dropping the harness-side command sender is itself a shutdown
 signal. A non-cancellable outer test owner always joins the supervisor task after the harness body
 returns, panics, or is cancelled; it does not report the test outcome until the join proves an
 empty registry. Each child also enables Tokio `kill_on_drop` only as process-termination damage
@@ -52,6 +53,7 @@ The number of process crashes is derived from a validated opt-in percentage and 
 rounded down with a minimum of one when the percentage is non-zero. It may not exceed the number
 of tickets or consume all allowed attempts. Those selected tickets are the guaranteed initially
 ready frontier, so every valid configured count is leasable before synthetic sessions start. The
+prelude also verifies every acquired ticket belongs to that selected set before dispatch. The
 default remains zero so `just stress` keeps its current cost and behavior.
 
 ## Consequences
