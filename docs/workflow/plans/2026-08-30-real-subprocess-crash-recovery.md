@@ -118,12 +118,21 @@ the live command phase, signals and joins every watcher, answers registered wait
 reap, discards tombstones that can no longer be consumed, and returns only after the registry is
 empty.
 
-The chaos boundary change is:
+The chaos boundary first inspects only the raw mode so unsupported transcode requests preserve the
+existing early `UnknownOperation` result, then performs the existing full payload validation:
 
 ```rust
+let transcode_crash = req.operation == OperationKind::TranscodeVideo
+    && req.payload.get("mode").and_then(Value::as_str) == Some("crash");
+if !matches!(req.operation, OperationKind::ProbeFile | OperationKind::HashFile)
+    && !transcode_crash
+{
+    return Ok(json_response(
+        "400 Bad Request",
+        &ProtocolError::UnknownOperation { name: format!("{:?}", req.operation) },
+    ));
+}
 let payload = parse_payload(req.payload.clone())?;
-let supported = matches!(req.operation, OperationKind::ProbeFile | OperationKind::HashFile)
-    || (req.operation == OperationKind::TranscodeVideo && payload.mode == ChaosMode::Crash);
 ```
 
 Retain the existing JSON error shape for unsupported operations and do not accept baseline or
@@ -147,10 +156,12 @@ other fault modes for transcode.
    `BOUND addr=<loopback>\n`, and retain `kill_on_drop(true)` only as a runtime-destruction
    backstop. Run the focused command; expect every supervisor test green.
 3. In `chaos_worker_test.rs`, add direct `dispatch_operation` tests using a transcode request with
-   `{"mode":"crash","path":"/stress/process-crash"}` and a transcode baseline request. The
-   first must select `ChaosResponse::ExitProcess(101)`; the second must remain the existing unknown
-   operation response. Run `cargo test -p voom-fakes --bin chaos-worker transcode`; first observe
-   the crash test fail, then apply the narrow allowlist change and expect both green.
+   `{"mode":"crash","path":"/stress/process-crash"}`, a transcode baseline request, a transcode
+   stall request, and malformed transcode payloads with no mode or path. The crash request must
+   select `ChaosResponse::ExitProcess(101)`; every non-crash transcode request must remain the
+   existing unknown-operation response without entering full payload decoding. Run
+   `cargo test -p voom-fakes --bin chaos-worker transcode`; first observe the crash test fail, then
+   apply the narrow raw-mode gate and expect every boundary case green.
 4. Run `cargo test -p voom-fakes --lib process_supervisor` and
    `cargo test -p voom-fakes --bin chaos-worker`; expect green. Run `just fmt-check`,
    `just check-test-layout`, and `just lint`; expect exit 0.
@@ -246,22 +257,25 @@ existing execution records as `ExecutionAction::Abandoned`; the existing recover
    existing synthetic sessions; and feed abandoned process records into the unchanged recovery and
    conservation paths. Hold the inner harness task separately from `ProcessSupervisor::shutdown`
    so every returned error or join error is combined only after supervisor cleanup.
-6. Run a zero-process ignored cell with no prebuilt-worker environment and prove no binary lookup
-   or nested build occurs. Then run a minimal process cell through the recipe:
+6. Update `just stress` before any process-enabled proof. Use a Bash recipe that reads
+   `VOOM_STRESS_PROCESS_CRASH_PERCENT` with default zero: only a non-zero value runs
+   `cargo build -p voom-fakes --bin chaos-worker --all-features` and exports
+   `VOOM_TEST_PREBUILT_WORKERS=1` for the subsequent ignored library test. Zero keeps the existing
+   single `cargo test` invocation and cost. Update the runbook with the new default/range, evidence
+   fields, and minimal cell. Run `just --list`; expect `stress` to remain listed.
+7. Run a zero-process ignored cell with no prebuilt-worker environment and prove no binary lookup
+   or nested build occurs. Then run a minimal process cell through the final recipe:
    `VOOM_STRESS_NODES=1 VOOM_STRESS_RUNNERS_PER_NODE=1 VOOM_STRESS_TICKETS=8 VOOM_STRESS_PROCESS_CRASH_PERCENT=25 VOOM_STRESS_DEPENDENCY_PERCENT=90 VOOM_STRESS_DRAIN_SECONDS=30 just stress`.
    Expect two non-zero process exits, two expired first leases, ten total attempts, eight terminal
    tickets, zero held leases, zero supervised children, and conservation success.
-7. Prove the conservation test bites: temporarily append a second non-abandoned record for one
+8. Prove the conservation test bites: temporarily append a second non-abandoned record for one
    process ticket before `assert_conservation`, rerun the minimal cell, and require the existing
    duplicate-execution diagnostic. Revert only that controlled fault and rerun the identical cell
    green.
-8. Update `just stress` to run `cargo build -p voom-fakes --bin chaos-worker --all-features` first,
-   then invoke the ignored library test with `VOOM_TEST_PREBUILT_WORKERS=1`; keep that test as its
-   only executed test. Update the runbook with the new default/range, evidence fields, and minimal cell.
-   Run `just --list`, `cargo test -p voom-fakes`, and the minimal process cell; expect green.
-9. Run `just fmt-check`, `just lint`, `just check-test-layout`, `just test`, and `just ci` bare.
+9. Run `cargo test -p voom-fakes` and the minimal process cell again; expect green.
+10. Run `just fmt-check`, `just lint`, `just check-test-layout`, `just test`, and `just ci` bare.
    Record observed durations and first real-process findings for the PR body.
-10. Commit implementation paths with `test: exercise lease recovery after process crashes`, then
+11. Commit implementation paths with `test: exercise lease recovery after process crashes`, then
    commit recipe/runbook paths with `docs: document process crash stress coverage`.
 
 ### Acceptance
