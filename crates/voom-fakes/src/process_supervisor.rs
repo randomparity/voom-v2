@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -41,6 +43,24 @@ pub(crate) struct ChildExit {
     pub(crate) child_id: ChildId,
     pub(crate) code: Option<i32>,
     pub(crate) success: bool,
+}
+
+trait SupervisedChild {
+    fn wait(&mut self, child_id: ChildId) -> impl Future<Output = io::Result<ChildExit>> + Send;
+
+    fn start_kill(&mut self) -> io::Result<()>;
+}
+
+impl SupervisedChild for Child {
+    async fn wait(&mut self, child_id: ChildId) -> io::Result<ChildExit> {
+        Child::wait(self)
+            .await
+            .map(|status| child_exit(child_id, status))
+    }
+
+    fn start_kill(&mut self) -> io::Result<()> {
+        Child::start_kill(self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,39 +612,78 @@ async fn finish_failed_readiness(
     }
 }
 
-async fn wait_or_shutdown(
+async fn wait_or_shutdown<C: SupervisedChild>(
     child_id: ChildId,
-    child: &mut Child,
+    child: &mut C,
     stdin: &mut Option<ChildStdin>,
     shutdown: &mut oneshot::Receiver<()>,
 ) -> Result<ChildExit, ProcessSupervisorError> {
     tokio::select! {
-        status = child.wait() => status
-            .map(|status| child_exit(child_id, status))
-            .map_err(|error| wait_error(child_id, error.to_string())),
+        status = child.wait(child_id) => match status {
+            Ok(status) => Ok(status),
+            Err(error) => {
+                drop(stdin.take());
+                kill_and_reap(
+                    child_id,
+                    child,
+                    format!("live wait failed: {error}"),
+                )
+                .await
+            }
+        },
         _ = shutdown => shutdown_child(child_id, child, stdin).await,
     }
 }
 
-async fn shutdown_child(
+async fn shutdown_child<C: SupervisedChild>(
     child_id: ChildId,
-    child: &mut Child,
+    child: &mut C,
     stdin: &mut Option<ChildStdin>,
 ) -> Result<ChildExit, ProcessSupervisorError> {
     drop(stdin.take());
-    if let Ok(status) = tokio::time::timeout(CHILD_TIMEOUT, child.wait()).await {
-        return status
-            .map(|status| child_exit(child_id, status))
-            .map_err(|error| wait_error(child_id, format!("after stdin close: {error}")));
+    match tokio::time::timeout(CHILD_TIMEOUT, child.wait(child_id)).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(error)) => {
+            kill_and_reap(
+                child_id,
+                child,
+                format!("wait after stdin close failed: {error}"),
+            )
+            .await
+        }
+        Err(_) => {
+            kill_and_reap(
+                child_id,
+                child,
+                "wait after stdin close timed out after five seconds".to_owned(),
+            )
+            .await
+        }
     }
-    child
-        .start_kill()
-        .map_err(|error| wait_error(child_id, format!("kill after timeout: {error}")))?;
-    child
-        .wait()
-        .await
-        .map(|status| child_exit(child_id, status))
-        .map_err(|error| wait_error(child_id, format!("reap after kill: {error}")))
+}
+
+async fn kill_and_reap<C: SupervisedChild>(
+    child_id: ChildId,
+    child: &mut C,
+    preceding_failure: String,
+) -> Result<ChildExit, ProcessSupervisorError> {
+    let kill_failure = child.start_kill().err().map(|error| error.to_string());
+    loop {
+        match child.wait(child_id).await {
+            Ok(status) => return Ok(status),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                let kill_detail = kill_failure.as_deref().unwrap_or("none");
+                return Err(wait_error(
+                    child_id,
+                    format!(
+                        "ownership became unrecoverable: {preceding_failure}; \
+                         kill failure: {kill_detail}; final reap failed: {error}"
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 fn child_exit(child_id: ChildId, status: ExitStatus) -> ChildExit {

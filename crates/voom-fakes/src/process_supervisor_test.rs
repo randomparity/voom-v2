@@ -7,7 +7,8 @@
     reason = "the cancellation-safety contract requires a post-spawn caller panic"
 )]
 
-use std::io::{Read, Write};
+use std::collections::VecDeque;
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,6 +98,53 @@ fn credentials(mode: u64) -> WorkerCredentials {
 
 fn test_binary() -> std::path::PathBuf {
     std::env::current_exe().unwrap()
+}
+
+enum WaitStep {
+    Exit(ChildExit),
+    Error(io::ErrorKind, &'static str),
+}
+
+struct ScriptedChild {
+    waits: VecDeque<WaitStep>,
+    kill_error: Option<&'static str>,
+    wait_count: usize,
+    kill_count: usize,
+}
+
+impl ScriptedChild {
+    fn new(waits: impl IntoIterator<Item = WaitStep>) -> Self {
+        Self {
+            waits: waits.into_iter().collect(),
+            kill_error: None,
+            wait_count: 0,
+            kill_count: 0,
+        }
+    }
+}
+
+impl SupervisedChild for ScriptedChild {
+    async fn wait(&mut self, _child_id: ChildId) -> io::Result<ChildExit> {
+        self.wait_count += 1;
+        match self.waits.pop_front().unwrap() {
+            WaitStep::Exit(status) => Ok(status),
+            WaitStep::Error(kind, detail) => Err(io::Error::new(kind, detail)),
+        }
+    }
+
+    fn start_kill(&mut self) -> io::Result<()> {
+        self.kill_count += 1;
+        self.kill_error
+            .map_or(Ok(()), |detail| Err(io::Error::other(detail)))
+    }
+}
+
+fn scripted_exit(child_id: ChildId) -> ChildExit {
+    ChildExit {
+        child_id,
+        code: Some(17),
+        success: false,
+    }
 }
 
 #[tokio::test]
@@ -193,6 +241,82 @@ async fn shutdown_kills_and_reaps_a_child_that_stays_alive() {
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0].child_id, ready.child_id);
     assert!(!exits[0].success);
+}
+
+#[tokio::test]
+async fn live_wait_error_kills_and_reaps_before_returning() {
+    let child_id = ChildId(91);
+    let mut child = ScriptedChild::new([
+        WaitStep::Error(io::ErrorKind::Other, "injected live wait failure"),
+        WaitStep::Exit(scripted_exit(child_id)),
+    ]);
+    let mut stdin = None;
+    let (_shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let exit = wait_or_shutdown(child_id, &mut child, &mut stdin, &mut shutdown_rx)
+        .await
+        .unwrap();
+
+    assert_eq!(exit, scripted_exit(child_id));
+    assert_eq!(child.wait_count, 2);
+    assert_eq!(child.kill_count, 1);
+}
+
+#[tokio::test]
+async fn start_kill_error_still_performs_final_reap() {
+    let child_id = ChildId(92);
+    let mut child = ScriptedChild::new([
+        WaitStep::Error(io::ErrorKind::Other, "injected graceful wait failure"),
+        WaitStep::Exit(scripted_exit(child_id)),
+    ]);
+    child.kill_error = Some("injected kill failure");
+    let mut stdin = None;
+
+    let exit = shutdown_child(child_id, &mut child, &mut stdin)
+        .await
+        .unwrap();
+
+    assert_eq!(exit, scripted_exit(child_id));
+    assert_eq!(child.wait_count, 2);
+    assert_eq!(child.kill_count, 1);
+}
+
+#[tokio::test]
+async fn final_reap_error_reports_unrecoverable_child_ownership() {
+    let child_id = ChildId(93);
+    let mut child = ScriptedChild::new([
+        WaitStep::Error(io::ErrorKind::Other, "injected graceful wait failure"),
+        WaitStep::Error(io::ErrorKind::Other, "injected final reap failure"),
+    ]);
+    let mut stdin = None;
+
+    let error = shutdown_child(child_id, &mut child, &mut stdin)
+        .await
+        .unwrap_err();
+
+    assert_eq!(child.wait_count, 2);
+    assert_eq!(child.kill_count, 1);
+    assert!(error.to_string().contains("ownership became unrecoverable"));
+    assert!(error.to_string().contains("injected final reap failure"));
+}
+
+#[tokio::test]
+async fn interrupted_final_reap_is_retried_until_status_is_observed() {
+    let child_id = ChildId(94);
+    let mut child = ScriptedChild::new([
+        WaitStep::Error(io::ErrorKind::Other, "injected graceful wait failure"),
+        WaitStep::Error(io::ErrorKind::Interrupted, "injected interrupted reap"),
+        WaitStep::Exit(scripted_exit(child_id)),
+    ]);
+    let mut stdin = None;
+
+    let exit = shutdown_child(child_id, &mut child, &mut stdin)
+        .await
+        .unwrap();
+
+    assert_eq!(exit, scripted_exit(child_id));
+    assert_eq!(child.wait_count, 3);
+    assert_eq!(child.kill_count, 1);
 }
 
 #[tokio::test]
