@@ -238,6 +238,27 @@ async fn natural_exit_remains_observable_until_delayed_wait() {
     assert!(supervisor.shutdown().await.unwrap().is_empty());
 }
 
+#[test]
+fn cancelled_late_wait_restores_tombstone_for_next_live_wait() {
+    let child_id = ChildId(81);
+    let status = scripted_exit(child_id);
+    let mut actor = Actor::new();
+    actor.registry.insert(
+        child_id,
+        ChildState::Exited {
+            status: status.clone(),
+        },
+    );
+
+    let (cancelled_reply, cancelled_receiver) = tokio::sync::oneshot::channel();
+    drop(cancelled_receiver);
+    actor.register_wait(child_id, cancelled_reply);
+
+    let (reply, mut receiver) = tokio::sync::oneshot::channel();
+    actor.register_wait(child_id, reply);
+    assert_eq!(receiver.try_recv().unwrap().unwrap(), status);
+}
+
 #[tokio::test]
 async fn duplicate_wait_is_rejected_while_first_wait_remains_registered() {
     let supervisor = ProcessSupervisor::start();

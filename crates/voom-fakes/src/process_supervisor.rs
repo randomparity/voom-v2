@@ -237,7 +237,7 @@ impl Actor {
             }
             Some(ChildState::Exited { .. }) => {
                 if let Some(ChildState::Exited { status }) = self.registry.remove(&child_id) {
-                    let _ = reply.send(Ok(status));
+                    self.deliver_or_store(Some(reply), status);
                 }
             }
             None => {
