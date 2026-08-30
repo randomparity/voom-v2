@@ -10,6 +10,7 @@ use voom_control_plane::workers::RegisterNodeInput;
 use voom_control_plane::{ControlPlane, HealthPlane};
 use voom_core::clock_test_support::ManualClock;
 use voom_core::{Clock, OperationKind, TicketId, TicketOperation};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::execution::leases::{Lease, LeaseFilter, LeaseState, SqliteLeaseRepo};
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::scheduler_node_limits::SqliteSchedulerNodeLimitRepo;
@@ -360,7 +361,12 @@ fn assert_conservation(input: &ConservationInput) -> Result<(), String> {
 }
 
 fn payload_id(payload: &Value, field: &str) -> Option<u64> {
-    payload.get(field).and_then(Value::as_u64)
+    payload.get(field).and_then(Value::as_u64).or_else(|| {
+        payload
+            .as_object()?
+            .values()
+            .find_map(|inner| inner.get(field).and_then(Value::as_u64))
+    })
 }
 
 fn event_id(events: &[EventObservation], kind: &str, subject_id: u64) -> Option<u64> {
@@ -766,30 +772,38 @@ async fn collect_conservation(
         .list(LeaseFilter::default(), None, 10_000)
         .await
         .map_err(|error| error.to_string())?;
-    let rows: Vec<(i64, String, Option<i64>, String)> =
-        sqlx::query_as("SELECT event_id, kind, subject_id, payload FROM events ORDER BY event_id")
-            .fetch_all(pool)
+    let repo = SqliteEventRepo::new(pool.clone());
+    let mut cursor = None;
+    let mut events = Vec::new();
+    let mut page_count = 0_usize;
+    loop {
+        let page = repo
+            .list(
+                EventFilter::default(),
+                Page {
+                    limit: EVENT_PAGE_SIZE,
+                    cursor,
+                },
+            )
             .await
             .map_err(|error| error.to_string())?;
-    let mut events = Vec::with_capacity(rows.len());
-    for (id, kind, subject_id, payload) in rows {
-        events.push(EventObservation {
-            id: u64::try_from(id).map_err(|_| format!("negative event id {id}"))?,
-            kind,
-            subject_id: subject_id
-                .map(u64::try_from)
-                .transpose()
-                .map_err(|_| "negative event subject id".to_owned())?,
-            payload: serde_json::from_str(&payload).map_err(|error| error.to_string())?,
-        });
+        page_count += 1;
+        for row in page.items {
+            events.push(EventObservation {
+                id: row.id.0,
+                kind: row.envelope.payload.kind().as_str().to_owned(),
+                subject_id: row.envelope.subject_id,
+                payload: serde_json::to_value(row.envelope.payload)
+                    .map_err(|error| error.to_string())?,
+            });
+        }
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
     }
-    if events.len() > usize::try_from(EVENT_PAGE_SIZE).unwrap_or(usize::MAX) {
-        eprintln!(
-            "VOOM stress event evidence spans {} logical pages",
-            events
-                .len()
-                .div_ceil(usize::try_from(EVENT_PAGE_SIZE).unwrap_or(1))
-        );
+    if page_count > 1 {
+        eprintln!("VOOM stress event evidence spans {page_count} pages");
     }
     Ok(ConservationInput {
         seeded: workload.ticket_ids,
