@@ -93,3 +93,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0091](0091-test-idempotency-at-the-remote-use-case-boundary.md) | Test idempotency at the remote use-case boundary |
 | [0092](0092-synchronize-capacity-cancellation-tests-at-deferral.md) | Synchronize capacity-cancellation tests at deferral |
 | [0093](0093-test-pool-saturation-with-queued-heartbeats.md) | Test pool saturation with queued heartbeats |
+| [0094](0094-stress-one-node-session-with-many-runner-workers.md) | Stress one node session with many runner workers |
