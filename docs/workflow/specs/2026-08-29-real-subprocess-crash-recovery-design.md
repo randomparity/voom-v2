@@ -37,10 +37,14 @@ one seeded ticket whose payload selects chaos crash mode. It performs these orde
    and epoch.
 2. Spawn `chaos-worker` on loopback with an ephemeral port, credentials derived from the activated
    identity, piped stdin/stdout, inherited stderr, and `kill_on_drop(true)`.
-3. Read one bounded `BOUND addr=...` readiness line, retain the remaining child handle, and mark
-   the worker ready through the API.
-4. Acquire one lease through the API and construct the worker-protocol `OperationRequest` from the
-   acquired lease without flattening its typed IDs.
+3. Receive one bounded `BOUND addr=...` readiness observation from the supervisor and mark the
+   worker ready through the API. The supervisor remains the sole owner of the child and all pipes.
+4. Acquire one transcode-video lease through the API and construct the worker-protocol
+   `OperationRequest` without flattening its typed lease ID. Preserve the acquired operation but
+   replace only the dispatch payload with `{"mode":"crash","path":"/stress/process-crash"}`.
+   The durable ticket payload is unchanged and remains the input to the synthetic retry. Extend
+   `chaos-worker::dispatch_operation` to accept `TranscodeVideo` only when this parsed mode is
+   `Crash`; its baseline and other fault operation allowlist remains unchanged.
 5. Dispatch over the real worker socket. Accept only a connection termination paired with the
    child exiting non-zero; an ordinary terminal response, no lease, readiness timeout, or a child
    that exits before dispatch is an error.
@@ -53,8 +57,14 @@ until the existing control-plane recovery path expires it.
 
 ### Child supervisor
 
-The integration harness starts one dedicated supervisor task for the whole prelude. Every spawn is
-registered before readiness is awaited. A successful crash is explicitly waited and removed. Any
+The integration harness starts one dedicated supervisor task for the whole prelude. It is the sole
+owner of every `tokio::process::Child`, stdin, stdout, and stderr disposition from spawn through
+wait. The runner communicates over bounded Tokio channels with commands `Spawn`, `Wait`, and
+`ShutdownAll`; replies are `Ready { child_id, pid, bound }`, `Exited { child_id, status }`, or an
+operation-specific error. `Spawn` registers the child before reading readiness, reads exactly one
+bounded stdout line, and returns only the parsed loopback address and identity. `Wait` owns the
+exit wait and removes the child only after reap. A successful crash is explicitly waited and
+removed. Any
 error or command-channel closure runs `shutdown_all`: close retained stdin, wait up to five
 seconds, issue kill for a still-running child, then retain ownership and wait until that controlled
 child is reaped. The final wait is intentionally not abandoned behind a second timeout: returning
@@ -65,14 +75,16 @@ supervisor before returning, propagating a body panic/cancellation only after th
 proven empty. After either normal completion or cleanup, the registry must be empty.
 
 The supervisor is test-only and accepts the binary path explicitly; it never searches `PATH`.
-All bind addresses are literal loopback with port zero. Child stdout is drained only through the
-single readiness line because crash mode emits no later stdout contract; stderr is inherited so a
-failure remains diagnosable.
+All bind addresses are literal loopback with port zero. The supervisor owns and drains stdout's
+single readiness line; `chaos-worker` emits no later stdout contract. Stderr is inherited and
+stdin is retained only so shutdown can close it before waiting. Aborting the runner while it waits
+for `Ready` or `Exited` drops only a reply receiver; command-channel closure still drives the
+supervisor's cleanup path without surrendering a child handle or pipe lock.
 
 ### Stress orchestration
 
 Seed the workload before starting synthetic sessions. The selected process tickets are independent
-roots placed first in deterministic seed order and carry the chaos crash payload; dependency
+roots placed first in deterministic seed order and retain the ordinary transcode media payload; dependency
 generation begins after that prefix and never points a selected ticket at a prerequisite. Keep
 every non-selected ticket pending while the prelude runs, then call the existing readiness
 transition for the remainder only after every selected lease has been acquired and its child
@@ -123,11 +135,15 @@ not defend against a malicious locally substituted build artifact or a hostile l
    child wait completed before the outcome propagates.
 4. Run a small real-process cell and assert process count, non-zero exits, recorded lease identity,
    exact expiry, reassignment, terminal settlement, and zero supervised children.
-5. Seed higher-priority non-selected tickets and prove they remain pending until the selected crash
+5. Prove an identical durable transcode payload causes child exit 101 through the harness-owned
+   crash dispatch override on attempt one and is accepted by the synthetic dispatcher on retry.
+6. Seed higher-priority non-selected tickets and prove they remain pending until the selected crash
    set is acquired; inject a mismatched acquired ticket and require cleanup before dispatch.
-6. Inject a duplicate terminal observation into the reused conservation input, observe the
+7. Abort the runner while it awaits readiness and while it awaits exit; in both cases require the
+   supervisor to retain ownership, reap the child, and report an empty registry.
+8. Inject a duplicate terminal observation into the reused conservation input, observe the
    existing duplicate diagnostic, revert, and rerun green.
-7. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
+9. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
    first real-process run configuration, duration, counts, and findings in the pull request.
 
 ## Durable workflow checkpoint

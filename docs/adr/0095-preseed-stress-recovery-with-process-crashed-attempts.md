@@ -23,7 +23,10 @@ selected for this prelude as an independent ready root, regardless of the config
 mix; generate dependencies only among the remaining workload, and withhold every non-selected
 ticket from readiness until the prelude has acquired the complete selected set. For each crash node,
 activate one worker, launch one `chaos-worker` subprocess using that activated worker identity,
-acquire one lease, and dispatch it over the worker protocol with crash mode. Require the child to
+acquire one transcode-video lease, and dispatch it over the worker protocol with a harness-owned
+crash payload while preserving the acquired lease ID and operation. The durable ticket payload is
+not mutated; the synthetic retry receives that original media payload. Extend `chaos-worker` only
+enough to accept `TranscodeVideo` in crash mode, before baseline payload decoding. Require the child to
 exit non-zero only after dispatch has begun, await and record its exit, and leave the acquired
 lease unsettled. Retain a typed observation containing the child PID, node, worker, ticket, lease,
 and exit status.
@@ -82,6 +85,9 @@ default remains zero so `just stress` keeps its current cost and behavior.
 - **Mutate the durable ticket payload after the crash.** judgment: changing persisted work to make
   a test retry pass would test a path production recovery does not use and expands the issue into
   production storage behavior.
+- **Use the media payload itself to select chaos mode.** verified: the stress media payload is
+  decoded by the synthetic retry under deny-unknown-field contracts, while `chaos-worker` expects
+  its own `mode`/`path` payload; a harness-owned dispatch override keeps both consumers valid.
 - **Activate every crash worker on one node.** verified: ADR 0094 and
   `remote_execution/activation.rs` establish that activation replaces a node incarnation and
   fences its prior workers; distinct nodes preserve the intended crashed leases.
