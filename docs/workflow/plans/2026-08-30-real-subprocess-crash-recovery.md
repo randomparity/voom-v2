@@ -42,12 +42,12 @@ and the existing `ManualClock` recovery harness.
 
 ## File map
 
-- Create `crates/voom-fakes/src/process_supervisor.rs`: test-support actor, child watchers,
+- Create `crates/voom-fakes/src/process_supervisor.rs`: crate-private test-support actor, child watchers,
   readiness parsing, shutdown/reap, pending waiter and completed-status tombstone state.
 - Create `crates/voom-fakes/src/process_supervisor_test.rs`: deterministic actor lifecycle,
   oversized readiness, stay-alive timeout cleanup, delayed wait, and cancellation cleanup tests.
-- Modify `crates/voom-fakes/src/lib.rs`: export `process_supervisor` for the remote runner and its
-  tests.
+- Modify `crates/voom-fakes/src/lib.rs`: declare private `process_supervisor` for the remote runner
+  and in-crate tests; do not export it from the crate API.
 - Modify `crates/voom-fakes/src/remote_runner.rs`: preserve activated worker epoch; add the
   process-crash prelude entry point using existing private activation/readiness/acquire methods and
   `voom_worker_protocol::ClientHandle`.
@@ -75,38 +75,38 @@ the existing chaos binary at the narrow operation boundary needed by a transcode
 Create these interfaces in `process_supervisor.rs`:
 
 ```rust
-pub struct ProcessSupervisor { /* bounded command sender + actor join */ }
+pub(crate) struct ProcessSupervisor { /* bounded command sender + actor join */ }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChildId(u64);
+pub(crate) struct ChildId(u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadyChild {
-    pub child_id: ChildId,
-    pub pid: u32,
-    pub bound: std::net::SocketAddr,
+pub(crate) struct ReadyChild {
+    pub(crate) child_id: ChildId,
+    pub(crate) pid: u32,
+    pub(crate) bound: std::net::SocketAddr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChildExit {
-    pub child_id: ChildId,
-    pub code: Option<i32>,
-    pub success: bool,
+pub(crate) struct ChildExit {
+    pub(crate) child_id: ChildId,
+    pub(crate) code: Option<i32>,
+    pub(crate) success: bool,
 }
 
 #[derive(Debug)]
-pub enum ProcessSupervisorError { /* spawn/readiness/wait/protocol/join variants */ }
+pub(crate) enum ProcessSupervisorError { /* spawn/readiness/wait/protocol/join variants */ }
 
 impl ProcessSupervisor {
-    pub fn start() -> Self;
-    pub async fn spawn(
+    pub(crate) fn start() -> Self;
+    pub(crate) async fn spawn(
         &self,
         binary: std::path::PathBuf,
         credentials: voom_worker_protocol::WorkerCredentials,
     ) -> Result<ReadyChild, ProcessSupervisorError>;
-    pub async fn wait(&self, child_id: ChildId)
+    pub(crate) async fn wait(&self, child_id: ChildId)
         -> Result<ChildExit, ProcessSupervisorError>;
-    pub async fn shutdown(self) -> Result<Vec<ChildExit>, ProcessSupervisorError>;
+    pub(crate) async fn shutdown(self) -> Result<Vec<ChildExit>, ProcessSupervisorError>;
 }
 ```
 
@@ -185,17 +185,17 @@ Add to `remote_runner.rs`:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessCrashObservation {
-    pub pid: u32,
-    pub node_id: NodeId,
-    pub worker_id: WorkerId,
-    pub ticket_id: TicketId,
-    pub lease_id: LeaseId,
-    pub exit_code: Option<i32>,
+pub(crate) struct ProcessCrashObservation {
+    pub(crate) pid: u32,
+    pub(crate) node_id: NodeId,
+    pub(crate) worker_id: WorkerId,
+    pub(crate) ticket_id: TicketId,
+    pub(crate) lease_id: LeaseId,
+    pub(crate) exit_code: Option<i32>,
 }
 
 impl RemoteSyntheticRunner {
-    pub async fn run_once_to_process_crash(
+    pub(crate) async fn run_once_to_process_crash(
         &self,
         supervisor: &ProcessSupervisor,
         binary: std::path::PathBuf,
@@ -287,6 +287,7 @@ existing execution records as `ExecutionAction::Abandoned`; the existing recover
 - Recovery expires exactly the selected process-crashed leases; synthetic retries settle them.
 - Existing attempt/event/lease/ticket conservation and duplicate-settlement checks pass unchanged.
 - Zero percent preserves existing `just stress` behavior; the process arm remains opt-in.
+- No new public Rust API is introduced; all supervisor/process-runner support remains crate-private.
 
 ## Durable handoff
 

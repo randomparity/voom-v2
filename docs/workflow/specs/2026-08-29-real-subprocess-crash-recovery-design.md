@@ -29,7 +29,8 @@ observation, total attempts, and retries.
 
 ### Process crash runner
 
-Add a focused process-backed entry point beside `RemoteSyntheticRunner`. It consumes the existing
+Add a crate-private process-backed entry point beside `RemoteSyntheticRunner`; it is implementation
+support for the in-crate stress harness, not a new externally consumable `voom-fakes` API. It consumes the existing
 API runner configuration, the `chaos-worker` binary path supplied by the integration harness, and
 one seeded ticket whose payload selects chaos crash mode. It performs these ordered steps:
 
@@ -62,7 +63,7 @@ until the existing control-plane recovery path expires it.
 
 ### Child supervisor
 
-The integration harness starts one dedicated supervisor actor for the whole prelude. For each
+The integration harness starts one crate-private dedicated supervisor actor for the whole prelude. For each
 spawn, that actor starts one child-watcher task and transfers the `tokio::process::Child`, stdin,
 and stdout to it. The watcher is the sole child owner from spawn through wait; the actor owns its
 shutdown sender and join handle in a registry. The runner communicates with the actor over a
