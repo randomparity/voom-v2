@@ -58,8 +58,11 @@ Fault selection is a pure function of the seed, ticket ID, and attempt. Stall sl
 duration shorter than the lease TTL, heartbeats once after the stall, and settles normally. Crash
 is applied only to attempt 1 of a selected ticket: the lane records `abandoned` and returns without
 heartbeat or settlement. Its supervisor immediately starts a replacement lane for the same worker.
-The harness calls `ControlPlane::remote_recover` with a domain timestamp beyond the abandoned
-lease deadline, which emits normal expiry/requeue events; it never edits storage directly.
+Stress leases use a one-second TTL while registered nodes use a 60-second heartbeat TTL. The
+harness calls `ControlPlane::remote_recover` with a domain timestamp two seconds after acquisition,
+which crosses the abandoned lease deadline while remaining before the node deadline and emits
+normal expiry/requeue events; it never edits storage directly. The recovery report must contain no
+stale nodes and must name every intentionally abandoned lease.
 
 The harness therefore tests the same durable recovery path as a lost process while deliberately
 excluding OS process and socket teardown, which #606 owns.
