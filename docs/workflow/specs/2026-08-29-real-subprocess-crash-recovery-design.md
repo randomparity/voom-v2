@@ -53,11 +53,14 @@ until the existing control-plane recovery path expires it.
 
 ### Child supervisor
 
-The integration harness owns one supervisor for the whole prelude. Every spawn is registered
-before readiness is awaited. A successful crash is explicitly waited and removed. Any error runs
-`shutdown_all`: close retained stdin, wait up to five seconds, issue kill for a still-running
-child, then wait up to five seconds for reap. Cleanup accumulates child-specific errors and still
-attempts every child. After either normal completion or cleanup, the registry must be empty.
+The integration harness starts one dedicated supervisor task for the whole prelude. Every spawn is
+registered before readiness is awaited. A successful crash is explicitly waited and removed. Any
+error or command-channel closure runs `shutdown_all`: close retained stdin, wait up to five
+seconds, issue kill for a still-running child, then wait up to five seconds for reap. Cleanup
+accumulates child-specific errors and still attempts every child. A non-cancellable outer test
+owner runs the harness body in an inner task, then always requests shutdown and joins the
+supervisor before returning, propagating a body panic/cancellation only after the registry is
+proven empty. After either normal completion or cleanup, the registry must be empty.
 
 The supervisor is test-only and accepts the binary path explicitly; it never searches `PATH`.
 All bind addresses are literal loopback with port zero. Child stdout is drained only through the
@@ -67,7 +70,10 @@ failure remains diagnosable.
 ### Stress orchestration
 
 Seed the workload before starting synthetic sessions. The selected process tickets are independent
-roots placed first in deterministic seed order and carry the chaos crash payload. Start and reap
+roots placed first in deterministic seed order and carry the chaos crash payload; dependency
+generation begins after that prefix and never points a selected ticket at a prerequisite. This
+guarantees the whole configured crash count is initially leasable even at the maximum dependency
+percentage. Start and reap
 their dedicated workers sequentially, recording the acquired leases. Then create the ordinary
 synthetic sessions and enter the existing drain loop. Its first recovery wave snapshots the
 process-crashed leases, advances the injected domain clock past their actual deadlines, and
@@ -81,8 +87,9 @@ conservation check runs.
 - Missing or non-executable binary, malformed readiness, readiness timeout, early clean exit,
   acquisition without a lease, unexpected worker terminal output, or an unreaped child returns an
   error naming the node/process phase.
-- Once a child has spawned, every exit path invokes supervisor cleanup before returning. Server
-  and synthetic-session tasks retain the existing stop/join/abort ordering.
+- Once a child has spawned, ordinary error, inner-task panic, and inner-task cancellation paths all
+  invoke and join supervisor cleanup before the outer test returns. Server and synthetic-session
+  tasks retain the existing stop/join/abort ordering.
 - A process observation is recorded only after the child has been explicitly waited; therefore an
   observed crash is also evidence of reap.
 - Recovery must expire every and only recorded process-crashed lease in its recovery wave.
@@ -105,8 +112,9 @@ not defend against a malicious locally substituted build artifact or a hostile l
 1. Unit-test configuration bounds and deterministic process-count selection.
 2. Add an ignored integration test selected by `just stress`; with a small non-zero process
    percentage, first observe it fail before the process runner exists, then implement it.
-3. Test cleanup with a deliberately returned post-spawn error and prove the supervisor registry is
-   empty and the child PID is no longer waitable through its retained handle.
+3. Test cleanup with a deliberately returned post-spawn error, panic, and cancelled inner body;
+   prove in every case that the outer owner joins the supervisor, its registry is empty, and the
+   child wait completed before the outcome propagates.
 4. Run a small real-process cell and assert process count, non-zero exits, recorded lease identity,
    exact expiry, reassignment, terminal settlement, and zero supervised children.
 5. Inject a duplicate terminal observation into the reused conservation input, observe the
