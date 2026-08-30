@@ -255,3 +255,7 @@ net-resilience *ARGS:
 # Hermetic net-resilience run: download + SHA256-verify the pinned toxiproxy-server. Used by CI.
 net-resilience-ci *ARGS:
     NET_RESILIENCE_DOWNLOAD=1 ./scripts/net-resilience.sh {{ARGS}}
+
+# Run the opt-in multi-node ticket-conservation stress harness. Not part of `just ci`.
+stress:
+    cargo test -p voom-fakes --lib distributed_stress_conserves_every_ticket -- --ignored --nocapture

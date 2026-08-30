@@ -26,9 +26,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "
 sqlx = { workspace = true }
 axum = "0.8.9"
 tempfile = { workspace = true }
+voom-core = { workspace = true, features = ["test"] }
 voom-test-support = { workspace = true }
 voom-api = { workspace = true }
-voom-control-plane = { workspace = true }
+voom-control-plane = { workspace = true, features = ["test"] }
+voom-events = { workspace = true }
 voom-store = { workspace = true, features = ["test"] }
 
 [[bin]]
