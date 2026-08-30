@@ -171,7 +171,7 @@ test-parallel *ARGS:
 
 # Run the workspace suite under runner-like limits (Linux cgroup v2 only)
 test-constrained *LIMITS:
-    ./scripts/run-constrained.sh {{ LIMITS }} -- cargo test --workspace --all-features
+    ./scripts/run-constrained.sh {{ LIMITS }} -- just test
 
 # Run the opt-in stress harness under explicit resource limits
 stress-constrained *LIMITS:

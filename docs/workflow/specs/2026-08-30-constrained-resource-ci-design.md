@@ -34,7 +34,9 @@ budget, benchmark comparison, or merge gate.
 ### Constrained recipes
 
 `just test-constrained *LIMITS` passes `LIMITS` to `scripts/run-constrained.sh` before the command
-separator, then runs `cargo test --workspace --all-features`. The interface accepts only options
+separator, then runs the canonical `just test` recipe. That recipe prebuilds worker binaries and
+sets `VOOM_TEST_PREBUILT_WORKERS=1` so concurrent tests never relink a binary another test is
+executing. The interface accepts only options
 already validated by `run-constrained.sh`; it no longer treats trailing values as Cargo test
 arguments. Repository search found no caller that relies on the old trailing-argument behavior.
 

@@ -15,7 +15,8 @@ Tech stack: GitHub Actions YAML, `just`, Bash, Cargo/Rust tests, systemd cgroup 
 - Branch: `feat/constrained-resource-ci-582`; base: `main`; scope token: `q582-95e2b519`.
 - Cells are exactly baseline (`--cpus 0-3 --memory 16G`), CPU load (baseline plus `--load 1`),
   disk (baseline plus `--write-bps 40M`), and memory (`--cpus 0-3 --memory 8G`).
-- Every cell runs `cargo test --workspace --all-features` through `just test-constrained`.
+- Every cell runs the canonical `just test` recipe through `just test-constrained`, preserving its
+  worker-binary prebuild and `VOOM_TEST_PREBUILT_WORKERS=1` contract.
 - Baseline and disk run the existing `just stress` behavior through `just stress-constrained`.
 - Baseline runs both ignored `scan_session_scale` diagnostics through
   `just scan-session-scale-constrained`.
@@ -87,7 +88,7 @@ just scan-session-scale-constrained [LIMITS...]
    }
 
    expect_field "test limits" load 1 test-constrained --load 1 --print-plan
-   expect_field "test command" command "cargo test --workspace --all-features" \
+   expect_field "test command" command "just test" \
        test-constrained --load 1 --print-plan
    expect_field "stress limits" write-bps 40M \
        stress-constrained --write-bps 40M --print-plan
@@ -119,7 +120,7 @@ just scan-session-scale-constrained [LIMITS...]
    ```just
    # Run the workspace suite under runner-like limits (Linux cgroup v2 only)
    test-constrained *LIMITS:
-       ./scripts/run-constrained.sh {{ LIMITS }} -- cargo test --workspace --all-features
+       ./scripts/run-constrained.sh {{ LIMITS }} -- just test
 
    # Run the opt-in stress harness under explicit resource limits
    stress-constrained *LIMITS:
@@ -141,7 +142,7 @@ just scan-session-scale-constrained [LIMITS...]
    ```text
    just test-constrained --load 1 --print-plan
    # load<TAB>1
-   # command<TAB>cargo test --workspace --all-features
+   # command<TAB>just test
 
    just stress-constrained --write-bps 40M --print-plan
    # write-bps<TAB>40M

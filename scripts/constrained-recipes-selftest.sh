@@ -19,7 +19,7 @@ expect_field() {
 }
 
 expect_field "test limits" load 1 test-constrained --load 1 --print-plan
-expect_field "test command" command "cargo test --workspace --all-features" \
+expect_field "test command" command "just test" \
 	test-constrained --load 1 --print-plan
 expect_field "stress limits" write-bps 40M \
 	stress-constrained --write-bps 40M --print-plan
