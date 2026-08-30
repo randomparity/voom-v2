@@ -3278,6 +3278,7 @@ dependencies = [
  "voom-api",
  "voom-control-plane",
  "voom-core",
+ "voom-events",
  "voom-fake-support",
  "voom-store",
  "voom-test-support",

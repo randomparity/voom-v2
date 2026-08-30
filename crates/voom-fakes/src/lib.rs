@@ -8,3 +8,6 @@
 //! Fake worker utilities used by integration tests and manual proofs.
 
 pub mod remote_runner;
+
+#[cfg(test)]
+mod remote_stress;

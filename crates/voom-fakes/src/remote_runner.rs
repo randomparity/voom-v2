@@ -82,6 +82,7 @@ pub trait RemoteFaultPolicy: fmt::Debug + Send + Sync {
 pub struct RemoteExecutionState {
     faults: Arc<dyn RemoteFaultPolicy>,
     inner: tokio::sync::Mutex<ExecutionStateInner>,
+    recovery_notification: tokio::sync::Notify,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,7 @@ pub struct RemoteNodeSession {
 struct ExecutionStateInner {
     ordinals: HashMap<TicketId, u32>,
     records: Vec<ExecutionRecord>,
+    recovered: std::collections::HashSet<LeaseId>,
 }
 
 impl RemoteExecutionState {
@@ -104,6 +106,7 @@ impl RemoteExecutionState {
         Self {
             faults,
             inner: tokio::sync::Mutex::new(ExecutionStateInner::default()),
+            recovery_notification: tokio::sync::Notify::new(),
         }
     }
 
@@ -130,6 +133,21 @@ impl RemoteExecutionState {
     pub async fn records(&self) -> Vec<ExecutionRecord> {
         self.inner.lock().await.records.clone()
     }
+
+    pub async fn mark_recovered(&self, lease_ids: &std::collections::HashSet<LeaseId>) {
+        self.inner.lock().await.recovered.extend(lease_ids);
+        self.recovery_notification.notify_waiters();
+    }
+
+    pub async fn wait_until_recovered(&self, lease_id: LeaseId) {
+        loop {
+            let notified = self.recovery_notification.notified();
+            if self.inner.lock().await.recovered.contains(&lease_id) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl RemoteNodeSession {
@@ -145,6 +163,12 @@ impl RemoteNodeSession {
 
     pub async fn recovery_guard(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
         self.recovery_gate.clone().write_owned().await
+    }
+
+    pub async fn active_worker_ids(&self) -> Vec<WorkerId> {
+        let mut worker_ids = self.active.lock().await.keys().copied().collect::<Vec<_>>();
+        worker_ids.sort_by_key(|worker_id| worker_id.0);
+        worker_ids
     }
 
     /// Heartbeat a held execution while the caller owns the recovery write guard.
@@ -212,14 +236,37 @@ impl RemoteNodeSession {
 
         let active = self.active.lock().await.clone();
         let mut tasks = Vec::new();
+        let mut heartbeat_stop = stop.clone();
+        let heartbeat_worker = active_workers[0];
+        let heartbeat_controller = controller.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut keys = IdempotencyKeys::new(&new_run_id());
+            while !*heartbeat_stop.borrow() {
+                heartbeat_controller
+                    .node_heartbeat(&heartbeat_worker, keys.next())
+                    .await?;
+                tokio::select! {
+                    () = tokio::time::sleep(heartbeat_controller.config.lease_heartbeat_interval) => {}
+                    result = heartbeat_stop.changed() => {
+                        if result.is_err() || *heartbeat_stop.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(RemoteRunnerSummary::default())
+        }));
         for (worker, runner) in active.into_values() {
+            let acquire_gate = Arc::new(tokio::sync::Mutex::new(()));
             for _ in 0..runner.config.max_parallel {
                 let runner = runner.clone();
                 let executions = self.executions.clone();
                 let gate = self.recovery_gate.clone();
+                let acquire_gate = acquire_gate.clone();
                 let lane_stop = stop.clone();
                 tasks.push(tokio::spawn(async move {
-                    run_session_lane(runner, worker, executions, gate, lane_stop).await
+                    run_session_lane(runner, worker, executions, gate, acquire_gate, lane_stop)
+                        .await
                 }));
             }
         }
@@ -265,18 +312,19 @@ async fn run_session_lane(
     active_worker: ActiveWorker,
     executions: Arc<RemoteExecutionState>,
     recovery_gate: Arc<tokio::sync::RwLock<()>>,
+    acquire_gate: Arc<tokio::sync::Mutex<()>>,
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> Result<RemoteRunnerSummary, RemoteRunnerError> {
     let mut summary = RemoteRunnerSummary::default();
     let mut keys = IdempotencyKeys::new(&new_run_id());
     while !*stop.borrow() {
-        runner.node_heartbeat(&active_worker, keys.next()).await?;
         let acquire = {
+            let _worker_admission = acquire_gate.lock().await;
             let _permit = recovery_gate.read().await;
             runner.acquire(&active_worker, keys.next()).await?
         };
         match acquire {
-            AcquireOutcome::Idle { .. } => {
+            AcquireOutcome::Idle { .. } | AcquireOutcome::NoCandidate { .. } => {
                 summary.idle_polls += 1;
                 tokio::time::sleep(runner.config.lease_heartbeat_interval).await;
             }
@@ -286,7 +334,10 @@ async fn run_session_lane(
                     .record_acquisition(lease.ticket_id, lease.lease_id, active_worker.worker_id)
                     .await;
                 match record.action {
-                    ExecutionAction::Abandoned => continue,
+                    ExecutionAction::Abandoned => {
+                        executions.wait_until_recovered(lease.lease_id).await;
+                        continue;
+                    }
                     ExecutionAction::StalledThenCompleted => {
                         tokio::time::sleep(runner.config.lease_heartbeat_interval).await;
                         let _permit = recovery_gate.read().await;
@@ -411,7 +462,7 @@ impl RemoteSyntheticRunner {
             self.node_heartbeat(&active_worker, keys.next()).await?;
             let acquire = self.acquire(&active_worker, keys.next()).await?;
             match acquire {
-                AcquireOutcome::Idle { .. } => {
+                AcquireOutcome::Idle { .. } | AcquireOutcome::NoCandidate { .. } => {
                     summary.idle_polls += 1;
                     if summary.idle_polls >= self.config.max_polls
                         || started.elapsed() >= self.config.idle_timeout
@@ -675,17 +726,24 @@ impl RemoteSyntheticRunner {
         let url = format!("{}{}", self.config.base_url, path);
         let response = self
             .client
-            .post(url)
+            .post(&url)
             .bearer_auth(self.config.token.expose_secret())
             .header("x-voom-idempotency-key", idempotency_key)
             .json(&body)
             .send()
             .await
             .map_err(|e| RemoteRunnerError::Http(e.to_string()))?;
-        let envelope: ApiEnvelope<T> = response
-            .json()
+        let status = response.status();
+        let body = response
+            .bytes()
             .await
             .map_err(|e| RemoteRunnerError::Http(e.to_string()))?;
+        let envelope: ApiEnvelope<T> = serde_json::from_slice(&body).map_err(|error| {
+            RemoteRunnerError::Http(format!(
+                "decode {status} response from {url}: {error}; body={}",
+                String::from_utf8_lossy(&body)
+            ))
+        })?;
         if envelope.status == "ok" {
             return envelope.data.ok_or_else(|| {
                 RemoteRunnerError::MalformedResponse("ok envelope missing data".to_owned())
@@ -808,6 +866,7 @@ struct RemoteTerminalData {}
 #[serde(tag = "outcome", rename_all = "snake_case")]
 enum AcquireOutcome {
     Idle {},
+    NoCandidate {},
     Leased(Box<RemoteLeaseDispatch>),
 }
 
