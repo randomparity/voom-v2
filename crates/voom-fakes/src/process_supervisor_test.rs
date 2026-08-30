@@ -13,8 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use secrecy::SecretString;
+use serde_json::json;
 use voom_core::WorkerId;
-use voom_worker_protocol::WorkerCredentials;
+use voom_worker_protocol::{
+    HttpServer, OperationHandler, OperationKind, ServerHandle, WorkerCredentials,
+    load_worker_bind_addr_from_env, load_worker_credentials_from_env,
+};
 
 use super::*;
 
@@ -26,6 +30,8 @@ const READY_UNTIL_STDIN_CLOSES: u64 = 4;
 const PENDING_READINESS: u64 = 5;
 const READY_DELAYED_EXIT: u64 = 6;
 const READY_IGNORE_STDIN: u64 = 7;
+const PROCESS_CRASH_WORKER: u64 = 8;
+const PROCESS_CLEAN_EXIT_WORKER: u64 = 9;
 
 #[test]
 fn process_supervisor_test_helper() {
@@ -66,8 +72,44 @@ fn process_supervisor_test_helper() {
             std::thread::sleep(Duration::from_secs(30));
             std::process::exit(0);
         }
+        PROCESS_CRASH_WORKER => run_process_worker(101),
+        PROCESS_CLEAN_EXIT_WORKER => run_process_worker(0),
         _ => std::process::exit(124),
     }
+}
+
+fn run_process_worker(exit_code: i32) -> ! {
+    let credentials =
+        load_worker_credentials_from_env().unwrap_or_else(|_| std::process::exit(121));
+    let bind = load_worker_bind_addr_from_env().unwrap_or_else(|_| std::process::exit(120));
+    let handler: OperationHandler = Arc::new(move |request| {
+        Box::pin(async move {
+            let valid = request.operation == OperationKind::TranscodeVideo
+                && request.lease_id.0 > 0
+                && request.payload == json!({"mode":"crash","path":"/stress/process-crash"})
+                && request.heartbeat_deadline_ms == 1_000
+                && request.progress_idle_deadline_ms == 1_000;
+            std::process::exit(if valid { exit_code } else { 126 });
+        })
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|_| std::process::exit(119));
+    let running = runtime
+        .block_on(HttpServer::new(credentials, handler).serve(bind))
+        .unwrap_or_else(|_| std::process::exit(118));
+    write_helper_output(format!("BOUND addr={}\n", running.bound).as_bytes());
+    let shutdown = running.shutdown;
+    let stdin = std::thread::spawn(move || {
+        wait_for_stdin_close();
+        let _ = shutdown.send(());
+    });
+    runtime
+        .block_on(running.joined)
+        .unwrap_or_else(|_| std::process::exit(117));
+    stdin.join().unwrap_or_else(|_| std::process::exit(116));
+    std::process::exit(0);
 }
 
 fn write_readiness() {

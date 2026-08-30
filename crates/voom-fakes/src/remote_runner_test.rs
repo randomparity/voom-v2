@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use secrecy::ExposeSecret;
 use serde_json::json;
 use voom_api::router_with_control_plane;
@@ -9,7 +11,9 @@ use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketSt
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
-use super::{RemoteRunnerConfig, RemoteSyntheticRunner};
+use crate::process_supervisor::ProcessSupervisor;
+
+use super::{ExecutionAction, RemoteRunnerConfig, RemoteSyntheticRunner};
 
 const OP: &str = "transcode_video";
 
@@ -247,6 +251,173 @@ async fn runner_activation_declares_configured_artifact_access() {
     );
 }
 
+#[tokio::test]
+async fn process_crash_uses_activated_credentials_and_a_typed_request() {
+    let fixture = RemoteRunnerFixture::new().await;
+    fixture.reserve_worker_ids(7).await;
+    let ticket_id = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/process.mkv",
+            "process-crash.mkv",
+        ))
+        .await;
+    let supervisor = ProcessSupervisor::start();
+
+    let (record, observation) = RemoteSyntheticRunner::new(fixture.config())
+        .run_once_to_process_crash(
+            &supervisor,
+            std::env::current_exe().unwrap(),
+            &HashSet::from([ticket_id]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(record.ticket_id, ticket_id);
+    assert_eq!(record.lease_id, observation.lease_id);
+    assert_eq!(record.worker_id, observation.worker_id);
+    assert_eq!(record.acquisition_ordinal, 1);
+    assert_eq!(record.action, ExecutionAction::Abandoned);
+    assert_eq!(observation.node_id, fixture.node_id);
+    assert_eq!(observation.ticket_id, ticket_id);
+    assert_eq!(observation.exit_code, Some(101));
+    assert_ne!(observation.pid, 0);
+    let worker_epoch: i64 = sqlx::query_scalar("SELECT epoch FROM workers WHERE id = ?")
+        .bind(i64::try_from(observation.worker_id.0).unwrap())
+        .fetch_one(&voom_store::connect(&fixture.url).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(worker_epoch, 0);
+    assert!(supervisor.shutdown().await.unwrap().is_empty());
+}
+
+#[test]
+fn process_crash_credentials_preserve_the_activated_epoch_and_refresh_the_secret() {
+    let active = super::ActiveWorker {
+        incarnation_id: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+        worker_id: voom_core::WorkerId(77),
+        worker_epoch: 43,
+    };
+
+    let first = super::process_credentials(active);
+    let second = super::process_credentials(active);
+
+    assert_eq!(first.worker_id, active.worker_id);
+    assert_eq!(first.worker_epoch, active.worker_epoch);
+    assert_ne!(first.secret.expose_secret(), second.secret.expose_secret());
+}
+
+#[tokio::test]
+async fn process_crash_rejects_an_acquired_ticket_outside_the_selected_set_before_dispatch() {
+    let fixture = RemoteRunnerFixture::new().await;
+    fixture.reserve_worker_ids(7).await;
+    let acquired_ticket = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/unexpected.mkv",
+            "unexpected.mkv",
+        ))
+        .await;
+    let supervisor = ProcessSupervisor::start();
+
+    let error = RemoteSyntheticRunner::new(fixture.config())
+        .run_once_to_process_crash(
+            &supervisor,
+            std::env::current_exe().unwrap(),
+            &HashSet::from([TicketId(acquired_ticket.0 + 1)]),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("outside selected process tickets")
+    );
+    let exits = supervisor.shutdown().await.unwrap();
+    assert_eq!(exits.len(), 1);
+    assert!(exits[0].success);
+    let held: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), SUM(CASE WHEN state = 'held' THEN 1 ELSE 0 END) FROM leases",
+    )
+    .fetch_one(&voom_store::connect(&fixture.url).await.unwrap())
+    .await
+    .unwrap();
+    assert_eq!(held, (1, 1));
+}
+
+#[tokio::test]
+async fn process_crash_rejects_a_clean_child_exit_after_dispatch() {
+    let fixture = RemoteRunnerFixture::new().await;
+    fixture.reserve_worker_ids(8).await;
+    let ticket_id = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/clean.mkv",
+            "clean-exit.mkv",
+        ))
+        .await;
+    let supervisor = ProcessSupervisor::start();
+
+    let error = RemoteSyntheticRunner::new(fixture.config())
+        .run_once_to_process_crash(
+            &supervisor,
+            std::env::current_exe().unwrap(),
+            &HashSet::from([ticket_id]),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("exited successfully"));
+    assert!(supervisor.shutdown().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn process_crash_observation_follows_explicit_wait_and_registry_removal() {
+    let fixture = RemoteRunnerFixture::new().await;
+    fixture.reserve_worker_ids(7).await;
+    let ticket_id = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/reaped.mkv",
+            "explicit-wait.mkv",
+        ))
+        .await;
+    let supervisor = ProcessSupervisor::start();
+
+    let (_, observation) = RemoteSyntheticRunner::new(fixture.config())
+        .run_once_to_process_crash(
+            &supervisor,
+            std::env::current_exe().unwrap(),
+            &HashSet::from([ticket_id]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(observation.exit_code, Some(101));
+    assert!(supervisor.shutdown().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn process_crash_record_seeds_the_synthetic_retry_ordinal() {
+    let state = super::RemoteExecutionState::new(std::sync::Arc::new(CompleteAll));
+    let ticket_id = TicketId(12);
+    state
+        .record_process_crash(super::ExecutionRecord {
+            ticket_id,
+            lease_id: voom_core::LeaseId(21),
+            worker_id: voom_core::WorkerId(31),
+            acquisition_ordinal: 1,
+            action: ExecutionAction::Abandoned,
+        })
+        .await
+        .unwrap();
+
+    let retry = state
+        .record_acquisition(ticket_id, voom_core::LeaseId(22), voom_core::WorkerId(32))
+        .await;
+
+    assert_eq!(retry.acquisition_ordinal, 2);
+    assert_eq!(retry.action, ExecutionAction::Completed);
+    assert_eq!(state.records().await.len(), 2);
+}
+
 struct RemoteRunnerFixture {
     _tmp: TempDatabase,
     url: String,
@@ -335,6 +506,30 @@ impl RemoteRunnerFixture {
             .unwrap()
             .unwrap()
             .state
+    }
+
+    async fn reserve_worker_ids(&self, count: usize) {
+        for ordinal in 0..count {
+            let registered = self
+                .cp
+                .register_node(RegisterNodeInput {
+                    name: format!("reserved-process-node-{ordinal}"),
+                    kind: NodeKind::Remote,
+                    heartbeat_ttl_seconds: 60,
+                    metadata: json!({"reserved": true}),
+                })
+                .await
+                .unwrap();
+            let mut config = self.config();
+            config.node_id = registered.node.id;
+            config.token = registered.token;
+            let runner = RemoteSyntheticRunner::new(config);
+            let incarnation_id = voom_core::NodeIncarnationId::generate().unwrap();
+            runner
+                .activate(incarnation_id, format!("reserve-worker-{ordinal}"))
+                .await
+                .unwrap();
+        }
     }
 }
 
