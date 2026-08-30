@@ -11,7 +11,7 @@ use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketSt
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
-use crate::process_supervisor::ProcessSupervisor;
+use crate::process_supervisor::{ProcessSupervisor, ProcessSupervisorMilestone};
 
 use super::{ExecutionAction, RemoteRunnerConfig, RemoteSyntheticRunner};
 
@@ -367,6 +367,77 @@ async fn process_crash_rejects_a_clean_child_exit_after_dispatch() {
 
     assert!(error.to_string().contains("exited successfully"));
     assert!(supervisor.shutdown().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn process_crash_timeout_reaps_stay_alive_worker_after_pending_wait() {
+    let fixture = RemoteRunnerFixture::new().await;
+    fixture.reserve_worker_ids(9).await;
+    let ticket_id = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/stay-alive.mkv",
+            "stay-alive-timeout.mkv",
+        ))
+        .await;
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = std::sync::Arc::new(supervisor);
+    let inner_supervisor = std::sync::Arc::clone(&supervisor);
+    let inner = tokio::spawn(async move {
+        RemoteSyntheticRunner::new(fixture.config())
+            .run_once_to_process_crash(
+                &inner_supervisor,
+                std::env::current_exe().unwrap(),
+                &HashSet::from([ticket_id]),
+            )
+            .await
+    });
+
+    let child_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(ProcessSupervisorMilestone::WaitRegistered(child_id)) =
+                milestones.recv().await
+            {
+                break child_id;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !inner.is_finished(),
+        "registered child wait must remain pending"
+    );
+    let completion = inner.await;
+
+    let supervisor = std::sync::Arc::try_unwrap(supervisor).ok().unwrap();
+    let cleanup = supervisor.shutdown().await;
+    let (mut watcher_completed, mut registry_empty) = (false, false);
+    while !watcher_completed || !registry_empty {
+        match milestones.recv().await.unwrap() {
+            ProcessSupervisorMilestone::WatcherCompleted(completed) => {
+                watcher_completed = completed == child_id;
+            }
+            ProcessSupervisorMilestone::RegistryEmpty => registry_empty = true,
+            ProcessSupervisorMilestone::ChildRegistered(_)
+            | ProcessSupervisorMilestone::AwaitingReadiness(_)
+            | ProcessSupervisorMilestone::WaitRegistered(_)
+            | ProcessSupervisorMilestone::TombstoneStored(_) => {}
+        }
+    }
+
+    let exits = cleanup.unwrap();
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].child_id, child_id);
+    assert!(
+        !exits[0].success,
+        "stay-alive child must exit only after kill"
+    );
+    let error = completion.unwrap().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("dispatch and exit observation timed out after five seconds")
+    );
 }
 
 #[tokio::test]

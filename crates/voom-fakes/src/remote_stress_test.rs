@@ -572,7 +572,10 @@ async fn await_registered_readiness(
             ProcessSupervisorMilestone::AwaitingReadiness(child_id) => {
                 awaiting_readiness = Some(child_id);
             }
-            ProcessSupervisorMilestone::WaitRegistered(_) => {}
+            ProcessSupervisorMilestone::WaitRegistered(_)
+            | ProcessSupervisorMilestone::TombstoneStored(_)
+            | ProcessSupervisorMilestone::WatcherCompleted(_)
+            | ProcessSupervisorMilestone::RegistryEmpty => {}
         }
     }
     assert_eq!(registered, awaiting_readiness);
@@ -648,7 +651,7 @@ async fn process_crash_owner_reaps_before_propagating_exit_cancellation() {
         let ready = inner_supervisor
             .spawn(
                 std::env::current_exe().unwrap(),
-                process_harness_credentials(6),
+                process_harness_credentials(4),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -667,7 +670,7 @@ async fn process_crash_owner_reaps_before_propagating_exit_cancellation() {
     let exits = finished.cleanup.unwrap();
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0].child_id, child_id);
-    assert_eq!(exits[0].code, Some(19));
+    assert_eq!(exits[0].code, Some(0));
     assert!(finished.completion.unwrap_err().is_cancelled());
 }
 

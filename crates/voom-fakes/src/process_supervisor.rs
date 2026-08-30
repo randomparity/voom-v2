@@ -29,6 +29,9 @@ pub(crate) enum ProcessSupervisorMilestone {
     ChildRegistered(ChildId),
     AwaitingReadiness(ChildId),
     WaitRegistered(ChildId),
+    TombstoneStored(ChildId),
+    WatcherCompleted(ChildId),
+    RegistryEmpty,
 }
 
 #[cfg(test)]
@@ -68,6 +71,25 @@ impl TestMilestones {
         self.send(ProcessSupervisorMilestone::WaitRegistered(child_id));
         #[cfg(not(test))]
         let _ = child_id;
+    }
+
+    fn tombstone_stored(&self, child_id: ChildId) {
+        #[cfg(test)]
+        self.send(ProcessSupervisorMilestone::TombstoneStored(child_id));
+        #[cfg(not(test))]
+        let _ = child_id;
+    }
+
+    fn watcher_completed(&self, child_id: ChildId) {
+        #[cfg(test)]
+        self.send(ProcessSupervisorMilestone::WatcherCompleted(child_id));
+        #[cfg(not(test))]
+        let _ = child_id;
+    }
+
+    fn registry_empty(&self) {
+        #[cfg(test)]
+        self.send(ProcessSupervisorMilestone::RegistryEmpty);
     }
 }
 
@@ -351,6 +373,7 @@ impl Actor {
                 self.record_error(error);
             }
         }
+        self.milestones.watcher_completed(completion.child_id);
     }
 
     fn finish_terminal(&mut self, joined: Result<(TaskId, WatcherCompletion), JoinError>) {
@@ -382,6 +405,7 @@ impl Actor {
                 self.record_error(error);
             }
         }
+        self.milestones.watcher_completed(completion.child_id);
     }
 
     fn resolve_join(
@@ -412,8 +436,10 @@ impl Actor {
         {
             return;
         }
+        let child_id = status.child_id;
         self.registry
-            .insert(status.child_id, ChildState::Exited { status });
+            .insert(child_id, ChildState::Exited { status });
+        self.milestones.tombstone_stored(child_id);
     }
 
     fn record_error(&mut self, error: ProcessSupervisorError) {
@@ -445,6 +471,7 @@ impl Actor {
                 }
             }
         }
+        self.milestones.registry_empty();
         if let Some(error) = self.first_error {
             return Err(error);
         }

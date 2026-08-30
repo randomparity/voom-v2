@@ -4,7 +4,7 @@
 )]
 #![expect(
     clippy::panic,
-    reason = "the cancellation-safety contract requires a post-spawn caller panic"
+    reason = "the lifecycle tests require deliberate caller and connection-task panics"
 )]
 
 use std::collections::VecDeque;
@@ -28,10 +28,10 @@ const OVERSIZED_READINESS: u64 = 2;
 const EXIT_BEFORE_READINESS: u64 = 3;
 const READY_UNTIL_STDIN_CLOSES: u64 = 4;
 const PENDING_READINESS: u64 = 5;
-const READY_DELAYED_EXIT: u64 = 6;
 const READY_IGNORE_STDIN: u64 = 7;
 const PROCESS_CRASH_WORKER: u64 = 8;
 const PROCESS_CLEAN_EXIT_WORKER: u64 = 9;
+const PROCESS_STAY_ALIVE_WORKER: u64 = 10;
 
 #[test]
 fn process_supervisor_test_helper() {
@@ -62,11 +62,6 @@ fn process_supervisor_test_helper() {
             wait_for_stdin_close();
             std::process::exit(33);
         }
-        READY_DELAYED_EXIT => {
-            write_readiness();
-            std::thread::sleep(Duration::from_millis(250));
-            std::process::exit(19);
-        }
         READY_IGNORE_STDIN => {
             write_readiness();
             std::thread::sleep(Duration::from_secs(30));
@@ -74,6 +69,7 @@ fn process_supervisor_test_helper() {
         }
         PROCESS_CRASH_WORKER => run_process_worker(101),
         PROCESS_CLEAN_EXIT_WORKER => run_process_worker(0),
+        PROCESS_STAY_ALIVE_WORKER => run_stay_alive_process_worker(),
         _ => std::process::exit(124),
     }
 }
@@ -112,6 +108,35 @@ fn run_process_worker(exit_code: i32) -> ! {
     std::process::exit(0);
 }
 
+fn run_stay_alive_process_worker() -> ! {
+    let credentials =
+        load_worker_credentials_from_env().unwrap_or_else(|_| std::process::exit(121));
+    let bind = load_worker_bind_addr_from_env().unwrap_or_else(|_| std::process::exit(120));
+    let handler: OperationHandler = Arc::new(move |request| {
+        Box::pin(async move {
+            let valid = request.operation == OperationKind::TranscodeVideo
+                && request.lease_id.0 > 0
+                && request.payload == json!({"mode":"crash","path":"/stress/process-crash"})
+                && request.heartbeat_deadline_ms == 1_000
+                && request.progress_idle_deadline_ms == 1_000;
+            if !valid {
+                std::process::exit(126);
+            }
+            panic!("close the accepted dispatch connection while keeping the helper alive");
+        })
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|_| std::process::exit(119));
+    let running = runtime
+        .block_on(HttpServer::new(credentials, handler).serve(bind))
+        .unwrap_or_else(|_| std::process::exit(118));
+    write_helper_output(format!("BOUND addr={}\n", running.bound).as_bytes());
+    runtime.block_on(std::future::pending::<()>());
+    std::process::exit(115);
+}
+
 fn write_readiness() {
     write_helper_output(b"BOUND addr=127.0.0.1:43123\n");
 }
@@ -140,6 +165,44 @@ fn credentials(mode: u64) -> WorkerCredentials {
 
 fn test_binary() -> std::path::PathBuf {
     std::env::current_exe().unwrap()
+}
+
+async fn await_milestone(
+    milestones: &mut tokio::sync::mpsc::UnboundedReceiver<ProcessSupervisorMilestone>,
+    expected: ProcessSupervisorMilestone,
+) {
+    tokio::time::timeout(CHILD_TIMEOUT, async {
+        while milestones.recv().await.unwrap() != expected {}
+    })
+    .await
+    .unwrap();
+}
+
+async fn await_registered_readiness(
+    milestones: &mut tokio::sync::mpsc::UnboundedReceiver<ProcessSupervisorMilestone>,
+) -> ChildId {
+    tokio::time::timeout(CHILD_TIMEOUT, async {
+        let mut registered = None;
+        let mut awaiting_readiness = None;
+        while registered.is_none() || awaiting_readiness.is_none() {
+            match milestones.recv().await.unwrap() {
+                ProcessSupervisorMilestone::ChildRegistered(child_id) => {
+                    registered = Some(child_id);
+                }
+                ProcessSupervisorMilestone::AwaitingReadiness(child_id) => {
+                    awaiting_readiness = Some(child_id);
+                }
+                ProcessSupervisorMilestone::WaitRegistered(_)
+                | ProcessSupervisorMilestone::TombstoneStored(_)
+                | ProcessSupervisorMilestone::WatcherCompleted(_)
+                | ProcessSupervisorMilestone::RegistryEmpty => {}
+            }
+        }
+        assert_eq!(registered, awaiting_readiness);
+        registered.unwrap()
+    })
+    .await
+    .unwrap()
 }
 
 enum WaitStep {
@@ -268,12 +331,16 @@ async fn child_exit_before_readiness_is_reported_after_reap() {
 
 #[tokio::test]
 async fn natural_exit_remains_observable_until_delayed_wait() {
-    let supervisor = ProcessSupervisor::start();
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
     let ready = supervisor
         .spawn(test_binary(), credentials(READY_EXIT))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(75)).await;
+    await_milestone(
+        &mut milestones,
+        ProcessSupervisorMilestone::TombstoneStored(ready.child_id),
+    )
+    .await;
 
     let exited = supervisor.wait(ready.child_id).await.unwrap();
     assert_eq!(exited.code, Some(17));
@@ -417,7 +484,8 @@ async fn interrupted_final_reap_is_retried_until_status_is_observed() {
 
 #[tokio::test]
 async fn caller_cancellation_after_natural_exit_preserves_unwaited_status() {
-    let supervisor = Arc::new(ProcessSupervisor::start());
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = Arc::new(supervisor);
     let inner_supervisor = Arc::clone(&supervisor);
     let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
     let inner = tokio::spawn(async move {
@@ -429,15 +497,20 @@ async fn caller_cancellation_after_natural_exit_preserves_unwaited_status() {
         std::future::pending::<()>().await;
     });
     let child_id = spawned_rx.await.unwrap();
-    tokio::time::sleep(Duration::from_millis(75)).await;
+    await_milestone(
+        &mut milestones,
+        ProcessSupervisorMilestone::TombstoneStored(child_id),
+    )
+    .await;
     inner.abort();
-    assert!(inner.await.unwrap_err().is_cancelled());
+    let completion = inner.await;
 
     let supervisor = Arc::try_unwrap(supervisor).ok().unwrap();
     let exits = supervisor.shutdown().await.unwrap();
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0].child_id, child_id);
     assert_eq!(exits[0].code, Some(17));
+    assert!(completion.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]
@@ -461,43 +534,15 @@ async fn shutdown_attempts_every_registered_child() {
 
 #[tokio::test]
 async fn abort_while_awaiting_readiness_reaps_before_propagating_cancellation() {
-    let supervisor = Arc::new(ProcessSupervisor::start());
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = Arc::new(supervisor);
     let inner_supervisor = Arc::clone(&supervisor);
     let inner = tokio::spawn(async move {
         inner_supervisor
             .spawn(test_binary(), credentials(PENDING_READINESS))
             .await
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    inner.abort();
-    let completion = inner.await;
-    let supervisor = Arc::try_unwrap(supervisor).ok().unwrap();
-    let owner = PendingOuterOwner {
-        supervisor,
-        completion,
-    };
-    let reaped = owner.shutdown().await.unwrap();
-    let exits = reaped.exits();
-    assert_eq!(exits.len(), 1);
-    assert_eq!(exits[0].code, Some(33));
-    let cancellation = reaped.into_join_error();
-    assert!(cancellation.is_cancelled());
-}
-
-#[tokio::test]
-async fn abort_while_awaiting_exit_reaps_before_propagating_cancellation() {
-    let supervisor = Arc::new(ProcessSupervisor::start());
-    let inner_supervisor = Arc::clone(&supervisor);
-    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
-    let inner = tokio::spawn(async move {
-        let ready = inner_supervisor
-            .spawn(test_binary(), credentials(READY_DELAYED_EXIT))
-            .await
-            .unwrap();
-        spawned_tx.send(ready.child_id).unwrap();
-        inner_supervisor.wait(ready.child_id).await
-    });
-    let child_id = spawned_rx.await.unwrap();
+    let child_id = await_registered_readiness(&mut milestones).await;
     inner.abort();
     let completion = inner.await;
     let supervisor = Arc::try_unwrap(supervisor).ok().unwrap();
@@ -509,7 +554,43 @@ async fn abort_while_awaiting_exit_reaps_before_propagating_cancellation() {
     let exits = reaped.exits();
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0].child_id, child_id);
-    assert_eq!(exits[0].code, Some(19));
+    assert_eq!(exits[0].code, Some(33));
+    let cancellation = reaped.into_join_error();
+    assert!(cancellation.is_cancelled());
+}
+
+#[tokio::test]
+async fn abort_while_awaiting_exit_reaps_before_propagating_cancellation() {
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = Arc::new(supervisor);
+    let inner_supervisor = Arc::clone(&supervisor);
+    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+    let inner = tokio::spawn(async move {
+        let ready = inner_supervisor
+            .spawn(test_binary(), credentials(READY_UNTIL_STDIN_CLOSES))
+            .await
+            .unwrap();
+        spawned_tx.send(ready.child_id).unwrap();
+        inner_supervisor.wait(ready.child_id).await
+    });
+    let child_id = spawned_rx.await.unwrap();
+    await_milestone(
+        &mut milestones,
+        ProcessSupervisorMilestone::WaitRegistered(child_id),
+    )
+    .await;
+    inner.abort();
+    let completion = inner.await;
+    let supervisor = Arc::try_unwrap(supervisor).ok().unwrap();
+    let owner = PendingOuterOwner {
+        supervisor,
+        completion,
+    };
+    let reaped = owner.shutdown().await.unwrap();
+    let exits = reaped.exits();
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].child_id, child_id);
+    assert_eq!(exits[0].code, Some(0));
     let cancellation = reaped.into_join_error();
     assert!(cancellation.is_cancelled());
 }
