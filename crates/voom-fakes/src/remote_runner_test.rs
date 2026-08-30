@@ -51,6 +51,108 @@ fn transcode_video_ticket(input_path: &str, output_name: &str) -> serde_json::Va
     })
 }
 
+#[derive(Debug)]
+struct AbandonFirst;
+
+impl super::RemoteFaultPolicy for AbandonFirst {
+    fn action(&self, _ticket_id: TicketId, acquisition_ordinal: u32) -> super::ExecutionAction {
+        if acquisition_ordinal == 1 {
+            super::ExecutionAction::Abandoned
+        } else {
+            super::ExecutionAction::Completed
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CompleteAll;
+
+impl super::RemoteFaultPolicy for CompleteAll {
+    fn action(&self, _ticket_id: TicketId, _acquisition_ordinal: u32) -> super::ExecutionAction {
+        super::ExecutionAction::Completed
+    }
+}
+
+#[tokio::test]
+async fn execution_state_serializes_cross_session_ordinals() {
+    let state = std::sync::Arc::new(super::RemoteExecutionState::new(std::sync::Arc::new(
+        AbandonFirst,
+    )));
+    let ticket_id = TicketId(7);
+    let first = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            state
+                .record_acquisition(ticket_id, voom_core::LeaseId(1), voom_core::WorkerId(1))
+                .await
+        })
+    };
+    let second = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            state
+                .record_acquisition(ticket_id, voom_core::LeaseId(2), voom_core::WorkerId(2))
+                .await
+        })
+    };
+    let mut records = [first.await.unwrap(), second.await.unwrap()];
+    records.sort_by_key(|record| record.acquisition_ordinal);
+
+    assert_eq!(records[0].acquisition_ordinal, 1);
+    assert_eq!(records[0].action, super::ExecutionAction::Abandoned);
+    assert_eq!(records[1].acquisition_ordinal, 2);
+    assert_eq!(records[1].action, super::ExecutionAction::Completed);
+    assert_eq!(state.records().await.len(), 2);
+}
+
+#[tokio::test]
+async fn node_session_activates_all_workers_once() {
+    let fixture = RemoteRunnerFixture::new().await;
+    let base = fixture.config();
+    let workers = (0..3)
+        .map(|index| super::RemoteWorkerConfig {
+            logical_name: format!("stress-worker-{index}"),
+            operations: base.operations.clone(),
+            artifact_access: base.artifact_access.clone(),
+            max_parallel: 2,
+        })
+        .collect();
+    let session = super::RemoteNodeSession::new(
+        super::RemoteNodeSessionConfig {
+            base_url: base.base_url,
+            node_id: base.node_id,
+            token: base.token,
+            workers,
+            max_polls: 3,
+            idle_timeout: std::time::Duration::from_millis(100),
+            poll_interval: std::time::Duration::from_millis(5),
+            lease_ttl_seconds: 1,
+            healthy_heartbeat_ttl_seconds: 3,
+        },
+        std::sync::Arc::new(super::RemoteExecutionState::new(std::sync::Arc::new(
+            CompleteAll,
+        ))),
+    );
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    let task = tokio::spawn({
+        let session = session.clone();
+        async move { session.run_until_stopped(stop_rx).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    stop_tx.send(true).unwrap();
+    task.await.unwrap().unwrap();
+
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT node_incarnation_id), COUNT(*) FROM workers WHERE node_id = ?",
+    )
+    .bind(i64::try_from(fixture.node_id.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 3));
+}
+
 #[tokio::test]
 async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
     let fixture = RemoteRunnerFixture::new().await;
@@ -200,6 +302,8 @@ impl RemoteRunnerFixture {
             max_polls: 3,
             idle_timeout: std::time::Duration::from_millis(100),
             lease_heartbeat_interval: std::time::Duration::from_millis(10),
+            lease_ttl_seconds: 60,
+            healthy_heartbeat_ttl_seconds: 60,
         }
     }
 
