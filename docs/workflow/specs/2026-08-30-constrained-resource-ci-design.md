@@ -59,6 +59,7 @@ runner. None of these recipes joins `just ci`.
 - `workflow_dispatch` and a weekly schedule;
 - repository-wide `contents: read` permission;
 - a four-entry Linux matrix with `fail-fast: false` and one fresh runner per cell;
+- a 90-minute timeout on every matrix cell;
 - pinned checkout, Rust cache, and just setup actions already used by this repository;
 - one constrained workspace-test command in every cell;
 - conditional stress steps for baseline and disk;
@@ -88,6 +89,9 @@ GitHub-owned repository/run values.
 - An unresolved block device or unsupported write cap fails the disk cell before tests start.
 - Any test, stress, or scale failure fails only its matrix cell; `fail-fast: false` preserves the
   remaining cell evidence.
+- A cell that stops making progress is failed by the 90-minute job timeout. This is an operational
+  cost and notification bound, not a test-duration acceptance threshold; timeout failure flows to
+  the same dependent scheduled-notification job as any other cell failure.
 - A scheduled failure causes the notification job to file a tracking issue. A notification
   failure remains visible as a failed job rather than masking the resource failure.
 - A manual failure does not create an issue because the dispatcher already has the run record.
