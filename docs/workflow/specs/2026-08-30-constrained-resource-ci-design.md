@@ -62,8 +62,10 @@ runner. None of these recipes joins `just ci`.
 - a 90-minute timeout on every matrix cell;
 - pinned checkout, Rust cache, and just setup actions already used by this repository;
 - the same ffmpeg and MKVToolNix package provisioning as the existing Linux all-features job;
-- a cheap real-wrapper preflight using the cell's limits and `true` before compilation, so hosted
-  cgroup or block-device incompatibility is attributable before the test suite starts;
+- a cheap real-wrapper preflight using the cell's CPU, memory, and disk limits with `true` before
+  compilation, so hosted cgroup or block-device incompatibility is attributable before the test
+  suite starts; the CPU-load cell omits `--load` from this preflight because the tracked cleanup
+  defect would otherwise leave one competitor set for the real test to double;
 - one constrained workspace-test command in every cell;
 - conditional stress steps for baseline and disk;
 - one conditional scan-scale step for baseline;
@@ -75,11 +77,13 @@ this lane follows that established operational contract.
 
 ## Data and control flow
 
-GitHub expands the fixed matrix. Each job checks out the same commit and resolves a literal
-resource-argument string owned by the workflow. `just` places that string before the wrapper's
+GitHub expands the fixed matrix. Each job checks out the same commit and resolves literal
+preflight and test resource-argument strings owned by the workflow. The CPU-load preflight string
+omits only `--load 1`; its test string retains it. `just` places test limits before the wrapper's
 command separator. `run-constrained.sh` validates the limits, resolves the backing block device
-when disk throttling is requested, starts any CPU competitors, and enters a systemd user scope.
-The recipe-owned command then runs without accepting workflow-controlled command substitution.
+when disk throttling is requested, starts any requested CPU competitors, and enters a systemd
+user scope. The recipe-owned command then runs without accepting workflow-controlled command
+substitution.
 
 The workflow never consumes issue, pull-request, or user input. Its only write occurs in the
 notification job after a scheduled failure, using GitHub's job token and a body composed from

@@ -168,8 +168,8 @@ added to `just ci`.
 ### Interfaces
 
 Consumes all four Task 1 recipes. Produces the workflow name `constrained-resources`, job
-`constrained`, matrix keys `name`, `limits`, `run_stress`, and `run_scale`, plus dependent job
-`notify-failure`.
+`constrained`, matrix keys `name`, `preflight_limits`, `limits`, `run_stress`, and `run_scale`, plus
+dependent job `notify-failure`.
 
 ### Steps
 
@@ -202,18 +202,24 @@ Consumes all four Task 1 recipes. Produces the workflow name `constrained-resour
          matrix:
            include:
              - name: baseline
+               preflight_limits: --cpus 0-3 --memory 16G
                limits: --cpus 0-3 --memory 16G
                run_stress: true
                run_scale: true
              - name: cpu-load
+               # Do not start load generators in preflight: debt 0006 means the
+               # real test would inherit them and then start a second set.
+               preflight_limits: --cpus 0-3 --memory 16G
                limits: --cpus 0-3 --memory 16G --load 1
                run_stress: false
                run_scale: false
              - name: disk
+               preflight_limits: --cpus 0-3 --memory 16G --write-bps 40M
                limits: --cpus 0-3 --memory 16G --write-bps 40M
                run_stress: true
                run_scale: false
              - name: memory
+               preflight_limits: --cpus 0-3 --memory 8G
                limits: --cpus 0-3 --memory 8G
                run_stress: false
                run_scale: false
@@ -231,7 +237,7 @@ Consumes all four Task 1 recipes. Produces the workflow name `constrained-resour
              sudo apt-get update
              sudo apt-get install -y ffmpeg mkvtoolnix
          - name: Verify resource controls
-           run: ./scripts/run-constrained.sh ${{ matrix.limits }} -- true
+           run: ./scripts/run-constrained.sh ${{ matrix.preflight_limits }} -- true
          - name: Run constrained workspace tests
            run: just test-constrained ${{ matrix.limits }}
          - name: Run constrained distributed stress
@@ -268,8 +274,9 @@ Consumes all four Task 1 recipes. Produces the workflow name `constrained-resour
 
 The four literal cells and conditional steps match ADR 0096; failures do not cancel siblings;
 every cell is bounded to 90 minutes; media prerequisites match the established Linux all-features
-job; the real wrapper is proven before compilation; only scheduled failures can reach the
-issue-write job; no fork or pull-request event can execute the workflow.
+job; the real wrapper is proven before compilation; the CPU preflight omits load while the CPU
+test applies `--load 1` exactly once; only scheduled failures can reach the issue-write job; no
+fork or pull-request event can execute the workflow.
 
 ## Task 3 — Document and exercise the operator path
 
