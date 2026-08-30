@@ -37,17 +37,22 @@ one seeded ticket whose payload selects chaos crash mode. It performs these orde
    and epoch.
 2. Spawn `chaos-worker` on loopback with an ephemeral port, credentials derived from the activated
    identity, piped stdin/stdout, inherited stderr, and `kill_on_drop(true)`.
-3. Receive one bounded `BOUND addr=...` readiness observation from the supervisor and mark the
-   worker ready through the API. The supervisor remains the sole owner of the child and all pipes.
+3. Receive one `BOUND addr=...` readiness observation from the supervisor within five seconds and
+   at no more than 4 KiB including the newline, then mark the worker ready through the API. Missing
+   newline at the byte limit, extra bytes in the frame, timeout, or a non-loopback address is
+   malformed readiness. The supervisor remains the sole owner of the child and all pipes.
 4. Acquire one transcode-video lease through the API and construct the worker-protocol
    `OperationRequest` without flattening its typed lease ID. Preserve the acquired operation but
    replace only the dispatch payload with `{"mode":"crash","path":"/stress/process-crash"}`.
    The durable ticket payload is unchanged and remains the input to the synthetic retry. Extend
    `chaos-worker::dispatch_operation` to accept `TranscodeVideo` only when this parsed mode is
    `Crash`; its baseline and other fault operation allowlist remains unchanged.
-5. Dispatch over the real worker socket. Accept only a connection termination paired with the
-   child exiting non-zero; an ordinary terminal response, no lease, readiness timeout, or a child
-   that exits before dispatch is an error.
+5. Dispatch over the real worker socket under one five-second post-dispatch deadline covering both
+   socket termination and the supervisor's child-exit observation. Accept only a connection
+   termination paired with the child exiting non-zero. An ordinary terminal response, no lease,
+   readiness timeout, early child exit, or post-dispatch timeout returns a phase-specific error to
+   the unconditional shutdown path. Shutdown may use a bounded pre-kill grace, but its final wait
+   continues until reap as ADR 0095 requires.
 6. Await the child, remove it from the supervisor registry, and append one abandoned
    `ExecutionRecord` plus one `ProcessCrashObservation` containing PID, node ID, worker ID, ticket
    ID, lease ID, and exit status.
@@ -61,8 +66,9 @@ The integration harness starts one dedicated supervisor task for the whole prelu
 owner of every `tokio::process::Child`, stdin, stdout, and stderr disposition from spawn through
 wait. The runner communicates over bounded Tokio channels with commands `Spawn`, `Wait`, and
 `ShutdownAll`; replies are `Ready { child_id, pid, bound }`, `Exited { child_id, status }`, or an
-operation-specific error. `Spawn` registers the child before reading readiness, reads exactly one
-bounded stdout line, and returns only the parsed loopback address and identity. `Wait` owns the
+operation-specific error. `Spawn` registers the child before reading readiness, reads at most one
+4 KiB newline-terminated stdout frame within five seconds, and returns only the parsed loopback
+address and identity. `Wait` owns the
 exit wait and removes the child only after reap. A successful crash is explicitly waited and
 removed. Any
 error or command-channel closure runs `shutdown_all`: close retained stdin, wait up to five
@@ -76,7 +82,8 @@ proven empty. After either normal completion or cleanup, the registry must be em
 
 The supervisor is test-only and accepts the binary path explicitly; it never searches `PATH`.
 All bind addresses are literal loopback with port zero. The supervisor owns and drains stdout's
-single readiness line; `chaos-worker` emits no later stdout contract. Stderr is inherited and
+single readiness frame under the byte and time limits above; `chaos-worker` emits no later stdout
+contract. Stderr is inherited and
 stdin is retained only so shutdown can close it before waiting. Aborting the runner while it waits
 for `Ready` or `Exited` drops only a reply receiver; command-channel closure still drives the
 supervisor's cleanup path without surrendering a child handle or pipe lock.
@@ -103,8 +110,8 @@ conservation check runs.
 
 - Invalid configuration fails before database, server, or process creation.
 - Missing or non-executable binary, malformed readiness, readiness timeout, early clean exit,
-  acquisition without a lease, unexpected worker terminal output, or an unreaped child returns an
-  error naming the node/process phase.
+  acquisition without a lease, unexpected worker terminal output, post-dispatch timeout, or an
+  unreaped child returns an error naming the node/process phase.
 - Once a child has spawned, ordinary error, inner-task panic, and inner-task cancellation paths all
   invoke and join supervisor cleanup before the outer test returns. Server and synthetic-session
   tasks retain the existing stop/join/abort ordering.
@@ -141,9 +148,12 @@ not defend against a malicious locally substituted build artifact or a hostile l
    set is acquired; inject a mismatched acquired ticket and require cleanup before dispatch.
 7. Abort the runner while it awaits readiness and while it awaits exit; in both cases require the
    supervisor to retain ownership, reap the child, and report an empty registry.
-8. Inject a duplicate terminal observation into the reused conservation input, observe the
+8. Use a test child that emits more than 4 KiB without a newline and one that accepts dispatch but
+   stays alive; require malformed-readiness and post-dispatch-timeout errors respectively, followed
+   by kill, final wait, and an empty supervisor registry.
+9. Inject a duplicate terminal observation into the reused conservation input, observe the
    existing duplicate diagnostic, revert, and rerun green.
-9. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
+10. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
    first real-process run configuration, duration, counts, and findings in the pull request.
 
 ## Durable workflow checkpoint
