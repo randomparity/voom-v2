@@ -61,11 +61,12 @@ heartbeat or settlement. Its supervisor immediately starts a replacement lane fo
 Stress leases use a one-second TTL while registered nodes use a 60-second heartbeat TTL. The
 harness and API share an injected `ManualClock`; Tokio time remains real. When abandonment is
 observed, the coordinator closes a session-wide recovery gate. The gate is a Tokio asynchronous
-read/write lock: a lane holds a read permit across its
-complete HTTP acquire request, while recovery takes and holds the write permit through the
-snapshot, heartbeat refresh, and `remote_recover`. Acquiring the write permit atomically blocks new
-admissions and waits for every admitted request to resolve before the coordinator snapshots every
-other held execution. For one-second leases acquired at `T0`, the coordinator advances to
+read/write lock: a lane holds a read permit across each HTTP request that mutates lease state —
+acquire, lease heartbeat, complete, and fail — while local fake-provider dispatch runs without a
+permit. Recovery takes and holds the write permit through the snapshot, heartbeat refresh, and
+`remote_recover`. Acquiring the write permit atomically blocks new mutations and waits for every
+admitted mutation to resolve before the coordinator snapshots every other held execution. For
+one-second leases acquired at `T0`, the coordinator advances to
 `T0 + 500ms`, heartbeats healthy leases so their deadlines become `T0 + 1500ms`, then advances to
 `T0 + 1250ms`, calls `ControlPlane::remote_recover`, and reopens the gate. The abandoned leases
 are overdue and the refreshed leases are not;
@@ -75,7 +76,8 @@ abandoned set exactly. A focused test holds one healthy lease beside one abandon
 deliberately blocks another acquire during recovery preparation, and proves the gate waits for it,
 the healthy heartbeat succeeds, and only the abandoned lease expires. A second admission test
 holds the recovery write permit first and proves a lane cannot begin its HTTP acquire until the
-permit is released.
+permit is released. A third interleaving finishes local dispatch after the snapshot and proves its
+completion request waits until recovery releases the write permit.
 
 The harness therefore tests the same durable recovery path as a lost process while deliberately
 excluding OS process and socket teardown, which #606 owns.

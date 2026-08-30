@@ -30,11 +30,13 @@ the lease deadline but remains before the node deadline. Require the recovery re
 stale nodes while it expires and requeues the abandoned lease. Use one injected `ManualClock` for
 the API control plane and harness. Before advancing it across an abandoned deadline, snapshot all
 other held leases. A session-wide asynchronous read/write lock is the recovery gate. Every lane
-holds a read permit across its complete HTTP acquire request; the coordinator takes the write
-permit before snapshotting and holds it through heartbeat refresh and recovery. Taking the write
-permit therefore both stops new polls and waits for every admitted acquire to resolve. Heartbeat
-healthy leases through HTTP before their current deadlines, advance again to a timestamp after the
-abandoned deadlines but before the refreshed healthy deadlines, recover, and release the gate.
+holds a read permit across each HTTP request that mutates lease state: acquire, lease heartbeat,
+complete, and fail. Local fake-provider dispatch does not hold a permit. The coordinator takes the
+write permit before snapshotting and holds it through heartbeat refresh and recovery. Taking the
+write permit therefore stops new mutations and waits for every admitted mutation to resolve.
+Heartbeat healthy leases through HTTP before their current deadlines, advance again to a timestamp
+after the abandoned deadlines but before the refreshed healthy deadlines, recover, and release the
+gate.
 Require the recovery report's expired set to equal the outstanding abandoned set exactly.
 
 Keep execution observations in a harness-owned in-memory log. Compare it with durable ticket,
@@ -53,6 +55,8 @@ lease, and event state after drain; do not add a production observation table or
   every observed non-abandoned held lease at the advanced domain time and rejects extra expiries.
 - The recovery gate closes the snapshot race: no acquisition can appear between the healthy-lease
   snapshot and the expiry scan.
+- Healthy settlement cannot invalidate the snapshot: completion, failure, and lease heartbeat wait
+  behind the same write permit while recovery owns it.
 - Existing single-runner tests and callers remain source-compatible.
 - The execution log is independent enough to detect cross-worker duplicate execution but is lost
   if the test process itself exits, which is acceptable for an in-process opt-in test.
@@ -85,6 +89,8 @@ lease, and event state after drain; do not add a production observation table or
 - **Check a boolean gate before incrementing an in-flight counter.** judgment: those two operations
   leave a scheduler window where recovery can observe zero before an already-admitted lane starts;
   one read/write-lock permit makes admission and draining atomic.
+- **Gate only acquisition.** judgment: a healthy lane could settle after the snapshot and before
+  its coordinator heartbeat, turning a valid completion into a spurious not-held heartbeat error.
 - **Heartbeat healthy leases only after crossing the abandoned deadline.** verified:
   `SqliteLeaseRepo::heartbeat_in_tx` rejects `expires_at <= now` in
   `crates/voom-store/src/repo/execution/leases.rs`, so equal-TTL healthy leases must be refreshed
