@@ -31,8 +31,9 @@ stale nodes while it expires and requeues the abandoned lease. Use one injected 
 the API control plane and harness. Before advancing it across an abandoned deadline, snapshot all
 other held leases. A session-wide recovery gate first stops new polls and waits for every in-flight
 acquire request to resolve; only then may the coordinator snapshot. After the advance, heartbeat
-those healthy leases through HTTP, recover, and reopen polling. Require the recovery report's
-expired set to equal the outstanding abandoned set exactly.
+those healthy leases through HTTP before their current deadlines, advance again to a timestamp
+after the abandoned deadlines but before the refreshed healthy deadlines, recover, and reopen
+polling. Require the recovery report's expired set to equal the outstanding abandoned set exactly.
 
 Keep execution observations in a harness-owned in-memory log. Compare it with durable ticket,
 lease, and event state after drain; do not add a production observation table or schema.
@@ -79,6 +80,10 @@ lease, and event state after drain; do not add a production observation table or
   intentionally abandoned lease.
 - **Snapshot healthy leases while polling continues.** judgment: an acquire completing after the
   snapshot would miss the heartbeat set and become an unintended expiry at the advanced time.
+- **Heartbeat healthy leases only after crossing the abandoned deadline.** verified:
+  `SqliteLeaseRepo::heartbeat_in_tx` rejects `expires_at <= now` in
+  `crates/voom-store/src/repo/execution/leases.rs`, so equal-TTL healthy leases must be refreshed
+  before the clock crosses their original deadline.
 - **Persist execution observations in SQLite.** judgment: a new schema and production write path
   are unnecessary for test-only independent observation and outside issue #581's surface.
 - **Keep only the existing one-lease runner.** verified: `run_once_to_completion` returns after one
