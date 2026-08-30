@@ -6,7 +6,6 @@ use super::super::{
 use secrecy::SecretString;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
-use tracing::instrument::WithSubscriber;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, LibraryId, NodeIncarnationEndReason, NodeIncarnationStatus,
     OperationKind, ProviderLocator, ScanSessionStatus, StorageProviderKind, StorageRootId,
@@ -516,7 +515,7 @@ async fn remote_activation_samples_quota_window_after_writer_serialization() {
     waiting.await.unwrap().unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn remote_activation_quota_rejection_is_operator_visible_without_secrets() {
     let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
     let registered = register_remote_node(&cp).await;
@@ -540,11 +539,8 @@ async fn remote_activation_quota_rejection_is_operator_visible_without_secrets()
         .with_ansi(false)
         .with_writer(logs.clone())
         .finish();
-    let error = cp
-        .remote_activate(rejected)
-        .with_subscriber(subscriber)
-        .await
-        .unwrap_err();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let error = cp.remote_activate(rejected).await.unwrap_err();
 
     assert_eq!(error.error_code(), ErrorCode::Conflict);
     let output = logs.text();
