@@ -36,6 +36,12 @@ exit, escalates to kill on a bounded timeout, and waits again. Its drop path ena
 `kill_on_drop` as a final failure-unwind backstop. Success requires the explicit reap path and an
 empty supervisor registry; drop is not accepted as proof.
 
+After the first child is registered, make cleanup unconditional for every ordinary `Result`
+return: retain the prelude result, always await shutdown/reap for the complete registry, verify the
+registry is empty, and only then return the original result or a combined error that preserves
+both the operation and cleanup failures. `kill_on_drop` contains cancellation and panic damage; it
+never satisfies the returned-error reap guarantee.
+
 The number of process crashes is derived from a validated opt-in percentage and ticket count,
 rounded down with a minimum of one when the percentage is non-zero. It may not exceed the number
 of tickets or consume all allowed attempts. The default remains zero so `just stress` keeps its
@@ -54,6 +60,8 @@ current cost and behavior.
   lifecycle observations for reproduction.
 - `kill_on_drop` limits damage during panic, while explicit bounded wait/kill/wait proves reaping
   on ordinary success and returned-error paths.
+- A failure injected after one child starts must observe that child's completed wait before the
+  harness returns, proving the unconditional cleanup structure bites.
 
 ## Considered & rejected
 
