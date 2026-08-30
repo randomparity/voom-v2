@@ -62,15 +62,22 @@ until the existing control-plane recovery path expires it.
 
 ### Child supervisor
 
-The integration harness starts one dedicated supervisor task for the whole prelude. It is the sole
-owner of every `tokio::process::Child`, stdin, stdout, and stderr disposition from spawn through
-wait. The runner communicates over bounded Tokio channels with commands `Spawn`, `Wait`, and
-`ShutdownAll`; replies are `Ready { child_id, pid, bound }`, `Exited { child_id, status }`, or an
-operation-specific error. `Spawn` registers the child before reading readiness, reads at most one
-4 KiB newline-terminated stdout frame within five seconds, and returns only the parsed loopback
-address and identity. `Wait` owns the
-exit wait and removes the child only after reap. A successful crash is explicitly waited and
-removed. Any
+The integration harness starts one dedicated supervisor actor for the whole prelude. For each
+spawn, that actor starts one child-watcher task and transfers the `tokio::process::Child`, stdin,
+and stdout to it. The watcher is the sole child owner from spawn through wait; the actor owns its
+shutdown sender and join handle in a registry. The runner communicates with the actor over a
+bounded command channel using `Spawn`, `Wait`, and `ShutdownAll`. Replies are
+`Ready { child_id, pid, bound }`, `Exited { child_id, status }`, or an operation-specific error.
+
+Each watcher reads at most one 4 KiB newline-terminated readiness frame within five seconds, then
+selects concurrently between `child.wait()` and its shutdown receiver. Natural exit returns the
+status exactly once. When shutdown wins, the watcher closes stdin, allows the five-second grace,
+issues kill if still running, and retains the sole child handle through the final wait. A pending
+`Wait` reply receives the same exit status or cleanup error when shutdown wins; it is never left
+waiting on a second owner. The actor itself continuously selects between runner commands and
+watcher joins, so a stay-alive child cannot prevent it receiving `ShutdownAll` or noticing command
+channel closure. It removes a registry entry only after its watcher join proves reap. A successful
+crash is explicitly waited and removed. Any
 error or command-channel closure runs `shutdown_all`: close retained stdin, wait up to five
 seconds, issue kill for a still-running child, then retain ownership and wait until that controlled
 child is reaped. The final wait is intentionally not abandoned behind a second timeout: returning
@@ -81,12 +88,12 @@ supervisor before returning, propagating a body panic/cancellation only after th
 proven empty. After either normal completion or cleanup, the registry must be empty.
 
 The supervisor is test-only and accepts the binary path explicitly; it never searches `PATH`.
-All bind addresses are literal loopback with port zero. The supervisor owns and drains stdout's
-single readiness frame under the byte and time limits above; `chaos-worker` emits no later stdout
-contract. Stderr is inherited and
-stdin is retained only so shutdown can close it before waiting. Aborting the runner while it waits
-for `Ready` or `Exited` drops only a reply receiver; command-channel closure still drives the
-supervisor's cleanup path without surrendering a child handle or pipe lock.
+All bind addresses are literal loopback with port zero. The watcher owns and drains stdout's single
+readiness frame under the byte and time limits above; `chaos-worker` emits no later stdout
+contract. Stderr is inherited and stdin stays with the watcher so shutdown can close it before
+waiting. Aborting the runner while it waits for `Ready` or `Exited` drops only a reply receiver;
+command-channel closure still drives the actor's cleanup path, whose watcher retains the unique
+child handle without a shared lock.
 
 ### Stress orchestration
 
@@ -150,7 +157,8 @@ not defend against a malicious locally substituted build artifact or a hostile l
    supervisor to retain ownership, reap the child, and report an empty registry.
 8. Use a test child that emits more than 4 KiB without a newline and one that accepts dispatch but
    stays alive; require malformed-readiness and post-dispatch-timeout errors respectively, followed
-   by kill, final wait, and an empty supervisor registry.
+   by kill, final wait, completion of the pending `Wait` reply, a joined actor, and an empty
+   supervisor registry rather than merely timing out the outer test.
 9. Inject a duplicate terminal observation into the reused conservation input, observe the
    existing duplicate diagnostic, revert, and rerun green.
 10. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
