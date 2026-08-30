@@ -60,9 +60,12 @@ is applied only to attempt 1 of a selected ticket: the lane records `abandoned` 
 heartbeat or settlement. Its supervisor immediately starts a replacement lane for the same worker.
 Stress leases use a one-second TTL while registered nodes use a 60-second heartbeat TTL. The
 harness and API share an injected `ManualClock`; Tokio time remains real. When abandonment is
-observed, the coordinator closes a session-wide recovery gate. Every lane checks the gate before
-polling; the coordinator waits until the in-flight-acquire counter reaches zero, then snapshots
-every other held execution. For one-second leases acquired at `T0`, the coordinator advances to
+observed, the coordinator closes a session-wide recovery gate. The gate is a Tokio asynchronous
+read/write lock: a lane holds a read permit across its
+complete HTTP acquire request, while recovery takes and holds the write permit through the
+snapshot, heartbeat refresh, and `remote_recover`. Acquiring the write permit atomically blocks new
+admissions and waits for every admitted request to resolve before the coordinator snapshots every
+other held execution. For one-second leases acquired at `T0`, the coordinator advances to
 `T0 + 500ms`, heartbeats healthy leases so their deadlines become `T0 + 1500ms`, then advances to
 `T0 + 1250ms`, calls `ControlPlane::remote_recover`, and reopens the gate. The abandoned leases
 are overdue and the refreshed leases are not;
@@ -70,7 +73,9 @@ both times remain before the node deadline. Every healthy heartbeat must succeed
 The report must contain no stale nodes and its expired-lease set must equal the outstanding
 abandoned set exactly. A focused test holds one healthy lease beside one abandoned lease,
 deliberately blocks another acquire during recovery preparation, and proves the gate waits for it,
-the healthy heartbeat succeeds, and only the abandoned lease expires.
+the healthy heartbeat succeeds, and only the abandoned lease expires. A second admission test
+holds the recovery write permit first and proves a lane cannot begin its HTTP acquire until the
+permit is released.
 
 The harness therefore tests the same durable recovery path as a lost process while deliberately
 excluding OS process and socket teardown, which #606 owns.

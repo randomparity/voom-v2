@@ -29,11 +29,13 @@ stress lease TTL strictly below the registered node heartbeat TTL; the recovery 
 the lease deadline but remains before the node deadline. Require the recovery report to contain no
 stale nodes while it expires and requeues the abandoned lease. Use one injected `ManualClock` for
 the API control plane and harness. Before advancing it across an abandoned deadline, snapshot all
-other held leases. A session-wide recovery gate first stops new polls and waits for every in-flight
-acquire request to resolve; only then may the coordinator snapshot. After the advance, heartbeat
-those healthy leases through HTTP before their current deadlines, advance again to a timestamp
-after the abandoned deadlines but before the refreshed healthy deadlines, recover, and reopen
-polling. Require the recovery report's expired set to equal the outstanding abandoned set exactly.
+other held leases. A session-wide asynchronous read/write lock is the recovery gate. Every lane
+holds a read permit across its complete HTTP acquire request; the coordinator takes the write
+permit before snapshotting and holds it through heartbeat refresh and recovery. Taking the write
+permit therefore both stops new polls and waits for every admitted acquire to resolve. Heartbeat
+healthy leases through HTTP before their current deadlines, advance again to a timestamp after the
+abandoned deadlines but before the refreshed healthy deadlines, recover, and release the gate.
+Require the recovery report's expired set to equal the outstanding abandoned set exactly.
 
 Keep execution observations in a harness-owned in-memory log. Compare it with durable ticket,
 lease, and event state after drain; do not add a production observation table or schema.
@@ -80,6 +82,9 @@ lease, and event state after drain; do not add a production observation table or
   intentionally abandoned lease.
 - **Snapshot healthy leases while polling continues.** judgment: an acquire completing after the
   snapshot would miss the heartbeat set and become an unintended expiry at the advanced time.
+- **Check a boolean gate before incrementing an in-flight counter.** judgment: those two operations
+  leave a scheduler window where recovery can observe zero before an already-admitted lane starts;
+  one read/write-lock permit makes admission and draining atomic.
 - **Heartbeat healthy leases only after crossing the abandoned deadline.** verified:
   `SqliteLeaseRepo::heartbeat_in_tx` rejects `expires_at <= now` in
   `crates/voom-store/src/repo/execution/leases.rs`, so equal-TTL healthy leases must be refreshed
