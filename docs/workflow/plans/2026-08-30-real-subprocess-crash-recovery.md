@@ -60,7 +60,8 @@ and the existing `ManualClock` recovery harness.
 - Modify `crates/voom-fakes/src/remote_stress_test.rs`: configuration, selected-root seeding,
   process prelude orchestration, observations, and conservation evidence.
 - Modify `justfile`: prebuild `chaos-worker` before the opt-in stress test so the existing
-  `voom_test_support::cargo_bin_or_build` lookup is a no-op under the prebuilt-worker guard.
+  `voom_test_support::worker::cargo_bin_or_build` lookup is a no-op under the explicitly set
+  `VOOM_TEST_PREBUILT_WORKERS=1` guard.
 - Modify `docs/runbooks/distributed-stress-harness.md`: new knob, process evidence, and a small
   real-process example.
 
@@ -134,8 +135,11 @@ other fault modes for transcode.
    Write tests for: readiness success; >4 KiB/no-newline rejection; child exits before readiness;
    natural exit before delayed `wait`; duplicate wait rejection; stay-alive child shutdown;
    caller cancellation after natural exit without wait; and shutdown attempting every registered
-   child. Test helper processes use the test executable with a private environment-selected helper
-   branch, not a shell command. Run
+   child. Separately abort an inner caller while its child watcher awaits readiness and while it
+   awaits exit, and trigger a post-spawn inner-task panic; the non-cancellable outer owner must
+   call shutdown, join the actor, observe completed child wait and an empty registry, and only then
+   propagate the abort or panic. Test helper processes use the test executable with a private
+   environment-selected helper branch, not a shell command. Run
    `cargo test -p voom-fakes --lib process_supervisor`; expect compilation failure because the
    interfaces do not exist.
 2. Implement the minimum bounded actor/watcher state machine. Read readiness with `take(4097)` so
@@ -230,27 +234,34 @@ existing execution records as `ExecutionAction::Abandoned`; the existing recover
    wait. Use the real loopback control-plane fixture and supervisor test helper where the worker
    boundary matters. Run `cargo test -p voom-fakes --lib process_crash`; expect red before the new
    entry point, then implement the minimum entry point and expect green.
-4. Wire `run_stress`: resolve `chaos-worker` with
-   `voom_test_support::cargo_bin_or_build("voom-fakes", "chaos-worker")` only when the process
+4. Add harness-owner tests that run the process prelude in an inner task, abort once while the
+   runner awaits readiness, abort once while it awaits child exit, and panic once immediately after
+   spawn registration. In all three cases, require the outer owner to shut down and join the
+   supervisor, prove the child's wait completed and the registry is empty, and only then propagate
+   the inner outcome. Keep the natural-exit-without-`Wait` tombstone case from Task 1 separate.
+5. Wire `run_stress`: import and resolve `chaos-worker` with
+   `voom_test_support::worker::cargo_bin_or_build("voom-fakes", "chaos-worker")` only when the process
    count is non-zero; register one remote node per selected crash; run crash attempts sequentially;
    require the observed ticket set equals the selected set; release the remaining workload; start
    existing synthetic sessions; and feed abandoned process records into the unchanged recovery and
    conservation paths. Hold the inner harness task separately from `ProcessSupervisor::shutdown`
    so every returned error or join error is combined only after supervisor cleanup.
-5. Run a minimal ignored cell:
+6. Run a zero-process ignored cell with no prebuilt-worker environment and prove no binary lookup
+   or nested build occurs. Then run a minimal process cell through the recipe:
    `VOOM_STRESS_NODES=1 VOOM_STRESS_RUNNERS_PER_NODE=1 VOOM_STRESS_TICKETS=8 VOOM_STRESS_PROCESS_CRASH_PERCENT=25 VOOM_STRESS_DEPENDENCY_PERCENT=90 VOOM_STRESS_DRAIN_SECONDS=30 just stress`.
    Expect two non-zero process exits, two expired first leases, ten total attempts, eight terminal
    tickets, zero held leases, zero supervised children, and conservation success.
-6. Prove the conservation test bites: temporarily append a second non-abandoned record for one
+7. Prove the conservation test bites: temporarily append a second non-abandoned record for one
    process ticket before `assert_conservation`, rerun the minimal cell, and require the existing
    duplicate-execution diagnostic. Revert only that controlled fault and rerun the identical cell
    green.
-7. Update `just stress` to prebuild `chaos-worker` and keep the ignored library test as its only
-   executed test. Update the runbook with the new default/range, evidence fields, and minimal cell.
+8. Update `just stress` to run `cargo build -p voom-fakes --bin chaos-worker --all-features` first,
+   then invoke the ignored library test with `VOOM_TEST_PREBUILT_WORKERS=1`; keep that test as its
+   only executed test. Update the runbook with the new default/range, evidence fields, and minimal cell.
    Run `just --list`, `cargo test -p voom-fakes`, and the minimal process cell; expect green.
-8. Run `just fmt-check`, `just lint`, `just check-test-layout`, `just test`, and `just ci` bare.
+9. Run `just fmt-check`, `just lint`, `just check-test-layout`, `just test`, and `just ci` bare.
    Record observed durations and first real-process findings for the PR body.
-9. Commit implementation paths with `test: exercise lease recovery after process crashes`, then
+10. Commit implementation paths with `test: exercise lease recovery after process crashes`, then
    commit recipe/runbook paths with `docs: document process crash stress coverage`.
 
 ### Acceptance
