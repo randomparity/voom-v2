@@ -46,17 +46,21 @@ whose declaration contains K uniquely named workers. The activation response sup
 worker IDs. Each worker starts `max_parallel` independent polling lanes using the same node
 incarnation and worker identity, fresh idempotency keys per request, and the existing HTTP methods.
 
-An execution record contains `ticket_id`, `lease_id`, `worker_id`, attempt, and one observed action:
-completed, failed, stalled-then-completed, or abandoned. Records are appended to a session-local
-`Arc<Mutex<Vec<_>>>` only after acquisition and before the selected action, so an abandoned lease
-is still independently visible. The stress harness merges logs from every node after all tasks
-join. This log is test observation only; it is never persisted into VOOM.
+An execution record contains `ticket_id`, `lease_id`, `worker_id`, a harness-owned acquisition
+ordinal, and one observed action:
+completed, failed, stalled-then-completed, or abandoned. Records are appended to the shared
+execution log only after acquisition and before the selected action, so an abandoned lease is still
+independently visible. One `Arc<Mutex<ExecutionState>>` is shared across all L node sessions. Its
+single critical section increments an ordinal keyed by `TicketId`, selects the fault from that
+ordinal, and appends the record. The public HTTP acquire payload supplies `ticket_id` but not a
+durable attempt count, so the harness never claims to decode one. This log is test observation
+only; it is never persisted into VOOM.
 
 ### Deterministic fault policy
 
-Fault selection is a pure function of the seed, ticket ID, and attempt. Stall sleeps for a bounded
+Fault selection is a pure function of the seed, ticket ID, and harness acquisition ordinal. Stall sleeps for a bounded
 duration shorter than the lease TTL, heartbeats once after the stall, and settles normally. Crash
-is applied only to attempt 1 of a selected ticket: the lane records `abandoned` and returns without
+is applied only to ordinal 1 of a selected ticket: the lane records `abandoned` and returns without
 heartbeat or settlement. Its supervisor immediately starts a replacement lane for the same worker.
 Stress leases use a one-second TTL while registered nodes use a 60-second heartbeat TTL. The
 harness and API share an injected `ManualClock`; Tokio time remains real. When abandonment is
@@ -116,8 +120,9 @@ It requires:
 2. Each ticket has exactly one terminal ticket event matching its durable terminal state.
 3. No lease remains held. Each execution record names a durable lease for the same ticket and
    worker.
-4. Each ticket's durable `attempt` equals its number of `lease.acquired` events and its distinct
-   execution-log lease count. The sum of ticket attempts equals both global counts.
+4. Each ticket's durable `attempt` equals its number of `lease.acquired` events, its distinct
+   execution-log lease count, and the highest contiguous harness acquisition ordinal. The sum of
+   ticket attempts equals all three global counts.
 5. A ticket may have multiple attempts but cannot have more than one non-abandoned execution, and
    no lease may appear under two workers. This distinguishes a legitimate retry from concurrent
    duplicate execution.

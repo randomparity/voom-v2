@@ -89,18 +89,31 @@ pub struct ExecutionRecord {
     pub ticket_id: TicketId,
     pub lease_id: LeaseId,
     pub worker_id: WorkerId,
-    pub attempt: u32,
+    pub acquisition_ordinal: u32,
     pub action: ExecutionAction,
 }
 
 pub trait RemoteFaultPolicy: Send + Sync {
-    fn action(&self, ticket_id: TicketId, attempt: u32) -> ExecutionAction;
+    fn action(&self, ticket_id: TicketId, acquisition_ordinal: u32) -> ExecutionAction;
 }
 
-pub struct RemoteNodeSession { /* private request state and recovery gate */ }
+pub struct RemoteExecutionState { /* private ordinals + records + fault policy */ }
+
+impl RemoteExecutionState {
+    pub fn new(faults: Arc<dyn RemoteFaultPolicy>) -> Self;
+    pub async fn record_acquisition(
+        &self,
+        ticket_id: TicketId,
+        lease_id: LeaseId,
+        worker_id: WorkerId,
+    ) -> ExecutionRecord;
+    pub async fn records(&self) -> Vec<ExecutionRecord>;
+}
+
+pub struct RemoteNodeSession { /* private request state, shared execution state, recovery gate */ }
 
 impl RemoteNodeSession {
-    pub fn new(config: RemoteNodeSessionConfig, faults: Arc<dyn RemoteFaultPolicy>) -> Self;
+    pub fn new(config: RemoteNodeSessionConfig, executions: Arc<RemoteExecutionState>) -> Self;
     pub async fn run_until_cancelled(
         &self,
         stop: CancellationToken,
@@ -132,8 +145,13 @@ Steps:
    It must prove a held write permit blocks acquire, heartbeat, complete, and fail read permits,
    while local dispatch does not need one. Run the focused test and expect failure until each
    request method acquires `RwLock::read_owned`; then expect one pass.
-4. Add `ticket_id` and `attempt` to the private `RemoteLeaseDispatch` response decoder, matching
-   the public API payload. Append an `ExecutionRecord` before applying the fault action. An
+4. Add `ticket_id` to the private `RemoteLeaseDispatch` response decoder, matching the public API
+   payload. Do not add `attempt`: the HTTP contract does not carry it. Share one
+   `RemoteExecutionState` across every node session. In one mutex critical section keyed by
+   `TicketId`, increment the acquisition ordinal, select the action, and append the
+   `ExecutionRecord` before applying that action. Add a cross-session concurrency test that calls
+   `record_acquisition` concurrently for one ticket and requires ordinals `[1, 2]` with exactly one
+   record eligible for first-ordinal abandonment. An
    `Abandoned` action returns the lane to polling without heartbeat or settlement; `StalledThenCompleted`
    sleeps for the configured bounded duration, heartbeats, then completes. Completed/failed retain
    current dispatch classification.
@@ -177,7 +195,7 @@ struct ConservationInput { tickets: Vec<Ticket>, leases: Vec<Lease>,
     dependencies: Vec<(TicketId, TicketId)> }
 
 fn stress_config_from_env() -> Result<StressConfig, String>;
-fn select_fault(seed: u64, ticket_id: TicketId, attempt: u32,
+fn select_fault(seed: u64, ticket_id: TicketId, acquisition_ordinal: u32,
     stall_percent: u8, crash_percent: u8) -> ExecutionAction;
 fn assert_conservation(input: &ConservationInput) -> Result<(), String>;
 ```
@@ -188,9 +206,10 @@ Steps:
    environment mutation with the test module's single mutex and restore every prior value. Run
    `cargo test -p voom-fakes --lib stress_config`; expect failure before the parser exists, then
    implement direct `std::env::var` parsing with named errors and rerun green.
-2. Write deterministic selection tests proving attempt >1 never abandons, identical seed/ticket
+2. Rename the final parameter to `acquisition_ordinal`. Write deterministic selection tests proving
+   ordinal >1 never abandons, identical seed/ticket
    yields identical action, and configured zeroes produce completed actions. Implement selection
-   with the installed `blake3` crate over seed/ticket/attempt bytes; map the first digest byte into
+   with the installed `blake3` crate over seed/ticket/ordinal bytes; map the first digest byte into
    0–99. Run `cargo test -p voom-fakes --lib stress_fault`; expect green.
 3. Write synthetic conservation tests for: valid success; duplicate non-abandoned execution;
    attempt/log/event mismatch; leaked held lease; mismatched terminal event; dependency acquisition
