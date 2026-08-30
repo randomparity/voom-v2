@@ -31,7 +31,11 @@ observation, total attempts, and retries.
 
 Add a crate-private process-backed entry point beside `RemoteSyntheticRunner`; it is implementation
 support for the in-crate stress harness, not a new externally consumable `voom-fakes` API. It consumes the existing
-API runner configuration, the `chaos-worker` binary path supplied by the integration harness, and
+API runner configuration and an explicit `chaos-worker` binary path. When the process percentage
+is non-zero, `just stress` first builds that binary in the active Cargo target directory, sets
+`VOOM_TEST_PREBUILT_WORKERS=1`, and the library test resolves the platform-specific path with
+`voom_test_support::worker::cargo_bin_or_build`. A missing or non-file path fails before database,
+server, or process setup. With zero percent, the recipe performs no binary build or lookup. The entry point also consumes
 one seeded ticket whose payload selects chaos crash mode. It performs these ordered steps:
 
 1. Activate exactly one worker on its dedicated registered node and retain the returned worker ID
@@ -183,6 +187,8 @@ not defend against a malicious locally substituted build artifact or a hostile l
    existing duplicate diagnostic, revert, and rerun green.
 12. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
    first real-process run configuration, duration, counts, and findings in the pull request.
+    The process-arm proof must use the exact conditional-prebuild `just stress` recipe; a separate
+    integration-test-only `CARGO_BIN_EXE_*` path is not part of this design.
 
 ## Durable workflow checkpoint
 
