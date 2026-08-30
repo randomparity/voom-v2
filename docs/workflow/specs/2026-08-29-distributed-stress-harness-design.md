@@ -69,10 +69,12 @@ read/write lock: a lane holds a read permit across each HTTP request that mutate
 acquire, lease heartbeat, complete, and fail — while local fake-provider dispatch runs without a
 permit. Recovery takes and holds the write permit through the snapshot, heartbeat refresh, and
 `remote_recover`. Acquiring the write permit atomically blocks new mutations and waits for every
-admitted mutation to resolve before the coordinator snapshots every other held execution. For
-one-second leases acquired at `T0`, the coordinator advances to
-`T0 + 500ms`, heartbeats healthy leases so their deadlines become `T0 + 1500ms`, then advances to
-`T0 + 1250ms`, calls `ControlPlane::remote_recover`, and reopens the gate. The abandoned leases
+admitted mutation to resolve before the coordinator snapshots every other held execution. Each
+recovery wave records `wave_start = clock.now()`. Because the manual clock advances only inside
+this gated recovery cycle, new leases in that wave expire at `wave_start + 1s`. The coordinator
+advances by 500ms, heartbeats healthy leases so their deadlines become
+`wave_start + 1500ms`, then advances by another 750ms, calls `ControlPlane::remote_recover`, and
+reopens the gate. The abandoned leases
 are overdue and the refreshed leases are not;
 both times remain before the node deadline. Every healthy heartbeat must succeed before recovery.
 The report must contain no stale nodes and its expired-lease set must equal the outstanding
@@ -82,6 +84,8 @@ the healthy heartbeat succeeds, and only the abandoned lease expires. A second a
 holds the recovery write permit first and proves a lane cannot begin its HTTP acquire until the
 permit is released. A third interleaving finishes local dispatch after the snapshot and proves its
 completion request waits until recovery releases the write permit.
+Another focused test completes one recovery wave, acquires and abandons a later ticket, and proves
+the second wave advances monotonically and expires the later lease.
 
 The harness therefore tests the same durable recovery path as a lost process while deliberately
 excluding OS process and socket teardown, which #606 owns.

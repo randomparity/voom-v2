@@ -122,7 +122,6 @@ impl RemoteNodeSession {
         &self,
         operation: impl Future<Output = Result<T, RemoteRunnerError>>,
     ) -> Result<T, RemoteRunnerError>;
-    pub async fn execution_log(&self) -> Vec<ExecutionRecord>;
 }
 ```
 
@@ -222,14 +221,19 @@ Steps:
    public control-plane/store APIs. Start one `RemoteNodeSession` per node behind a barrier.
    Run `cargo test -p voom-fakes --lib distributed_stress_conserves_every_ticket -- --ignored
    --nocapture`; expect red before drain/recovery orchestration is complete.
-5. Implement drain/recovery. When abandoned records appear, take every session write permit in
-   deterministic node order, advance `ManualClock` to +500ms, heartbeat every non-abandoned held
-   lease through its owning session, advance to +1250ms, call `remote_recover`, require no stale
-   nodes and exact abandoned expiry, then release gates. Poll typed ticket counts until all seeded
-   tickets are terminal and no held lease remains or the wall deadline expires. Stop and join every
-   session before assertions; abort and await the server on every path.
+5. Implement repeatable drain/recovery. When abandoned records appear, take every session write
+   permit in deterministic node order and record `wave_start = clock.now()`. The manual clock moves
+   only inside this gated cycle, so leases acquired since the prior wave expire at
+   `wave_start + 1s`. Advance by 500ms, heartbeat every non-abandoned held lease through its owning
+   session, advance by another 750ms, call `remote_recover`, require no stale nodes and exact
+   abandoned expiry, remove that exact set from the outstanding-abandonment set, then release
+   gates. Repeat for later waves without setting the clock backward. Add a focused test with two
+   abandonment waves separated by recovery and a later acquisition. Poll typed ticket counts until
+   all seeded tickets are terminal and no held lease remains or the wall deadline expires. Stop and
+   join every session before assertions; abort and await the server on every path.
 6. Paginate `SqliteEventRepo::list` until `next_cursor` is absent, collect all ticket and lease rows
-   with typed repositories, merge execution logs, and call `assert_conservation`. Run a small cell:
+   with typed repositories, read `executions.records()` exactly once from the sole shared
+   `RemoteExecutionState`, and call `assert_conservation`. Run a small cell:
    `VOOM_STRESS_NODES=2 VOOM_STRESS_RUNNERS_PER_NODE=2 VOOM_STRESS_TICKETS=40
    VOOM_STRESS_DRAIN_SECONDS=30 cargo test -p voom-fakes --lib
    distributed_stress_conserves_every_ticket -- --ignored --nocapture`; expect one pass.
