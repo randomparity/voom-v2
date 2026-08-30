@@ -5,7 +5,7 @@ use serde_json::json;
 use voom_api::router_with_control_plane;
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_control_plane::{ControlPlane, HealthPlane};
-use voom_core::{NodeId, OperationKind, TicketId, TicketOperation};
+use voom_core::{LeaseId, NodeId, OperationKind, TicketId, TicketOperation};
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use voom_store::test_support::sqlite_url_for;
@@ -261,7 +261,8 @@ async fn process_crash_uses_activated_credentials_and_a_typed_request() {
             "process-crash.mkv",
         ))
         .await;
-    let supervisor = ProcessSupervisor::start();
+    let expected_lease_id = fixture.expected_first_lease_id();
+    let supervisor = ProcessSupervisor::start_with_expected_lease_id(expected_lease_id);
 
     let (record, observation) = RemoteSyntheticRunner::new(fixture.config())
         .run_once_to_process_crash(
@@ -273,7 +274,8 @@ async fn process_crash_uses_activated_credentials_and_a_typed_request() {
         .unwrap();
 
     assert_eq!(record.ticket_id, ticket_id);
-    assert_eq!(record.lease_id, observation.lease_id);
+    assert_eq!(record.lease_id, expected_lease_id);
+    assert_eq!(observation.lease_id, expected_lease_id);
     assert_eq!(record.worker_id, observation.worker_id);
     assert_eq!(record.acquisition_ordinal, 1);
     assert_eq!(record.action, ExecutionAction::Abandoned);
@@ -316,7 +318,8 @@ async fn process_crash_rejects_an_acquired_ticket_outside_the_selected_set_befor
             "unexpected.mkv",
         ))
         .await;
-    let supervisor = ProcessSupervisor::start();
+    let supervisor =
+        ProcessSupervisor::start_with_expected_lease_id(fixture.expected_first_lease_id());
 
     let error = RemoteSyntheticRunner::new(fixture.config())
         .run_once_to_process_crash(
@@ -354,7 +357,8 @@ async fn process_crash_rejects_a_clean_child_exit_after_dispatch() {
             "clean-exit.mkv",
         ))
         .await;
-    let supervisor = ProcessSupervisor::start();
+    let supervisor =
+        ProcessSupervisor::start_with_expected_lease_id(fixture.expected_first_lease_id());
 
     let error = RemoteSyntheticRunner::new(fixture.config())
         .run_once_to_process_crash(
@@ -370,6 +374,35 @@ async fn process_crash_rejects_a_clean_child_exit_after_dispatch() {
 }
 
 #[tokio::test]
+async fn process_crash_rejects_child_that_exits_between_readiness_and_dispatch() {
+    let fixture = RemoteRunnerFixture::new().await;
+    fixture.reserve_worker_ids(10).await;
+    let ticket_id = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/pre-dispatch-exit.mkv",
+            "pre-dispatch-exit.mkv",
+        ))
+        .await;
+    let supervisor = ProcessSupervisor::start();
+
+    let outcome = RemoteSyntheticRunner::new(fixture.config())
+        .run_once_to_process_crash(
+            &supervisor,
+            std::env::current_exe().unwrap(),
+            &HashSet::from([ticket_id]),
+        )
+        .await;
+
+    assert!(supervisor.shutdown().await.unwrap().is_empty());
+    let error = outcome.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("without connection termination evidence")
+    );
+}
+
+#[tokio::test]
 async fn process_crash_timeout_reaps_stay_alive_worker_after_pending_wait() {
     let fixture = RemoteRunnerFixture::new().await;
     fixture.reserve_worker_ids(9).await;
@@ -379,7 +412,9 @@ async fn process_crash_timeout_reaps_stay_alive_worker_after_pending_wait() {
             "stay-alive-timeout.mkv",
         ))
         .await;
-    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let expected_lease_id = fixture.expected_first_lease_id();
+    let (supervisor, mut milestones) =
+        ProcessSupervisor::start_with_test_milestones_and_expected_lease_id(expected_lease_id);
     let supervisor = std::sync::Arc::new(supervisor);
     let inner_supervisor = std::sync::Arc::clone(&supervisor);
     let inner = tokio::spawn(async move {
@@ -450,7 +485,8 @@ async fn process_crash_observation_follows_explicit_wait_and_registry_removal() 
             "explicit-wait.mkv",
         ))
         .await;
-    let supervisor = ProcessSupervisor::start();
+    let expected_lease_id = fixture.expected_first_lease_id();
+    let supervisor = ProcessSupervisor::start_with_expected_lease_id(expected_lease_id);
 
     let (_, observation) = RemoteSyntheticRunner::new(fixture.config())
         .run_once_to_process_crash(
@@ -462,6 +498,7 @@ async fn process_crash_observation_follows_explicit_wait_and_registry_removal() 
         .unwrap();
 
     assert_eq!(observation.exit_code, Some(101));
+    assert_eq!(observation.lease_id, expected_lease_id);
     assert!(supervisor.shutdown().await.unwrap().is_empty());
 }
 
@@ -497,6 +534,7 @@ struct RemoteRunnerFixture {
     server: tokio::task::JoinHandle<()>,
     node_id: NodeId,
     token: secrecy::SecretString,
+    expected_first_lease_id: LeaseId,
 }
 
 impl RemoteRunnerFixture {
@@ -529,6 +567,7 @@ impl RemoteRunnerFixture {
             server,
             node_id: registered.node.id,
             token: registered.token,
+            expected_first_lease_id: LeaseId(1),
         }
     }
 
@@ -547,6 +586,10 @@ impl RemoteRunnerFixture {
             lease_ttl_seconds: 60,
             healthy_heartbeat_ttl_seconds: 60,
         }
+    }
+
+    fn expected_first_lease_id(&self) -> LeaseId {
+        self.expected_first_lease_id
     }
 
     async fn ready_ticket(&self, payload: serde_json::Value) -> TicketId {

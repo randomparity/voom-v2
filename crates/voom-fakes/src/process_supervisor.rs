@@ -13,11 +13,13 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command as ProcessCommand};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{Id as TaskId, JoinError, JoinHandle, JoinSet};
+use voom_core::LeaseId;
 use voom_worker_protocol::WorkerCredentials;
 
 const COMMAND_CAPACITY: usize = 16;
 const READINESS_LIMIT_BYTES: usize = 4 * 1024;
 const CHILD_TIMEOUT: Duration = Duration::from_secs(5);
+const EXPECTED_LEASE_ID_ENV: &str = "VOOM_PROCESS_SUPERVISOR_EXPECTED_LEASE_ID";
 
 type SpawnReply = oneshot::Sender<Result<ReadyChild, ProcessSupervisorError>>;
 type WaitReply = oneshot::Sender<Result<ChildExit, ProcessSupervisorError>>;
@@ -96,6 +98,7 @@ impl TestMilestones {
 pub(crate) struct ProcessSupervisor {
     commands: mpsc::Sender<SupervisorCommand>,
     actor: JoinHandle<Result<Vec<ChildExit>, ProcessSupervisorError>>,
+    expected_lease_id: Option<LeaseId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -164,7 +167,11 @@ impl std::error::Error for ProcessSupervisorError {}
 
 impl ProcessSupervisor {
     pub(crate) fn start() -> Self {
-        Self::start_with_milestones(TestMilestones::default())
+        Self::start_with_options(TestMilestones::default(), None)
+    }
+
+    pub(crate) fn start_with_expected_lease_id(expected_lease_id: LeaseId) -> Self {
+        Self::start_with_options(TestMilestones::default(), Some(expected_lease_id))
     }
 
     #[cfg(test)]
@@ -172,17 +179,39 @@ impl ProcessSupervisor {
     -> (Self, mpsc::UnboundedReceiver<ProcessSupervisorMilestone>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         (
-            Self::start_with_milestones(TestMilestones {
-                sender: Some(sender),
-            }),
+            Self::start_with_options(
+                TestMilestones {
+                    sender: Some(sender),
+                },
+                None,
+            ),
             receiver,
         )
     }
 
-    fn start_with_milestones(milestones: TestMilestones) -> Self {
+    pub(crate) fn start_with_test_milestones_and_expected_lease_id(
+        expected_lease_id: LeaseId,
+    ) -> (Self, mpsc::UnboundedReceiver<ProcessSupervisorMilestone>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (
+            Self::start_with_options(
+                TestMilestones {
+                    sender: Some(sender),
+                },
+                Some(expected_lease_id),
+            ),
+            receiver,
+        )
+    }
+
+    fn start_with_options(milestones: TestMilestones, expected_lease_id: Option<LeaseId>) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let actor = tokio::spawn(run_actor(receiver, milestones));
-        Self { commands, actor }
+        Self {
+            commands,
+            actor,
+            expected_lease_id,
+        }
     }
 
     pub(crate) async fn spawn(
@@ -195,6 +224,7 @@ impl ProcessSupervisor {
             .send(SupervisorCommand::Spawn {
                 binary,
                 credentials,
+                expected_lease_id: self.expected_lease_id,
                 reply,
             })
             .await
@@ -239,6 +269,7 @@ enum SupervisorCommand {
     Spawn {
         binary: PathBuf,
         credentials: WorkerCredentials,
+        expected_lease_id: Option<LeaseId>,
         reply: SpawnReply,
     },
     Wait {
@@ -288,10 +319,17 @@ impl Actor {
         }
     }
 
-    fn spawn_child(&mut self, binary: PathBuf, credentials: &WorkerCredentials, reply: SpawnReply) {
+    fn spawn_child(
+        &mut self,
+        binary: PathBuf,
+        credentials: &WorkerCredentials,
+        expected_lease_id: Option<LeaseId>,
+        reply: SpawnReply,
+    ) {
         let child_id = ChildId(self.next_child_id);
         self.next_child_id = self.next_child_id.saturating_add(1);
-        let (mut command, helper_readiness) = child_command(&binary, credentials);
+        let (mut command, helper_readiness) =
+            child_command(&binary, credentials, expected_lease_id);
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -492,8 +530,13 @@ async fn run_actor(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                Some(SupervisorCommand::Spawn { binary, credentials, reply }) => {
-                    actor.spawn_child(binary, &credentials, reply);
+                Some(SupervisorCommand::Spawn {
+                    binary,
+                    credentials,
+                    expected_lease_id,
+                    reply,
+                }) => {
+                    actor.spawn_child(binary, &credentials, expected_lease_id, reply);
                 }
                 Some(SupervisorCommand::Wait { child_id, reply }) => {
                     actor.register_wait(child_id, reply);
@@ -514,7 +557,11 @@ async fn run_actor(
     actor.shutdown_all().await
 }
 
-fn child_command(binary: &Path, credentials: &WorkerCredentials) -> (ProcessCommand, bool) {
+fn child_command(
+    binary: &Path,
+    credentials: &WorkerCredentials,
+    expected_lease_id: Option<LeaseId>,
+) -> (ProcessCommand, bool) {
     let mut command = ProcessCommand::new(binary);
     command
         .env_clear()
@@ -526,7 +573,8 @@ fn child_command(binary: &Path, credentials: &WorkerCredentials) -> (ProcessComm
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
-    let helper_readiness = configure_test_helper(&mut command, binary, credentials);
+    let helper_readiness =
+        configure_test_helper(&mut command, binary, credentials, expected_lease_id);
     (command, helper_readiness)
 }
 
@@ -535,6 +583,7 @@ fn configure_test_helper(
     command: &mut ProcessCommand,
     binary: &Path,
     credentials: &WorkerCredentials,
+    expected_lease_id: Option<LeaseId>,
 ) -> bool {
     if std::env::current_exe().is_ok_and(|current| current == binary) {
         command
@@ -549,6 +598,9 @@ fn configure_test_helper(
             )
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        if let Some(expected_lease_id) = expected_lease_id {
+            command.env(EXPECTED_LEASE_ID_ENV, expected_lease_id.0.to_string());
+        }
         true
     } else {
         false
@@ -560,6 +612,7 @@ fn configure_test_helper(
     _command: &mut ProcessCommand,
     _binary: &Path,
     _credentials: &WorkerCredentials,
+    _expected_lease_id: Option<LeaseId>,
 ) -> bool {
     false
 }

@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use serde_json::json;
-use voom_core::WorkerId;
+use voom_core::{LeaseId, WorkerId};
 use voom_worker_protocol::{
-    HttpServer, OperationHandler, OperationKind, ServerHandle, WorkerCredentials,
-    load_worker_bind_addr_from_env, load_worker_credentials_from_env,
+    ClientHandle, HttpClient, HttpServer, OperationHandler, OperationKind, OperationRequest,
+    ServerHandle, WorkerCredentials, load_worker_bind_addr_from_env,
+    load_worker_credentials_from_env,
 };
 
 use super::*;
@@ -32,6 +33,7 @@ const READY_IGNORE_STDIN: u64 = 7;
 const PROCESS_CRASH_WORKER: u64 = 8;
 const PROCESS_CLEAN_EXIT_WORKER: u64 = 9;
 const PROCESS_STAY_ALIVE_WORKER: u64 = 10;
+const PROCESS_EXIT_BEFORE_DISPATCH_WORKER: u64 = 11;
 
 #[test]
 fn process_supervisor_test_helper() {
@@ -70,18 +72,38 @@ fn process_supervisor_test_helper() {
         PROCESS_CRASH_WORKER => run_process_worker(101),
         PROCESS_CLEAN_EXIT_WORKER => run_process_worker(0),
         PROCESS_STAY_ALIVE_WORKER => run_stay_alive_process_worker(),
+        PROCESS_EXIT_BEFORE_DISPATCH_WORKER => {
+            run_process_worker_exit_before_dispatch();
+        }
         _ => std::process::exit(124),
     }
+}
+
+fn run_process_worker_exit_before_dispatch() -> ! {
+    let credentials =
+        load_worker_credentials_from_env().unwrap_or_else(|_| std::process::exit(121));
+    let bind = load_worker_bind_addr_from_env().unwrap_or_else(|_| std::process::exit(120));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|_| std::process::exit(119));
+    let handler: OperationHandler = Arc::new(|_| Box::pin(std::future::pending()));
+    let running = runtime
+        .block_on(HttpServer::new(credentials, handler).serve(bind))
+        .unwrap_or_else(|_| std::process::exit(118));
+    write_helper_output(format!("BOUND addr={}\n", running.bound).as_bytes());
+    std::process::exit(102);
 }
 
 fn run_process_worker(exit_code: i32) -> ! {
     let credentials =
         load_worker_credentials_from_env().unwrap_or_else(|_| std::process::exit(121));
     let bind = load_worker_bind_addr_from_env().unwrap_or_else(|_| std::process::exit(120));
+    let expected_lease_id = expected_lease_id();
     let handler: OperationHandler = Arc::new(move |request| {
         Box::pin(async move {
             let valid = request.operation == OperationKind::TranscodeVideo
-                && request.lease_id.0 > 0
+                && request.lease_id == expected_lease_id
                 && request.payload == json!({"mode":"crash","path":"/stress/process-crash"})
                 && request.heartbeat_deadline_ms == 1_000
                 && request.progress_idle_deadline_ms == 1_000;
@@ -112,10 +134,11 @@ fn run_stay_alive_process_worker() -> ! {
     let credentials =
         load_worker_credentials_from_env().unwrap_or_else(|_| std::process::exit(121));
     let bind = load_worker_bind_addr_from_env().unwrap_or_else(|_| std::process::exit(120));
+    let expected_lease_id = expected_lease_id();
     let handler: OperationHandler = Arc::new(move |request| {
         Box::pin(async move {
             let valid = request.operation == OperationKind::TranscodeVideo
-                && request.lease_id.0 > 0
+                && request.lease_id == expected_lease_id
                 && request.payload == json!({"mode":"crash","path":"/stress/process-crash"})
                 && request.heartbeat_deadline_ms == 1_000
                 && request.progress_idle_deadline_ms == 1_000;
@@ -135,6 +158,13 @@ fn run_stay_alive_process_worker() -> ! {
     write_helper_output(format!("BOUND addr={}\n", running.bound).as_bytes());
     runtime.block_on(std::future::pending::<()>());
     std::process::exit(115);
+}
+
+fn expected_lease_id() -> LeaseId {
+    std::env::var(EXPECTED_LEASE_ID_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .map_or_else(|| std::process::exit(114), LeaseId)
 }
 
 fn write_readiness() {
@@ -176,6 +206,37 @@ async fn await_milestone(
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn process_worker_rejects_a_wrong_positive_lease_id() {
+    let expected_lease_id = LeaseId(41);
+    let supervisor = ProcessSupervisor::start_with_expected_lease_id(expected_lease_id);
+    let ready = supervisor
+        .spawn(test_binary(), credentials(PROCESS_CRASH_WORKER))
+        .await
+        .unwrap();
+    let request = OperationRequest {
+        operation: OperationKind::TranscodeVideo,
+        lease_id: LeaseId(42),
+        payload: json!({"mode":"crash","path":"/stress/process-crash"}),
+        heartbeat_deadline_ms: 1_000,
+        progress_idle_deadline_ms: 1_000,
+    };
+
+    let _dispatch_error = HttpClient::new(ready.bound)
+        .dispatch(
+            &credentials(PROCESS_CRASH_WORKER),
+            "wrong-positive-lease",
+            request,
+        )
+        .await
+        .unwrap_err();
+    let exit = supervisor.wait(ready.child_id).await.unwrap();
+
+    assert_eq!(exit.code, Some(126));
+    assert!(!exit.success);
+    assert!(supervisor.shutdown().await.unwrap().is_empty());
 }
 
 async fn await_registered_readiness(

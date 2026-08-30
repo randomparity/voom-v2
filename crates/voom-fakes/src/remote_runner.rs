@@ -21,12 +21,14 @@ use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, ProtocolError};
 
 #[cfg(test)]
-use crate::process_supervisor::ProcessSupervisor;
+use crate::process_supervisor::{ChildExit, ProcessSupervisor};
 #[cfg(test)]
-use voom_worker_protocol::{ClientHandle, HttpClient, WorkerCredentials};
+use voom_worker_protocol::WorkerCredentials;
 
 #[cfg(test)]
 const PROCESS_CRASH_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const PROCESS_CRASH_EXIT_CODE: i32 = 101;
 
 #[derive(Debug, Clone)]
 pub struct RemoteRunnerConfig {
@@ -581,28 +583,27 @@ impl RemoteSyntheticRunner {
             progress_idle_deadline_ms: 1_000,
         };
         let exit = tokio::time::timeout(PROCESS_CRASH_TIMEOUT, async {
-            let client = HttpClient::new(ready.bound);
-            let Err(dispatch_error) = client
-                .dispatch(
-                    &credentials,
-                    &format!("process-crash-{}", new_run_id()),
-                    request,
-                )
-                .await
-            else {
-                return Err(RemoteRunnerError::Protocol(
-                    "process crash worker returned a successful dispatch response".to_owned(),
-                ));
-            };
-            if !dispatch_connection_terminated(&dispatch_error) {
-                return Err(RemoteRunnerError::Protocol(format!(
-                    "process crash dispatch failed without connection termination: {dispatch_error}"
-                )));
-            }
-            supervisor
+            let dispatch_error =
+                dispatch_process_crash_request(&self.client, ready.bound, &credentials, &request)
+                    .await?;
+            let exit = supervisor
                 .wait(ready.child_id)
                 .await
-                .map_err(|error| process_supervisor_error(&error))
+                .map_err(|error| process_supervisor_error(&error))?;
+            if exit.success {
+                return Err(RemoteRunnerError::Protocol(format!(
+                    "process crash child {} exited successfully",
+                    ready.pid
+                )));
+            }
+            if !dispatch_connection_terminated(&dispatch_error, &exit) {
+                return Err(RemoteRunnerError::Protocol(format!(
+                    "process crash dispatch failed without connection termination evidence: \
+                     exit={:?}; {dispatch_error}",
+                    exit.code
+                )));
+            }
+            Ok(exit)
         })
         .await
         .map_err(|_| {
@@ -611,12 +612,6 @@ impl RemoteSyntheticRunner {
                     .to_owned(),
             )
         })??;
-        if exit.success {
-            return Err(RemoteRunnerError::Protocol(format!(
-                "process crash child {} exited successfully",
-                ready.pid
-            )));
-        }
         let record = ExecutionRecord {
             ticket_id: lease.ticket_id,
             lease_id: lease.lease_id,
@@ -916,6 +911,36 @@ impl RemoteSyntheticRunner {
     }
 }
 
+#[cfg(test)]
+async fn dispatch_process_crash_request(
+    client: &reqwest::Client,
+    bound: std::net::SocketAddr,
+    credentials: &WorkerCredentials,
+    request: &OperationRequest,
+) -> Result<reqwest::Error, RemoteRunnerError> {
+    let result = client
+        .post(format!("http://{bound}/v1/operations"))
+        .bearer_auth(credentials.secret.expose_secret())
+        .header(
+            "x-voom-protocol-version",
+            voom_core::PROTOCOL_VERSION.to_string(),
+        )
+        .header("x-voom-worker-id", credentials.worker_id.0.to_string())
+        .header("x-voom-worker-epoch", credentials.worker_epoch.to_string())
+        .header(
+            "x-voom-idempotency-key",
+            format!("process-crash-{}", new_run_id()),
+        )
+        .json(request)
+        .send()
+        .await;
+    result.err().ok_or_else(|| {
+        RemoteRunnerError::Protocol(
+            "process crash worker returned a successful dispatch response".to_owned(),
+        )
+    })
+}
+
 #[derive(Debug)]
 struct IdempotencyKeys {
     run_id: String,
@@ -968,14 +993,12 @@ fn process_credentials(active_worker: ActiveWorker) -> WorkerCredentials {
 }
 
 #[cfg(test)]
-fn dispatch_connection_terminated(error: &ProtocolError) -> bool {
-    match error {
-        ProtocolError::InvalidPayload { detail } => detail.starts_with("request: "),
-        ProtocolError::MalformedFrame { detail } => {
-            detail.starts_with("response read: ") || detail == "missing response/body separator"
-        }
-        _ => false,
-    }
+fn dispatch_connection_terminated(error: &reqwest::Error, exit: &ChildExit) -> bool {
+    error.is_request()
+        && !error.is_connect()
+        && !error.is_timeout()
+        && !exit.success
+        && exit.code == Some(PROCESS_CRASH_EXIT_CODE)
 }
 
 fn new_run_id() -> String {
