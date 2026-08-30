@@ -7,9 +7,9 @@ Accepted (2026-08-29)
 ## Context
 
 The on-disk SQLite pool has eight connections. A `BEGIN IMMEDIATE` writer can occupy one while
-seven more write transactions hold the remaining connections waiting for SQLite's write lock;
-later callers then wait for a pooled connection. Issue #580 requires a deterministic regression
-test for that saturation path and for recovery after the writer releases.
+concurrent lease operations consume the remaining connections; later callers then wait for a
+pooled connection. Issue #580 requires a deterministic regression test for that admission pressure
+and for recovery after the writer releases.
 
 Testing a mix of acquisition, heartbeat, and settlement calls would add unrelated domain fixtures
 and outcomes to a test whose load-bearing behavior is connection admission under a held write
@@ -18,16 +18,14 @@ transaction, and has an observable durable epoch and deadline.
 
 ## Decision
 
-Test saturation in the lease repository with twelve concurrent heartbeats against one held lease.
-Hold a `BEGIN IMMEDIATE` transaction open. First, let seven tasks open deferred transactions on the
-remaining connections. Then start five public `heartbeat` calls and poll each once. Because every
-connection is already checked out, their `Pending` polls prove that those callers are waiting for
-pool admission. Release the seven admitted tasks to call `heartbeat_in_tx`, and poll each write
-once. Because those transactions are already open, their `Pending` polls prove that their updates
-are waiting for SQLite's write lock rather than for a connection. Observe all five admission waits,
-all seven write waits, eight checked-out connections, and zero idle connections before releasing
-the writer. Capture any failed observation without asserting, commit the writer, join every task,
-and only then report the observation or task failure.
+Test saturation in the lease repository with twelve concurrent public heartbeats against one held
+lease. Hold a `BEGIN IMMEDIATE` transaction open, release all heartbeat tasks together, and poll
+each heartbeat future once. Observe all twelve first polls return `Pending`, all eight connections
+checked out, and zero idle connections before releasing the writer. Twelve unfinished callers plus
+the fully checked-out pool prove that at least five callers are waiting for pool admission; they do
+not prove where the other seven calls are inside SQLx or SQLite. Capture any failed observation
+without asserting, commit the writer, join every task, and only then report the observation or task
+failure.
 Capture the commit result too: consume the transaction, join every task regardless of that result,
 and only then assert that commit succeeded.
 
@@ -41,7 +39,7 @@ pool saturation; do not shorten production lock or pool-acquire budgets.
 
 ## Consequences
 
-- The test exercises both occupied SQLite connections and callers queued at the pool boundary.
+- The test exercises a fully occupied SQLite pool and callers queued at the pool boundary.
 - Failure diagnostics do not strand a held writer or detached heartbeat tasks.
 - Lease liveness is decided by the supplied domain timestamp, not by time spent waiting in the
   pool, so transient queueing cannot manufacture expiry.
@@ -60,9 +58,11 @@ pool saturation; do not shorten production lock or pool-acquire budgets.
   would test a different pool from production and is unnecessary for the recovery contract.
 - **Use sleeps to infer saturation.** verified: `sqlx::Pool::size` and `Pool::num_idle` expose the
   live connection counts in sqlx 0.8.6 (`Cargo.lock` and the dependency source), so the test can
-  observe full checkout directly instead of guessing from elapsed time. Test-local one-poll
-  wrappers separately prove the five public calls are awaiting pool admission and the seven
-  transaction-scoped calls have reached their writes.
+  observe full checkout directly instead of guessing from elapsed time. A test-local one-poll
+  wrapper separately proves all twelve public calls entered their heartbeat futures.
+- **Claim that first `Pending` proves a SQLite write-lock wait.** rejected: SQLx may return
+  `Pending` after enqueueing work but before its worker begins the statement. Issue #588 owns the
+  worker/SQLite-side observability needed for that stronger claim.
 - **Keep the existing lower-cardinality contention tests only.** verified: the on-disk pool selects
   eight connections in `crates/voom-store/src/pool.rs` on `main` at
   `22d61c6680af37c33d57464012a9245811300a3c`, while existing tests do not assert a fully checked-out
