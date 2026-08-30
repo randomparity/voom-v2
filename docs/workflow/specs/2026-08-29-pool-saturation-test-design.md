@@ -20,24 +20,24 @@ Add one multi-thread Tokio test to
 1. Use the existing on-disk `setup()` fixture and acquire one held lease with a deadline later than
    the test's fixed heartbeat timestamp.
 2. Open a `BEGIN IMMEDIATE` transaction from the same pool and retain it as the slow writer.
-3. Spawn twelve heartbeat calls against the held lease. A thirteen-party barrier releases the
-   tasks together so the test does not mistake spawn order for contention. After the barrier, each
-   task pins its heartbeat future and uses a test-local `poll_fn` wrapper to poll it exactly once.
-   An atomic counter advances only when that first inner poll returns `Pending`; the task then
-   awaits the same pinned future to completion.
-4. With a bounded `tokio::time::timeout`, yield until the first-pending counter equals twelve,
-   `pool.size() == 8`, and `pool.num_idle() == 0`. Capture, rather than immediately assert, the
-   observation result and the number of finished tasks. The anti-vacuity contract has four parts:
-   every heartbeat future was actually polled; all twelve returned `Pending` while the writer was
-   held; all eight connections were checked out; and twelve exceeds the seven connections
-   available beside the writer. Those facts prove at least five callers reached pool admission and
-   waited there rather than remaining merely runnable.
-5. Attempt to commit the writer and retain its `Result` without `?`, `unwrap`, `expect`, or an
+3. Spawn seven admitted tasks. Each opens a deferred test-only transaction before incrementing an
+   `transactions_open` counter, then waits on a `watch<bool>` start gate. Wait with a bounded
+   timeout until all seven transactions are open, `pool.size() == 8`, and `pool.num_idle() == 0`.
+4. Spawn five queued tasks that call the public `heartbeat` method. Each pins and polls its future
+   once, increments `admission_pending` only for `Pending`, then awaits that same future. Wait with
+   a bounded timeout until all five first polls are pending. Since the writer and seven deferred
+   transactions hold every connection, these polls can only be waiting for pool admission.
+5. Set the start gate. Each admitted task pins and polls `heartbeat_in_tx` once, increments
+   `write_pending` only for `Pending`, then awaits that same future and commits its transaction.
+   Wait with a bounded timeout until all seven first polls are pending. Since every task already
+   owns a transaction, these polls have reached the update and are waiting for the held writer.
+   Capture, rather than immediately assert, all three observations and finished-task counts.
+6. Attempt to commit the writer and retain its `Result` without `?`, `unwrap`, `expect`, or an
    assertion; the commit consumes the transaction on either outcome. Join every task regardless of
    the commit result. Only then assert that commit succeeded, assert the captured saturation
    observation, and require every heartbeat to return the same held lease identity without a
    database or conflict error.
-6. Read the lease and assert it remains held, its deadline is at least the original deadline, its
+7. Read the lease and assert it remains held, its deadline is at least the original deadline, its
    last-heartbeat timestamp equals the fixed supplied value, and its epoch increased exactly
    twelve times. Issue one more heartbeat and require its epoch to advance, proving convergence
    after the saturated queue drains.
@@ -49,10 +49,10 @@ the state is observed.
 
 ## Failure contract
 
-A task panic, join error, `DB_UNREACHABLE`, lease conflict, a heartbeat first poll that completes
-while the writer is held, failure to observe all twelve pending polls or all eight connections
-checked out, a shortened deadline, an expired or released lease, or an incorrect epoch fails the
-test. All spawned tasks are joined after writer release before any commit-result,
+A task panic, join error, `DB_UNREACHABLE`, lease conflict, a first poll that completes while the
+writer is held, failure to observe five admission waits, seven write waits, or all eight
+connections checked out, a shortened deadline, an expired or released lease, or an incorrect
+epoch fails the test. All spawned tasks are joined after writer release before any commit-result,
 captured-observation, or task-result assertion can fire, so a red test does not strand lock
 waiters.
 
@@ -61,8 +61,8 @@ waiters.
 - Run the focused test and require it to pass in under ten seconds.
 - Run it through `just test-repeat voom-store pool_saturation 25` and require all repetitions to
   pass.
-- Verify the test bites by temporarily reducing the caller count to seven, observe the explicit
-  caller-count-versus-available-slots assertion fail after cleanup, restore twelve, and rerun
+- Verify the test bites by temporarily setting the queued-caller count to zero, observe the
+  explicit total-callers-versus-pool-size assertion fail after cleanup, restore five, and rerun
   green.
 - Run `just fmt-check`, `just lint`, `just check-test-layout`, `just check-paused-time-db`,
   `just check-transaction-openers`, and `just test` before shipping.
@@ -75,4 +75,5 @@ waiters.
 - Scope token: `q580-fc6e0258`
 - Guardrails: `just fmt-check`; `just lint`; `just check-test-layout`;
   `just check-paused-time-db`; `just check-transaction-openers`; `just test`; `just ci`
-- Open findings and deferrals: none at design creation
+- Open findings and deferrals: none. The operator approved the staged seven-write/five-admission
+  proof in issue comment `5465708409`; all original scope exclusions remain in force.

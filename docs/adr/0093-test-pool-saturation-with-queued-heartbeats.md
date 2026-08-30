@@ -19,12 +19,14 @@ transaction, and has an observable durable epoch and deadline.
 ## Decision
 
 Test saturation in the lease repository with twelve concurrent heartbeats against one held lease.
-Hold a `BEGIN IMMEDIATE` transaction open, release all heartbeat tasks together, and wait until the
-pool reports all eight connections checked out. Require the caller count to exceed the seven
-connections available beside the held writer. Poll each heartbeat future once after the barrier
-and count it only when that poll returns `Pending`; observing all twelve first-poll results together
-with eight checked-out connections proves that at least five callers reached pool admission and
-wait there. Capture any failed observation without asserting, commit the writer, join every task,
+Hold a `BEGIN IMMEDIATE` transaction open. First, let seven tasks open deferred transactions on the
+remaining connections. Then start five public `heartbeat` calls and poll each once. Because every
+connection is already checked out, their `Pending` polls prove that those callers are waiting for
+pool admission. Release the seven admitted tasks to call `heartbeat_in_tx`, and poll each write
+once. Because those transactions are already open, their `Pending` polls prove that their updates
+are waiting for SQLite's write lock rather than for a connection. Observe all five admission waits,
+all seven write waits, eight checked-out connections, and zero idle connections before releasing
+the writer. Capture any failed observation without asserting, commit the writer, join every task,
 and only then report the observation or task failure.
 Capture the commit result too: consume the transaction, join every task regardless of that result,
 and only then assert that commit succeeded.
@@ -58,8 +60,9 @@ pool saturation; do not shorten production lock or pool-acquire budgets.
   would test a different pool from production and is unnecessary for the recovery contract.
 - **Use sleeps to infer saturation.** verified: `sqlx::Pool::size` and `Pool::num_idle` expose the
   live connection counts in sqlx 0.8.6 (`Cargo.lock` and the dependency source), so the test can
-  observe full checkout directly instead of guessing from elapsed time. A test-local one-poll
-  wrapper separately proves each caller entered its heartbeat future.
+  observe full checkout directly instead of guessing from elapsed time. Test-local one-poll
+  wrappers separately prove the five public calls are awaiting pool admission and the seven
+  transaction-scoped calls have reached their writes.
 - **Keep the existing lower-cardinality contention tests only.** verified: the on-disk pool selects
   eight connections in `crates/voom-store/src/pool.rs` on `main` at
   `22d61c6680af37c33d57464012a9245811300a3c`, while existing tests do not assert a fully checked-out

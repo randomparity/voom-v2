@@ -5,9 +5,10 @@
 Add a deterministic lease-repository regression test proving that more callers than the on-disk
 SQLite pool can serve queue safely behind a held writer and converge after release.
 
-ADR 0093 selects twelve concurrent heartbeats against one held lease. The test observes all eight
-connections checked out, proves the remaining callers cannot have acquired connections, releases
-the writer before asserting any captured failure, and verifies durable lease state afterward.
+ADR 0093 selects seven transaction-scoped heartbeats plus five public heartbeats against one held
+lease. The staged test proves seven writes are waiting behind the writer and five callers are
+waiting for pool admission, releases the writer before asserting any captured failure, and verifies
+durable lease state afterward.
 
 Tech stack: Rust, Tokio multi-thread tests, sqlx SQLite, existing `voom-test-support` fixtures.
 
@@ -20,11 +21,12 @@ Tech stack: Rust, Tokio multi-thread tests, sqlx SQLite, existing `voom-test-sup
   records. Production edits are transient only for the bite check and must be restored.
 - Use the existing real on-disk `setup()` fixture and real Tokio time. Never pause or advance
   Tokio time around the SQLite pool.
-- Use twelve heartbeat callers and one held `BEGIN IMMEDIATE` writer. Do not shorten production
-  lock-wait or pool-acquire budgets and do not add a pool constructor.
-- Poll every heartbeat future once after the barrier, count only first polls that return `Pending`,
-  capture the saturation observation and writer commit result, consume the writer, and join all
-  tasks before asserting any captured failure.
+- Use seven admitted and five queued heartbeat callers plus one held `BEGIN IMMEDIATE` writer. Do
+  not shorten production lock-wait or pool-acquire budgets and do not add a pool constructor.
+- Open seven deferred transactions before starting the five public calls. Poll the public calls
+  once to prove pool-admission waits, then gate the seven `heartbeat_in_tx` writes and poll them
+  once to prove SQLite writer waits. Capture observations and writer commit result, consume the
+  writer, and join all tasks before asserting any captured failure.
 - Guardrails: `cargo test -p voom-store pool_saturation_queues_heartbeats_until_writer_releases`;
   `just test-repeat voom-store pool_saturation_queues_heartbeats_until_writer_releases 25`;
   `just fmt-check`; `just lint`; `just check-test-layout`; `just check-paused-time-db`;
@@ -48,161 +50,59 @@ Interfaces:
 
 Steps:
 
-1. Add the following test beside the existing concurrent-writer lease tests. It acquires a held
-   lease, retains a writer, barrier-releases twelve heartbeat tasks, and captures the saturation
-   observation without asserting:
+1. Replace the current one-stage test with a staged proof. Define `ADMITTED = 7`, `QUEUED = 5`,
+   and `CALLERS = ADMITTED + QUEUED`. After opening the held writer, spawn seven tasks that each
+   open a deferred test transaction, increment `transactions_open`, and wait on a cloned
+   `watch<bool>` receiver. Bounded-wait for all seven transactions and a full pool.
+2. Spawn five public-heartbeat tasks. Each pins its heartbeat, polls it exactly once, increments
+   `admission_pending` only for `Pending`, and then awaits the same future. Bounded-wait for all
+   five; at this stage every pool connection is already owned.
+3. Send `true` on the watch gate. Each admitted task pins `heartbeat_in_tx` against its already-open
+   transaction, polls it exactly once, increments `write_pending` only for `Pending`, awaits the
+   same future, and commits. Bounded-wait for all seven pending writes. Capture each timeout and
+   the finished-task counts without asserting.
+4. Commit the held writer and capture its result, then join all twelve tasks regardless of any
+   captured failure. Only afterward assert the writer result, observations, `CALLERS > pool.size()`,
+   zero premature finishes, and each heartbeat result. Assert the stored lease and final
+   uncontended heartbeat exactly as in the current test.
 
-   ```rust
-   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-   async fn pool_saturation_queues_heartbeats_until_writer_releases() {
-       use std::future::Future as _;
-
-       const CALLERS: usize = 12;
-       let (pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
-       let lease = lrepo
-           .acquire(NewLease {
-               ticket_id: tid,
-               worker_id: wid,
-               ttl: Duration::seconds(60),
-               now: T0,
-           })
-           .await
-           .unwrap();
-       let writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
-       let lease_id = lease.id;
-       let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
-       let first_pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-       let heartbeat_at = T0 + Duration::seconds(10);
-       let mut handles = Vec::with_capacity(CALLERS);
-       for _ in 0..CALLERS {
-           let lrepo = lrepo.clone();
-           let barrier = std::sync::Arc::clone(&barrier);
-           let first_pending = std::sync::Arc::clone(&first_pending);
-           handles.push(tokio::spawn(async move {
-               barrier.wait().await;
-               let heartbeat = lrepo.heartbeat(
-                   lease_id,
-                   Duration::seconds(60),
-                   heartbeat_at,
-               );
-               tokio::pin!(heartbeat);
-               let completed = std::future::poll_fn(|cx| {
-                   match heartbeat.as_mut().poll(cx) {
-                       std::task::Poll::Pending => {
-                           first_pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                           std::task::Poll::Ready(None)
-                       }
-                       std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
-                   }
-               })
-               .await;
-               match completed {
-                   Some(result) => result,
-                   None => heartbeat.await,
-               }
-           }));
-       }
-       barrier.wait().await;
-
-       let saturated = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-           loop {
-               if first_pending.load(std::sync::atomic::Ordering::SeqCst) == CALLERS
-                   && pool.size() == 8
-                   && pool.num_idle() == 0
-               {
-                   return;
-               }
-               tokio::task::yield_now().await;
-           }
-       })
-       .await;
-       let finished_while_locked = handles.iter().filter(|handle| handle.is_finished()).count();
-
-       let writer_result = writer.commit().await;
-       let mut heartbeat_results = Vec::with_capacity(CALLERS);
-       for handle in handles {
-           heartbeat_results.push(handle.await);
-       }
-
-       writer_result.expect("held writer must commit before heartbeat assertions");
-       saturated.unwrap_or_else(|error| {
-           panic!(
-               "pool did not saturate while the writer was held: pending={}, size={}, idle={}, \
-                finished={finished_while_locked}, error={error}",
-               first_pending.load(std::sync::atomic::Ordering::SeqCst),
-               pool.size(),
-               pool.num_idle()
-           )
-       });
-       let available_beside_writer = usize::try_from(pool.size()).unwrap() - 1;
-       assert!(
-           CALLERS > available_beside_writer,
-           "{CALLERS} callers must exceed {available_beside_writer} non-writer connections"
-       );
-       assert_eq!(finished_while_locked, 0);
-       for result in heartbeat_results {
-           let heartbeat = result
-               .expect("heartbeat task panicked")
-               .expect("heartbeat must wait for the writer and succeed");
-           assert_eq!(heartbeat.id, lease_id);
-           assert_eq!(heartbeat.state, LeaseState::Held);
-       }
-
-       let stored = lrepo.get(lease_id).await.unwrap().unwrap();
-       assert_eq!(stored.state, LeaseState::Held);
-       assert!(stored.expires_at >= lease.expires_at);
-       assert_eq!(stored.last_heartbeat_at, heartbeat_at);
-       assert_eq!(stored.epoch, lease.epoch + u64::try_from(CALLERS).unwrap());
-
-       let converged = lrepo
-           .heartbeat(
-               lease_id,
-               Duration::seconds(60),
-               T0 + Duration::seconds(20),
-           )
-           .await
-           .unwrap();
-       assert_eq!(converged.epoch, stored.epoch + 1);
-   }
-   ```
-
-2. Run
+5. Run
    `cargo test -p voom-store pool_saturation_queues_heartbeats_until_writer_releases`; expect one
    passed test and elapsed test time below ten seconds. If the compiler identifies an existing
    interface mismatch, correct only the borrowed signature or type named by that diagnostic and
    keep the behavior above unchanged.
-3. Verify the test bites: temporarily set `CALLERS` to `7`, rerun the same focused command, and
-   require failure at the `callers must exceed ... non-writer connections` assertion after every
-   spawned task has joined. Restore `CALLERS` to `12` with `apply_patch`, rerun the focused command,
+6. Verify the test bites: temporarily set `QUEUED` to `0`, rerun the same focused command, and
+   require failure at the `callers must exceed ... pool connections` assertion after every
+   spawned task has joined. Restore `QUEUED` to `5` with `apply_patch`, rerun the focused command,
    and require it green. Do not commit the controlled fault.
-4. Run
+7. Run
    `just test-repeat voom-store pool_saturation_queues_heartbeats_until_writer_releases 25`; expect
    all 25 repetitions to pass and each iteration to stay below the issue's ten-second default-suite
    threshold.
-5. Run `just fmt-check`, `just lint`, `just check-test-layout`, `just check-paused-time-db`,
+8. Run `just fmt-check`, `just lint`, `just check-test-layout`, `just check-paused-time-db`,
    `just check-transaction-openers`, and `just test`; expect every command to exit zero with no
    skipped test reported by the focused or repeated runs.
-6. Commit the focused test as `test: cover SQLite pool saturation recovery` after the guardrails
+9. Commit the focused correction as `test: prove both saturation wait layers` after the guardrails
    are green.
 
 Acceptance:
 
-- Twelve tasks are released together while one writer holds the SQLite write lock.
-- The test observes twelve heartbeat futures return `Pending` on their first poll, eight checked-out
-  connections, zero idle connections, zero completed heartbeats, and more callers than the seven
-  non-writer slots before releasing the writer.
+- Seven deferred transactions occupy the non-writer connections before five public calls start.
+- The test observes five public heartbeat futures pending at pool admission and seven
+  transaction-scoped heartbeat writes pending behind the SQLite writer, with eight checked-out
+  connections, zero idle connections, zero completed heartbeats, and more callers than pool slots.
 - Writer commit is captured, all task handles are joined, and only then can assertions panic.
 - Every heartbeat succeeds; the lease stays held, does not shorten its deadline, records the fixed
   heartbeat time, and increments its epoch once per caller.
 - A later uncontended heartbeat succeeds and advances the epoch once more.
-- The controlled seven-caller fault fails, the focused test stays below ten seconds, and 25
+- The controlled zero-queued-caller fault fails, the focused test stays below ten seconds, and 25
   repeated runs pass.
 
 ## Durable workflow checkpoint
 
-- Current phase: operator-approved forge review correction; re-review and scope audit precede the
-  fix wave.
+- Current phase: operator-approved staged-proof design amendment; re-review and scope audit precede
+  the fix wave.
 - Branch: `feat/pool-saturation-test-580`; base branch: `main`.
 - Scope token: `q580-fc6e0258`.
-- Open findings and deferrals: none. Spec-review suppression: ADR 0093 settles the arithmetic
-  proof that twelve unfinished callers beside one held writer exceed the seven non-writer slots.
+- Open findings and deferrals: none. Issue comment `5465708409` authorizes only the staged
+  seven-write/five-admission test proof; all original exclusions remain unchanged.
