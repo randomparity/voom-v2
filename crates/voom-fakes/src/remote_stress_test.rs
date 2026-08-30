@@ -21,7 +21,9 @@ use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 use voom_worker_protocol::WorkerCredentials;
 
-use crate::process_supervisor::{ChildExit, ProcessSupervisor, ProcessSupervisorError};
+use crate::process_supervisor::{
+    ChildExit, ChildId, ProcessSupervisor, ProcessSupervisorError, ProcessSupervisorMilestone,
+};
 use crate::remote_runner::{
     ExecutionAction, ExecutionRecord, ProcessCrashObservation, RemoteExecutionState,
     RemoteFaultPolicy, RemoteNodeSession, RemoteNodeSessionConfig, RemoteRunnerConfig,
@@ -557,6 +559,40 @@ async fn finish_process_harness<T>(
     }
 }
 
+async fn await_registered_readiness(
+    milestones: &mut tokio::sync::mpsc::UnboundedReceiver<ProcessSupervisorMilestone>,
+) -> ChildId {
+    let mut registered = None;
+    let mut awaiting_readiness = None;
+    while registered.is_none() || awaiting_readiness.is_none() {
+        match milestones.recv().await.unwrap() {
+            ProcessSupervisorMilestone::ChildRegistered(child_id) => {
+                registered = Some(child_id);
+            }
+            ProcessSupervisorMilestone::AwaitingReadiness(child_id) => {
+                awaiting_readiness = Some(child_id);
+            }
+            ProcessSupervisorMilestone::WaitRegistered(_) => {}
+        }
+    }
+    assert_eq!(registered, awaiting_readiness);
+    registered.unwrap()
+}
+
+async fn await_registered_wait(
+    milestones: &mut tokio::sync::mpsc::UnboundedReceiver<ProcessSupervisorMilestone>,
+    expected_child_id: ChildId,
+) {
+    loop {
+        if let ProcessSupervisorMilestone::WaitRegistered(child_id) =
+            milestones.recv().await.unwrap()
+            && child_id == expected_child_id
+        {
+            return;
+        }
+    }
+}
+
 fn resolve_process_harness<T>(
     finished: ProcessHarnessFinished<T>,
 ) -> Result<(T, Vec<ChildExit>), String> {
@@ -578,7 +614,8 @@ fn resolve_process_harness<T>(
 
 #[tokio::test]
 async fn process_crash_owner_reaps_before_propagating_readiness_cancellation() {
-    let supervisor = Arc::new(ProcessSupervisor::start());
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = Arc::new(supervisor);
     let inner_supervisor = Arc::clone(&supervisor);
     let inner = tokio::spawn(async move {
         inner_supervisor
@@ -589,20 +626,22 @@ async fn process_crash_owner_reaps_before_propagating_readiness_cancellation() {
             .await
             .map_err(|error| error.to_string())
     });
-    tokio::time::sleep(StdDuration::from_millis(50)).await;
+    let child_id = await_registered_readiness(&mut milestones).await;
     inner.abort();
 
     let finished = finish_process_harness(supervisor, inner).await;
 
     let exits = finished.cleanup.unwrap();
     assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].child_id, child_id);
     assert_eq!(exits[0].code, Some(33));
     assert!(finished.completion.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]
 async fn process_crash_owner_reaps_before_propagating_exit_cancellation() {
-    let supervisor = Arc::new(ProcessSupervisor::start());
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = Arc::new(supervisor);
     let inner_supervisor = Arc::clone(&supervisor);
     let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
     let inner = tokio::spawn(async move {
@@ -620,6 +659,7 @@ async fn process_crash_owner_reaps_before_propagating_exit_cancellation() {
             .map_err(|error| error.to_string())
     });
     let child_id = spawned_rx.await.unwrap();
+    await_registered_wait(&mut milestones, child_id).await;
     inner.abort();
 
     let finished = finish_process_harness(supervisor, inner).await;

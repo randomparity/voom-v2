@@ -261,7 +261,7 @@ stress:
     #!/usr/bin/env bash
     set -euo pipefail
     process_crash_percent="${VOOM_STRESS_PROCESS_CRASH_PERCENT:-0}"
-    if [[ "$process_crash_percent" =~ ^[0-9]+$ && ! "$process_crash_percent" =~ ^0+$ ]]; then
+    if [[ "$process_crash_percent" =~ ^\+?[0-9]+$ && ! "$process_crash_percent" =~ ^\+?0+$ ]]; then
         cargo build -p voom-fakes --bin chaos-worker --all-features
         export VOOM_TEST_PREBUILT_WORKERS=1
     fi

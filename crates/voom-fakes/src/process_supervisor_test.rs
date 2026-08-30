@@ -284,7 +284,7 @@ async fn natural_exit_remains_observable_until_delayed_wait() {
 fn cancelled_late_wait_restores_tombstone_for_next_live_wait() {
     let child_id = ChildId(81);
     let status = scripted_exit(child_id);
-    let mut actor = Actor::new();
+    let mut actor = Actor::new(TestMilestones::default());
     actor.registry.insert(
         child_id,
         ChildState::Exited {

@@ -23,6 +23,54 @@ type SpawnReply = oneshot::Sender<Result<ReadyChild, ProcessSupervisorError>>;
 type WaitReply = oneshot::Sender<Result<ChildExit, ProcessSupervisorError>>;
 type ReadinessReader = Pin<Box<dyn AsyncRead + Send>>;
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessSupervisorMilestone {
+    ChildRegistered(ChildId),
+    AwaitingReadiness(ChildId),
+    WaitRegistered(ChildId),
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct TestMilestones {
+    sender: Option<mpsc::UnboundedSender<ProcessSupervisorMilestone>>,
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Default)]
+struct TestMilestones;
+
+impl TestMilestones {
+    #[cfg(test)]
+    fn send(&self, milestone: ProcessSupervisorMilestone) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(milestone);
+        }
+    }
+
+    fn child_registered(&self, child_id: ChildId) {
+        #[cfg(test)]
+        self.send(ProcessSupervisorMilestone::ChildRegistered(child_id));
+        #[cfg(not(test))]
+        let _ = child_id;
+    }
+
+    fn awaiting_readiness(&self, child_id: ChildId) {
+        #[cfg(test)]
+        self.send(ProcessSupervisorMilestone::AwaitingReadiness(child_id));
+        #[cfg(not(test))]
+        let _ = child_id;
+    }
+
+    fn wait_registered(&self, child_id: ChildId) {
+        #[cfg(test)]
+        self.send(ProcessSupervisorMilestone::WaitRegistered(child_id));
+        #[cfg(not(test))]
+        let _ = child_id;
+    }
+}
+
 pub(crate) struct ProcessSupervisor {
     commands: mpsc::Sender<SupervisorCommand>,
     actor: JoinHandle<Result<Vec<ChildExit>, ProcessSupervisorError>>,
@@ -94,8 +142,24 @@ impl std::error::Error for ProcessSupervisorError {}
 
 impl ProcessSupervisor {
     pub(crate) fn start() -> Self {
+        Self::start_with_milestones(TestMilestones::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_test_milestones()
+    -> (Self, mpsc::UnboundedReceiver<ProcessSupervisorMilestone>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (
+            Self::start_with_milestones(TestMilestones {
+                sender: Some(sender),
+            }),
+            receiver,
+        )
+    }
+
+    fn start_with_milestones(milestones: TestMilestones) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        let actor = tokio::spawn(run_actor(receiver));
+        let actor = tokio::spawn(run_actor(receiver, milestones));
         Self { commands, actor }
     }
 
@@ -186,10 +250,11 @@ struct Actor {
     watcher_ids: HashMap<TaskId, ChildId>,
     exits: Vec<ChildExit>,
     first_error: Option<ProcessSupervisorError>,
+    milestones: TestMilestones,
 }
 
 impl Actor {
-    fn new() -> Self {
+    fn new(milestones: TestMilestones) -> Self {
         Self {
             next_child_id: 1,
             registry: HashMap::new(),
@@ -197,6 +262,7 @@ impl Actor {
             watcher_ids: HashMap::new(),
             exits: Vec::new(),
             first_error: None,
+            milestones,
         }
     }
 
@@ -215,7 +281,14 @@ impl Actor {
             }
         };
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let watcher = watch_child(child_id, child, helper_readiness, shutdown_rx, reply);
+        let watcher = watch_child(
+            child_id,
+            child,
+            helper_readiness,
+            shutdown_rx,
+            reply,
+            self.milestones.clone(),
+        );
         let task = self.watchers.spawn(watcher);
         self.watcher_ids.insert(task.id(), child_id);
         self.registry.insert(
@@ -225,12 +298,14 @@ impl Actor {
                 waiter: None,
             },
         );
+        self.milestones.child_registered(child_id);
     }
 
     fn register_wait(&mut self, child_id: ChildId, reply: WaitReply) {
         match self.registry.get_mut(&child_id) {
             Some(ChildState::Running { waiter, .. }) if waiter.is_none() => {
                 *waiter = Some(reply);
+                self.milestones.wait_registered(child_id);
             }
             Some(ChildState::Running { .. }) => {
                 send_protocol_error(reply, format!("child {} already has a waiter", child_id.0));
@@ -384,8 +459,9 @@ fn send_protocol_error(reply: WaitReply, detail: String) {
 
 async fn run_actor(
     mut commands: mpsc::Receiver<SupervisorCommand>,
+    milestones: TestMilestones,
 ) -> Result<Vec<ChildExit>, ProcessSupervisorError> {
-    let mut actor = Actor::new();
+    let mut actor = Actor::new(milestones);
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -467,11 +543,12 @@ async fn watch_child(
     helper_readiness: bool,
     mut shutdown: oneshot::Receiver<()>,
     spawn_reply: SpawnReply,
+    milestones: TestMilestones,
 ) -> WatcherCompletion {
     let pid = child.id();
     let mut stdin = child.stdin.take();
     let readiness = take_readiness_reader(&mut child, helper_readiness);
-    let ready = await_readiness(child_id, &mut child, readiness, &mut shutdown).await;
+    let ready = await_readiness(child_id, &mut child, readiness, &mut shutdown, &milestones).await;
     match ready {
         Ok(ReadinessOutcome::Ready(bound)) => {
             let ready = ReadyChild {
@@ -537,6 +614,7 @@ async fn await_readiness(
     child: &mut Child,
     reader: Option<ReadinessReader>,
     shutdown: &mut oneshot::Receiver<()>,
+    milestones: &TestMilestones,
 ) -> Result<ReadinessOutcome, ProcessSupervisorError> {
     let Some(reader) = reader else {
         return Err(readiness_error(
@@ -544,6 +622,7 @@ async fn await_readiness(
             "spawned child has no readiness pipe",
         ));
     };
+    milestones.awaiting_readiness(child_id);
     let readiness = read_readiness(child_id, reader);
     tokio::pin!(readiness);
     tokio::select! {
