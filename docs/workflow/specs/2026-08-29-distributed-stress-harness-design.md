@@ -59,10 +59,13 @@ duration shorter than the lease TTL, heartbeats once after the stall, and settle
 is applied only to attempt 1 of a selected ticket: the lane records `abandoned` and returns without
 heartbeat or settlement. Its supervisor immediately starts a replacement lane for the same worker.
 Stress leases use a one-second TTL while registered nodes use a 60-second heartbeat TTL. The
-harness calls `ControlPlane::remote_recover` with a domain timestamp two seconds after acquisition,
-which crosses the abandoned lease deadline while remaining before the node deadline and emits
-normal expiry/requeue events; it never edits storage directly. The recovery report must contain no
-stale nodes and must name every intentionally abandoned lease.
+harness and API share an injected `ManualClock`; Tokio time remains real. When abandonment is
+observed, the coordinator snapshots every other held execution, advances the domain clock two
+seconds, heartbeats every still-healthy held lease through HTTP at that time, and only then calls
+`ControlPlane::remote_recover`. This crosses abandoned deadlines while extending healthy ones and
+remaining before the node deadline. The recovery report must contain no stale nodes and its
+expired-lease set must equal the outstanding abandoned set exactly. A focused two-lane test holds
+one healthy lease beside one abandoned lease and proves only the latter expires.
 
 The harness therefore tests the same durable recovery path as a lost process while deliberately
 excluding OS process and socket teardown, which #606 owns.
@@ -108,8 +111,10 @@ It requires:
    duplicate execution.
 6. Every acquired lease has exactly one terminal lease event: released for a completed/failed
    action or expired for an abandoned action.
-7. Every configured dependency edge points from a terminal ticket to a succeeded prerequisite;
-   thus the terminal drain did not bypass dependency ordering.
+7. For every configured dependency edge, the prerequisite's `ticket.succeeded` event ID precedes
+   the dependent's first `lease.acquired` event ID. A final-state check also requires the
+   prerequisite to be succeeded. A synthetic observation test swaps those two event IDs and must
+   fail with a dependency-order diagnostic.
 
 Event reads paginate until `next_cursor` is absent; a fixed page size must not silently truncate
 the evidence. Numeric conversions from SQLite-backed types remain checked through typed repository
