@@ -77,7 +77,13 @@ issues kill if still running, and retains the sole child handle through the fina
 waiting on a second owner. The actor itself continuously selects between runner commands and
 watcher joins, so a stay-alive child cannot prevent it receiving `ShutdownAll` or noticing command
 channel closure. It removes a registry entry only after its watcher join proves reap. A successful
-crash is explicitly waited and removed. Any
+watcher join stores `Exited { status }` as a completed-status tombstone when no `Wait` reply is
+registered yet; the actor retains that tombstone until exactly one later `Wait` consumes the
+status. When `Wait` arrives first, it registers one reply sender that the watcher join completes.
+A second `Wait` for either a pending or consumed identity is rejected. The child identity leaves
+the registry only after both reap and exactly-once status delivery, so a fast crash cannot erase
+the observation before the runner subscribes. A successful crash is explicitly waited and
+removed. Any
 error or command-channel closure runs `shutdown_all`: close retained stdin, wait up to five
 seconds, issue kill for a still-running child, then retain ownership and wait until that controlled
 child is reaped. The final wait is intentionally not abandoned behind a second timeout: returning
@@ -159,9 +165,12 @@ not defend against a malicious locally substituted build artifact or a hostile l
    stays alive; require malformed-readiness and post-dispatch-timeout errors respectively, followed
    by kill, final wait, completion of the pending `Wait` reply, a joined actor, and an empty
    supervisor registry rather than merely timing out the outer test.
-9. Inject a duplicate terminal observation into the reused conservation input, observe the
+9. Delay `Wait` until after the watcher join and prove the completed-status tombstone returns the
+   exact non-zero exit once; require a second `Wait` to fail and the registry to become empty only
+   after the first status is consumed.
+10. Inject a duplicate terminal observation into the reused conservation input, observe the
    existing duplicate diagnostic, revert, and rerun green.
-10. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
+11. Run focused `voom-fakes` tests, `just stress` with the process arm, then `just ci`. Record the
    first real-process run configuration, duration, counts, and findings in the pull request.
 
 ## Durable workflow checkpoint
