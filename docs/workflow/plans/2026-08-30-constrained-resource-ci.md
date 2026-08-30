@@ -30,14 +30,17 @@ Tech stack: GitHub Actions YAML, `just`, Bash, Cargo/Rust tests, systemd cgroup 
   `258712b0b7b1ddf8bddc9fc3b0faca682b2736c3`, and `extractions/setup-just` at
   `53165ef7e734c5c07cb06b3c8e7b647c5aa16db3`.
 - Local guardrails: recipe red/green probes below; `just run-constrained-selftest`;
-  `actionlint .github/workflows/constrained-resources.yml`; `just ci`.
+  `just constrained-recipes-selftest`; `actionlint .github/workflows/constrained-resources.yml`;
+  `just ci`.
 - Post-merge obligations, not pre-merge claims: manually dispatch the default-branch workflow
   and report it on #582; report the first scheduled run's findings on #582.
 
 ## File map
 
 - Modify `justfile`: pass wrapper limits before fixed commands and add fixed constrained stress
-  and scale recipes.
+  and scale recipes; add the recipe-boundary selftest to `just ci`.
+- Create `scripts/constrained-recipes-selftest.sh`: invoke the public just recipes through
+  `--print-plan` and assert their exact limits and fixed commands.
 - Create `.github/workflows/constrained-resources.yml`: schedule/dispatch, four cells, conditional
   stress/scale steps, and scheduled-failure notification.
 - Create `docs/operations/constrained-resource-testing.md`: lane contract, cell table, local
@@ -64,7 +67,54 @@ just scan-session-scale-constrained [LIMITS...]
    puts `--load 1 --print-plan` after `cargo test`, proving the wrapper-option interface is absent.
 2. Run `just stress-constrained --print-plan`. Expect `error: Justfile does not contain recipe`.
 3. Run `just scan-session-scale`. Expect `error: Justfile does not contain recipe`.
-4. Replace the existing constrained recipe and add the three fixed recipes:
+4. Create `scripts/constrained-recipes-selftest.sh` as a Bash selftest that runs these commands
+   from the repository root, captures their tab-separated plans, and fails unless each exact field
+   is present:
+
+   ```bash
+   #!/usr/bin/env bash
+   set -uo pipefail
+
+   failures=0
+   fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
+   expect_field() {
+       local label=$1 field=$2 want=$3
+       shift 3
+       local plan got
+       plan=$(just "$@" 2>/dev/null)
+       got=$(printf '%s\n' "$plan" | awk -F'\t' -v k="$field" '$1 == k {print $2}')
+       [ "$got" = "$want" ] || fail "$label: expected $field=$want, got ${got:-<missing>}"
+   }
+
+   expect_field "test limits" load 1 test-constrained --load 1 --print-plan
+   expect_field "test command" command "cargo test --workspace --all-features" \
+       test-constrained --load 1 --print-plan
+   expect_field "stress limits" write-bps 40M \
+       stress-constrained --write-bps 40M --print-plan
+   expect_field "stress command" command "just stress" \
+       stress-constrained --write-bps 40M --print-plan
+   expect_field "scale limits" memory 8G \
+       scan-session-scale-constrained --memory 8G --print-plan
+   expect_field "scale command" command "just scan-session-scale" \
+       scan-session-scale-constrained --memory 8G --print-plan
+
+   if [ "$failures" -gt 0 ]; then
+       echo "constrained-recipes-selftest: $failures failure(s)" >&2
+       exit 1
+   fi
+   echo "constrained-recipes-selftest: all checks passed"
+   ```
+
+5. Make the script executable. Add this recipe and include it in the root `ci` dependency list:
+
+   ```just
+   constrained-recipes-selftest:
+       ./scripts/constrained-recipes-selftest.sh
+   ```
+
+6. Run `just constrained-recipes-selftest`. Expect failure because the changed and new recipes
+   do not yet expose the asserted wrapper plans. This is the durable red bite check.
+7. Replace the existing constrained recipe and add the three fixed recipes:
 
    ```just
    # Run the workspace suite under runner-like limits (Linux cgroup v2 only)
@@ -84,7 +134,9 @@ just scan-session-scale-constrained [LIMITS...]
        ./scripts/run-constrained.sh {{ LIMITS }} -- just scan-session-scale
    ```
 
-5. Run each cheap plan proof and require the shown fields:
+8. Run `just constrained-recipes-selftest`. Expect
+   `constrained-recipes-selftest: all checks passed`.
+9. Run each cheap plan proof and require the shown fields:
 
    ```text
    just test-constrained --load 1 --print-plan
@@ -100,9 +152,10 @@ just scan-session-scale-constrained [LIMITS...]
    # command<TAB>just scan-session-scale
    ```
 
-6. Run `just --dry-run scan-session-scale`. Expect the exact Cargo command from step 4.
-7. Run `just run-constrained-selftest`. Expect `run-constrained-selftest: all checks passed`.
-8. Commit `justfile` with `test: expose constrained resource recipes`.
+10. Run `just --dry-run scan-session-scale`. Expect the exact Cargo command from step 7.
+11. Run `just run-constrained-selftest`. Expect `run-constrained-selftest: all checks passed`.
+12. Commit `justfile` and `scripts/constrained-recipes-selftest.sh` with
+    `test: expose constrained resource recipes`.
 
 ### Acceptance
 
@@ -173,6 +226,12 @@ Consumes all four Task 1 recipes. Produces the workflow name `constrained-resour
            uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3
          - name: Install just
            uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
+         - name: Install media tools
+           run: |
+             sudo apt-get update
+             sudo apt-get install -y ffmpeg mkvtoolnix
+         - name: Verify resource controls
+           run: ./scripts/run-constrained.sh ${{ matrix.limits }} -- true
          - name: Run constrained workspace tests
            run: just test-constrained ${{ matrix.limits }}
          - name: Run constrained distributed stress
@@ -208,8 +267,9 @@ Consumes all four Task 1 recipes. Produces the workflow name `constrained-resour
 ### Acceptance
 
 The four literal cells and conditional steps match ADR 0096; failures do not cancel siblings;
-every cell is bounded to 90 minutes; only scheduled failures can reach the issue-write job; no
-fork or pull-request event can execute the workflow.
+every cell is bounded to 90 minutes; media prerequisites match the established Linux all-features
+job; the real wrapper is proven before compilation; only scheduled failures can reach the
+issue-write job; no fork or pull-request event can execute the workflow.
 
 ## Task 3 — Document and exercise the operator path
 
@@ -241,18 +301,20 @@ Consumes the Task 1 recipe names and Task 2 cell names. Produces
    Expect the conservation test to pass with eight terminal tickets, no leaked lease, and no
    duplicate non-abandoned execution.
 4. Run `actionlint .github/workflows/constrained-resources.yml`; expect no output and exit 0.
-5. Run `just ci`; expect every named recipe to pass and `==> All CI checks passed`, with no skipped
-   command silently described as run.
+5. Run `just ci`; expect the repository guardrails, including
+   `constrained-recipes-selftest`, to pass and print `==> All CI checks passed`. This command does
+   not run the opt-in stress or scale diagnostics.
 6. Re-read `git diff main...HEAD` for scope, action pins, workflow permissions, fixed command
    ownership, and exact documentation values. Commit the operations document with
    `docs: document constrained resource testing`.
 
 ### Acceptance
 
-The operator can reproduce every cell from the document; local scale and reduced stress evidence
-are recorded in the PR; the workflow is syntactically and semantically linted; full repository
-guardrails are green. If local systemd or cgroup prerequisites are absent, record the exact exit-3
-diagnostic rather than claiming the constrained execution ran.
+The operator can reproduce every cell from the document; the locally executed opt-in evidence is
+exactly the scale recipe plus one reduced baseline stress cell; workflow preflights for all four
+hosted cells remain explicit post-merge evidence. The workflow is linted and repository guardrails
+are green. If local systemd or cgroup prerequisites are absent, record the exact exit-3 diagnostic
+rather than claiming the constrained execution ran.
 
 ## Rollback and post-merge evidence
 

@@ -61,6 +61,9 @@ runner. None of these recipes joins `just ci`.
 - a four-entry Linux matrix with `fail-fast: false` and one fresh runner per cell;
 - a 90-minute timeout on every matrix cell;
 - pinned checkout, Rust cache, and just setup actions already used by this repository;
+- the same ffmpeg and MKVToolNix package provisioning as the existing Linux all-features job;
+- a cheap real-wrapper preflight using the cell's limits and `true` before compilation, so hosted
+  cgroup or block-device incompatibility is attributable before the test suite starts;
 - one constrained workspace-test command in every cell;
 - conditional stress steps for baseline and disk;
 - one conditional scan-scale step for baseline;
@@ -85,7 +88,8 @@ GitHub-owned repository/run values.
 ## Failure behavior
 
 - A missing Linux/systemd/cgroup prerequisite fails the cell with `run-constrained.sh`'s existing
-  exit 3 diagnostic; it is not silently converted to an unconstrained run.
+  exit 3 diagnostic during the real-wrapper preflight; it is not silently converted to an
+  unconstrained run or conflated with a later workspace-test failure.
 - An unresolved block device or unsupported write cap fails the disk cell before tests start.
 - Any test, stress, or scale failure fails only its matrix cell; `fail-fast: false` preserves the
   remaining cell evidence.
@@ -116,7 +120,8 @@ hardening are outside scope.
 ## Verification and bite checks
 
 1. Add recipe-shape assertions to a focused shell selftest before changing the `justfile`; observe
-   failure, implement the recipes, then observe green.
+   failure, implement the recipes, then observe green. Wire that selftest into `just ci` so the
+   fixed command boundary remains a repository guardrail.
 2. Run the existing `just run-constrained-selftest` to preserve parsing and limit validation.
 3. Execute each new recipe with `--print-plan` limits where possible so the real just-to-wrapper
    argument boundary is observed without running the expensive suites.
