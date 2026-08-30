@@ -25,10 +25,12 @@ Add one multi-thread Tokio test to
    then awaits the same future.
 4. With a bounded timeout, wait until all twelve first polls are pending, `pool.size() == 8`, and
    `pool.num_idle() == 0`. Capture rather than immediately assert the observation and finished-task
-   count. Since twelve heartbeat futures are unfinished while only eight connections exist, at
-   least four callers are necessarily waiting for admission; with the held writer occupying one
-   connection, at least five heartbeat callers are waiting for admission. This does not claim that
-   the other seven calls have reached SQLite's write lock; issue #588 owns that observability gap.
+   count. SQLx counts a slot in `size()` after reserving its capacity permit, potentially before a
+   new connection finishes opening, so this proves eight active or reserved slots rather than eight
+   physical checkouts. With the held writer owning one slot, at most seven heartbeat callers can
+   hold or reserve the remaining capacity; at least five must await admission. This does not claim
+   that the other seven calls have reached SQLite's write lock; issue #588 owns that observability
+   gap.
 5. Attempt to commit the writer and retain its `Result` without `?`, `unwrap`, `expect`, or an
    assertion; the commit consumes the transaction on either outcome. Join every task regardless of
    the commit result. Only then assert that commit succeeded, assert the captured saturation
@@ -47,7 +49,7 @@ the state is observed.
 ## Failure contract
 
 A task panic, join error, `DB_UNREACHABLE`, lease conflict, a first poll that completes while the
-writer is held, failure to observe twelve pending first polls or all eight connections checked out,
+writer is held, failure to observe twelve pending first polls or all eight pool slots active or reserved,
 a shortened deadline, an expired or released lease, or an incorrect epoch fails the test. All
 spawned tasks are joined after writer release before any commit-result,
 captured-observation, or task-result assertion can fire, so a red test does not strand lock

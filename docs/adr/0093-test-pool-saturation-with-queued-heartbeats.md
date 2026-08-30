@@ -20,12 +20,12 @@ transaction, and has an observable durable epoch and deadline.
 
 Test saturation in the lease repository with twelve concurrent public heartbeats against one held
 lease. Hold a `BEGIN IMMEDIATE` transaction open, release all heartbeat tasks together, and poll
-each heartbeat future once. Observe all twelve first polls return `Pending`, all eight connections
-checked out, and zero idle connections before releasing the writer. Twelve unfinished callers plus
-the fully checked-out pool prove that at least five callers are waiting for pool admission; they do
-not prove where the other seven calls are inside SQLx or SQLite. Capture any failed observation
-without asserting, commit the writer, join every task, and only then report the observation or task
-failure.
+each heartbeat future once. Observe all twelve first polls return `Pending`, all eight pool slots
+active or reserved, and zero idle connections before releasing the writer. Twelve unfinished
+callers plus exhausted pool capacity prove that at least five callers are waiting for admission;
+they do not prove where the other seven calls are inside SQLx or SQLite. Capture any failed
+observation without asserting, commit the writer, join every task, and only then report the
+observation or task failure.
 Capture the commit result too: consume the transaction, join every task regardless of that result,
 and only then assert that commit succeeded.
 
@@ -57,8 +57,8 @@ pool saturation; do not shorten production lock or pool-acquire budgets.
 - **Lower timeouts through a test-only pool constructor.** judgment: new configuration surface
   would test a different pool from production and is unnecessary for the recovery contract.
 - **Use sleeps to infer saturation.** verified: `sqlx::Pool::size` and `Pool::num_idle` expose the
-  live connection counts in sqlx 0.8.6 (`Cargo.lock` and the dependency source), so the test can
-  observe full checkout directly instead of guessing from elapsed time. A test-local one-poll
+  live pool size and idle count in sqlx 0.8.6 (`Cargo.lock` and the dependency source), so the test
+  can observe exhausted capacity directly instead of guessing from elapsed time. A test-local one-poll
   wrapper separately proves all twelve public calls entered their heartbeat futures.
 - **Claim that first `Pending` proves a SQLite write-lock wait.** rejected: SQLx may return
   `Pending` after enqueueing work but before its worker begins the statement. Issue #588 owns the

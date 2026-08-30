@@ -5,8 +5,9 @@
 Add a deterministic lease-repository regression test proving that more callers than the on-disk
 SQLite pool can serve queue safely behind a held writer and converge after release.
 
-ADR 0093 selects twelve public heartbeats against one held lease. The test proves the pool is fully
-occupied and at least five heartbeat callers are waiting for admission, releases the writer before
+ADR 0093 selects twelve public heartbeats against one held lease. The test proves the pool's
+capacity permits are exhausted and at least five heartbeat callers are waiting for admission,
+releases the writer before
 asserting any captured failure, and verifies durable lease state afterward. It makes no claim that
 the other calls reached SQLite's write lock; issue #588 owns that observability.
 
@@ -78,9 +79,9 @@ Steps:
 
 Acceptance:
 
-- The test observes twelve public heartbeat futures `Pending` on their first poll, eight
-  checked-out connections, zero idle connections, zero completed heartbeats, and more callers than
-  the seven non-writer slots. These facts prove at least five callers wait for pool admission.
+- The test observes twelve public heartbeat futures `Pending` on their first poll, eight active or
+  reserved pool slots, zero idle connections, zero completed heartbeats, and more callers than the
+  seven non-writer slots. These facts prove at least five callers wait for pool admission.
 - Writer commit is captured, all task handles are joined, and only then can assertions panic.
 - Every heartbeat succeeds; the lease stays held, does not shorten its deadline, records the fixed
   heartbeat time, and increments its epoch once per caller.
