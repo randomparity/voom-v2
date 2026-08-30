@@ -26,7 +26,8 @@ Tech stack: Rust, Tokio multi-thread tests and synchronization, axum real socket
   through healthy heartbeat refresh and `remote_recover`.
 - Use real Tokio time around SQLite and an injected `ManualClock` for domain timestamps.
 - Stress lease TTL is one second; node heartbeat TTL is 60 seconds. Refresh healthy leases at
-  `T0 + 500ms`; recover at `T0 + 1250ms`.
+  the current domain time with a three-second renewal TTL; recover one nanosecond after the maximum
+  actual abandoned deadline and before every refreshed healthy deadline.
 - No new dependencies, schema, migration, production API, or durable payload contract.
 - Follow sibling unit-test layout. The new ignored test is linked from `remote_runner.rs` as a
   second sibling test module.
@@ -79,6 +80,7 @@ pub struct RemoteNodeSessionConfig {
     pub idle_timeout: Duration,
     pub poll_interval: Duration,
     pub lease_ttl_seconds: i64,
+    pub healthy_heartbeat_ttl_seconds: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,14 +223,15 @@ Steps:
    public control-plane/store APIs. Start one `RemoteNodeSession` per node behind a barrier.
    Run `cargo test -p voom-fakes --lib distributed_stress_conserves_every_ticket -- --ignored
    --nocapture`; expect red before drain/recovery orchestration is complete.
-5. Implement repeatable drain/recovery. When abandoned records appear, take every session write
-   permit in deterministic node order and record `wave_start = clock.now()`. The manual clock moves
-   only inside this gated cycle, so leases acquired since the prior wave expire at
-   `wave_start + 1s`. Advance by 500ms, heartbeat every non-abandoned held lease through its owning
-   session, advance by another 750ms, call `remote_recover`, require no stale nodes and exact
-   abandoned expiry, remove that exact set from the outstanding-abandonment set, then release
-   gates. Repeat for later waves without setting the clock backward. Add a focused test with two
-   abandonment waves separated by recovery and a later acquisition. Poll typed ticket counts until
+5. Implement deadline-driven repeatable recovery. When abandoned records appear, take every
+   session write permit in deterministic node order and snapshot actual held leases and deadlines.
+   Heartbeat every non-abandoned held lease immediately at `clock.now()` with the three-second
+   renewal TTL. Set `recovery_at` to the maximum outstanding abandoned deadline plus one nanosecond;
+   require it to be later than the current clock and earlier than every refreshed healthy deadline.
+   Advance monotonically to `recovery_at`, call `remote_recover`, require no stale nodes and exact
+   abandoned expiry, remove that exact set from the outstanding-abandonment set, then release gates.
+   Repeat for later waves without setting the clock backward. Add a focused test that carries a
+   healthy lease across two abandonment waves separated by recovery and a later acquisition. Poll typed ticket counts until
    all seeded tickets are terminal and no held lease remains or the wall deadline expires. Stop and
    join every session before assertions; abort and await the server on every path.
 6. Paginate `SqliteEventRepo::list` until `next_cursor` is absent, collect all ticket and lease rows

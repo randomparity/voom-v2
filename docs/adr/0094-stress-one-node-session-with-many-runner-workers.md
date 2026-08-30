@@ -36,7 +36,9 @@ write permit before snapshotting and holds it through heartbeat refresh and reco
 write permit therefore stops new mutations and waits for every admitted mutation to resolve.
 Heartbeat healthy leases through HTTP before their current deadlines, advance again to a timestamp
 after the abandoned deadlines but before the refreshed healthy deadlines, recover, and release the
-gate.
+gate. Initial acquisitions use a one-second TTL; coordinator heartbeats renew healthy leases for
+three seconds. Compute each recovery timestamp from the maximum actual abandoned deadline plus the
+smallest representable positive duration, and require it to precede every refreshed deadline.
 Require the recovery report's expired set to equal the outstanding abandoned set exactly.
 
 Keep execution observations in a harness-owned in-memory log. Compare it with durable ticket,
