@@ -20,6 +20,16 @@ use voom_fake_support::{dispatch_provider, provider_definition_for_operation};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, ProtocolError};
 
+#[cfg(test)]
+use crate::process_supervisor::{ChildExit, ProcessSupervisor};
+#[cfg(test)]
+use voom_worker_protocol::WorkerCredentials;
+
+#[cfg(test)]
+const PROCESS_CRASH_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const PROCESS_CRASH_EXIT_CODE: i32 = 101;
+
 #[derive(Debug, Clone)]
 pub struct RemoteRunnerConfig {
     pub base_url: String,
@@ -72,6 +82,17 @@ pub struct ExecutionRecord {
     pub worker_id: WorkerId,
     pub acquisition_ordinal: u32,
     pub action: ExecutionAction,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessCrashObservation {
+    pub(crate) pid: u32,
+    pub(crate) node_id: NodeId,
+    pub(crate) worker_id: WorkerId,
+    pub(crate) ticket_id: TicketId,
+    pub(crate) lease_id: LeaseId,
+    pub(crate) exit_code: Option<i32>,
 }
 
 pub trait RemoteFaultPolicy: fmt::Debug + Send + Sync {
@@ -132,6 +153,28 @@ impl RemoteExecutionState {
 
     pub async fn records(&self) -> Vec<ExecutionRecord> {
         self.inner.lock().await.records.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_process_crash(
+        &self,
+        record: ExecutionRecord,
+    ) -> Result<(), RemoteRunnerError> {
+        if record.acquisition_ordinal != 1 || record.action != ExecutionAction::Abandoned {
+            return Err(RemoteRunnerError::Protocol(
+                "process crash record must be an abandoned first acquisition".to_owned(),
+            ));
+        }
+        let mut inner = self.inner.lock().await;
+        if inner.ordinals.contains_key(&record.ticket_id) {
+            return Err(RemoteRunnerError::Protocol(format!(
+                "process crash ticket {} already has an acquisition",
+                record.ticket_id
+            )));
+        }
+        inner.ordinals.insert(record.ticket_id, 1);
+        inner.records.push(record);
+        Ok(())
     }
 
     pub async fn mark_recovered(&self, lease_ids: &std::collections::HashSet<LeaseId>) {
@@ -501,6 +544,92 @@ impl RemoteSyntheticRunner {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn run_once_to_process_crash(
+        &self,
+        supervisor: &ProcessSupervisor,
+        binary: std::path::PathBuf,
+        expected_tickets: &std::collections::HashSet<TicketId>,
+    ) -> Result<(ExecutionRecord, ProcessCrashObservation), RemoteRunnerError> {
+        let mut keys = IdempotencyKeys::new(&new_run_id());
+        let incarnation_id = NodeIncarnationId::generate()
+            .map_err(|error| RemoteRunnerError::Protocol(error.to_string()))?;
+        let active_worker = self.activate(incarnation_id, keys.next()).await?;
+        let credentials = process_credentials(active_worker);
+        let ready = supervisor
+            .spawn(binary, credentials.clone())
+            .await
+            .map_err(|error| process_supervisor_error(&error))?;
+        self.worker_readiness(&active_worker, keys.next()).await?;
+        let lease = match self.acquire(&active_worker, keys.next()).await? {
+            AcquireOutcome::Leased(lease) => *lease,
+            AcquireOutcome::Idle { .. } | AcquireOutcome::NoCandidate { .. } => {
+                return Err(RemoteRunnerError::Protocol(
+                    "process crash worker acquired no lease".to_owned(),
+                ));
+            }
+        };
+        if !expected_tickets.contains(&lease.ticket_id) {
+            return Err(RemoteRunnerError::Protocol(format!(
+                "process crash worker acquired ticket {} outside selected process tickets",
+                lease.ticket_id
+            )));
+        }
+        let request = OperationRequest {
+            operation: OperationKind::TranscodeVideo,
+            lease_id: lease.lease_id,
+            payload: serde_json::json!({"mode":"crash","path":"/stress/process-crash"}),
+            heartbeat_deadline_ms: 1_000,
+            progress_idle_deadline_ms: 1_000,
+        };
+        let exit = tokio::time::timeout(PROCESS_CRASH_TIMEOUT, async {
+            let dispatch_error =
+                dispatch_process_crash_request(&self.client, ready.bound, &credentials, &request)
+                    .await?;
+            let exit = supervisor
+                .wait(ready.child_id)
+                .await
+                .map_err(|error| process_supervisor_error(&error))?;
+            if exit.success {
+                return Err(RemoteRunnerError::Protocol(format!(
+                    "process crash child {} exited successfully",
+                    ready.pid
+                )));
+            }
+            if !dispatch_connection_terminated(&dispatch_error, &exit) {
+                return Err(RemoteRunnerError::Protocol(format!(
+                    "process crash dispatch failed without connection termination evidence: \
+                     exit={:?}; {dispatch_error}",
+                    exit.code
+                )));
+            }
+            Ok(exit)
+        })
+        .await
+        .map_err(|_| {
+            RemoteRunnerError::Protocol(
+                "process crash dispatch and exit observation timed out after five seconds"
+                    .to_owned(),
+            )
+        })??;
+        let record = ExecutionRecord {
+            ticket_id: lease.ticket_id,
+            lease_id: lease.lease_id,
+            worker_id: active_worker.worker_id,
+            acquisition_ordinal: 1,
+            action: ExecutionAction::Abandoned,
+        };
+        let observation = ProcessCrashObservation {
+            pid: ready.pid,
+            node_id: self.config.node_id,
+            worker_id: active_worker.worker_id,
+            ticket_id: lease.ticket_id,
+            lease_id: lease.lease_id,
+            exit_code: exit.code,
+        };
+        Ok((record, observation))
+    }
+
     async fn activate(
         &self,
         incarnation_id: NodeIncarnationId,
@@ -574,7 +703,7 @@ impl RemoteSyntheticRunner {
                 Ok(ActiveWorker {
                     incarnation_id,
                     worker_id: activated.worker_id,
-                    _worker_epoch: activated.worker_epoch,
+                    worker_epoch: activated.worker_epoch,
                 })
             })
             .collect()
@@ -782,6 +911,36 @@ impl RemoteSyntheticRunner {
     }
 }
 
+#[cfg(test)]
+async fn dispatch_process_crash_request(
+    client: &reqwest::Client,
+    bound: std::net::SocketAddr,
+    credentials: &WorkerCredentials,
+    request: &OperationRequest,
+) -> Result<reqwest::Error, RemoteRunnerError> {
+    let result = client
+        .post(format!("http://{bound}/v1/operations"))
+        .bearer_auth(credentials.secret.expose_secret())
+        .header(
+            "x-voom-protocol-version",
+            voom_core::PROTOCOL_VERSION.to_string(),
+        )
+        .header("x-voom-worker-id", credentials.worker_id.0.to_string())
+        .header("x-voom-worker-epoch", credentials.worker_epoch.to_string())
+        .header(
+            "x-voom-idempotency-key",
+            format!("process-crash-{}", new_run_id()),
+        )
+        .json(request)
+        .send()
+        .await;
+    result.err().ok_or_else(|| {
+        RemoteRunnerError::Protocol(
+            "process crash worker returned a successful dispatch response".to_owned(),
+        )
+    })
+}
+
 #[derive(Debug)]
 struct IdempotencyKeys {
     run_id: String,
@@ -807,7 +966,39 @@ impl IdempotencyKeys {
 struct ActiveWorker {
     incarnation_id: NodeIncarnationId,
     worker_id: WorkerId,
-    _worker_epoch: u64,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the crate-private process crash harness consumes the activated epoch in tests"
+        )
+    )]
+    worker_epoch: u64,
+}
+
+#[cfg(test)]
+fn process_supervisor_error(
+    error: &crate::process_supervisor::ProcessSupervisorError,
+) -> RemoteRunnerError {
+    RemoteRunnerError::Protocol(format!("process supervisor: {error}"))
+}
+
+#[cfg(test)]
+fn process_credentials(active_worker: ActiveWorker) -> WorkerCredentials {
+    WorkerCredentials {
+        worker_id: active_worker.worker_id,
+        worker_epoch: active_worker.worker_epoch,
+        secret: SecretString::from(format!("process-crash-{}", new_run_id())),
+    }
+}
+
+#[cfg(test)]
+fn dispatch_connection_terminated(error: &reqwest::Error, exit: &ChildExit) -> bool {
+    error.is_request()
+        && !error.is_connect()
+        && !error.is_timeout()
+        && !exit.success
+        && exit.code == Some(PROCESS_CRASH_EXIT_CODE)
 }
 
 fn new_run_id() -> String {

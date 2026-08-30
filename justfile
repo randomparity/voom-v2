@@ -258,4 +258,11 @@ net-resilience-ci *ARGS:
 
 # Run the opt-in multi-node ticket-conservation stress harness. Not part of `just ci`.
 stress:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    process_crash_percent="${VOOM_STRESS_PROCESS_CRASH_PERCENT:-0}"
+    if [[ "$process_crash_percent" =~ ^\+?[0-9]+$ && ! "$process_crash_percent" =~ ^\+?0+$ ]]; then
+        cargo build -p voom-fakes --bin chaos-worker --all-features
+        export VOOM_TEST_PREBUILT_WORKERS=1
+    fi
     cargo test -p voom-fakes --lib distributed_stress_conserves_every_ticket -- --ignored --nocapture

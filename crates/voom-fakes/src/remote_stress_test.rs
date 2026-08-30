@@ -19,10 +19,15 @@ use voom_store::repo::execution::tickets::{
 };
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
+use voom_worker_protocol::WorkerCredentials;
 
+use crate::process_supervisor::{
+    ChildExit, ChildId, ProcessSupervisor, ProcessSupervisorError, ProcessSupervisorMilestone,
+};
 use crate::remote_runner::{
-    ExecutionAction, ExecutionRecord, RemoteExecutionState, RemoteFaultPolicy, RemoteNodeSession,
-    RemoteNodeSessionConfig, RemoteWorkerConfig,
+    ExecutionAction, ExecutionRecord, ProcessCrashObservation, RemoteExecutionState,
+    RemoteFaultPolicy, RemoteNodeSession, RemoteNodeSessionConfig, RemoteRunnerConfig,
+    RemoteSyntheticRunner, RemoteWorkerConfig,
 };
 
 const STRESS_START: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -37,6 +42,7 @@ struct StressConfig {
     dependency_percent: u8,
     stall_percent: u8,
     crash_percent: u8,
+    process_crash_percent: u8,
     seed: u64,
     drain_timeout: StdDuration,
 }
@@ -51,6 +57,7 @@ impl Default for StressConfig {
             dependency_percent: 20,
             stall_percent: 0,
             crash_percent: 0,
+            process_crash_percent: 0,
             seed: 581,
             drain_timeout: StdDuration::from_mins(2),
         }
@@ -83,10 +90,21 @@ fn stress_config_from_lookup(
         0,
         25,
     )?;
-    if stall_percent.saturating_add(crash_percent) > 25 {
-        return Err(
-            "VOOM_STRESS_STALL_PERCENT + VOOM_STRESS_CRASH_PERCENT must be <= 25".to_owned(),
-        );
+    let process_crash_percent = config_number(
+        &lookup,
+        "VOOM_STRESS_PROCESS_CRASH_PERCENT",
+        defaults.process_crash_percent,
+        0,
+        25,
+    )?;
+    if stall_percent
+        .saturating_add(crash_percent)
+        .saturating_add(process_crash_percent)
+        > 25
+    {
+        return Err("VOOM_STRESS_STALL_PERCENT + VOOM_STRESS_CRASH_PERCENT + \
+             VOOM_STRESS_PROCESS_CRASH_PERCENT must be <= 25"
+            .to_owned());
     }
     Ok(StressConfig {
         nodes: config_number(&lookup, "VOOM_STRESS_NODES", defaults.nodes, 1, 32)?,
@@ -114,6 +132,7 @@ fn stress_config_from_lookup(
         )?,
         stall_percent,
         crash_percent,
+        process_crash_percent,
         seed: config_number(&lookup, "VOOM_STRESS_SEED", defaults.seed, 0, u64::MAX)?,
         drain_timeout: StdDuration::from_secs(config_number(
             &lookup,
@@ -123,6 +142,16 @@ fn stress_config_from_lookup(
             600,
         )?),
     })
+}
+
+fn process_crash_count(tickets: usize, percent: u8) -> usize {
+    if percent == 0 || tickets == 0 {
+        0
+    } else {
+        (tickets.saturating_mul(usize::from(percent)) / 100)
+            .max(1)
+            .min(tickets)
+    }
 }
 
 fn config_number<T>(
@@ -398,6 +427,289 @@ fn stress_config_rejects_out_of_range_values() {
     assert!(error.contains("VOOM_STRESS_NODES"));
 }
 
+#[test]
+fn stress_process_config_defaults_to_zero() {
+    let config = stress_config_from_lookup(|_| Ok(None)).unwrap();
+
+    assert_eq!(config.process_crash_percent, 0);
+}
+
+#[test]
+fn stress_process_config_accepts_its_bounds_and_rejects_above_maximum() {
+    for accepted in [0, 25] {
+        let config = stress_config_from_lookup(|name| {
+            Ok((name == "VOOM_STRESS_PROCESS_CRASH_PERCENT").then(|| accepted.to_string()))
+        })
+        .unwrap();
+        assert_eq!(config.process_crash_percent, accepted);
+    }
+
+    let error = stress_config_from_lookup(|name| {
+        Ok((name == "VOOM_STRESS_PROCESS_CRASH_PERCENT").then(|| "26".to_owned()))
+    })
+    .unwrap_err();
+    assert!(error.contains("VOOM_STRESS_PROCESS_CRASH_PERCENT"));
+}
+
+#[test]
+fn stress_process_config_limits_the_three_way_fault_sum() {
+    let accepted = stress_config_from_lookup(|name| {
+        Ok(match name {
+            "VOOM_STRESS_STALL_PERCENT" => Some("5".to_owned()),
+            "VOOM_STRESS_CRASH_PERCENT" | "VOOM_STRESS_PROCESS_CRASH_PERCENT" => {
+                Some("10".to_owned())
+            }
+            _ => None,
+        })
+    })
+    .unwrap();
+    assert_eq!(accepted.process_crash_percent, 10);
+
+    let error = stress_config_from_lookup(|name| {
+        Ok(match name {
+            "VOOM_STRESS_STALL_PERCENT" => Some("5".to_owned()),
+            "VOOM_STRESS_CRASH_PERCENT" => Some("10".to_owned()),
+            "VOOM_STRESS_PROCESS_CRASH_PERCENT" => Some("11".to_owned()),
+            _ => None,
+        })
+    })
+    .unwrap_err();
+    assert!(error.contains("must be <= 25"));
+}
+
+#[test]
+fn stress_process_count_rounds_down_with_a_nonzero_minimum() {
+    assert_eq!(process_crash_count(8, 25), 2);
+    assert_eq!(process_crash_count(7, 25), 1);
+    assert_eq!(process_crash_count(1, 1), 1);
+    assert_eq!(process_crash_count(10_000, 25), 2_500);
+    assert_eq!(process_crash_count(10_000, 0), 0);
+}
+
+#[tokio::test]
+async fn stress_process_seed_keeps_only_the_selected_prefix_ready_until_release() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    voom_store::init(&url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
+    let config = StressConfig {
+        tickets: 4,
+        dependency_percent: 90,
+        process_crash_percent: 25,
+        ..StressConfig::default()
+    };
+
+    let mut workload = seed_workload(&cp, &config).await.unwrap();
+    assert_eq!(workload.process_ticket_ids, workload.ticket_ids[..1]);
+    let repo = SqliteTicketRepo::new(voom_store::connect(&url).await.unwrap());
+    let selected = repo
+        .get(workload.process_ticket_ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let higher_priority_non_selected = repo.get(workload.ticket_ids[3]).await.unwrap().unwrap();
+    assert_eq!(selected.state, TicketState::Ready);
+    assert_eq!(higher_priority_non_selected.priority, 50);
+    assert_eq!(higher_priority_non_selected.state, TicketState::Pending);
+
+    release_remaining_workload(&cp, &config, &mut workload)
+        .await
+        .unwrap();
+    let released_root = repo.get(workload.ticket_ids[1]).await.unwrap().unwrap();
+    assert_eq!(released_root.state, TicketState::Ready);
+    assert!(
+        workload
+            .dependencies
+            .iter()
+            .all(|(dependent, prerequisite)| {
+                !workload.process_ticket_ids.contains(dependent)
+                    && !workload.process_ticket_ids.contains(prerequisite)
+            })
+    );
+}
+
+fn process_harness_credentials(mode: u64) -> WorkerCredentials {
+    WorkerCredentials {
+        worker_id: voom_core::WorkerId(mode),
+        worker_epoch: 1,
+        secret: "process-supervisor-test".to_owned().into(),
+    }
+}
+
+struct ProcessHarnessFinished<T> {
+    completion: Result<Result<T, String>, tokio::task::JoinError>,
+    cleanup: Result<Vec<ChildExit>, ProcessSupervisorError>,
+}
+
+async fn finish_process_harness<T>(
+    supervisor: Arc<ProcessSupervisor>,
+    inner: tokio::task::JoinHandle<Result<T, String>>,
+) -> ProcessHarnessFinished<T> {
+    let completion = inner.await;
+    let cleanup = match Arc::try_unwrap(supervisor) {
+        Ok(supervisor) => supervisor.shutdown().await,
+        Err(_) => Err(ProcessSupervisorError::Protocol {
+            detail: "process harness retained a supervisor owner after its inner task ended"
+                .to_owned(),
+        }),
+    };
+    ProcessHarnessFinished {
+        completion,
+        cleanup,
+    }
+}
+
+async fn await_registered_readiness(
+    milestones: &mut tokio::sync::mpsc::UnboundedReceiver<ProcessSupervisorMilestone>,
+) -> ChildId {
+    let mut registered = None;
+    let mut awaiting_readiness = None;
+    while registered.is_none() || awaiting_readiness.is_none() {
+        match milestones.recv().await.unwrap() {
+            ProcessSupervisorMilestone::ChildRegistered(child_id) => {
+                registered = Some(child_id);
+            }
+            ProcessSupervisorMilestone::AwaitingReadiness(child_id) => {
+                awaiting_readiness = Some(child_id);
+            }
+            ProcessSupervisorMilestone::WaitRegistered(_)
+            | ProcessSupervisorMilestone::TombstoneStored(_)
+            | ProcessSupervisorMilestone::WatcherCompleted(_)
+            | ProcessSupervisorMilestone::RegistryEmpty => {}
+        }
+    }
+    assert_eq!(registered, awaiting_readiness);
+    registered.unwrap()
+}
+
+async fn await_registered_wait(
+    milestones: &mut tokio::sync::mpsc::UnboundedReceiver<ProcessSupervisorMilestone>,
+    expected_child_id: ChildId,
+) {
+    loop {
+        if let ProcessSupervisorMilestone::WaitRegistered(child_id) =
+            milestones.recv().await.unwrap()
+            && child_id == expected_child_id
+        {
+            return;
+        }
+    }
+}
+
+fn resolve_process_harness<T>(
+    finished: ProcessHarnessFinished<T>,
+) -> Result<(T, Vec<ChildExit>), String> {
+    match (finished.completion, finished.cleanup) {
+        (Ok(Ok(value)), Ok(exits)) => Ok((value, exits)),
+        (Ok(Err(error)), Ok(_)) => Err(error),
+        (Err(join_error), Ok(_)) => Err(format!("process harness inner task: {join_error}")),
+        (Ok(Ok(_)), Err(cleanup_error)) => {
+            Err(format!("process supervisor cleanup: {cleanup_error}"))
+        }
+        (Ok(Err(error)), Err(cleanup_error)) => Err(format!(
+            "{error}; process supervisor cleanup: {cleanup_error}"
+        )),
+        (Err(join_error), Err(cleanup_error)) => Err(format!(
+            "process harness inner task: {join_error}; process supervisor cleanup: {cleanup_error}"
+        )),
+    }
+}
+
+#[tokio::test]
+async fn process_crash_owner_reaps_before_propagating_readiness_cancellation() {
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = Arc::new(supervisor);
+    let inner_supervisor = Arc::clone(&supervisor);
+    let inner = tokio::spawn(async move {
+        inner_supervisor
+            .spawn(
+                std::env::current_exe().unwrap(),
+                process_harness_credentials(5),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    });
+    let child_id = await_registered_readiness(&mut milestones).await;
+    inner.abort();
+
+    let finished = finish_process_harness(supervisor, inner).await;
+
+    let exits = finished.cleanup.unwrap();
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].child_id, child_id);
+    assert_eq!(exits[0].code, Some(33));
+    assert!(finished.completion.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn process_crash_owner_reaps_before_propagating_exit_cancellation() {
+    let (supervisor, mut milestones) = ProcessSupervisor::start_with_test_milestones();
+    let supervisor = Arc::new(supervisor);
+    let inner_supervisor = Arc::clone(&supervisor);
+    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+    let inner = tokio::spawn(async move {
+        let ready = inner_supervisor
+            .spawn(
+                std::env::current_exe().unwrap(),
+                process_harness_credentials(4),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        spawned_tx.send(ready.child_id).unwrap();
+        inner_supervisor
+            .wait(ready.child_id)
+            .await
+            .map_err(|error| error.to_string())
+    });
+    let child_id = spawned_rx.await.unwrap();
+    await_registered_wait(&mut milestones, child_id).await;
+    inner.abort();
+
+    let finished = finish_process_harness(supervisor, inner).await;
+
+    let exits = finished.cleanup.unwrap();
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].child_id, child_id);
+    assert_eq!(exits[0].code, Some(0));
+    assert!(finished.completion.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+#[expect(
+    clippy::panic,
+    reason = "the harness-owner test must propagate a deliberately injected inner-task panic"
+)]
+async fn process_crash_owner_reaps_before_propagating_post_spawn_panic() {
+    let supervisor = Arc::new(ProcessSupervisor::start());
+    let inner_supervisor = Arc::clone(&supervisor);
+    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+    let inner = tokio::spawn(async move {
+        let ready = inner_supervisor
+            .spawn(
+                std::env::current_exe().unwrap(),
+                process_harness_credentials(4),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        spawned_tx.send(ready.child_id).unwrap();
+        panic!("injected process harness panic");
+        #[expect(
+            unreachable_code,
+            reason = "the typed task result follows the injected panic"
+        )]
+        Ok(ready)
+    });
+    let child_id = spawned_rx.await.unwrap();
+
+    let finished = finish_process_harness(supervisor, inner).await;
+
+    let exits = finished.cleanup.unwrap();
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].child_id, child_id);
+    assert_eq!(exits[0].code, Some(0));
+    assert!(finished.completion.unwrap_err().is_panic());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "opt-in distributed stress harness; run with just stress"]
 #[expect(
@@ -416,6 +728,15 @@ async fn distributed_stress_conserves_every_ticket() {
     reason = "the opt-in harness owns one lifecycle and reports its reproducible result"
 )]
 async fn run_stress(config: StressConfig) -> Result<(), String> {
+    let process_count = process_crash_count(config.tickets, config.process_crash_percent);
+    let process_binary = if process_count == 0 {
+        None
+    } else {
+        Some(
+            voom_test_support::worker::cargo_bin_or_build("voom-fakes", "chaos-worker")
+                .map_err(|error| error.to_string())?,
+        )
+    };
     let tmp = TempDatabase::new().map_err(|error| error.to_string())?;
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url)
@@ -444,10 +765,96 @@ async fn run_stress(config: StressConfig) -> Result<(), String> {
         .await
     });
 
-    let workload = seed_workload(&cp, &config).await?;
+    let mut workload = seed_workload(&cp, &config).await?;
     let executions = Arc::new(RemoteExecutionState::new(Arc::new(StressFaultPolicy(
         config.clone(),
     ))));
+    let mut process_runners = Vec::with_capacity(process_count);
+    for process_index in 0..process_count {
+        let registered = cp
+            .register_node(RegisterNodeInput {
+                name: format!("stress-process-node-{process_index}"),
+                kind: NodeKind::Remote,
+                heartbeat_ttl_seconds: 60,
+                metadata: json!({"stress": true, "process_crash": true}),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        SqliteSchedulerNodeLimitRepo::new(pool.clone())
+            .set_node_limit(registered.node.id, 1, STRESS_START)
+            .await
+            .map_err(|error| error.to_string())?;
+        process_runners.push(RemoteSyntheticRunner::new(RemoteRunnerConfig {
+            base_url: format!("http://{address}"),
+            node_id: registered.node.id,
+            token: registered.token.expose_secret().to_owned().into(),
+            worker_logical_name: format!("stress-process-{process_index}"),
+            operations: vec![OperationKind::TranscodeVideo],
+            artifact_access: vec!["shared_mount".to_owned()],
+            max_parallel: 1,
+            max_polls: 1,
+            idle_timeout: StdDuration::from_secs(1),
+            lease_heartbeat_interval: StdDuration::from_millis(10),
+            lease_ttl_seconds: 1,
+            healthy_heartbeat_ttl_seconds: 3,
+        }));
+    }
+    let mut process_observations = Vec::with_capacity(process_count);
+    if let Some(binary) = process_binary {
+        let supervisor = Arc::new(ProcessSupervisor::start());
+        let inner_supervisor = Arc::clone(&supervisor);
+        let expected = workload
+            .process_ticket_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let inner = tokio::spawn(async move {
+            run_process_prelude(inner_supervisor, binary, process_runners, expected).await
+        });
+        let finished = finish_process_harness(supervisor, inner).await;
+        let ((records, observations), cleanup_exits) = resolve_process_harness(finished)?;
+        if !cleanup_exits.is_empty() {
+            return Err(format!(
+                "process supervisor retained {} completed children after explicit waits",
+                cleanup_exits.len()
+            ));
+        }
+        for record in records {
+            executions
+                .record_process_crash(record)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        process_observations = observations;
+    }
+    let observed_process_tickets = process_observations
+        .iter()
+        .map(|observation| observation.ticket_id)
+        .collect::<HashSet<_>>();
+    let selected_process_tickets = workload
+        .process_ticket_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    if observed_process_tickets != selected_process_tickets {
+        return Err(format!(
+            "process ticket observation mismatch: observed={observed_process_tickets:?} \
+             selected={selected_process_tickets:?}"
+        ));
+    }
+    release_remaining_workload(&cp, &config, &mut workload).await?;
+    let expected_process_leases = process_observations
+        .iter()
+        .map(|observation| observation.lease_id)
+        .collect::<HashSet<_>>();
+    let mut recovered = HashSet::new();
+    recover_abandoned(&cp, &pool, &clock, &[], &executions, &mut recovered).await?;
+    if recovered != expected_process_leases {
+        return Err(format!(
+            "process lease recovery mismatch: recovered={recovered:?} \
+             expected={expected_process_leases:?}"
+        ));
+    }
     let mut sessions = Vec::with_capacity(config.nodes);
     for node_index in 0..config.nodes {
         let registered = cp
@@ -505,7 +912,6 @@ async fn run_stress(config: StressConfig) -> Result<(), String> {
     )
     .await?;
     let deadline = tokio::time::Instant::now() + config.drain_timeout;
-    let mut recovered = HashSet::new();
     loop {
         recover_abandoned(&cp, &pool, &clock, &sessions, &executions, &mut recovered).await?;
         let tickets = SqliteTicketRepo::new(pool.clone())
@@ -554,17 +960,62 @@ async fn run_stress(config: StressConfig) -> Result<(), String> {
     let _ = server.await;
     let input = collect_conservation(&pool, workload, executions.records().await).await?;
     let retries = input.executions.len().saturating_sub(config.tickets);
+    let nonzero_process_exits = process_observations
+        .iter()
+        .filter(|observation| observation.exit_code.is_none_or(|code| code != 0))
+        .count();
     eprintln!(
-        "VOOM stress drained: tickets={} attempts={} retries={retries}",
+        "VOOM stress process crashes: selected={process_count} observed={} nonzero_exits={} \
+         expired_first_leases={} supervised_children=0",
+        process_observations.len(),
+        nonzero_process_exits,
+        expected_process_leases.len()
+    );
+    for observation in &process_observations {
+        eprintln!("VOOM stress process observation: {observation:?}");
+    }
+    eprintln!(
+        "VOOM stress drained: tickets={} attempts={} retries={retries} held_leases=0",
         config.tickets,
         input.executions.len()
     );
     assert_conservation(&input)
 }
 
+async fn run_process_prelude(
+    supervisor: Arc<ProcessSupervisor>,
+    binary: std::path::PathBuf,
+    runners: Vec<RemoteSyntheticRunner>,
+    mut expected_tickets: HashSet<TicketId>,
+) -> Result<(Vec<ExecutionRecord>, Vec<ProcessCrashObservation>), String> {
+    let mut records = Vec::with_capacity(runners.len());
+    let mut observations = Vec::with_capacity(runners.len());
+    for runner in runners {
+        let (record, observation) = runner
+            .run_once_to_process_crash(&supervisor, binary.clone(), &expected_tickets)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !expected_tickets.remove(&observation.ticket_id) {
+            return Err(format!(
+                "process crash ticket {} was observed more than once",
+                observation.ticket_id
+            ));
+        }
+        records.push(record);
+        observations.push(observation);
+    }
+    if !expected_tickets.is_empty() {
+        return Err(format!(
+            "process crash prelude did not observe selected tickets {expected_tickets:?}"
+        ));
+    }
+    Ok((records, observations))
+}
+
 #[derive(Debug)]
 struct SeededWorkload {
     ticket_ids: Vec<TicketId>,
+    process_ticket_ids: Vec<TicketId>,
     dependencies: Vec<(TicketId, TicketId)>,
 }
 
@@ -584,30 +1035,53 @@ async fn seed_workload(cp: &ControlPlane, config: &StressConfig) -> Result<Seede
             .map_err(|error| error.to_string())?;
         ticket_ids.push(ticket.id);
     }
-    let mut dependencies = Vec::new();
-    for index in 1..ticket_ids.len() {
-        let bucket = workload_bucket(
-            config.seed,
-            u64::try_from(index).map_err(|_| "ticket index overflow".to_owned())?,
-        );
-        if bucket < config.dependency_percent {
-            let prerequisite_index = usize::from(bucket) % index;
-            cp.tickets()
-                .add_dependency(ticket_ids[index], ticket_ids[prerequisite_index])
-                .await
-                .map_err(|error| error.to_string())?;
-            dependencies.push((ticket_ids[index], ticket_ids[prerequisite_index]));
-        }
-    }
-    for ticket_id in &ticket_ids {
+    let process_count = process_crash_count(config.tickets, config.process_crash_percent);
+    let process_ticket_ids = ticket_ids[..process_count].to_vec();
+    for ticket_id in &process_ticket_ids {
         cp.mark_ready_if_unblocked(*ticket_id, STRESS_START)
             .await
             .map_err(|error| error.to_string())?;
     }
     Ok(SeededWorkload {
         ticket_ids,
-        dependencies,
+        process_ticket_ids,
+        dependencies: Vec::new(),
     })
+}
+
+async fn release_remaining_workload(
+    cp: &ControlPlane,
+    config: &StressConfig,
+    workload: &mut SeededWorkload,
+) -> Result<(), String> {
+    let first_remaining = workload.process_ticket_ids.len();
+    for index in first_remaining.saturating_add(1)..workload.ticket_ids.len() {
+        let bucket = workload_bucket(
+            config.seed,
+            u64::try_from(index).map_err(|_| "ticket index overflow".to_owned())?,
+        );
+        if bucket < config.dependency_percent {
+            let prerequisite_index =
+                first_remaining + usize::from(bucket) % (index - first_remaining);
+            cp.tickets()
+                .add_dependency(
+                    workload.ticket_ids[index],
+                    workload.ticket_ids[prerequisite_index],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            workload.dependencies.push((
+                workload.ticket_ids[index],
+                workload.ticket_ids[prerequisite_index],
+            ));
+        }
+    }
+    for ticket_id in &workload.ticket_ids[first_remaining..] {
+        cp.mark_ready_if_unblocked(*ticket_id, STRESS_START)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn workload_bucket(seed: u64, index: u64) -> u8 {

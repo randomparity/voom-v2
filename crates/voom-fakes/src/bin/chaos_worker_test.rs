@@ -106,6 +106,95 @@ fn malformed_body_is_not_valid_progress_json() {
     assert!(serde_json::from_slice::<serde_json::Value>(&malformed_body()).is_err());
 }
 
+fn transcode_request(payload: serde_json::Value) -> OperationRequest {
+    OperationRequest {
+        operation: OperationKind::TranscodeVideo,
+        lease_id: voom_core::LeaseId(42),
+        payload,
+        heartbeat_deadline_ms: 1_000,
+        progress_idle_deadline_ms: 1_000,
+    }
+}
+
+fn assert_unknown_transcode(response: ChaosResponse) {
+    assert!(matches!(response, ChaosResponse::Fixed { .. }));
+    if let ChaosResponse::Fixed {
+        status,
+        content_type,
+        body,
+    } = response
+    {
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(content_type, "application/json");
+        assert_eq!(
+            body,
+            serde_json::to_vec(&ProtocolError::UnknownOperation {
+                name: "TranscodeVideo".to_owned(),
+            })
+            .unwrap()
+        );
+    }
+}
+
+#[test]
+fn transcode_crash_request_exits_process() {
+    let request = transcode_request(serde_json::json!({
+        "mode": "crash",
+        "path": "/stress/process-crash"
+    }));
+
+    assert!(matches!(
+        dispatch_operation(&request).unwrap(),
+        ChaosResponse::ExitProcess(101)
+    ));
+}
+
+#[test]
+fn transcode_baseline_request_remains_unknown_operation() {
+    let request = transcode_request(serde_json::json!({
+        "mode": "baseline",
+        "path": "/stress/process-crash"
+    }));
+
+    assert_unknown_transcode(dispatch_operation(&request).unwrap());
+}
+
+#[test]
+fn transcode_stall_request_remains_unknown_operation() {
+    let request = transcode_request(serde_json::json!({
+        "mode": "stall",
+        "path": "/stress/process-crash"
+    }));
+
+    assert_unknown_transcode(dispatch_operation(&request).unwrap());
+}
+
+#[test]
+fn transcode_request_without_mode_remains_unknown_operation() {
+    let request = transcode_request(serde_json::json!({
+        "path": "/stress/process-crash"
+    }));
+
+    assert_unknown_transcode(dispatch_operation(&request).unwrap());
+}
+
+#[test]
+fn transcode_crash_request_without_path_uses_payload_validation() {
+    let request = transcode_request(serde_json::json!({"mode": "crash"}));
+    let response = dispatch_operation(&request).unwrap();
+    assert!(matches!(response, ChaosResponse::Fixed { .. }));
+    if let ChaosResponse::Fixed { status, body, .. } = response {
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(
+            body,
+            serde_json::to_vec(&ProtocolError::InvalidPayload {
+                detail: "payload missing path".to_owned(),
+            })
+            .unwrap()
+        );
+    }
+}
+
 fn version_headers(value: &str) -> Vec<(String, String)> {
     vec![(PROTOCOL_VERSION_HEADER.to_owned(), value.to_owned())]
 }

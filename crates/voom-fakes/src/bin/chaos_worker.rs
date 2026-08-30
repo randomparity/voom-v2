@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
+use serde_json::Value;
 use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -304,10 +305,13 @@ fn dispatch_operation(req: &OperationRequest) -> Result<ChaosResponse, ProtocolE
     // ProbeFile is the historical target; HashFile is the current one —
     // probe is an envelope-family operation that no longer leases workers,
     // so the executor's dispatch-failure coverage faults a generic op.
+    let transcode_crash = req.operation == OperationKind::TranscodeVideo
+        && req.payload.get("mode").and_then(Value::as_str) == Some("crash");
     if !matches!(
         req.operation,
         OperationKind::ProbeFile | OperationKind::HashFile
-    ) {
+    ) && !transcode_crash
+    {
         return Ok(json_response(
             "400 Bad Request",
             &ProtocolError::UnknownOperation {
