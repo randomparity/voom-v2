@@ -60,12 +60,15 @@ is applied only to attempt 1 of a selected ticket: the lane records `abandoned` 
 heartbeat or settlement. Its supervisor immediately starts a replacement lane for the same worker.
 Stress leases use a one-second TTL while registered nodes use a 60-second heartbeat TTL. The
 harness and API share an injected `ManualClock`; Tokio time remains real. When abandonment is
-observed, the coordinator snapshots every other held execution, advances the domain clock two
-seconds, heartbeats every still-healthy held lease through HTTP at that time, and only then calls
-`ControlPlane::remote_recover`. This crosses abandoned deadlines while extending healthy ones and
-remaining before the node deadline. The recovery report must contain no stale nodes and its
-expired-lease set must equal the outstanding abandoned set exactly. A focused two-lane test holds
-one healthy lease beside one abandoned lease and proves only the latter expires.
+observed, the coordinator closes a session-wide recovery gate. Every lane checks the gate before
+polling; the coordinator waits until the in-flight-acquire counter reaches zero, then snapshots
+every other held execution. It advances the domain clock two seconds, heartbeats every still-
+healthy held lease through HTTP at that time, calls `ControlPlane::remote_recover`, and reopens the
+gate. This crosses abandoned deadlines while extending healthy ones and remaining before the node
+deadline. The recovery report must contain no stale nodes and its expired-lease set must equal the
+outstanding abandoned set exactly. A focused test holds one healthy lease beside one abandoned
+lease, deliberately blocks another acquire during recovery preparation, and proves the gate waits
+for it and only the abandoned lease expires.
 
 The harness therefore tests the same durable recovery path as a lost process while deliberately
 excluding OS process and socket teardown, which #606 owns.
