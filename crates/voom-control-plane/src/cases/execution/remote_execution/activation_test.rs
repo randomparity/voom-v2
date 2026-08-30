@@ -548,14 +548,38 @@ async fn remote_activation_quota_rejection_is_operator_visible_without_secrets()
 
     assert_eq!(error.error_code(), ErrorCode::Conflict);
     let output = logs.text();
-    assert!(output.contains("remote node activation quota exceeded"));
-    assert!(output.contains("activation_count=5"));
-    assert!(output.contains("activation_limit=5"));
-    assert!(output.contains("window_seconds=60"));
-    assert!(!output.contains("secret-idempotency-key"));
-    assert!(!output.contains("secret-request-hash"));
-    assert!(!output.contains("secret-worker-name"));
-    assert!(!output.contains(&rejected_incarnation));
+    assert!(
+        output.contains("remote node activation quota exceeded"),
+        "captured activation logs:\n{output}"
+    );
+    assert!(
+        output.contains("activation_count=5"),
+        "captured activation logs:\n{output}"
+    );
+    assert!(
+        output.contains("activation_limit=5"),
+        "captured activation logs:\n{output}"
+    );
+    assert!(
+        output.contains("window_seconds=60"),
+        "captured activation logs:\n{output}"
+    );
+    assert!(
+        !output.contains("secret-idempotency-key"),
+        "captured activation logs:\n{output}"
+    );
+    assert!(
+        !output.contains("secret-request-hash"),
+        "captured activation logs:\n{output}"
+    );
+    assert!(
+        !output.contains("secret-worker-name"),
+        "captured activation logs:\n{output}"
+    );
+    assert!(
+        !output.contains(&rejected_incarnation),
+        "captured activation logs:\n{output}"
+    );
 }
 
 #[tokio::test]
