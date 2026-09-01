@@ -27,7 +27,7 @@ ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-s
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
     check-transaction-openers check-transaction-openers-selftest \
     check-adr-index check-adr-index-selftest select-ffmpeg-asset-selftest \
-    run-constrained-selftest \
+    run-constrained-selftest constrained-recipes-selftest \
     test doc deny audit
     @echo "==> All CI checks passed"
 
@@ -129,6 +129,9 @@ select-ffmpeg-asset-selftest:
 run-constrained-selftest:
     ./scripts/run-constrained-selftest.sh
 
+constrained-recipes-selftest:
+    ./scripts/constrained-recipes-selftest.sh
+
 # Races in this suite are found by repetition, not by a single run: issue #546
 # reproduces at roughly 1 run in 8 on idle hardware, so "it passed locally"
 # after one run means very little.
@@ -166,9 +169,21 @@ test-parallel *ARGS:
 # one race measured so far, and this is for what repetition cannot reach
 # (memory pressure, slow storage). See `scripts/run-constrained.sh --help`.
 
-# Run the suite under runner-like limits, 4 cpus and 16G (Linux cgroup v2 only)
-test-constrained *ARGS:
-    ./scripts/run-constrained.sh -- cargo test --workspace --all-features {{ ARGS }}
+# Run the workspace suite under runner-like limits (Linux cgroup v2 only)
+test-constrained *LIMITS:
+    ./scripts/run-constrained.sh {{ LIMITS }} -- just test
+
+# Run the opt-in stress harness under explicit resource limits
+stress-constrained *LIMITS:
+    ./scripts/run-constrained.sh {{ LIMITS }} -- just stress
+
+# Run both ignored 100,000-location scan diagnostics
+scan-session-scale:
+    cargo test -p voom-control-plane --test scan_session_scale -- --ignored --nocapture
+
+# Run the scan diagnostics under explicit resource limits
+scan-session-scale-constrained *LIMITS:
+    ./scripts/run-constrained.sh {{ LIMITS }} -- just scan-session-scale
 
 # Run the CLI binary
 run *ARGS:

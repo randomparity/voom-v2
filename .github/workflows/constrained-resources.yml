@@ -1,0 +1,86 @@
+name: constrained-resources
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: constrained-resources-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  constrained:
+    name: constrained (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline
+            preflight_limits: --cpus 0-3 --memory 16G
+            limits: --cpus 0-3 --memory 16G
+            run_stress: true
+            run_scale: true
+          - name: cpu-load
+            # Do not start load generators in preflight: debt 0006 means the
+            # real test would inherit them and then start a second set.
+            preflight_limits: --cpus 0-3 --memory 16G
+            limits: --cpus 0-3 --memory 16G --load 1
+            run_stress: false
+            run_scale: false
+          - name: disk
+            preflight_limits: --cpus 0-3 --memory 16G --write-bps 40M
+            limits: --cpus 0-3 --memory 16G --write-bps 40M
+            run_stress: true
+            run_scale: false
+          - name: memory
+            preflight_limits: --cpus 0-3 --memory 8G
+            limits: --cpus 0-3 --memory 8G
+            run_stress: false
+            run_scale: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
+      - name: Install media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg mkvtoolnix
+      - name: Verify resource controls
+        run: ./scripts/run-constrained.sh ${{ matrix.preflight_limits }} -- true
+      - name: Run constrained workspace tests
+        run: just test-constrained ${{ matrix.limits }}
+      - name: Run constrained distributed stress
+        if: matrix.run_stress
+        run: just stress-constrained ${{ matrix.limits }}
+      - name: Run constrained scan scale
+        if: matrix.run_scale
+        run: just scan-session-scale-constrained ${{ matrix.limits }}
+
+  notify-failure:
+    name: notify failure
+    needs: constrained
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Scheduled constrained-resource run failed" \
+            --body "The weekly constrained-resource workflow failed. Run: $RUN_URL"
