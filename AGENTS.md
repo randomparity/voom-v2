@@ -128,6 +128,8 @@ Production crate responsibilities:
 - `voom-mkvtoolnix-worker`: local remux operations through mkvtoolnix.
 - `voom-verify-artifact-worker`: local artifact verification.
 - `voom-backup-worker`: local artifact backup and checksum verification.
+- `voom-scan-worker`: storage-owner file discovery and media/sidecar classification.
+- `voom-hash-worker`: storage-owner BLAKE3 hashing of root-relative files.
 
 ADR 0050 defines target byte ownership: storage-owner node agents perform or supervise
 every byte read and mutation. The control plane retains durable authority, commit
@@ -153,7 +155,7 @@ voom-api                 → voom-control-plane, voom-core
 voom-node-agent          → voom-core, voom-worker-protocol
 voom-cli                 → voom-control-plane, voom-core, voom-events,
                            voom-plan, voom-policy, voom-store
-real media/backup workers → voom-core, voom-worker-protocol
+real scan/hash/media/backup workers → voom-core, voom-worker-protocol
 ```
 
 The direct lower-crate edges from `voom-cli` are intentional. The CLI presents
