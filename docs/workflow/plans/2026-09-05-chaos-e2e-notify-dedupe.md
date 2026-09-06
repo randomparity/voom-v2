@@ -15,7 +15,7 @@ Tech stack: GitHub Actions workflow YAML, bash, `jq`, `gh`, `just`, `prek`.
 
 Spec: `docs/workflow/specs/2026-09-05-chaos-e2e-notify-dedupe-design.md`.
 
-Expected implementation size: 245–305 changed lines (M) — counted from this plan's own code fences, which carry the implementation verbatim: a ~50-line script, a ~150-line selftest, ~56 changed workflow lines, and 14 across `justfile` and `.pre-commit-config.yaml`.
+Expected implementation size: 300–330 changed lines (M) — counted from this plan's own code fences: a 52-line script, a 173-line selftest, ~83 changed workflow lines (8 ids + 2 output + 16 naming step + 48 notify step + 9 removed), and 13 across `justfile` and `.pre-commit-config.yaml`.
 
 ## Global Constraints
 
@@ -59,19 +59,28 @@ Two material contracts change.
   script writes the id of the first entry whose `outcome` is `failure`, writes
   `unknown-step` when no entry qualifies or the id leaves `^[A-Za-z0-9_-]{1,64}$`, and
   exits non-zero on absent or non-object input. Test file:
-  `scripts/name-failing-step-selftest.sh`. Expected red before the script exists: the
-  selftest aborts because `scripts/name-failing-step.sh` is not executable. Green command:
+  `scripts/name-failing-step-selftest.sh`. Expected red before the script exists: every
+  case reddens with exit status 127 (`scripts/name-failing-step.sh` does not exist yet)
+  and the selftest exits 1 reporting the failed-case count. Green command:
   `just name-failing-step-selftest`, expected final line
   `name-failing-step-selftest: OK`.
-- **The `notify-failure` job body** (`.github/workflows/chaos-e2e.yml`).
-  `Mode: task-test-not-applicable`. Changed surface: the search-then-comment-or-create
-  sequence. Reason: the sequence is `gh` calls against the live GitHub Issues API executed
-  inside a job that carries no repository checkout, so no in-repo harness can invoke it;
-  giving it one requires adding `contents: read` to that job's `permissions:` block, which
-  replaces the workflow default rather than adding to it, and Global Constraints forbids
-  that change. This is a knowing gap, not a categorical one — it is why the derivation
-  above was extracted into a script that *can* be tested, and it is reported rather than
-  papered over.
+- **The search-and-select pipeline** (`.github/workflows/chaos-e2e.yml`, Step 2.4).
+  `Mode: focused-test`. Observable contract: the `gh issue list` search plus the `jq`
+  selector return the number of an open, bot-authored issue whose title matches the key
+  exactly, and return nothing for a key that only shares a prefix. It is verifiable
+  read-only from a developer machine against the live public repository, without any
+  runner and without any permission change — Step 2.5a runs it and pins both outputs. This
+  is the half of the notify job that carries the logic; the rest is two `gh` write calls.
+- **The `notify-failure` job body's control flow** (`.github/workflows/chaos-e2e.yml`).
+  `Mode: task-test-not-applicable`. Changed surface: the branch between commenting and
+  creating, and the two `gh` write calls. Reason, narrowed to what the permission
+  constraint actually forecloses: exercising this inside the job needs the extracted
+  script, therefore `actions/checkout`, therefore `contents: read` on a job whose
+  `permissions:` block replaces the workflow default rather than adding to it — which
+  Global Constraints forbids. The write calls additionally cannot be exercised read-only,
+  since observing them means creating a real issue. Note what this reason does *not* cover
+  and is therefore tested above: the search and selection logic, which needs neither. The
+  residual gap is the branch itself and is reported, not papered over.
 
 ## Task 1 — extract and test the failing-step derivation
 
@@ -272,9 +281,10 @@ echo "name-failing-step-selftest: OK"
 
 ### Step 1.2 — confirm the expected failure
 
-Run `./scripts/name-failing-step-selftest.sh`. Expect a non-zero exit with a
-"No such file or directory" error naming `scripts/name-failing-step.sh`: the script under
-test does not exist yet.
+Run `./scripts/name-failing-step-selftest.sh`. Expect every case to redden with exit
+status 127 and a "No such file or directory" error naming `scripts/name-failing-step.sh`,
+and the selftest itself to exit 1 with `name-failing-step-selftest: 15 case(s) failed`:
+the script under test does not exist yet.
 
 ### Step 1.3 — write the script
 
@@ -441,6 +451,9 @@ Append this step to the end of the `chaos-e2e` job's `steps:` list, after
         env:
           STEPS_CONTEXT: ${{ toJSON(steps) }}
         run: |
+          # GitHub's default shell here is `bash -e`, WITHOUT pipefail, so a
+          # failure on the left of a pipe is invisible. Set it explicitly.
+          set -euo pipefail
           name=$(printf '%s' "$STEPS_CONTEXT" | ./scripts/name-failing-step.sh)
           echo "Failing step: $name"
           printf 'name=%s\n' "$name" >> "$GITHUB_OUTPUT"
@@ -459,7 +472,24 @@ Replace the whole `Open tracking issue` step in the `notify-failure` job with:
           # no notification, so this falls back rather than failing.
           FAILING_STEP: ${{ needs.chaos-e2e.outputs.failing-step }}
         run: |
+          # GitHub's default shell here is `bash -e`, WITHOUT pipefail. Without
+          # this line a failed `gh issue list` below hands jq empty stdin, jq
+          # exits 0, the search reads as "nothing found", and the job files a
+          # duplicate -- the exact defect this change removes, silently. A failed
+          # search must fail the step: a missed notification is recoverable next
+          # run, a duplicate is the bug.
+          set -euo pipefail
+
           step=${FAILING_STEP:-unknown-step}
+          if [[ -z ${FAILING_STEP:-} ]]; then
+            echo "::warning::chaos-e2e published no failing-step output; keying on unknown-step"
+          fi
+          # Re-check on this side of the job boundary. The producing job builds and
+          # runs the whole workspace, and this is the job holding `issues: write`,
+          # so the charset guard inside name-failing-step.sh is not a control on
+          # what *this* job consumes.
+          [[ $step =~ ^[A-Za-z0-9_-]{1,64}$ ]] || step=unknown-step
+
           title="Scheduled chaos-e2e run failed: $step"
 
           # `in:title` matches by phrase containment, not equality, so the search
@@ -502,7 +532,36 @@ Replace the whole `Open tracking issue` step in the `notify-failure` job with:
 
 Leave the job's `needs:`, `if:`, `runs-on:`, and `permissions:` lines exactly as they are.
 
-### Step 2.5 — verify
+### Step 2.5a — verify the search-and-select pipeline against the live repository
+
+This is the `focused-test` entry for the search pipeline. It is read-only, needs no runner
+and no permission change, and it is what proves the `jq` selector rejects the containment
+matches it exists to reject. Run both commands from the worktree:
+
+```sh
+# 1. The exact-title case: an open bot-authored issue under the OLD suffix-free
+#    title. Substitute a title that exists; as of 2026-09-05 the suffix-free
+#    "Scheduled chaos-e2e run failed" issues are closed, so this is expected to
+#    print nothing against --state open and to print a number against --state all.
+title='Scheduled chaos-e2e run failed'
+gh issue list --repo randomparity/voom-v2 --state all \
+  --search "in:title \"$title\"" --limit 50 --json number,title,author \
+  | jq -r --arg title "$title" \
+      '[ .[] | select(.title == $title and .author.is_bot? == true) | .number ] | first // empty'
+
+# 2. The containment case: a longer key that only shares the prefix above.
+title='Scheduled chaos-e2e run failed: run-chaos-e2e'
+gh issue list --repo randomparity/voom-v2 --state all \
+  --search "in:title \"$title\"" --limit 50 --json number,title,author \
+  | jq -r --arg title "$title" \
+      '[ .[] | select(.title == $title and .author.is_bot? == true) | .number ] | first // empty'
+```
+
+Expect command 1 to print a single issue number (`536` as of 2026-09-05) and command 2 to
+print nothing. That pair is the contract: an exact bot-authored match is selected, and a
+key sharing only a prefix is not.
+
+### Step 2.5 — verify the workflow parses and the grant is untouched
 
 Confirm the workflow still parses and that the permission grant is untouched:
 
@@ -523,10 +582,25 @@ Commit with `fix(ci): reuse one chaos-e2e tracking issue per failing step`.
 
 **Acceptance criteria.** The notify job searches before creating; comments and stops when
 an exact-title bot-authored open issue exists; otherwise creates one carrying `bug` and
-`status:needs-triage`; the title carries the failing step id; `permissions:` is unchanged;
-`just ci` is green.
+`status:needs-triage`; the title carries the failing step id; both new `run:` blocks set
+`set -euo pipefail`, so a failed search fails the step instead of filing a duplicate; the
+step name is re-checked against the charset on the consuming side of the job boundary; an
+absent `failing-step` output emits a `::warning::` rather than passing silently as a
+genuine `unknown-step`; `permissions:` is unchanged; Step 2.5a's two commands give the
+expected pair; `just ci` is green.
 
 ## Review deferrals
 
-None yet. Deferrals from the design review and the branch review are recorded here as they
-are dispositioned.
+No `deferred-tracked` findings. The design review (`$gauntlet`, iteration 1) raised six
+findings; five were `accepted-fixed` in this plan and the spec, and one sub-remedy was
+`rejected-with-evidence`:
+
+- **Rejected:** adding an `actionlint` hook over `.github/workflows/*.yml` to
+  `.pre-commit-config.yaml` and the `ci:` recipe, proposed as part of the verification
+  finding. The concern behind it is real and is recorded in the spec's Testing section —
+  nothing statically checks the workflow's Actions schema or its `needs.*.outputs`
+  expression. The remedy is out of charter: it adds a third-party linter to the repository
+  guardrail suite, which the frozen surface does not include (it permits one hook entry for
+  *this change's* selftest recipe, not a new tool), and it would gate every workflow in the
+  repo, including the two this issue explicitly excludes. Reported as follow-up work
+  instead.

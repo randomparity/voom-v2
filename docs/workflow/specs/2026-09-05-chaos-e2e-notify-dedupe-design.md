@@ -74,8 +74,14 @@ output, and a notification with a vague key beats no notification. Then:
 3. Not found: `gh issue create` with the title, `--label bug`, and
    `--label status:needs-triage`.
 
-Both labels exist in the repository. If either is later deleted, `gh issue create` fails
-and the job fails loudly rather than filing an unlabelled issue.
+Both labels exist in the repository, verified with `gh label list` on 2026-09-05. If one
+is later renamed or removed, the create step fails and *no* notification is filed at all —
+neither a labelled issue nor an unlabelled one. That is an accepted consequence, not a
+safety property: the only channel it is visible on is the Actions run list, which is the
+channel whose going unwatched is the reason this job exists. It is accepted because the
+trigger is a deliberate label change rather than anything routine, and because the
+alternative — retrying without `--label` — would violate requirement 3 in exactly the case
+the labels are supposed to cover.
 
 The job body stays inline. Running the extracted script here would need
 `actions/checkout`, and that job declares its own `permissions:`, which replaces the
@@ -96,8 +102,15 @@ issue title and a search query from a non-literal value.
 **Boundary inventory.** Added: (a) the `toJSON(steps)` context reaching
 `name-failing-step.sh` on stdin; (b) the derived step name reaching an issue title, a
 search query, and an issue body; (c) issue titles and authors returned by the search
-reaching the choice of which issue to comment on. Widened: none. The `GH_TOKEN` handling
-and the `issues: write` grant are untouched.
+reaching the choice of which issue to comment on; (d) the job-output crossing
+`needs.chaos-e2e.outputs.failing-step`, from the `chaos-e2e` job — which builds and runs
+the whole workspace plus the `third_party/chaos-librarian` submodule — into the
+`notify-failure` job, which is the one holding `issues: write`. Widened: none. The
+`GH_TOKEN` handling and the `issues: write` grant are untouched.
+
+Boundary (d) is the reason the charset check is applied twice. Anything able to write
+`$GITHUB_OUTPUT` in the producing job would otherwise choose the string the privileged job
+puts into a title, a query, and a body.
 
 **Actor model.** The Actions runtime is trusted to report its own step outcomes, and the
 step ids it reports are literals in the workflow file — a closed set. Any GitHub user may
@@ -108,11 +121,22 @@ untrusted actor reaches. Repository maintainers are trusted.
 
 - (a) `set -euo pipefail`, `export LC_ALL=C`, no `eval`. Malformed or non-object stdin
   exits non-zero rather than emitting a partial name.
-- (b) The derived name is validated against `^[A-Za-z0-9_-]{1,64}$` and degraded to
-  `unknown-step` otherwise, so no quote, backtick, `$`, or space can reach a title or a
-  query. It is passed to `gh` as its own argv element, never interpolated into a shell
-  string, so a hostile value could not become a second argument even without the
-  validation. The exact-title comparison uses `jq --arg`, which is data, not program text.
+- (b) and (d) What actually holds at the privileged consumer is argv separation: the name
+  reaches `gh` as its own argv element, never interpolated into shell program text, so a
+  hostile value cannot become a second argument or a command. The charset check against
+  `^[A-Za-z0-9_-]{1,64}$`, degrading to `unknown-step`, is defence in depth on top of
+  that — and it runs on *both* sides of boundary (d): in `name-failing-step.sh` in the
+  producing job, and again on the value read from `needs.chaos-e2e.outputs.failing-step`
+  in the consuming job. A check that ran only in the producing job would not be a control
+  on what the privileged job consumes. The exact-title comparison uses `jq --arg`, which
+  is data, not program text.
+- (b) The notify step runs under `set -euo pipefail`. GitHub's default shell for a `run:`
+  block with no `shell:` key is `bash -e`, *without* `pipefail`, so a failing
+  `gh issue list` at the head of a pipeline would otherwise be masked by `jq` exiting 0 on
+  empty stdin — the search would silently return "nothing found" and the job would file a
+  duplicate, which is exactly the defect this change removes. A failed search must fail
+  the step instead: a missed notification is recoverable on the next run, a duplicate is
+  the bug.
 - (c) Requiring `author.is_bot` alongside the exact title is what stops an outside user
   capturing the notification stream by opening an issue under the predictable title. No
   human account can set that flag. Without the control the worst case is a nuisance rather
@@ -133,11 +157,33 @@ case pins one rule: the failure is selected over successes and skips; a context 
 failure yields `unknown-step`; an unparseable or non-object context exits non-zero; a
 name outside the slug charset degrades to `unknown-step`; empty stdin exits non-zero.
 
-The `notify-failure` job body has no executable coverage. It is a sequence of `gh` calls
-against the live Issues API inside a job that carries no repository checkout, and giving
-it one would require the permission requirement 5 forbids. This is a knowing gap, carried
-into the plan's verification inventory and reported rather than papered over; closing it
-is follow-up work, not this change.
+The `notify-failure` job body gets no *in-job* executable coverage: running the extracted
+script inside that job would need `actions/checkout`, and therefore `contents: read`,
+which requirement 5 forbids. What that constraint does *not* foreclose is checked anyway —
+the plan runs the search-and-select pipeline against the live repository read-only from a
+developer machine and pins its output, which is what proves the `jq` selector and the
+search interaction behave as designed.
+
+Three assumptions remain unverified until a real scheduled failure, and are recorded here
+rather than discovered later:
+
+- **Failed-job output propagation.** Criterion 4 rests on `needs.chaos-e2e.outputs.*`
+  being readable by a dependent job when the producing job *failed*. This is the first
+  `needs.<job>.outputs` reference in this repository, so no local precedent confirms it,
+  and it cannot be exercised without an Actions run. The failure is graceful rather than
+  silent-and-wrong: an empty output degrades to `unknown-step`, and the notify step emits
+  a `::warning::` annotation saying the output was absent, which is what distinguishes
+  this case from a genuine `unknown-step`.
+- **`workflow_dispatch` cannot exercise the path.** The job's pre-existing gate is
+  `if: failure() && github.event_name == 'schedule'`, so the first real execution is a
+  scheduled failure. That gate is pre-existing and out of scope to change.
+- **A `Checkout` failure necessarily degrades to `unknown-step`**, because
+  `scripts/name-failing-step.sh` lives in the tree the failed step was fetching. The
+  namer cannot name its own missing checkout.
+
+No static check covers the workflow's Actions schema or its expressions: `just ci` carries
+no actionlint and no yamllint. Adding one would be a repository-wide tooling change beyond
+this issue's surface, and is reported as follow-up work rather than taken here.
 
 ## Out of scope
 
@@ -152,17 +198,17 @@ settled by the issue's own requirement, and a record whose decision was made els
 records nothing. The alternatives below are kept here, where the change that needs them
 lives.
 
-- **Read the failing step from the Actions API in the notify job**
-  (`GET /actions/runs/{id}/jobs`). verified: that endpoint needs `actions: read`, and the
-  `notify-failure` job declares `permissions: issues: write`, which replaces the
-  workflow-level default rather than adding to it (`.github/workflows/chaos-e2e.yml`
-  lines 119-120 at 16b62e87) — so it would widen the grant requirement 5 freezes.
+- **Do the work inside the notify job** — either reading the failing step from
+  `GET /actions/runs/{id}/jobs`, or checking the repository out so the extracted script can
+  run there. verified: the first needs `actions: read` and the second needs
+  `contents: read`, and that job declares `permissions: issues: write`
+  (`.github/workflows/chaos-e2e.yml:119-120` at 16b62e87), which *replaces* the
+  workflow-level default rather than adding to it — every scope not listed is `none`. Both
+  therefore widen the grant requirement 5 freezes. This one fact rules out both, and it is
+  why the derivation runs in the `chaos-e2e` job, which already checks out.
 - **Enumerate step display names in an env block** rather than keying on `toJSON(steps)`.
   judgment: a second list of every step, which a later step addition silently falls out
   of, to gain a prettier suffix than the id.
-- **Run the extracted script in the notify job.** verified: that job has no
-  `actions/checkout`, and adding one requires `contents: read` on a job whose
-  `permissions:` block replaces the workflow default — the same widening as above.
 - **Dedupe on a marker in the issue body, or a dedicated label, instead of the title.**
   verified: requirement 1 in #496 names the title ("Search for an open issue with this
   exact title"), so this is not the design's choice to make.
