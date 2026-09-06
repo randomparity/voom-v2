@@ -11,11 +11,13 @@ run.
 ## Current behaviour
 
 `notify-failure` runs `gh issue create` unconditionally with the fixed title
-`Scheduled chaos-e2e run failed` and no labels. One defect has therefore produced three
-identical issues — #470, #491 and #536 — and the count grows by one per week until the
-underlying failure is fixed. #496 names only the first two; #536 arrived after it was
-filed, which is the growth the issue predicts. None carries a label, so none appears in a
-triage query filtering on `status:` or `type:`.
+`Scheduled chaos-e2e run failed` and no labels. **Two distinct failures** have therefore
+produced three identically-titled issues — #470, #491 and #536 — and the count grows by one
+per failed run until the underlying failures are fixed. #496 names only the first two; #536
+arrived after it was filed, which is the growth the issue predicts. None carries a label,
+so none appears in a triage query filtering on `status:` or `type:`. That two different
+defects collapsed into one title is the case for keying on the failing step, not an
+incidental detail — see *The test half of requirement 4*.
 
 ## Requirements
 
@@ -247,8 +249,10 @@ than discovered later:
   `if: failure() && github.event_name == 'schedule'`, so the first real execution is a
   scheduled failure. That gate is pre-existing and out of scope to change.
 - **The naming step is inside the failing job**, so it yields no output whenever it does
-  not run. Three of those are catastrophic and rare — a cancellation, the 60-minute
-  timeout, a runner death. The fourth is mundane and works differently: a **post** step
+  not run. Two of those are catastrophic and rare — the 60-minute timeout and a runner
+  death, both of which Actions marks as `failure`. A cancellation is *not* one of them:
+  `failure()` is false when an ancestor was cancelled, so `notify-failure` is skipped and
+  nothing is filed at all. The third case is mundane and works differently: a **post** step
   failing. Post steps run after every main step, so if `Post Install uv` or
   `Post Cache cargo` fails while every main step succeeded, `if: failure()` is false when
   the naming step is evaluated, the step is *skipped*, and the job is then marked failed —

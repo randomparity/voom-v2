@@ -181,12 +181,17 @@ print('outputs:', d['jobs']['chaos-e2e']['outputs'])
 print('notify permissions:', d['jobs']['notify-failure']['permissions'])
 print('ids:', [s.get('id') for s in d['jobs']['chaos-e2e']['steps']])
 "
-git diff -U0 -- .github/workflows/chaos-e2e.yml \
-  | grep -E '^[+-][[:space:]]*(permissions:|issues:|contents:)[[:space:]]*[a-z]*$'
+# Diff against the BASE, not the worktree: a bare `git diff` on a committed branch is
+# empty, so it would print nothing and exit 1 even on a branch that widened the grant.
+# Write to a file rather than piping, so the grep's exit code is over real input.
+git diff main...HEAD -U0 -- .github/workflows/chaos-e2e.yml > /tmp/wf-496.diff
+wc -l < /tmp/wf-496.diff
+grep -nE '^[+-][[:space:]]*(permissions:|issues:|contents:)[[:space:]]*[a-z]*$' /tmp/wf-496.diff
 ```
 
-Expect `parses OK`, `notify permissions: {'issues': 'write'}`, nine non-null ids, and the
-`grep` to print nothing and exit 1.
+Expect `parses OK`, `notify permissions: {'issues': 'write'}`, workflow-level
+`{'contents': 'read'}`, nine non-null ids, a non-zero diff line count, and the `grep` to
+print nothing and exit 1 — no permission line added, removed, or changed.
 
 ### Step 3.2 — drive both `run:` blocks against fixtures
 

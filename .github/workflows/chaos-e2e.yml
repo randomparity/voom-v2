@@ -176,9 +176,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Empty when the job died before its naming step could run at all -- a
-          # cancellation, the job timeout, a runner death. A vague key beats no
-          # notification, so this falls back rather than failing.
+          # Empty when the naming step never ran: the job timeout, a runner death, or a
+          # post step failing after every main step succeeded (which leaves `if:
+          # failure()` false, so the namer is skipped). Not a cancellation -- `failure()`
+          # is false for a cancelled ancestor, so this job is skipped entirely. A vague
+          # key beats no notification, so this falls back rather than failing.
           FAILING_STEP: ${{ needs.chaos-e2e.outputs.failing-step }}
           # See the naming step: the charset guard is a locale-collated bracket range.
           LC_ALL: C
