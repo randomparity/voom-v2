@@ -142,15 +142,16 @@ jobs:
           # ffmpeg step above.
           LC_ALL: C
         run: |
-          # No `shell:` key means `bash -e` WITHOUT pipefail, so a jq failure at the
-          # head of this pipeline would be invisible. Set it explicitly.
+          # No `shell:` key means `bash -e` WITHOUT pipefail. jq reads a here-string
+          # rather than a pipe so a jq failure is the assignment's own status and
+          # `set -e` catches it either way.
           set -euo pipefail
           # `.value.outcome?` tolerates a non-object entry rather than aborting the
           # filter. `first // "unknown-step"`: `first` of an empty array is null, and
           # `null // x` is x, so the caller always gets a usable key.
-          name=$(printf '%s' "$STEPS_CONTEXT" | jq -r '
+          name=$(jq -r '
             [to_entries[] | select(.value.outcome? == "failure") | .key]
-            | first // "unknown-step"')
+            | first // "unknown-step"' <<<"$STEPS_CONTEXT")
           # Actions already constrains a step id to this shape, so this is a boundary
           # check rather than a transformation: the value reaches an issue title and a
           # search query in a job that holds `issues: write`.
