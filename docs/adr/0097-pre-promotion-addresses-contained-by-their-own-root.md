@@ -39,21 +39,19 @@ read the staging bytes and promote into the target" — and fails pre-mutation
 otherwise. The stronger property the guard actually demands, that the staging
 root's path be *nested inside* the output root's path, is written down nowhere,
 and nothing enforces it at configuration time. It surfaces as
-`COMMIT_FAILURE: artifact commit path escaped storage root <id>` only after a
-transcode has already run. Issue #497 attributes the weekly `chaos-e2e` failures
-#470 and #491 to this failure mode; both of those issue bodies carry only an
-Actions run URL, so that attribution is inherited here rather than verified.
+`CONFIG_INVALID: artifact commit path escaped storage root <id>` only after a
+transcode has already run — `require_contained` returns `VoomError::Config`,
+which `crates/voom-core/src/error.rs:371` maps to `ConfigInvalid` and `:183`
+renders, and `crates/voom-control-plane/src/operation_source_test.rs:181` pins it
+for this exact escape. Issue #497
+attributes the weekly `chaos-e2e` failures #470 and #491 to this failure mode;
+both of those issue bodies carry only an Actions run URL, so that attribution is
+inherited here rather than verified.
 
-How the in-tree fixture avoids the failure is worth stating precisely, because
-the fourth decision below removes the route it takes.
-`crates/voom-cli/tests/support/voom_cli.rs:48-50` sets
-`default_staging_root_id = id, default_backup_root_id = id` and leaves
-`default_output_root_id` NULL. Containment therefore measures against the source
-root — the library root the staging tree already sits inside — through
-`artifact_target_root`'s `unwrap_or(source_storage_root_id)` fallback. The
-fixture's own comment says as much: the defaults exist "so envelope destinations
-resolve inside the library tree rather than escaping the storage root during
-commit." The roots are not collapsed onto one id; the fallback is what holds.
+The in-tree fixture at `crates/voom-cli/tests/support/voom_cli.rs:48-50` leaves
+`default_output_root_id` NULL, so containment measures against the source root
+through the `unwrap_or(source_storage_root_id)` fallback that the fourth decision
+below removes — not through the three roots being collapsed onto one id.
 
 A second, related divergence has to be settled with it. Two resolution routes for
 one concept disagree about an unconfigured output root: `artifact_target_root`
@@ -65,9 +63,9 @@ render." ADR 0055 is the source of the first behavior: it records that artifact
 finalization "selects an explicit target root from that source root's configured
 output-root relationship, falling back to the same root," and that the resolver
 "proves the target path is contained by that target root." Containment at commit
-is therefore an accepted decision, not an emergent one — the issue's premise that
-ADR 0055 does not state it is mistaken. What ADR 0055 does not state, and what
-this record settles, is *which* root a pre-promotion address is contained by.
+is therefore an accepted decision, not an emergent one. What ADR 0055 does not
+state, and what this record settles, is *which* root a pre-promotion address is
+contained by.
 
 Constraints in play. ADR 0050 makes storage-owner node agents perform every byte
 read and mutation, and marks the control plane's filesystem-promotion path
@@ -145,16 +143,23 @@ pairing without writing a default column. `require_default_ids_in_library`
 non-retired same-library root as a default, with no state or owner requirement,
 and `assign_library_root_owner_in_tx` (`:361-390`) then permits that root's owner
 to change while it is `unassigned` or `configured` with no activation identity. So
-the owner-agreement check must also run at owner assignment, against every root
-that names the reassigned root as a default. #616's body is right that
-`create_library_root` and `update_library_root` are the only writers of the
-default columns; the owner-assignment path writes none of them and is still a way
-a valid pairing goes stale.
+the owner-agreement check must also run at owner assignment, **in both
+directions** — against every root that names the reassigned root as a default, and
+against every default the reassigned root itself names. One direction alone leaves
+the reassigned root's own pairings unchecked, which is the reachable case: a
+migrated root R is quarantined with a null owner, `update_library_root` accepts
+`R.default_staging_root_id = S` because same-library is all that is checked, and
+`assign_library_root_owner_in_tx(R, N)` then succeeds without ever looking at S.
+#616's body is right that `create_library_root` and `update_library_root` are the
+only writers of the default columns; the owner-assignment path writes none of them
+and is still a way a valid pairing goes stale.
 
 Second, ADR 0055 quarantined migrated roots as `unassigned` with a null owner. A
-pairing where either side has no assigned owner is accepted at configuration time
-and stays the run-time pre-mutation check's to refuse, because a
-configuration-time rule cannot decide agreement between an owner and an absence.
+pairing is undecidable at configuration time only while an owner is genuinely
+absent, because no rule can decide agreement between an owner and an absence. Owner
+assignment is the moment the absence becomes a presence and the pairing first
+becomes decidable, which is why the check must run there; only pairings whose owner
+is still absent are inherited by the run-time pre-mutation check.
 
 ### An unaddressable destination fails closed
 
@@ -186,16 +191,24 @@ untouched.
   reconciliation, and #623 is the harness reconciliation. That resolver change
   needs an owner before the consequences below can be acted on. Naming the gap is
   this record's job; filing the work is the tracker's.
-- Removing the source-root fallback carries an in-tree cost this record should not
-  understate. `default_output_root_id` is set on exactly two paths that reach a
-  commit or a promotion (`crates/voom-control-plane/src/artifact/commit/mod_test.rs:1467`
-  and `crates/voom-control-plane/src/operation_source_test.rs:67`; a third test,
-  `crates/voom-store/src/repo/library/library_roots_test.rs:471`, exercises the
-  column through the repository API and never commits). Around eighteen further
-  fixtures construct it as `None` and depend on the fallback, including
-  `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Every fixture that reaches a
-  commit or a promotion must gain an explicit output root. That work belongs to
-  the resolver change above, not to #497's closure.
+- Removing the source-root fallback carries an in-tree cost. Two paths that reach
+  a commit or promotion set `default_output_root_id`
+  (`crates/voom-control-plane/src/artifact/commit/mod_test.rs:1467`,
+  `crates/voom-control-plane/src/operation_source_test.rs:67`); eighteen fixtures
+  construct it as `None` and depend on the fallback, including
+  `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Each of the latter that
+  reaches a commit or promotion must gain an explicit output root, and that work
+  belongs to the resolver change above, not to #497's closure.
+- **The amendment is invisible from the records it amends, and that is unowned.**
+  This repository's convention is a `## Later decision:` section added to the
+  amended record in the same commit as the amending one — ADR 0050's commit
+  `b3ccc609` did exactly that to ADRs 0019 (`:99`), 0025 (`:154`), 0027 (`:194`),
+  and 0034 (`:202`). ADR 0055:101-105 and ADR 0069:255-257 need the same
+  back-reference, and `docs/adr/README.md` cannot substitute: it is a two-column
+  `| ADR | Title |` table with no status field. Those two edits are outside this
+  PR's permitted surface and have no owner. Until they land, a reader arriving at
+  ADR 0055 or 0069 sees a bare `Accepted` record and a clause this decision has
+  removed.
 - Open issue #484 is affected and must be restated. Its acceptance criterion names
   the rule this record removes: the byte-work declaration should name the resolved
   destination root "using the same `default_output_root_id.unwrap_or(source)` rule
@@ -233,10 +246,13 @@ untouched.
   which sits outside `$run_dir` entirely (`library_dir="$run_dir/library"`, `:49`)
   and which no `library_roots` row describes — only `$library_dir` is registered,
   by `voom scan --path "$library_dir"` at `:113`. Under this decision that is a
-  fail-closed error. #623's report that it nonetheless "does
-  not fail" is unexplained by this record, and establishing whether that harness
-  reaches a commit at all is part of #623's work. #623 must not run before the
-  resolver change lands, or it will assert a layout the code still rejects.
+  fail-closed error. #623's report that it nonetheless "does not fail" has a plain
+  cause: `:11` defaults `CHAOS_EXECUTE_POLICY` to `0` and `:160` gates the
+  `compliance execute --staging-root` call on it, so a default run never reaches a
+  commit. That layout is untested rather than passing, and no CI run exercises it —
+  the weekly job runs `just chaos-e2e-ci` (`justfile:249-252`), which is the Rust
+  harness only. #623 must not run before the resolver change lands, or it will
+  assert a layout the code still rejects.
 - Removing the fallback is a behavior change for any deployment relying on the
   implicit "write beside the source" default; it must now set `--output-root`
   explicitly. The project is pre-release, so no migration or deprecation window is
@@ -269,7 +285,7 @@ untouched.
   behavior as the contract.** judgment: this is what actually runs — with no output
   default configured, `unwrap_or(source_storage_root_id)`
   (`operation_source.rs:185-188`) already makes the source root the containment
-  root, and every in-tree fixture and both chaos harnesses satisfy it. It names a
+  root, and every in-tree fixture and the Rust chaos harness satisfy it. It names a
   registered root for every pre-promotion address, needs no nesting between staging
   and output, and would avoid the fourth decision and its fixture cost entirely.
   Rejected because once the staging and source roots genuinely differ, "contained by
@@ -296,7 +312,4 @@ untouched.
 - **Settle only the containment question and leave the fallback to a later
   record.** judgment: issue #615's fifth acceptance criterion requires this record
   to settle the fallback, and splitting it out would leave the defect half-fixed in
-  exactly the way that criterion names. The two are separable — the #616 rule above
-  never consults the fallback, and under the first decision the fallback leaves the
-  commit path entirely — so the ground for bundling them is the criterion, not a
-  technical dependency.
+  exactly the way that criterion names.

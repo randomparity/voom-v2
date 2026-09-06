@@ -16,7 +16,17 @@ Tech stack: Markdown records under `docs/adr/`, gated by
 `scripts/check-adr-index.sh` (invoked as `just check-adr-index`, which `just ci`
 runs and which the `prek` pre-commit hook also runs on staged `docs/adr/` changes).
 
-Expected implementation size: 295–315 changed lines (M) — derived from the file map below: one 302-line record plus one index row.
+Expected implementation size: 310–325 changed lines (M) — derived from the file map below: one 315-line record plus one index row.
+
+That line has been revised on every commit of this branch (200–210 → 255–270 →
+295–315 → this one), tracking a record that grew 202 → 260 → 302 → 315 under three
+rounds of review. Recorded here rather than smoothed over, because an estimate
+re-derived from the artifact's current length can never fail and so bounds
+nothing. The growth is accounted for: rounds two and three cut four passages the
+review named as defending rather than deciding, and added more than that back in
+corrections the review's blocking findings required — the bidirectional
+owner-assignment rule, the amendment-visibility residual, and the `CONFIG_INVALID`
+correction. The four decisions themselves have not grown since the first draft.
 
 ## Global Constraints
 
@@ -107,7 +117,9 @@ their own storage root`, to build the index row.
    base, then check each line. Run from the worktree root:
 
    ```sh
-   git diff --quiet main -- crates/ scripts/ || { echo "cited sources differ from base"; exit 1; }
+   git diff --quiet main -- crates/ scripts/ docs/adr/0050-*.md docs/adr/0055-*.md \
+     docs/adr/0069-*.md docs/adr/0074-*.md docs/adr/0075-*.md \
+     || { echo "cited sources differ from base"; exit 1; }
    while IFS='|' read -r f line token; do
      [ -z "$f" ] && continue
      sed -n "${line}p" "$f" | grep -qF -- "$token" \
@@ -125,6 +137,9 @@ their own storage root`, to build the index row.
    crates/voom-control-plane/src/cases/policy/compliance.rs|696|COMMITTED_SUBDIR
    crates/voom-control-plane/src/artifact/commit/mod_test.rs|1467|default_output_root_id
    crates/voom-control-plane/src/operation_source_test.rs|67|default_output_root_id
+   crates/voom-control-plane/src/operation_source_test.rs|181|CONFIG_INVALID
+   crates/voom-core/src/error.rs|183|CONFIG_INVALID
+   crates/voom-core/src/error.rs|371|ErrorCode::ConfigInvalid
    crates/voom-cli/tests/support/owner_node.rs|492|root_path
    crates/voom-cli/tests/support/owner_node.rs|581|.committed
    crates/voom-cli/tests/support/voom_cli.rs|49|default_staging_root_id = id
@@ -135,10 +150,19 @@ their own storage root`, to build the index row.
    crates/voom-store/src/repo/library/library_roots.rs|614|require_default_ids_in_library
    crates/voom-store/src/repo/library/library_roots_test.rs|471|default_output_root_id
    crates/voom-cli/tests/chaos_librarian_e2e.rs|247|staging flag mirrors
+   scripts/chaos-e2e-local.sh|11|CHAOS_EXECUTE_POLICY:-0
    scripts/chaos-e2e-local.sh|49|library_dir="$run_dir/library"
    scripts/chaos-e2e-local.sh|113|--path "$library_dir"
+   scripts/chaos-e2e-local.sh|160|execute_policy" = "execute"
    scripts/chaos-e2e-local.sh|166|--staging-root
    scripts/check-adr-index.sh|21|row_prefix
+   justfile|249|chaos-e2e-ci:
+   docs/adr/0055-node-owned-roots-and-relative-file-locations.md|103|falling back to the same
+   docs/adr/0069-byte-work-tickets-declare-canonical-artifact-access.md|256|unwrap_or(source)
+   docs/adr/0019-commit-gate-lineage-commit-check.md|99|## Later decision
+   docs/adr/0025-backup-worker-and-backup-before-mutation-gate.md|154|## Later decision
+   docs/adr/0027-library-root-and-scan-configuration.md|194|## Later decision
+   docs/adr/0034-policy-tool-requirements-use-worker-capabilities.md|202|## Later decision
    EOF
    echo "citations OK"
    ```
@@ -225,6 +249,7 @@ table row and carries no schema, no behavior, and no deployment ordering.
 
 ## Deferrals carried into the build
 
-None. The design review's nine findings were all dispositioned `accepted-fixed`;
-no `deferred-tracked` or `rejected-with-evidence` disposition was recorded, and
-`docs/debt/` is outside this run's permitted surface.
+None. The design review ran three iterations under one charter and every finding
+was dispositioned `accepted-fixed`; no `deferred-tracked` or
+`rejected-with-evidence` disposition was recorded, and `docs/debt/` is outside this
+run's permitted surface.

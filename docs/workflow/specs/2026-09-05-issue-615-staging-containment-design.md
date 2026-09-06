@@ -14,7 +14,9 @@ containment (`operation_source.rs:290-302`). The emergent effect is that the
 staging root's path must be nested inside the output root's path — a coupling
 stronger than ADR 0074's shared-owner-node requirement and stated in no record.
 It surfaces only after a transcode, as
-`COMMIT_FAILURE: artifact commit path escaped storage root <id>`.
+`CONFIG_INVALID: artifact commit path escaped storage root <id>`
+(`crates/voom-control-plane/src/operation_source_test.rs:181` pins the code; the
+issue bodies that call it `COMMIT_FAILURE` are wrong).
 
 A second route resolves the same concept with the opposite fallback:
 `destination_root` (`crates/voom-control-plane/src/workflow/plan/envelope.rs:197-228`)
@@ -37,8 +39,9 @@ leaves the defect half-fixed, so both are settled in one record.
    same-owner-node agreement between a root and each root it names as a default,
    with no filesystem path comparison — plus the two completeness points the
    record states: the owner-assignment path (`assign_library_root_owner_in_tx`)
-   can invalidate a pairing without writing a default column, and the null-owner
-   case ADR 0055's migration left behind is not decidable at configuration time.
+   can invalidate a pairing without writing a default column and must be checked
+   in both directions, and a pairing is undecidable only while an owner is still
+   absent, owner assignment being where it becomes decidable.
 4. The unconfigured-output-root fallback converges on fail-closed, amending one
    clause of ADR 0055.
 
@@ -84,9 +87,12 @@ Two contracts, both machine-checkable:
    `docs/adr/README.md` row for the new record. This is the arm of `just ci` that
    decides this change, and the pre-commit hook enforces it at commit time, so the
    record and its row cannot land separately.
-2. **Citation accuracy.** Every `file:line` the record cites resolves, at the
-   branch base, to a line containing a token drawn from the fact the citing
-   sentence asserts — not merely a token that happens to appear on the cited line.
+2. **Citation accuracy.** Every `file:line` the record cites into `crates/`,
+   `scripts/`, and `docs/adr/` resolves, at the branch base, to a line containing
+   a token drawn from the fact the citing sentence asserts — not merely a token
+   that happens to appear on the cited line. Claims the record states without a
+   `file:line` are outside this check and remain a reviewer's to verify; that is
+   where its residual risk lives.
    That distinction is the contract's substance: a check keyed to an incidental
    token passes while the citation is wrong, which is how the first draft's table
    confirmed `chaos-e2e-local.sh:49` for a claim living on line 166. A record whose
