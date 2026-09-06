@@ -199,16 +199,16 @@ untouched.
   `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Each of the latter that
   reaches a commit or promotion must gain an explicit output root, and that work
   belongs to the resolver change above, not to #497's closure.
-- **The amendment is invisible from the records it amends, and that is unowned.**
-  This repository's convention is a `## Later decision:` section added to the
-  amended record in the same commit as the amending one — ADR 0050's commit
-  `b3ccc609` did exactly that to ADRs 0019 (`:99`), 0025 (`:154`), 0027 (`:194`),
-  and 0034 (`:202`). ADR 0055:101-105 and ADR 0069:255-257 need the same
-  back-reference, and `docs/adr/README.md` cannot substitute: it is a two-column
-  `| ADR | Title |` table with no status field. Those two edits are outside this
-  PR's permitted surface and have no owner. Until they land, a reader arriving at
-  ADR 0055 or 0069 sees a bare `Accepted` record and a clause this decision has
-  removed.
+- **The amendment is discoverable from the records it amends.** This repository's
+  convention is a `## Later decision:` section added to the amended record in the
+  same commit as the amending one — ADR 0050's commit `b3ccc609` did exactly that
+  to ADRs 0019 (`:99`), 0025 (`:154`), 0027 (`:194`), and 0034 (`:202`). This
+  change follows it: ADR 0055 gains `## Later decision: pre-promotion address
+  containment` and ADR 0069 gains `## Later decision: fail-closed destination
+  resolution`, both appended, both naming this record and issue #615 and the exact
+  clause amended. Neither record is otherwise altered, and `docs/adr/README.md`
+  could not have substituted — it is a two-column `| ADR | Title |` table with no
+  status field.
 - Open issue #484 is affected and must be restated. Its acceptance criterion names
   the rule this record removes: the byte-work declaration should name the resolved
   destination root "using the same `default_output_root_id.unwrap_or(source)` rule

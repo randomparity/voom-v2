@@ -117,9 +117,15 @@ their own storage root`, to build the index row.
    base, then check each line. Run from the worktree root:
 
    ```sh
-   git diff --quiet main -- crates/ scripts/ docs/adr/0050-*.md docs/adr/0055-*.md \
-     docs/adr/0069-*.md docs/adr/0074-*.md docs/adr/0075-*.md \
+   git diff --quiet main -- crates/ scripts/ justfile \
      || { echo "cited sources differ from base"; exit 1; }
+   # ADR 0055 and 0069 are amended by this change, so they are not unchanged from
+   # base. Assert instead that both diffs are append-only: cited line numbers sit
+   # before the appended sections, so they still resolve.
+   for adr in docs/adr/0055-*.md docs/adr/0069-*.md; do
+     dels=$(git diff --numstat main -- "$adr" | cut -f2)
+     [ "${dels:-0}" = "0" ] || { echo "not append-only: $adr deleted $dels line(s)"; exit 1; }
+   done
    while IFS='|' read -r f line token; do
      [ -z "$f" ] && continue
      sed -n "${line}p" "$f" | grep -qF -- "$token" \
