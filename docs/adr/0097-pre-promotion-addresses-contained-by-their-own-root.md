@@ -96,15 +96,18 @@ address happens to have been built under. The two readings coincide only when th
 staging path is a registered root, and on the transitional coordinator path they
 do not: `committed_working_dir` joins `.committed/<op>` onto an operator-supplied
 path that no `library_roots` row describes. Under this decision such a path has
-**no** containment root, and that is a configuration error that fails closed — not
-an address trivially contained by itself.
+**no** containment root, and that is a fail-closed error — not an address
+trivially contained by itself.
 
 Concretely, a resolver validating an address resolves its containment root from
 the role the address serves: a pre-promotion staging address against the root
 `destination_root` resolves for `DestinationRole::Staging`, a durable output
-address against the root resolved from `default_output_root_id`. Applying the
-output root's containment to a staging address is the defect; the guard is
-correct and is applied against the wrong root.
+address against the `default_output_root_id` of whichever root its caller passes —
+the source media root at `crates/voom-control-plane/src/artifact/commit/prepare.rs:229-236`,
+the artifact's own root at `promotion.rs:742`, which under this decision is the
+staging root and must therefore carry its own output default. Applying the output
+root's containment to a staging address is the defect; the guard is correct and is
+applied against the wrong root.
 
 ### The staging↔output relationship is ADR 0074's shared owner node, and nothing more
 
@@ -115,13 +118,18 @@ staging root that is a sibling of, or wholly unrelated to, the output root is a
 correct configuration provided both are registered roots resolving to the same
 owner node and the same library.
 
-Neither half of that agreement is enforced today outside ADR 0074's pre-mutation
-check. `artifact_target_root` requires the *output* root to share the *source*
-root's library (`operation_source.rs:196-202`) and to be owned by the control
-plane's own local node (`require_effective_local_root_path`,
-`operation_source.rs:275`); the staging root is never passed to that function and
-never reaches it. Staging↔output owner agreement is enforced nowhere at
-configuration time, and closing that gap is the substance of #616's new check.
+The two halves stand differently today. The same-library half is already enforced
+at configuration time on both write paths: `require_default_ids_in_library`
+(`crates/voom-store/src/repo/library/library_roots.rs:614-634`) forces every
+`default_*_root_id` into the naming root's library, reached from
+`update_library_root` (`:309`) and from `create_library_root` through
+`require_defaults_in_library` (`:602`). The owner-node half is enforced nowhere at
+configuration time. At run time `artifact_target_root` checks only that the
+*output* root shares the *source* root's library (`operation_source.rs:196-202`)
+and is owned by the control plane's own local node
+(`require_effective_local_root_path`, `operation_source.rs:275`); the staging root
+is never passed to that function. So #616's genuinely new work is the owner-node
+condition and the owner-assignment path below, not the whole check.
 
 ### The rule #616 enforces at configuration time
 
@@ -160,7 +168,12 @@ than be guessed.
 
 This **amends ADR 0055** in one clause only — "falling back to the same root" no
 longer holds. ADR 0055's root identity model, its provider-relative location
-model, and its containment requirement are untouched and still govern.
+model, and its containment requirement are untouched and still govern. ADR 0069's
+Consequences (`:255-257`) restate that same clause descriptively — "ADR 0055
+resolves a destination as `default_output_root_id.unwrap_or(source)`, and
+`artifact_target_root` implements it" — so that sentence goes stale with it. ADR
+0069's own decision, that byte-work tickets declare canonical artifact access, is
+untouched.
 
 ## Consequences
 
@@ -174,13 +187,22 @@ model, and its containment requirement are untouched and still govern.
   needs an owner before the consequences below can be acted on. Naming the gap is
   this record's job; filing the work is the tracker's.
 - Removing the source-root fallback carries an in-tree cost this record should not
-  understate. `default_output_root_id` is set in exactly two tests
-  (`crates/voom-control-plane/src/artifact/commit/mod_test.rs:1467` and
-  `crates/voom-control-plane/src/operation_source_test.rs:67`); roughly a dozen
-  further fixtures construct it as `None` and depend on the fallback, including
+  understate. `default_output_root_id` is set on exactly two paths that reach a
+  commit or a promotion (`crates/voom-control-plane/src/artifact/commit/mod_test.rs:1467`
+  and `crates/voom-control-plane/src/operation_source_test.rs:67`; a third test,
+  `crates/voom-store/src/repo/library/library_roots_test.rs:471`, exercises the
+  column through the repository API and never commits). Around eighteen further
+  fixtures construct it as `None` and depend on the fallback, including
   `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Every fixture that reaches a
   commit or a promotion must gain an explicit output root. That work belongs to
   the resolver change above, not to #497's closure.
+- Open issue #484 is affected and must be restated. Its acceptance criterion names
+  the rule this record removes: the byte-work declaration should name the resolved
+  destination root "using the same `default_output_root_id.unwrap_or(source)` rule
+  as `artifact_target_root`, so the two cannot disagree." After this record there
+  is no such rule, so #484's criterion becomes "name the resolved output root"
+  without the fallback clause. Its own subject, `declaration_for`, is untouched by
+  the resolver change; only the criterion's wording is.
 - #616 is unblocked to implement the same-library, same-owner-node configuration
   check above, at `create_library_root`, `update_library_root`, and the
   owner-assignment path. Its premise changes: it must **not** implement the
@@ -193,7 +215,11 @@ model, and its containment requirement are untouched and still govern.
   containment root is now a registered root, so a `--staging-root` path that names
   no registered root has no containment root at all. The reconciliation stays
   inside ADR 0050's constraint — no new control-plane-owned filesystem behavior,
-  and `promotion_plan()`'s surface holds or shrinks.
+  and `promotion_plan()`'s surface holds or shrinks. Until #618 lands there is a
+  residual worth stating: no configuration-time surface can see the `--staging-root`
+  path, since #616's rule validates only the three `default_*_root_id` columns, so
+  an unregistered staging path is still rejected at commit time — the same class of
+  late failure this record's Context names as the harm.
 - #623's question is answered, but not on the axis either harness's author framed
   it on. What matters is not whether the staging tree is nested inside the library
   root; it is whether the staging path is a registered storage root that some root
@@ -203,9 +229,11 @@ model, and its containment requirement are untouched and still govern.
   scan root is a registered root made its own staging default — while its comment's
   stated reason, that a staging root outside the storage root makes the commit path
   escape it, describes the containment this record rejects. The shell harness
-  (`scripts/chaos-e2e-local.sh:47-49`) passes `$workdir/staging-<checkpoint>`, a
-  sibling of `$run_dir/library` that no `library_roots` row describes; under this
-  decision that is a configuration error. #623's report that it nonetheless "does
+  (`scripts/chaos-e2e-local.sh:161-167`) passes `$workdir/staging-<checkpoint>`,
+  which sits outside `$run_dir` entirely (`library_dir="$run_dir/library"`, `:49`)
+  and which no `library_roots` row describes — only `$library_dir` is registered,
+  by `voom scan --path "$library_dir"` at `:113`. Under this decision that is a
+  fail-closed error. #623's report that it nonetheless "does
   not fail" is unexplained by this record, and establishing whether that harness
   reaches a commit at all is part of #623's work. #623 must not run before the
   resolver change lands, or it will assert a layout the code still rejects.
@@ -237,6 +265,17 @@ model, and its containment requirement are untouched and still govern.
   trivially contained by its own prefix, so the guard decides nothing — and it is
   unavailable to the envelope path regardless, where `destination_root`
   (`envelope.rs:197-228`) returns a `StorageRootId` and there is no prefix to read.
+- **Contain the pre-promotion address in the source root, stating today's fallback
+  behavior as the contract.** judgment: this is what actually runs — with no output
+  default configured, `unwrap_or(source_storage_root_id)`
+  (`operation_source.rs:185-188`) already makes the source root the containment
+  root, and every in-tree fixture and both chaos harnesses satisfy it. It names a
+  registered root for every pre-promotion address, needs no nesting between staging
+  and output, and would avoid the fourth decision and its fixture cost entirely.
+  Rejected because once the staging and source roots genuinely differ, "contained by
+  whichever root the source media happens to live in" is arbitrary — the staging
+  bytes have no relationship to the source root beyond provenance — and it preserves
+  the silent fallback that made the two resolution routes diverge in the first place.
 - **Supersede ADR 0074 and restate the staging↔target relationship.** judgment:
   ADR 0074's shared-owner-node rule is the correct and sufficient relationship and
   needs no change; superseding a record to confirm it would retire a live decision
@@ -255,6 +294,9 @@ model, and its containment requirement are untouched and still govern.
   (`operation_source.rs:185-188` versus `envelope.rs:197-228`) still disagreeing —
   the half-fixed outcome issue #615 names.
 - **Settle only the containment question and leave the fallback to a later
-  record.** judgment: the containment root for a durable output address *is* the
-  fallback's result, so a rule stated without it is a rule #616 cannot implement
-  without a second decision, which is the acceptance criterion this record owes.
+  record.** judgment: issue #615's fifth acceptance criterion requires this record
+  to settle the fallback, and splitting it out would leave the defect half-fixed in
+  exactly the way that criterion names. The two are separable — the #616 rule above
+  never consults the fallback, and under the first decision the fallback leaves the
+  commit path entirely — so the ground for bundling them is the criterion, not a
+  technical dependency.

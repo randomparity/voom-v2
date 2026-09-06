@@ -85,9 +85,13 @@ Two contracts, both machine-checkable:
    decides this change, and the pre-commit hook enforces it at commit time, so the
    record and its row cannot land separately.
 2. **Citation accuracy.** Every `file:line` the record cites resolves, at the
-   branch base, to a line containing a distinctive token from the sentence citing
-   it. A record whose evidence is its whole argument is worth nothing if a
-   citation is misread — one was, on the first draft, and it inverted a
-   Consequences bullet. The plan carries the exact asserting command.
+   branch base, to a line containing a token drawn from the fact the citing
+   sentence asserts — not merely a token that happens to appear on the cited line.
+   That distinction is the contract's substance: a check keyed to an incidental
+   token passes while the citation is wrong, which is how the first draft's table
+   confirmed `chaos-e2e-local.sh:49` for a claim living on line 166. A record whose
+   evidence is its whole argument is worth nothing if a citation is misread — one
+   was, on the first draft, and it inverted a Consequences bullet. The plan carries
+   the exact asserting command and a row for every location the record cites.
 
 `just ci` green overall.

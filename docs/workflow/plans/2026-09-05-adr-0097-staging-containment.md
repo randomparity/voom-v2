@@ -16,7 +16,7 @@ Tech stack: Markdown records under `docs/adr/`, gated by
 `scripts/check-adr-index.sh` (invoked as `just check-adr-index`, which `just ci`
 runs and which the `prek` pre-commit hook also runs on staged `docs/adr/` changes).
 
-Expected implementation size: 255–270 changed lines (M) — derived from the file map below: one 260-line record plus one index row.
+Expected implementation size: 295–315 changed lines (M) — derived from the file map below: one 302-line record plus one index row.
 
 ## Global Constraints
 
@@ -115,25 +115,52 @@ their own storage root`, to build the index row.
    done <<'EOF'
    crates/voom-control-plane/src/operation_source.rs|158|resolve_artifact_target
    crates/voom-control-plane/src/operation_source.rs|187|default_output_root_id
+   crates/voom-control-plane/src/operation_source.rs|196|library_id != source_library_id
    crates/voom-control-plane/src/operation_source.rs|275|owner != local
    crates/voom-control-plane/src/operation_source.rs|290|require_contained
    crates/voom-control-plane/src/workflow/plan/envelope.rs|207|destination_root
+   crates/voom-control-plane/src/workflow/coordinator/promotion.rs|724|promote_artifact
+   crates/voom-control-plane/src/workflow/coordinator/promotion.rs|742|artifact.storage_root_id
+   crates/voom-control-plane/src/artifact/commit/prepare.rs|233|source.source_storage_root_id
    crates/voom-control-plane/src/cases/policy/compliance.rs|696|COMMITTED_SUBDIR
+   crates/voom-control-plane/src/artifact/commit/mod_test.rs|1467|default_output_root_id
+   crates/voom-control-plane/src/operation_source_test.rs|67|default_output_root_id
    crates/voom-cli/tests/support/owner_node.rs|492|root_path
    crates/voom-cli/tests/support/owner_node.rs|581|.committed
    crates/voom-cli/tests/support/voom_cli.rs|49|default_staging_root_id = id
+   crates/voom-store/src/repo/library/library_roots.rs|309|require_default_ids_in_library
    crates/voom-store/src/repo/library/library_roots.rs|361|assign_library_root_owner_in_tx
    crates/voom-store/src/repo/library/library_roots.rs|379|owner_node_id = ?
+   crates/voom-store/src/repo/library/library_roots.rs|602|require_default_ids_in_library
    crates/voom-store/src/repo/library/library_roots.rs|614|require_default_ids_in_library
+   crates/voom-store/src/repo/library/library_roots_test.rs|471|default_output_root_id
    crates/voom-cli/tests/chaos_librarian_e2e.rs|247|staging flag mirrors
-   scripts/chaos-e2e-local.sh|49|library_dir
+   scripts/chaos-e2e-local.sh|49|library_dir="$run_dir/library"
+   scripts/chaos-e2e-local.sh|113|--path "$library_dir"
+   scripts/chaos-e2e-local.sh|166|--staging-root
    scripts/check-adr-index.sh|21|row_prefix
    EOF
    echo "citations OK"
    ```
 
-   Expect `citations OK` and exit 0. Before trusting it, substitute one wrong
-   token and confirm it exits 1 with the `CITATION FAILED` line.
+   Expect `citations OK` and exit 0. Two properties of this check are earned
+   rather than assumed, and both were established by it failing first:
+
+   - **It bites.** Substitute the pair
+     `crates/voom-cli/tests/support/voom_cli.rs|49|default_output_root_id` and
+     confirm exit 1 with
+     `CITATION FAILED: crates/voom-cli/tests/support/voom_cli.rs:49 lacks default_output_root_id`.
+     That is the exact misreading the first draft of the record shipped.
+   - **The token must come from the asserted fact, not merely from the cited
+     line.** The first version of this table paired `chaos-e2e-local.sh:49` with
+     the token `library_dir` and passed, while the sentence citing that line
+     claimed the harness "passes `$workdir/staging-<checkpoint>`" — a claim living
+     on line 166. A token that any nearby line would satisfy proves nothing. Pick
+     the token the record's sentence actually asserts.
+
+   Run it as a script (`bash /tmp/check-citations.sh`), not pasted into an
+   interactive shell: the here-doc keeps `exit 1` in the current shell, so a
+   failure would close that shell.
 5. Confirm the `Considered & rejected` section carries one evidence tag per
    bullet. Command:
 
@@ -145,7 +172,7 @@ their own storage root`, to build the index row.
      docs/adr/0097-pre-promotion-addresses-contained-by-their-own-root.md
    ```
 
-   Expect `bullets=7 tags=7` and exit 0. This proves count agreement within the
+   Expect `bullets=8 tags=8` and exit 0. This proves count agreement within the
    section, not per-bullet placement; read the section once to confirm each tag
    sits on its own bullet.
 
