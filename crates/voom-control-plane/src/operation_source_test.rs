@@ -131,3 +131,56 @@ async fn configured_root_alias_resolves_but_descendant_symlink_is_rejected() {
     assert_eq!(error.code(), "CONFIG_INVALID");
     assert!(error.to_string().contains("must not traverse a symlink"));
 }
+
+/// `require_contained` is the guard that rejects a commit target outside its
+/// storage root. Nothing else in the workspace asserts its rejection branch, so
+/// a change that let it pass unconditionally would surface only in a run that
+/// misconfigures a root. Issue #491 showed that such runs happen only in the
+/// weekly `chaos-e2e` job, which is `#[ignore]`-gated out of `just ci`.
+///
+/// The escape target is a textual-prefix sibling of the root, not an unrelated
+/// directory, so this also fails if the component-wise `starts_with` check is
+/// ever replaced by a string prefix comparison.
+#[tokio::test]
+async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
+    let (cp, _db) = crate::cases::cp().await;
+    let parent = tempfile::tempdir().unwrap();
+    // Canonicalize before joining: the symlink guard walks the target's
+    // ancestors, and on macOS the temp directory sits under `/var`, which is a
+    // symlink to `/private/var`. Without this the guard rejects the path for
+    // traversing a symlink before the containment check ever runs.
+    let base = parent.path().canonicalize().unwrap();
+    let root_dir = base.join("root");
+    let outside_dir = base.join("root-outside");
+    std::fs::create_dir(&root_dir).unwrap();
+    std::fs::create_dir(&outside_dir).unwrap();
+    let library_id = library(&cp, "contained-target").await;
+    let root = cp
+        .create_library_root(root_input(library_id, &root_dir))
+        .await
+        .unwrap();
+    cp.activate_library_root(root.id, "contained-target".to_owned())
+        .await
+        .unwrap();
+
+    let error = resolve_artifact_target(
+        &cp,
+        "test artifact",
+        root.id,
+        &outside_dir.join("output.mkv"),
+    )
+    .await
+    .unwrap_err();
+
+    // Discriminate on "path escaped", not on "escaped storage root":
+    // `rooted_target_address` rejects an escape a second time when
+    // `strip_prefix` fails, with "target escaped ...", so the looser substring
+    // would not notice `require_contained` being disabled. Match a substring
+    // rather than the whole rendered string, so the message can later name the
+    // rejected path without editing this test.
+    assert_eq!(error.code(), "CONFIG_INVALID");
+    assert!(
+        error.to_string().contains("path escaped storage root"),
+        "got: {error}"
+    );
+}
