@@ -16,7 +16,7 @@ Today one guard answers both questions at once, and gets the second one wrong.
 single target root from the *source* root's `default_output_root_id` — falling
 back to the source root itself when none is configured
 (`operation_source.rs:185-188`) — and then requires the commit path to start with
-that root's canonical locator (`require_contained`, `operation_source.rs:290-302`).
+that root's canonical locator (`require_contained`, `operation_source.rs:290-304`).
 
 The address it is handed is not the durable commit address. In the owner-node
 flow the staged output is written under the root the media-dispatch envelope
@@ -39,11 +39,13 @@ read the staging bytes and promote into the target" — and fails pre-mutation
 otherwise. The stronger property the guard actually demands, that the staging
 root's path be *nested inside* the output root's path, is written down nowhere,
 and nothing enforces it at configuration time. It surfaces as
-`CONFIG_INVALID: artifact commit path escaped storage root <id>` only after a
-transcode has already run — `require_contained` returns `VoomError::Config`,
-which `crates/voom-core/src/error.rs:371` maps to `ConfigInvalid` and `:183`
-renders, and `crates/voom-control-plane/src/operation_source_test.rs:181` pins it
-for this exact escape. Issue #497
+`CONFIG_INVALID: artifact commit path escaped storage root <id>: <path> is not
+inside <root>` only after a transcode has already run — `require_contained`
+returns `VoomError::Config`, which `crates/voom-core/src/error.rs:371` maps to
+`ConfigInvalid` and `:183` renders, and
+`crates/voom-control-plane/src/operation_source_test.rs:177` pins it for this
+exact escape. The path-naming half of that message is #617's work, landed in
+PR #624. Issue #497
 attributes the weekly `chaos-e2e` failures #470 and #491 to this failure mode;
 both of those issue bodies carry only an Actions run URL, so that attribution is
 inherited here rather than verified.
@@ -200,8 +202,8 @@ untouched.
   a commit or promotion set `default_output_root_id`
   (`crates/voom-control-plane/src/artifact/commit/mod_test.rs:1467`,
   `crates/voom-control-plane/src/operation_source_test.rs:67`); eighteen fixtures
-  construct it as `None` and depend on the fallback, including
-  `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Each of the latter that
+  construct it as `None` (`rg -o 'default_output_root_id: None' crates/ | wc -l`),
+  including `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Each of the latter that
   reaches a commit or promotion must gain an explicit output root, and that work
   belongs to #625, not to #497's closure.
 - **The amendment is discoverable from the records it amends.** This repository's

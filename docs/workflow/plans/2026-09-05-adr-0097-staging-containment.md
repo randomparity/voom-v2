@@ -122,11 +122,13 @@ their own storage root`, to build the index row.
    git diff --quiet main -- crates/ scripts/ justfile \
      || { echo "cited sources differ from base"; exit 1; }
    # ADR 0055 and 0069 are amended by this change, so they are not unchanged from
-   # base. Assert instead that both diffs are append-only: cited line numbers sit
-   # before the appended sections, so they still resolve.
+   # base. Assert instead that each file's first N lines still equal the base file
+   # exactly -- a true append-only test, which a deletions-only count is not: a
+   # mid-file insertion passes that and fails this.
    for adr in docs/adr/0055-*.md docs/adr/0069-*.md; do
-     dels=$(git diff --numstat main -- "$adr" | cut -f2)
-     [ "${dels:-0}" = "0" ] || { echo "not append-only: $adr deleted $dels line(s)"; exit 1; }
+     base_lines=$(git show "main:$adr" | wc -l)
+     git show "main:$adr" | diff -q - <(head -n "$base_lines" "$adr") >/dev/null \
+       || { echo "not append-only: $adr altered existing content"; exit 1; }
    done
    while IFS='|' read -r f line token; do
      [ -z "$f" ] && continue
@@ -138,6 +140,7 @@ their own storage root`, to build the index row.
    crates/voom-control-plane/src/operation_source.rs|196|library_id != source_library_id
    crates/voom-control-plane/src/operation_source.rs|275|owner != local
    crates/voom-control-plane/src/operation_source.rs|290|require_contained
+   crates/voom-control-plane/src/operation_source.rs|300|is not inside
    crates/voom-control-plane/src/workflow/plan/envelope.rs|207|destination_root
    crates/voom-control-plane/src/workflow/coordinator/promotion.rs|724|promote_artifact
    crates/voom-control-plane/src/workflow/coordinator/promotion.rs|742|artifact.storage_root_id
@@ -145,7 +148,7 @@ their own storage root`, to build the index row.
    crates/voom-control-plane/src/cases/policy/compliance.rs|696|COMMITTED_SUBDIR
    crates/voom-control-plane/src/artifact/commit/mod_test.rs|1467|default_output_root_id
    crates/voom-control-plane/src/operation_source_test.rs|67|default_output_root_id
-   crates/voom-control-plane/src/operation_source_test.rs|181|CONFIG_INVALID
+   crates/voom-control-plane/src/operation_source_test.rs|177|CONFIG_INVALID
    crates/voom-core/src/error.rs|183|CONFIG_INVALID
    crates/voom-core/src/error.rs|371|ErrorCode::ConfigInvalid
    crates/voom-cli/tests/support/owner_node.rs|492|root_path
@@ -156,7 +159,6 @@ their own storage root`, to build the index row.
    crates/voom-store/src/repo/library/library_roots.rs|379|owner_node_id = ?
    crates/voom-store/src/repo/library/library_roots.rs|602|require_default_ids_in_library
    crates/voom-store/src/repo/library/library_roots.rs|614|require_default_ids_in_library
-   crates/voom-store/src/repo/library/library_roots_test.rs|471|default_output_root_id
    crates/voom-cli/tests/chaos_librarian_e2e.rs|247|staging flag mirrors
    scripts/chaos-e2e-local.sh|11|CHAOS_EXECUTE_POLICY:-0
    scripts/chaos-e2e-local.sh|49|library_dir="$run_dir/library"
@@ -259,7 +261,7 @@ table row and carries no schema, no behavior, and no deployment ordering.
 
 ## Deferrals carried into the build
 
-None. The design review ran three iterations under one charter and every finding
+None. The design review ran four iterations under two charters and every finding
 was dispositioned `accepted-fixed`; no `deferred-tracked` or
 `rejected-with-evidence` disposition was recorded, and `docs/debt/` is outside this
 run's permitted surface.

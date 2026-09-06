@@ -10,13 +10,14 @@ plus its row in `docs/adr/README.md`. No behavior ships from this change.
 `<staging-root>/.committed/<op>/…` address against a target root resolved from the
 source root's `default_output_root_id`, falling back silently to the source root
 (`crates/voom-control-plane/src/operation_source.rs:175-205`), then requires
-containment (`operation_source.rs:290-302`). The emergent effect is that the
+containment (`operation_source.rs:290-304`). The emergent effect is that the
 staging root's path must be nested inside the output root's path — a coupling
 stronger than ADR 0074's shared-owner-node requirement and stated in no record.
 It surfaces only after a transcode, as
-`CONFIG_INVALID: artifact commit path escaped storage root <id>`
-(`crates/voom-control-plane/src/operation_source_test.rs:181` pins the code; the
-issue bodies that call it `COMMIT_FAILURE` are wrong).
+`CONFIG_INVALID: artifact commit path escaped storage root <id>: <path> is not
+inside <root>` (`crates/voom-control-plane/src/operation_source_test.rs:177` pins
+the code; the issue bodies that called it `COMMIT_FAILURE` were wrong and have
+been corrected).
 
 A second route resolves the same concept with the opposite fallback:
 `destination_root` (`crates/voom-control-plane/src/workflow/plan/envelope.rs:197-228`)
