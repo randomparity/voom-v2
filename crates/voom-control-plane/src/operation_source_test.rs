@@ -163,14 +163,10 @@ async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
         .await
         .unwrap();
 
-    let error = resolve_artifact_target(
-        &cp,
-        "test artifact",
-        root.id,
-        &outside_dir.join("output.mkv"),
-    )
-    .await
-    .unwrap_err();
+    let target = outside_dir.join("output.mkv");
+    let error = resolve_artifact_target(&cp, "test artifact", root.id, &target)
+        .await
+        .unwrap_err();
 
     // Discriminate on "path escaped", not on "escaped storage root":
     // `rooted_target_address` rejects an escape a second time when
@@ -181,6 +177,22 @@ async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
     assert_eq!(error.code(), "CONFIG_INVALID");
     assert!(
         error.to_string().contains("path escaped storage root"),
+        "got: {error}"
+    );
+
+    // The rejection has to tell an operator which path was rejected and what it
+    // was measured against; a storage root id alone sent issue #491 back to the
+    // source to reconstruct the constraint. Assert the two paths as one
+    // rendered phrase rather than two `contains` calls: `outside_dir` is a
+    // textual-prefix sibling of `root_dir`, so `contains(root_dir)` alone is
+    // satisfied by the rejected path and would still pass if the root were
+    // dropped from the message.
+    assert!(
+        error.to_string().contains(&format!(
+            "{} is not inside {}",
+            target.display(),
+            root_dir.display()
+        )),
         "got: {error}"
     );
 }
