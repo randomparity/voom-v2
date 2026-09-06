@@ -15,7 +15,7 @@ Tech stack: GitHub Actions workflow YAML, bash, `jq`, `gh`, `just`, `prek`.
 
 Spec: `docs/workflow/specs/2026-09-05-chaos-e2e-notify-dedupe-design.md`.
 
-Expected implementation size: 300–330 changed lines (M) — counted from this plan's own code fences: a 52-line script, a 173-line selftest, ~83 changed workflow lines (8 ids + 2 output + 16 naming step + 48 notify step + 9 removed), and 13 across `justfile` and `.pre-commit-config.yaml`.
+Expected implementation size: 330–360 changed lines (M) — measured on this plan's own code fences: a 52-line script, a 173-line selftest, ~105 changed workflow lines (8 ids + 2 output + 18 naming step + 68 notify step + 9 removed), and ~11 across `justfile` and `.pre-commit-config.yaml`.
 
 ## Global Constraints
 
@@ -67,10 +67,12 @@ Two material contracts change.
 - **The search-and-select pipeline** (`.github/workflows/chaos-e2e.yml`, Step 2.4).
   `Mode: focused-test`. Observable contract: the `gh issue list` search plus the `jq`
   selector return the number of an open, bot-authored issue whose title matches the key
-  exactly, and return nothing for a key that only shares a prefix. It is verifiable
-  read-only from a developer machine against the live public repository, without any
-  runner and without any permission change — Step 2.5a runs it and pins both outputs. This
-  is the half of the notify job that carries the logic; the rest is two `gh` write calls.
+  exactly, and return nothing for a key that only shares a prefix. Step 2.5a runs it
+  read-only against the live public repository and pins both outputs. What it pins is the
+  `jq` selector and the search's containment semantics **under a developer credential**;
+  it does not exercise the job token, and it queries `--state all` where the job queries
+  `--state open`. This is the half of the notify job that carries the logic; the rest is
+  the branch and two `gh` write calls.
 - **The `notify-failure` job body's control flow** (`.github/workflows/chaos-e2e.yml`).
   `Mode: task-test-not-applicable`. Changed surface: the branch between commenting and
   creating, and the two `gh` write calls. Reason, narrowed to what the permission
@@ -283,8 +285,9 @@ echo "name-failing-step-selftest: OK"
 
 Run `./scripts/name-failing-step-selftest.sh`. Expect every case to redden with exit
 status 127 and a "No such file or directory" error naming `scripts/name-failing-step.sh`,
-and the selftest itself to exit 1 with `name-failing-step-selftest: 15 case(s) failed`:
-the script under test does not exist yet.
+and the selftest itself to exit 1 with `name-failing-step-selftest: 17 case(s) failed`
+(10 `expect_ok` plus 7 `expect_stderr` assertions, every one of which increments the
+counter when the script is missing): the script under test does not exist yet.
 
 ### Step 1.3 — write the script
 
@@ -471,6 +474,10 @@ Replace the whole `Open tracking issue` step in the `notify-failure` job with:
           # Empty when the job died before its naming step ran. A vague key beats
           # no notification, so this falls back rather than failing.
           FAILING_STEP: ${{ needs.chaos-e2e.outputs.failing-step }}
+          # The charset check below is a bracket range, which glibc resolves through
+          # the locale's collation -- under a UTF-8 locale it admits Arabic-Indic and
+          # fullwidth digits. Same guard, same reason, as chaos-e2e.yml:51.
+          LC_ALL: C
         run: |
           # GitHub's default shell here is `bash -e`, WITHOUT pipefail. Without
           # this line a failed `gh issue list` below hands jq empty stdin, jq
@@ -487,20 +494,28 @@ Replace the whole `Open tracking issue` step in the `notify-failure` job with:
           # Re-check on this side of the job boundary. The producing job builds and
           # runs the whole workspace, and this is the job holding `issues: write`,
           # so the charset guard inside name-failing-step.sh is not a control on
-          # what *this* job consumes.
-          [[ $step =~ ^[A-Za-z0-9_-]{1,64}$ ]] || step=unknown-step
+          # what *this* job consumes. Announce the rejection: a silent degrade is
+          # indistinguishable from a genuine `unknown-step` in the log.
+          if [[ ! $step =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+            echo "::warning::rejected a malformed failing-step value; keying on unknown-step"
+            step=unknown-step
+          fi
 
           title="Scheduled chaos-e2e run failed: $step"
 
           # `in:title` matches by phrase containment, not equality, so the search
           # only narrows the candidates -- the exact title comparison is the rule.
-          # `is_bot` is what stops an outside user capturing this notification
-          # stream by opening an issue under the predictable title; gh reports the
-          # Actions account as `app/github-actions`, not `github-actions[bot]`.
+          # `author:` is a SERVER-side qualifier and is what bounds this boundary:
+          # without it, anyone can open 50 issues whose titles contain the key and
+          # push the real tracking issue out of the --limit window, so the exact
+          # match finds nothing and a duplicate is filed every run under their
+          # control. The client-side `is_bot` check stays as defence in depth. gh
+          # reports the Actions account as `app/github-actions`, not
+          # `github-actions[bot]`.
           existing=$(gh issue list \
             --repo "$GITHUB_REPOSITORY" \
             --state open \
-            --search "in:title \"$title\"" \
+            --search "in:title \"$title\" author:app/github-actions" \
             --limit 50 \
             --json number,title,author \
             | jq -r --arg title "$title" '
@@ -580,20 +595,56 @@ Run `just ci` bare. Expect exit 0 and the final line `==> All CI checks passed`.
 
 Commit with `fix(ci): reuse one chaos-e2e tracking issue per failing step`.
 
-**Acceptance criteria.** The notify job searches before creating; comments and stops when
-an exact-title bot-authored open issue exists; otherwise creates one carrying `bug` and
-`status:needs-triage`; the title carries the failing step id; both new `run:` blocks set
-`set -euo pipefail`, so a failed search fails the step instead of filing a duplicate; the
-step name is re-checked against the charset on the consuming side of the job boundary; an
-absent `failing-step` output emits a `::warning::` rather than passing silently as a
-genuine `unknown-step`; `permissions:` is unchanged; Step 2.5a's two commands give the
-expected pair; `just ci` is green.
+**Acceptance criteria.** Every contract in this plan's Verification inventory holds, plus:
+`permissions:` is unchanged (Step 2.5's grep prints nothing and exits 1), Step 2.5a's two
+commands give the expected pair, and `just ci` is green.
 
-## Review deferrals
+## Review state
 
-No `deferred-tracked` findings. The design review (`$gauntlet`, iteration 1) raised six
-findings; five were `accepted-fixed` in this plan and the spec, and one sub-remedy was
-`rejected-with-evidence`:
+The design review (`$gauntlet`, `$trial-loop`, 2 iterations, budget 2) **stopped as blocked
+at the iteration budget**. Iteration 1 raised 6 findings (1 blocking, fixed); iteration 2
+raised 8 findings (1 blocking, **outstanding**; 7 notes, all `accepted-fixed`). No
+`deferred-tracked` findings — nothing needed a `docs/debt/` record.
+
+### Outstanding blocking finding — needs a human decision before the build
+
+**Criterion 4's "or test" half was never evaluated, and step-id keying collapses every
+`run-chaos-e2e` failure into one issue.** The frozen criterion reads "the failing step **or
+test** where it is cheap to extract"; this design's Requirements 4 silently narrowed that to
+"the failing step", and no section states the cost judgement the charter's `ambiguities`
+field committed this run to making and reporting.
+
+The consequence is concrete and is the modal case, not an edge case. `just chaos-e2e-ci`
+(`justfile:249-252`) is three commands — `uv sync --locked`, `cargo build -p voom-cli …`,
+`cargo test -p voom-cli --test chaos_librarian_e2e -- --ignored --nocapture`. All three run
+inside the single step `run-chaos-e2e`, and all three historical duplicates (#470, #491,
+#536) came from it. Under the step-id key, a lockfile-resolution failure, a compile error,
+and two unrelated failing E2E tests all produce the identical title
+`Scheduled chaos-e2e run failed: run-chaos-e2e`. The suffix separates "setup broke" from
+"the test run broke" and nothing finer.
+
+The two options, for whoever resumes this:
+
+1. **Accept the residual, state the judgement** (recommended; text only, no surface
+   change). Extracting the failing test name means teeing the `Run Chaos Librarian E2E`
+   step's stdout and parsing `cargo test`'s `failures:` block — machinery the frozen
+   surface does not cover, and which breaks whenever the E2E suite's output format moves.
+   Record that as a rejected alternative, and name the residual in Requirements 4 and in
+   Migration: while one tracking issue is open, distinct failures inside `run-chaos-e2e`
+   share it and triage separates them by reading the comments.
+2. **Extend the key with the failing test name.** A surface expansion beyond the frozen
+   charter, and therefore a `SCOPE CHECKPOINT` decision, not this run's to take.
+
+### Dispositions carried forward
+
+Seven notes from iteration 2 were `accepted-fixed` in this plan and the spec: the
+server-side `author:` qualifier bounding search-result eviction, `LC_ALL: C` plus an
+announcing degrade on the consuming-side charset check, the corrected red signal at Step
+1.2, the narrowed Step 2.5a claim plus a fourth unverified assumption in the spec, the
+corrected size estimate, two cut rejected-alternative bullets, and the corrected Migration
+section.
+
+One sub-remedy was `rejected-with-evidence`:
 
 - **Rejected:** adding an `actionlint` hook over `.github/workflows/*.yml` to
   `.pre-commit-config.yaml` and the `ci:` recipe, proposed as part of the verification

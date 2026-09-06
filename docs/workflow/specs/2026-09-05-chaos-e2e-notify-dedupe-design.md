@@ -66,10 +66,11 @@ permission it did not have.
 `unknown-step` when the output is absent — a job killed before its final step sets no
 output, and a notification with a vague key beats no notification. Then:
 
-1. Search: `gh issue list --state open --search "in:title …" --json number,title,author`,
-   and select an exact title match whose author carries `is_bot`, using `jq --arg`. The
-   search matches by phrase containment, so it is only a candidate filter; the exact
-   comparison is the rule.
+1. Search: `gh issue list --state open --search "in:title … author:app/github-actions"
+   --json number,title,author`, then select an exact title match whose author carries
+   `is_bot`, using `jq --arg`. The search matches by phrase containment, so it is only a
+   candidate filter; the exact comparison is the rule. The `author:` qualifier is
+   server-side and load-bearing — see boundary (c) in the threat model.
 2. Found: `gh issue comment <n>` naming the run, and stop.
 3. Not found: `gh issue create` with the title, `--label bug`, and
    `--label status:needs-triage`.
@@ -90,9 +91,11 @@ widening it, and a notification job is the wrong place to spend a permission.
 
 ### Migration
 
-The existing #470 and #491 carry the old suffix-free title, so the first failure after
-this merges opens one new issue under the new key and reuses it thereafter. Retitling or
-closing the two existing issues belongs to their own triage, not here.
+None required. #470, #491 and #536 all carry the old suffix-free title and are all closed
+(verified 2026-09-05: the same `in:title` search returns them under `--state closed` and
+returns `[]` under `--state open`). The job searches `--state open`, so the first scheduled
+failure after this merges finds nothing, opens one issue under the new key, and reuses it
+thereafter.
 
 ## Threat model
 
@@ -124,12 +127,15 @@ untrusted actor reaches. Repository maintainers are trusted.
 - (b) and (d) What actually holds at the privileged consumer is argv separation: the name
   reaches `gh` as its own argv element, never interpolated into shell program text, so a
   hostile value cannot become a second argument or a command. The charset check against
-  `^[A-Za-z0-9_-]{1,64}$`, degrading to `unknown-step`, is defence in depth on top of
-  that — and it runs on *both* sides of boundary (d): in `name-failing-step.sh` in the
-  producing job, and again on the value read from `needs.chaos-e2e.outputs.failing-step`
-  in the consuming job. A check that ran only in the producing job would not be a control
-  on what the privileged job consumes. The exact-title comparison uses `jq --arg`, which
-  is data, not program text.
+  `^[A-Za-z0-9_-]{1,64}$`, degrading to `unknown-step` with a `::warning::`, is defence in
+  depth on top of that — and it runs on *both* sides of boundary (d): in
+  `name-failing-step.sh` in the producing job, and again on the value read from
+  `needs.chaos-e2e.outputs.failing-step` in the consuming job. A check that ran only in the
+  producing job would not be a control on what the privileged job consumes. Both sides
+  carry `LC_ALL=C`, because the guard is a bracket range and glibc resolves a range through
+  the locale's collation — under a UTF-8 locale it admits Arabic-Indic and fullwidth
+  digits, so the export is part of the control rather than decoration. The exact-title
+  comparison uses `jq --arg`, which is data, not program text.
 - (b) The notify step runs under `set -euo pipefail`. GitHub's default shell for a `run:`
   block with no `shell:` key is `bash -e`, *without* `pipefail`, so a failing
   `gh issue list` at the head of a pipeline would otherwise be masked by `jq` exiting 0 on
@@ -137,12 +143,17 @@ untrusted actor reaches. Repository maintainers are trusted.
   duplicate, which is exactly the defect this change removes. A failed search must fail
   the step instead: a missed notification is recoverable on the next run, a duplicate is
   the bug.
-- (c) Requiring `author.is_bot` alongside the exact title is what stops an outside user
-  capturing the notification stream by opening an issue under the predictable title. No
-  human account can set that flag. Without the control the worst case is a nuisance rather
-  than a disclosure — the comment carries only a run URL that is already public on a
-  public repository — but it costs one JSON field and one `jq` clause, so it is cheaper
-  than the argument for omitting it.
+- (c) What bounds this boundary is the **server-side** `author:app/github-actions`
+  qualifier on the search, not the client-side check. An untrusted actor has two moves
+  against a predictable title, and the client-side check only stops the first. *Capture*:
+  open an issue under the exact title so the job comments there instead of filing — the
+  `author.is_bot` check in `jq` rejects that, and no human account can set the flag.
+  *Eviction*: open 50 or more issues whose titles merely **contain** the key, so that
+  phrase-containment search plus `--limit 50` pushes the real tracking issue out of the
+  returned window; the exact-title filter then matches nothing and the job files a fresh
+  duplicate every week, under the actor's control and invisible in the log. Filtering by
+  author on the server keeps those issues out of the result set entirely. The client-side
+  `is_bot` and exact-title checks stay as defence in depth.
 
 **Explicitly out of scope.** A compromised `GITHUB_TOKEN` or a malicious maintainer: this
 job's grant is unchanged, so the design neither adds nor removes that exposure. Search
@@ -180,6 +191,16 @@ rather than discovered later:
 - **A `Checkout` failure necessarily degrades to `unknown-step`**, because
   `scripts/name-failing-step.sh` lives in the tree the failed step was fetching. The
   namer cannot name its own missing checkout.
+- **The search succeeds under a token scoped to `issues: write` alone.** This change adds
+  a *read* call — `gh issue list --search`, which gh serves from the GraphQL search API —
+  to a job that until now only wrote. Criterion 5 forbids widening the grant to find out,
+  and Step 2.5a runs under a developer credential rather than the job token, so it does
+  not answer this. Unlike the three assumptions above, the failure here is **not**
+  graceful: `set -euo pipefail` turns a rejected search into a failed step, so the job
+  would flip from filing a duplicate every run to filing nothing at all, visible only on
+  the Actions run list. That trade is the right one — a silent duplicate is worse than a
+  loud absence — but the first scheduled failure after merge must be checked for it
+  specifically.
 
 No static check covers the workflow's Actions schema or its expressions: `just ci` carries
 no actionlint and no yamllint. Adding one would be a repository-wide tooling change beyond
@@ -209,9 +230,6 @@ lives.
 - **Enumerate step display names in an env block** rather than keying on `toJSON(steps)`.
   judgment: a second list of every step, which a later step addition silently falls out
   of, to gain a prettier suffix than the id.
-- **Dedupe on a marker in the issue body, or a dedicated label, instead of the title.**
-  verified: requirement 1 in #496 names the title ("Search for an open issue with this
-  exact title"), so this is not the design's choice to make.
 - **Match on the search result alone, without the exact-title comparison.** verified:
   `in:title` matches by phrase *containment*, not equality —
   `gh issue list --repo randomparity/voom-v2 --state all --search 'in:title "Scheduled
@@ -225,6 +243,3 @@ lives.
   spelling, not gh's. Matching that literal would never match, so every run would create a
   duplicate: the defect being fixed, reintroduced silently. `is_bot` is the stable field,
   and no human account can set it.
-- **Do nothing and fix only the underlying failure.** judgment: the duplication is a
-  property of the notify job, not of the failure, so the next unrelated failure streak
-  reproduces it.
