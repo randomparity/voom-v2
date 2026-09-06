@@ -24,19 +24,27 @@ leaves the defect half-fixed, so both are settled in one record.
 ## What the record decides
 
 1. The pre-promotion address is storage-root-contained, and the containing root is
-   the **staging** root — the root the address was built under — not the output
-   root. Containment is a property of an address inside its own addressing domain,
-   never a property of two roots' locators relative to each other.
+   the **staging** root — specifically the registered `library_roots` row resolved
+   for `DestinationRole::Staging`, not merely the directory prefix the address was
+   built under. Those two readings diverge on the transitional coordinator path,
+   where `--staging-root` is a raw operator path no `library_roots` row describes;
+   the record picks the registered-root reading and makes the unregistered path a
+   fail-closed configuration error.
 2. ADR 0074's shared-owner-node requirement is the whole of the staging↔output
    relationship. No path nesting between the two roots is required, and
    introducing one is forbidden.
 3. The rule #616 enforces at configuration time is same-library and
    same-owner-node agreement between a root and each root it names as a default,
    with no filesystem path comparison — plus the two completeness points the
-   record states (the third writer, `assign_library_root_owner_in_tx`, and the
-   null-owner case ADR 0055's migration left behind).
+   record states: the owner-assignment path (`assign_library_root_owner_in_tx`)
+   can invalidate a pairing without writing a default column, and the null-owner
+   case ADR 0055's migration left behind is not decidable at configuration time.
 4. The unconfigured-output-root fallback converges on fail-closed, amending one
    clause of ADR 0055.
+
+The record also names what it does *not* authorize: the resolver change in
+`operation_source.rs` that implements decisions 1 and 4 is owned by no open issue,
+and #623 is sequenced behind it.
 
 ## Alternatives
 
@@ -48,11 +56,12 @@ here; that is where a later reader looks.
 In scope: `docs/adr/0097-*.md` (new), one new row in `docs/adr/README.md`, and
 these two design artifacts.
 
-Out of scope, with owners: the resolver change itself and the configuration-time
-validation (#616); the `--staging-root` / `default_staging_root_id` reconciliation
-(#618); the chaos-harness layout reconciliation (#623); retiring the in-tree
-workaround (#497's closure); anything that extends the transitional
-control-plane filesystem-promotion path (#416–#425, forbidden by ADR 0050).
+Out of scope, with owners: the resolver change itself (no owner today — the record
+says so) and the configuration-time validation (#616); the `--staging-root` /
+`default_staging_root_id` reconciliation (#618); the chaos-harness layout
+reconciliation (#623); retiring the in-tree fixture dependency on the fallback
+(the resolver change); anything that extends the transitional control-plane
+filesystem-promotion path (#416–#425, forbidden by ADR 0050).
 
 No Rust source, migration, or `justfile` change. `operation_source.rs` and
 `operation_source_test.rs` are owned by parallel issue #617 and are read here, not
@@ -69,5 +78,16 @@ Markdown files and one table row. So no threat model is owed either.
 
 ## Verification
 
-`just ci` green, which includes `check-adr-index` — the gate that couples the new
-record to exactly one index row.
+Two contracts, both machine-checkable:
+
+1. **Index coupling.** `just check-adr-index` exits 0 — exactly one
+   `docs/adr/README.md` row for the new record. This is the arm of `just ci` that
+   decides this change, and the pre-commit hook enforces it at commit time, so the
+   record and its row cannot land separately.
+2. **Citation accuracy.** Every `file:line` the record cites resolves, at the
+   branch base, to a line containing a distinctive token from the sentence citing
+   it. A record whose evidence is its whole argument is worth nothing if a
+   citation is misread — one was, on the first draft, and it inverted a
+   Consequences bullet. The plan carries the exact asserting command.
+
+`just ci` green overall.

@@ -26,8 +26,9 @@ built beneath that same path as `<root>/.committed/<op>/tN-<name>`
 (`owner_node.rs:579-583`). In the transitional coordinator promotion path the
 working dir is `committed_working_dir()`
 (`crates/voom-control-plane/src/cases/policy/compliance.rs:686-696`), which joins
-`.committed/<op>` onto the operator's `voom compliance execute --staging-root`
-path. Both are staging addresses; only the later promotion into `--output-dir`
+`.committed/<op>` onto the raw filesystem path the operator passed to
+`voom compliance execute --staging-root`; no storage root row is created for it.
+Both are staging addresses; only the later promotion into `--output-dir`
 (`crates/voom-control-plane/src/workflow/coordinator/promotion.rs:723-760`)
 produces a durable output address.
 
@@ -36,14 +37,23 @@ roots have no stated path relationship. ADR 0074 requires only that the staging
 root and the target root resolve to the same owner node — "one node must both
 read the staging bytes and promote into the target" — and fails pre-mutation
 otherwise. The stronger property the guard actually demands, that the staging
-root's path be *nested inside* the output root's path, is written down nowhere.
-Nothing enforces it at configuration time; it surfaces as
-`COMMIT_FAILURE: artifact commit path escaped storage root <id>` after a transcode
-has already run, which is the failure that broke the weekly `chaos-e2e` job
-(#470, #491). The workaround in tree is to collapse the roots:
-`crates/voom-cli/tests/support/voom_cli.rs:49` sets
-`default_staging_root_id = default_backup_root_id = default_output_root_id = id`,
-so a registered library root has to contain voom's own `.committed` scratch.
+root's path be *nested inside* the output root's path, is written down nowhere,
+and nothing enforces it at configuration time. It surfaces as
+`COMMIT_FAILURE: artifact commit path escaped storage root <id>` only after a
+transcode has already run. Issue #497 attributes the weekly `chaos-e2e` failures
+#470 and #491 to this failure mode; both of those issue bodies carry only an
+Actions run URL, so that attribution is inherited here rather than verified.
+
+How the in-tree fixture avoids the failure is worth stating precisely, because
+the fourth decision below removes the route it takes.
+`crates/voom-cli/tests/support/voom_cli.rs:48-50` sets
+`default_staging_root_id = id, default_backup_root_id = id` and leaves
+`default_output_root_id` NULL. Containment therefore measures against the source
+root — the library root the staging tree already sits inside — through
+`artifact_target_root`'s `unwrap_or(source_storage_root_id)` fallback. The
+fixture's own comment says as much: the defaults exist "so envelope destinations
+resolve inside the library tree rather than escaping the storage root during
+commit." The roots are not collapsed onto one id; the fallback is what holds.
 
 A second, related divergence has to be settled with it. Two resolution routes for
 one concept disagree about an unconfigured output root: `artifact_target_root`
@@ -75,17 +85,26 @@ appeal to.
 ### A pre-promotion address is contained by the root that owns it
 
 The `<staging-root>/.committed/<op>/…` address is a storage-root-contained
-location, and the root that contains it is the **staging** root — the one the
-address was built under — not the output root. Containment is a property of an
-address inside its own addressing domain. It is never a property of two roots'
-locators relative to each other.
+location, and the root that contains it is the **staging** root, not the output
+root. Containment is a property of an address inside its own addressing domain.
+It is never a property of two roots' locators relative to each other.
+
+"The staging root" means the registered `library_roots` row resolved for
+`DestinationRole::Staging` — the root `destination_root`
+(`envelope.rs:197-228`) returns — and not merely whatever directory prefix an
+address happens to have been built under. The two readings coincide only when the
+staging path is a registered root, and on the transitional coordinator path they
+do not: `committed_working_dir` joins `.committed/<op>` onto an operator-supplied
+path that no `library_roots` row describes. Under this decision such a path has
+**no** containment root, and that is a configuration error that fails closed — not
+an address trivially contained by itself.
 
 Concretely, a resolver validating an address resolves its containment root from
 the role the address serves: a pre-promotion staging address against the root
-resolved for `DestinationRole::Staging`, a durable output address against the root
-resolved from `default_output_root_id`. Applying the output root's containment to
-a staging address is the defect; the guard is correct, and is applied one step too
-early to the wrong root.
+`destination_root` resolves for `DestinationRole::Staging`, a durable output
+address against the root resolved from `default_output_root_id`. Applying the
+output root's containment to a staging address is the defect; the guard is
+correct and is applied against the wrong root.
 
 ### The staging↔output relationship is ADR 0074's shared owner node, and nothing more
 
@@ -93,9 +112,16 @@ ADR 0074's requirement — that the staging root and the target root resolve to 
 same owner node — is confirmed as the whole of the relationship. This record adds
 no path-nesting requirement between them and forbids one being introduced. A
 staging root that is a sibling of, or wholly unrelated to, the output root is a
-correct configuration provided both resolve to the same owner node and the same
-library, which `artifact_target_root` already requires
-(`operation_source.rs:196-202`).
+correct configuration provided both are registered roots resolving to the same
+owner node and the same library.
+
+Neither half of that agreement is enforced today outside ADR 0074's pre-mutation
+check. `artifact_target_root` requires the *output* root to share the *source*
+root's library (`operation_source.rs:196-202`) and to be owned by the control
+plane's own local node (`require_effective_local_root_path`,
+`operation_source.rs:275`); the staging root is never passed to that function and
+never reaches it. Staging↔output owner agreement is enforced nowhere at
+configuration time, and closing that gap is the substance of #616's new check.
 
 ### The rule #616 enforces at configuration time
 
@@ -105,21 +131,28 @@ R when the named root does not exist, does not belong to R's library, or resolve
 to an owner node other than R's. They perform **no** filesystem path comparison
 between roots.
 
-Two completeness points bind that rule. First, `default_*_root_id` has a third
-writer beyond the two #616 names: `assign_library_root_owner_in_tx`
-(`crates/voom-store/src/repo/library/library_roots.rs:361-390`) changes an owner
-without touching the default columns, so the owner-agreement check must also run
-there, against every root that names the root being reassigned as a default.
-Second, ADR 0055 quarantined migrated roots as `unassigned` with a null owner;
-a pairing where either side has no assigned owner is accepted at configuration
-time and remains the run-time pre-mutation check's to refuse, because a
+Two completeness points bind that rule. First, a third path can invalidate a
+pairing without writing a default column. `require_default_ids_in_library`
+(`crates/voom-store/src/repo/library/library_roots.rs:614-634`) admits any
+non-retired same-library root as a default, with no state or owner requirement,
+and `assign_library_root_owner_in_tx` (`:361-390`) then permits that root's owner
+to change while it is `unassigned` or `configured` with no activation identity. So
+the owner-agreement check must also run at owner assignment, against every root
+that names the reassigned root as a default. #616's body is right that
+`create_library_root` and `update_library_root` are the only writers of the
+default columns; the owner-assignment path writes none of them and is still a way
+a valid pairing goes stale.
+
+Second, ADR 0055 quarantined migrated roots as `unassigned` with a null owner. A
+pairing where either side has no assigned owner is accepted at configuration time
+and stays the run-time pre-mutation check's to refuse, because a
 configuration-time rule cannot decide agreement between an owner and an absence.
 
 ### An unaddressable destination fails closed
 
-`artifact_target_root`'s silent fallback to the source root is removed.
-When no `default_output_root_id` is configured for the source root, resolving a
-durable commit target fails with an actionable error naming the root and the
+`artifact_target_root`'s silent fallback to the source root is removed. When no
+`default_output_root_id` is configured for the source root, resolving a durable
+commit target fails with an actionable error naming the root and the
 `voom library root update --output-root <id>` that fixes it. This converges both
 routes on `destination_root`'s fail-closed semantics, for the reason
 `destination_root` already gives: an unaddressable destination must fail rather
@@ -131,54 +164,79 @@ model, and its containment requirement are untouched and still govern.
 
 ## Consequences
 
-- The chaos-e2e workaround is retired in principle: a registered library root no
-  longer has to contain voom's own `.committed` scratch. Retiring it in tree is
-  #497's closure, not this record.
+- This record decides the rule; it does not authorize the change that implements
+  it. Applying containment against the staging root and removing
+  `artifact_target_root`'s source-root fallback are edits to
+  `crates/voom-control-plane/src/operation_source.rs` that no open issue owns:
+  #616 is configuration-time validation and is forbidden the path work by the rule
+  above, #617 is an error-message change, #618 is the `--staging-root`
+  reconciliation, and #623 is the harness reconciliation. That resolver change
+  needs an owner before the consequences below can be acted on. Naming the gap is
+  this record's job; filing the work is the tracker's.
+- Removing the source-root fallback carries an in-tree cost this record should not
+  understate. `default_output_root_id` is set in exactly two tests
+  (`crates/voom-control-plane/src/artifact/commit/mod_test.rs:1467` and
+  `crates/voom-control-plane/src/operation_source_test.rs:67`); roughly a dozen
+  further fixtures construct it as `None` and depend on the fallback, including
+  `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Every fixture that reaches a
+  commit or a promotion must gain an explicit output root. That work belongs to
+  the resolver change above, not to #497's closure.
 - #616 is unblocked to implement the same-library, same-owner-node configuration
-  check above, at `create_library_root`, `update_library_root`, and
-  `assign_library_root_owner_in_tx`. Its premise changes: it must **not**
-  implement the path-containment check its body describes, and the filesystem
-  canonicalization question that made it look migration-adjacent disappears with
-  it. Its open question about pre-existing rows narrows to rows whose staging and
-  output roots have different assigned owners.
-- #618 is unblocked to reconcile `--staging-root` with `default_staging_root_id`
-  by making the durable column the single source of truth, since this record
-  makes the staging root the address's containment domain and a flag carrying a
-  path that disagrees with it can no longer be correct. That reconciliation stays
-  inside ADR 0050's constraint: no new control-plane-owned filesystem behavior,
+  check above, at `create_library_root`, `update_library_root`, and the
+  owner-assignment path. Its premise changes: it must **not** implement the
+  path-containment check its body describes, and the filesystem canonicalization
+  question that made it look migration-adjacent disappears with it. Its open
+  question about pre-existing rows narrows to rows whose staging and output roots
+  have different assigned owners.
+- #618 is unblocked to make `default_staging_root_id` the single source of truth,
+  and this record makes that reconciliation load-bearing rather than tidying: the
+  containment root is now a registered root, so a `--staging-root` path that names
+  no registered root has no containment root at all. The reconciliation stays
+  inside ADR 0050's constraint — no new control-plane-owned filesystem behavior,
   and `promotion_plan()`'s surface holds or shrinks.
-- #623's question is answered: the two chaos harnesses should both use a staging
-  root that is **not** nested inside the library root, which is
-  `scripts/chaos-e2e-local.sh`'s current arrangement. The Rust harness's nesting
-  at `crates/voom-cli/tests/chaos_librarian_e2e.rs:247-266`, and its comment
-  claiming a staging root outside the storage root makes the commit path escape
-  it, both encode the behavior this record rejects. #623 owns that reconciliation
-  and must not run before the resolver change lands, or the harness will assert a
-  layout the code still rejects.
-- Removing the source-root fallback is a behavior change for any deployment that
-  relied on the implicit "write beside the source" default; it must now set
-  `--output-root` explicitly. The project is pre-release, so no migration or
-  deprecation window is owed.
+- #623's question is answered, but not on the axis either harness's author framed
+  it on. What matters is not whether the staging tree is nested inside the library
+  root; it is whether the staging path is a registered storage root that some root
+  names as its `default_staging_root_id`. The Rust harness
+  (`crates/voom-cli/tests/chaos_librarian_e2e.rs:247-266`, with
+  `crates/voom-cli/tests/support/voom_cli.rs:48-50`) satisfies that, because the
+  scan root is a registered root made its own staging default — while its comment's
+  stated reason, that a staging root outside the storage root makes the commit path
+  escape it, describes the containment this record rejects. The shell harness
+  (`scripts/chaos-e2e-local.sh:47-49`) passes `$workdir/staging-<checkpoint>`, a
+  sibling of `$run_dir/library` that no `library_roots` row describes; under this
+  decision that is a configuration error. #623's report that it nonetheless "does
+  not fail" is unexplained by this record, and establishing whether that harness
+  reaches a commit at all is part of #623's work. #623 must not run before the
+  resolver change lands, or it will assert a layout the code still rejects.
+- Removing the fallback is a behavior change for any deployment relying on the
+  implicit "write beside the source" default; it must now set `--output-root`
+  explicitly. The project is pre-release, so no migration or deprecation window is
+  owed.
 - Nothing in this record ships behavior. Until the resolver change lands, the
-  emergent nesting requirement still binds at run time, and the in-tree workaround
-  is still load-bearing.
+  emergent nesting requirement still binds at run time and the in-tree fixtures
+  still depend on the fallback.
 
 ## Considered & rejected
 
 - **Keep the guard where it is and make staging↔output path nesting a stated
-  contract.** verified: it makes a registered library root contain voom's
-  `.committed` scratch, which is the in-tree workaround at
-  `crates/voom-cli/tests/support/voom_cli.rs:49` and the arrangement the Rust
-  chaos harness encodes at `chaos_librarian_e2e.rs:247-266`; ADR 0055 makes a root
-  an addressing domain with its own epoch and retirement lifecycle, so nesting one
-  inside another gives every scratch byte two containing domains and no rule for
-  which epoch fences it.
+  contract.** verified: `crates/voom-cli/tests/chaos_librarian_e2e.rs:247-266`
+  already encodes that arrangement, passing the scan root as `--staging-root` so
+  the commit path stays inside the library root, and its comment states the
+  nesting as a requirement; ADR 0055 makes a root an addressing domain with its
+  own epoch and retirement lifecycle, so nesting one inside another gives every
+  scratch byte two containing domains and no rule for which epoch fences it.
 - **Drop the containment check on the pre-promotion address entirely, treating
   `.committed` as rootless scratch.** verified: ADR 0055's migration 0034
   quarantined exactly the rootless case as ineligible for work, and ADR 0075
   carries only `(StorageRootId, ProviderRelativeLocator)` pairs across the
   control-plane↔agent boundary, so a dispatched staging destination has no
   rootless representation to express.
+- **Read "the staging root" as the directory prefix the address was built under,
+  rather than a registered root.** verified: that reading makes every address
+  trivially contained by its own prefix, so the guard decides nothing — and it is
+  unavailable to the envelope path regardless, where `destination_root`
+  (`envelope.rs:197-228`) returns a `StorageRootId` and there is no prefix to read.
 - **Supersede ADR 0074 and restate the staging↔target relationship.** judgment:
   ADR 0074's shared-owner-node rule is the correct and sufficient relationship and
   needs no change; superseding a record to confirm it would retire a live decision
@@ -192,8 +250,8 @@ model, and its containment requirement are untouched and still govern.
   the configuration mistake.
 - **Do nothing and let #616 encode the emergent coupling.** verified: issue #616's
   body proposes validating that `default_staging_root_id` resolves to a root
-  contained in `default_output_root_id`'s path, which would freeze the workaround
-  into a configuration-time contract and leave the two fallback routes
+  contained in `default_output_root_id`'s path, which would freeze the current
+  arrangement into a configuration-time contract and leave the two fallback routes
   (`operation_source.rs:185-188` versus `envelope.rs:197-228`) still disagreeing —
   the half-fixed outcome issue #615 names.
 - **Settle only the containment question and leave the fallback to a later
