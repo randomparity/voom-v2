@@ -19,28 +19,38 @@ jobs:
     name: chaos-e2e
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Carries the failing step's id to notify-failure, which cannot see this job's
+    # steps context. It is the dedupe key for the tracking issue.
+    outputs:
+      failing-step: ${{ steps.name-failing-step.outputs.name }}
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           submodules: true
 
       - name: Cache cargo
+        id: cache-cargo
         uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3  # v2.9.1
 
       - name: Install just
+        id: install-just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
       - name: Install uv
+        id: install-uv
         uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
 
       - name: Install MKVToolNix
+        id: install-mkvtoolnix
         run: |
           sudo apt-get update
           sudo apt-get install -y mkvtoolnix
 
       - name: Install ffmpeg
+        id: install-ffmpeg
         env:
           GH_TOKEN: ${{ github.token }}
           # Chaos Librarian documents ffmpeg/ffprobe 7.0+ as its floor
@@ -98,6 +108,7 @@ jobs:
           fi
 
       - name: Verify external tools
+        id: verify-external-tools
         run: |
           uv --version
           uv python install 3.13
@@ -107,7 +118,48 @@ jobs:
           mkvmerge --version
 
       - name: Run Chaos Librarian E2E
+        id: run-chaos-e2e
         run: just chaos-e2e-ci
+
+      # Names the step that failed, so notify-failure can key one tracking issue per
+      # distinct failure instead of filing a fresh one every week. Keyed by step id
+      # because `toJSON(steps)` is keyed by id: a step added above with an `id:` is
+      # covered here with no second list of names to keep in sync, and a short slug
+      # reads well in an issue title.
+      #
+      # This separates a setup failure from an E2E failure and no finer: `just
+      # chaos-e2e-ci` bundles `uv sync`, the cargo build and the test run into this
+      # one step, so genuinely different failures inside it still share a key. That
+      # residual is deliberate -- see the design doc.
+      - name: Name the failing step
+        id: name-failing-step
+        if: failure()
+        env:
+          STEPS_CONTEXT: ${{ toJSON(steps) }}
+          # The charset guard below is a bracket range, and glibc resolves a range
+          # through the locale's collation -- under a UTF-8 locale it admits
+          # Arabic-Indic and fullwidth digits. Same guard, same reason, as the
+          # ffmpeg step above.
+          LC_ALL: C
+        run: |
+          # No `shell:` key means `bash -e` WITHOUT pipefail, so a jq failure at the
+          # head of this pipeline would be invisible. Set it explicitly.
+          set -euo pipefail
+          # `.value.outcome?` tolerates a non-object entry rather than aborting the
+          # filter. `first // "unknown-step"`: `first` of an empty array is null, and
+          # `null // x` is x, so the caller always gets a usable key.
+          name=$(printf '%s' "$STEPS_CONTEXT" | jq -r '
+            [to_entries[] | select(.value.outcome? == "failure") | .key]
+            | first // "unknown-step"')
+          # Actions already constrains a step id to this shape, so this is a boundary
+          # check rather than a transformation: the value reaches an issue title and a
+          # search query in a job that holds `issues: write`.
+          if [[ ! $name =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+            echo "::warning::failing step id is not a plain slug; reporting unknown-step"
+            name=unknown-step
+          fi
+          echo "Failing step: $name"
+          printf 'name=%s\n' "$name" >> "$GITHUB_OUTPUT"
 
   notify-failure:
     name: notify failure
@@ -119,12 +171,88 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Open tracking issue
+      - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Empty when the job died before its naming step could run at all -- a
+          # cancellation, the job timeout, a runner death. A vague key beats no
+          # notification, so this falls back rather than failing.
+          FAILING_STEP: ${{ needs.chaos-e2e.outputs.failing-step }}
+          # See the naming step: the charset guard is a locale-collated bracket range.
+          LC_ALL: C
         run: |
+          # No `shell:` key means `bash -e` WITHOUT pipefail, so a failure on the left of
+          # a pipe is invisible. What this and the `if !` guard below establish is that a
+          # FAILED search fails the step -- so a transient `gh` error cannot masquerade as
+          # "nothing found" and file a duplicate, which is the defect being fixed. They do
+          # not validate an empty result set; a genuinely empty answer from search-index
+          # lag still costs one duplicate, which the design accepts explicitly.
+          set -euo pipefail
+
+          step=${FAILING_STEP:-unknown-step}
+          if [[ -z ${FAILING_STEP:-} ]]; then
+            echo "::warning::chaos-e2e published no failing-step output; keying on unknown-step"
+          fi
+          # Re-check on this side of the job boundary. The producing job builds and runs
+          # the whole workspace plus a submodule, and this is the job holding
+          # `issues: write`, so the guard inside that job is not a control on what this
+          # one consumes. Announce a rejection: a silent degrade is indistinguishable
+          # from a genuine `unknown-step` in the log.
+          if [[ ! $step =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+            echo "::warning::rejected a malformed failing-step value; keying on unknown-step"
+            step=unknown-step
+          fi
+
+          title="Scheduled chaos-e2e run failed: $step"
+
+          # Assigned from its own command rather than through a pipeline, so a failed
+          # search is attributable to `gh` instead of reaching jq as empty stdin -- the
+          # same reason the Install ffmpeg step above writes to a file. Whether
+          # `gh issue list --search` succeeds under a token scoped to `issues: write`
+          # alone could not be established without merging this; if it cannot, this is
+          # where it fails, by name, rather than quietly filing a duplicate.
+          #
+          # `in:title` matches by phrase containment, not equality, so the search only
+          # narrows candidates -- the exact comparison below is the rule. `author:` is a
+          # SERVER-side qualifier and is load-bearing: without it anyone can open 50
+          # issues whose titles merely contain the key and push the real tracking issue
+          # out of the --limit window, so the exact match finds nothing and a duplicate
+          # is filed every run under their control. gh reports the Actions account as
+          # `app/github-actions`, NOT `github-actions[bot]`; the client-side `is_bot`
+          # check is defence in depth on top of the qualifier.
+          if ! search_json=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "in:title \"$title\" author:app/github-actions" \
+            --limit 50 \
+            --json number,title,author); then
+            echo "::error::could not search for an existing tracking issue; refusing to file a possible duplicate"
+            exit 1
+          fi
+
+          existing=$(jq -r --arg title "$title" '
+            [ .[]
+              | select(.title == $title and .author.is_bot? == true)
+              | .number
+            ] | first // empty' <<<"$search_json")
+
+          if [[ -n $existing ]]; then
+            echo "Reusing tracking issue #$existing"
+            gh issue comment "$existing" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "The scheduled chaos-e2e workflow failed again at \`$step\`. Run: $RUN_URL"
+            exit 0
+          fi
+
+          echo "No open tracking issue titled '$title'; creating one"
+          body=$(printf '%s\n\n%s\n\n%s' \
+            "The weekly scheduled chaos-e2e workflow failed at \`$step\`." \
+            "Run: $RUN_URL" \
+            "This issue is reused for later failures of the same step; each failed run adds a comment.")
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Scheduled chaos-e2e run failed" \
-            --body "The weekly scheduled chaos-e2e workflow failed. Run: $RUN_URL"
+            --title "$title" \
+            --label bug \
+            --label status:needs-triage \
+            --body "$body"

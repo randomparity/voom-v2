@@ -23,8 +23,10 @@ triage query filtering on `status:` or `type:`.
    when one exists.
 2. When one is found, comment on it naming the new run, and stop.
 3. When none is found, create it with `bug` and `status:needs-triage` at birth.
-4. The title carries the failing step, so two genuinely different `chaos-e2e` failures do
-   not collapse into one issue.
+4. The title carries the failing step **or test** where it is cheap to extract, so two
+   genuinely different `chaos-e2e` failures do not collapse into one issue. This design
+   carries the **step** and not the test, deliberately — see *The test half of requirement
+   4*, which states what that costs.
 5. No new token scope. `permissions: issues: write` on that job is not widened.
 
 ## Design
@@ -40,25 +42,56 @@ it; what the design chooses is the suffix that makes the key discriminate.
 
 Steps in the `chaos-e2e` job are not visible to the downstream `notify-failure` job, so
 the name crosses as a job output. Every step in `chaos-e2e` gains an `id:`, and a final
-`if: failure()` step pipes `toJSON(steps)` into a new `scripts/name-failing-step.sh`,
-whose stdout becomes the job's `failing-step` output.
+`if: failure()` step pipes `toJSON(steps)` through `jq`, and its stdout becomes the job's
+`failing-step` output.
 
-The script reads the steps context on stdin and writes the id of the first step whose
-`outcome` is `failure`, or `unknown-step` when the context names none. Keying on the id
+The filter takes the id of the first step whose `outcome` is `failure`, or `unknown-step`
+when the context names none. Keying on the id
 rather than the display name is what keeps the enumeration out of the workflow: the
 context is already keyed by id, so a step added later with an `id:` is covered with no
 second list to keep in sync, and a short slug reads well in a title. Only one step in a
 job can fail — the job stops there — so "first" is a total order in practice, not a
 tie-break.
 
-The script exists rather than an inline `jq` call because the derivation is the part with
-a silent failure mode: a wrong filter yields `unknown-step` for every failure and
-collapses every issue back into one, which is the defect being fixed, invisibly. Off the
-runner it is a pure stdin-to-stdout function, so it is directly testable — the same
-reason `scripts/select-ffmpeg-asset.sh` was extracted from this same workflow file, and
-this change follows that file's script + selftest + `just ci` recipe pattern exactly. It
-runs in the `chaos-e2e` job, which already checks the repository out, so no job gains a
-permission it did not have.
+The derivation is an inline `jq` filter in that step. An earlier draft extracted it to
+`scripts/name-failing-step.sh` with a selftest wired into `just ci`, following
+`scripts/select-ffmpeg-asset.sh` — the existing extraction from this same workflow file —
+because the derivation is the part with a silent failure mode: a wrong filter yields
+`unknown-step` for every failure and collapses every issue back into one, which is the
+defect being fixed, invisibly. The operator declined that surface, confining this change to
+`.github/workflows/chaos-e2e.yml` and explicitly excluding `justfile`. The filter therefore
+ships untested by `just ci`; *Testing* records what was checked instead and what is left
+uncovered.
+
+## The test half of requirement 4
+
+Requirement 4 says "the failing step **or test** where it is cheap to extract". This design
+carries the step id and not the test name. The cost judgement, stated rather than left
+implicit:
+
+Extracting a test name means teeing the `Run Chaos Librarian E2E` step's stdout and parsing
+`cargo test`'s `failures:` block. That is output-parsing machinery outside this change's
+permitted surface, and it breaks whenever that output format moves — a coupling to a
+libtest rendering detail, inside a notification path, to sharpen a key.
+
+**What the step key buys, and what it does not.** Against the real history it would have
+split the three duplicates two ways (`gh run view <id> --json jobs`, checked 2026-09-05):
+#470 (run 31361822593) and #491 (run 32000334810) failed in `Run Chaos Librarian E2E`,
+while #536 (run 32696142015) failed in `Install ffmpeg` with the E2E step never reached. So
+the step key does discriminate on the evidence available, which is the case for adopting it.
+
+What it does not buy is discrimination *inside* the modal bucket. `just chaos-e2e-ci`
+(`justfile:249-252`) bundles three commands — `uv sync --locked`, a four-crate
+`cargo build`, and `cargo test -p voom-cli --test chaos_librarian_e2e` — into the single
+step `run-chaos-e2e` (`chaos-e2e.yml:109-110`). Within it, a lockfile-resolution failure, a
+compile error, and two unrelated failing E2E tests all produce the title
+`Scheduled chaos-e2e run failed: run-chaos-e2e` and land on one issue, which triage
+separates by reading the comments. That bucket is where the recurring defect lives, so the
+residual is real; it is accepted deliberately rather than overlooked.
+
+Splitting `chaos-e2e-ci` into composed recipes so the step id discriminates would fix this
+without any output parsing. It was put to the operator alongside the parsing option, and
+both were declined in favour of shipping the dedupe fix now.
 
 ### The notify job
 
@@ -84,10 +117,23 @@ trigger is a deliberate label change rather than anything routine, and because t
 alternative — retrying without `--label` — would violate requirement 3 in exactly the case
 the labels are supposed to cover.
 
-The job body stays inline. Running the extracted script here would need
-`actions/checkout`, and that job declares its own `permissions:`, which replaces the
-workflow default — so it would have to gain `contents: read`. Requirement 5 forbids
-widening it, and a notification job is the wrong place to spend a permission.
+**Retitling the tracking issue detaches it**, and that is the second accepted consequence of
+the same shape. The title is the whole key, matched exactly on both sides, so if triage
+edits the issue's title — prefixing a component, appending a root-cause number, rewording it
+to describe the actual defect — the next failure's comparison finds nothing and a fresh
+issue is opened. It is silent: the log line is the ordinary "creating one", and the new
+issue arrives labelled as though nothing were tracked. Closing it properly would mean a
+second key — an invisible body marker or a dedicated tracking label — which is machinery a
+notification path does not earn for a weekly nuisance that degrades only to today's
+behaviour. The operational mitigation is a sentence, not code: on a tracking issue like
+this, relabel and comment rather than retitle, or close it and let the next run open a
+clean one.
+
+The search is assigned from its own command rather than read through a pipeline, so a
+failed `gh issue list` is attributable to `gh` instead of arriving at `jq` as empty stdin.
+That is the same reason the `Install ffmpeg` step above writes its release read to a file,
+and it is what keeps a transient search failure from being indistinguishable from "no
+existing issue".
 
 ### Migration
 
@@ -103,7 +149,7 @@ Security-relevant: the change edits CI config that handles `GH_TOKEN`, and build
 issue title and a search query from a non-literal value.
 
 **Boundary inventory.** Added: (a) the `toJSON(steps)` context reaching
-`name-failing-step.sh` on stdin; (b) the derived step name reaching an issue title, a
+the naming step's `jq` filter on stdin; (b) the derived step name reaching an issue title, a
 search query, and an issue body; (c) issue titles and authors returned by the search
 reaching the choice of which issue to comment on; (d) the job-output crossing
 `needs.chaos-e2e.outputs.failing-step`, from the `chaos-e2e` job — which builds and runs
@@ -129,20 +175,22 @@ untrusted actor reaches. Repository maintainers are trusted.
   hostile value cannot become a second argument or a command. The charset check against
   `^[A-Za-z0-9_-]{1,64}$`, degrading to `unknown-step` with a `::warning::`, is defence in
   depth on top of that — and it runs on *both* sides of boundary (d): in
-  `name-failing-step.sh` in the producing job, and again on the value read from
+  the naming step in the producing job, and again on the value read from
   `needs.chaos-e2e.outputs.failing-step` in the consuming job. A check that ran only in the
   producing job would not be a control on what the privileged job consumes. Both sides
   carry `LC_ALL=C`, because the guard is a bracket range and glibc resolves a range through
   the locale's collation — under a UTF-8 locale it admits Arabic-Indic and fullwidth
   digits, so the export is part of the control rather than decoration. The exact-title
   comparison uses `jq --arg`, which is data, not program text.
-- (b) The notify step runs under `set -euo pipefail`. GitHub's default shell for a `run:`
-  block with no `shell:` key is `bash -e`, *without* `pipefail`, so a failing
+- (b) The notify step runs under `set -euo pipefail`, and assigns the search result inside
+  an `if !` guard rather than reading it through a pipeline. GitHub's default shell for a
+  `run:` block with no `shell:` key is `bash -e`, *without* `pipefail`, so a failing
   `gh issue list` at the head of a pipeline would otherwise be masked by `jq` exiting 0 on
-  empty stdin — the search would silently return "nothing found" and the job would file a
-  duplicate, which is exactly the defect this change removes. A failed search must fail
-  the step instead: a missed notification is recoverable on the next run, a duplicate is
-  the bug.
+  empty stdin. What the pair establishes is precisely that a **failed** search fails the
+  step, so a transient `gh` error cannot masquerade as "nothing found" and file a
+  duplicate. It does not establish that an empty result set is trustworthy — a genuinely
+  empty answer caused by search-index lag still costs one duplicate, which *Explicitly out
+  of scope* accepts.
 - (c) What bounds this boundary is the **server-side** `author:app/github-actions`
   qualifier on the search, not the client-side check. An untrusted actor has two moves
   against a predictable title, and the client-side check only stops the first. *Capture*:
@@ -162,21 +210,31 @@ cadence, and no worse than today's behaviour, which duplicates every run.
 
 ## Testing
 
-`scripts/name-failing-step-selftest.sh`, wired as `just name-failing-step-selftest` into
-the `ci:` recipe and a prek hook, in the pattern of `select-ffmpeg-asset-selftest`. Each
-case pins one rule: the failure is selected over successes and skips; a context with no
-failure yields `unknown-step`; an unparseable or non-object context exits non-zero; a
-name outside the slug charset degrades to `unknown-step`; empty stdin exits non-zero.
+**Nothing in `just ci` exercises this change.** The repository has no actionlint and no
+yamllint, workflow shell logic is not reachable from any recipe, and the extraction that
+would have been testable is outside the permitted surface. That is the honest state, and
+it is why the checks below were run by hand and recorded here rather than left implicit.
 
-The `notify-failure` job body gets no *in-job* executable coverage: running the extracted
-script inside that job would need `actions/checkout`, and therefore `contents: read`,
-which requirement 5 forbids. What that constraint does *not* foreclose is checked anyway —
-the plan runs the search-and-select pipeline against the live repository read-only from a
-developer machine and pins its output, which is what proves the `jq` selector and the
-search interaction behave as designed.
+Performed on 2026-09-05, all read-only:
 
-Three assumptions remain unverified until a real scheduled failure, and are recorded here
-rather than discovered later:
+- **Both `run:` blocks extracted from the YAML and executed against fixtures.** The naming
+  block returns `run-chaos-e2e` from a full success/failure context, `install-ffmpeg` when
+  a setup step fails and later steps are `skipped`, and `unknown-step` when the context
+  holds only successes, only `cancelled`/`skipped`, or a key outside the slug charset —
+  the last with its `::warning::`. A non-object entry does not abort the filter.
+- **The notify block against a stubbed `gh` recording its argv.** A failed search exits 1
+  with `::error::` and issues no `create`; an exact bot-authored match produces a
+  `gh issue comment <n>` and no `create`; a title matching only by containment, and an
+  exact title from a non-bot author, both fall through to `create`; the `create` carries
+  `--label bug` and `--label status:needs-triage`; and an empty or malformed
+  `FAILING_STEP` warns and keys on `unknown-step`.
+- **The search pipeline against the live repository.** With the old suffix-free key it
+  selects #536 under `--state all` and nothing under `--state open`; with the new suffixed
+  key it selects nothing under either. That is the containment/exactness contract, checked
+  against real data.
+
+Four things stay unchecked until a real scheduled failure, and are recorded here rather
+than discovered later:
 
 - **Failed-job output propagation.** Criterion 4 rests on `needs.chaos-e2e.outputs.*`
   being readable by a dependent job when the producing job *failed*. This is the first
@@ -188,19 +246,27 @@ rather than discovered later:
 - **`workflow_dispatch` cannot exercise the path.** The job's pre-existing gate is
   `if: failure() && github.event_name == 'schedule'`, so the first real execution is a
   scheduled failure. That gate is pre-existing and out of scope to change.
-- **A `Checkout` failure necessarily degrades to `unknown-step`**, because
-  `scripts/name-failing-step.sh` lives in the tree the failed step was fetching. The
-  namer cannot name its own missing checkout.
+- **The naming step is inside the failing job**, so it yields no output whenever it does
+  not run. Three of those are catastrophic and rare — a cancellation, the 60-minute
+  timeout, a runner death. The fourth is mundane and works differently: a **post** step
+  failing. Post steps run after every main step, so if `Post Install uv` or
+  `Post Cache cargo` fails while every main step succeeded, `if: failure()` is false when
+  the naming step is evaluated, the step is *skipped*, and the job is then marked failed —
+  so `notify-failure` fires with an empty output. All four degrade to `unknown-step` with
+  the `::warning::` above rather than to a wrong key, but the fourth is why
+  `unknown-step` issues should be expected occasionally rather than treated as alarming.
 - **The search succeeds under a token scoped to `issues: write` alone.** This change adds
   a *read* call — `gh issue list --search`, which gh serves from the GraphQL search API —
   to a job that until now only wrote. Criterion 5 forbids widening the grant to find out,
-  and Step 2.5a runs under a developer credential rather than the job token, so it does
-  not answer this. Unlike the three assumptions above, the failure here is **not**
-  graceful: `set -euo pipefail` turns a rejected search into a failed step, so the job
-  would flip from filing a duplicate every run to filing nothing at all, visible only on
-  the Actions run list. That trade is the right one — a silent duplicate is worse than a
-  loud absence — but the first scheduled failure after merge must be checked for it
-  specifically.
+  and the live check above ran under a developer credential rather than the job token, so
+  it does not settle this. It could not be settled without merging. The failure here is
+  **not** graceful, so the job is built to be loud about it: the search is assigned from
+  its own command rather than through a pipeline, and a non-zero `gh` exit produces
+  `::error::could not search for an existing tracking issue; refusing to file a possible
+  duplicate` and fails the step. The job would then flip from filing a duplicate every run
+  to filing nothing, visible only on the Actions run list. That trade is deliberate — a
+  silent duplicate is worse than a named absence — but the first scheduled failure after
+  merge must be checked for it specifically.
 
 No static check covers the workflow's Actions schema or its expressions: `just ci` carries
 no actionlint and no yamllint. Adding one would be a repository-wide tooling change beyond
@@ -230,6 +296,19 @@ lives.
 - **Enumerate step display names in an env block** rather than keying on `toJSON(steps)`.
   judgment: a second list of every step, which a later step addition silently falls out
   of, to gain a prettier suffix than the id.
+- **Put the failing test name in the key**, by teeing the E2E step's stdout and parsing
+  `cargo test`'s `failures:` block. judgment: output-parsing machinery coupled to a libtest
+  rendering detail, inside a notification path — and outside the permitted surface. Put to
+  the operator with its residual stated and declined; see *The test half of requirement 4*.
+- **Split `chaos-e2e-ci` into composed recipes** so the step id discriminates inside the
+  E2E run. judgment: the cheaper way to sharpen the key, but it changes `justfile`, which
+  this change's surface excludes. Put to the operator alongside the option above and
+  likewise declined.
+- **Extract the naming filter to `scripts/` with a selftest wired into `just ci`**, in the
+  pattern of `scripts/select-ffmpeg-asset.sh`. judgment: the repository's own answer to
+  untestable workflow shell, and it needs no permission change because the producing job
+  already checks out — but it adds files the operator excluded from this change's surface.
+  The consequence is recorded in *Testing*: the filter ships with no coverage in `just ci`.
 - **Match on the search result alone, without the exact-title comparison.** verified:
   `in:title` matches by phrase *containment*, not equality —
   `gh issue list --repo randomparity/voom-v2 --state all --search 'in:title "Scheduled
