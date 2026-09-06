@@ -15,7 +15,7 @@ Tech stack: GitHub Actions workflow YAML, bash, `jq`, `gh`, `just`, `prek`.
 
 Spec: `docs/workflow/specs/2026-09-05-chaos-e2e-notify-dedupe-design.md`.
 
-Expected implementation size: 180–240 changed lines (M) — derived from the file map below: one new ~50-line script, one new ~130-line selftest, and ~55 changed lines across the workflow, `justfile`, and `.pre-commit-config.yaml`.
+Expected implementation size: 245–305 changed lines (M) — counted from this plan's own code fences, which carry the implementation verbatim: a ~50-line script, a ~150-line selftest, ~56 changed workflow lines, and 14 across `justfile` and `.pre-commit-config.yaml`.
 
 ## Global Constraints
 
