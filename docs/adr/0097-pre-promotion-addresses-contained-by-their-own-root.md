@@ -182,15 +182,14 @@ untouched.
 
 ## Consequences
 
-- This record decides the rule; it does not authorize the change that implements
-  it. Applying containment against the staging root and removing
-  `artifact_target_root`'s source-root fallback are edits to
-  `crates/voom-control-plane/src/operation_source.rs` that no open issue owns:
-  #616 is configuration-time validation and is forbidden the path work by the rule
-  above, #617 is an error-message change, #618 is the `--staging-root`
-  reconciliation, and #623 is the harness reconciliation. That resolver change
-  needs an owner before the consequences below can be acted on. Naming the gap is
-  this record's job; filing the work is the tracker's.
+- This record decides the rule; it does not implement it. Applying containment
+  against the staging root and removing `artifact_target_root`'s source-root
+  fallback are edits to `crates/voom-control-plane/src/operation_source.rs`, owned
+  by **#625**, which is blocked on this record landing. No other child of the #497
+  epic covers that work — #616 is configuration-time validation and is forbidden
+  the path change by the rule above, #617 is an error-message change, #618 is the
+  `--staging-root` reconciliation, #623 is the harness reconciliation — and read
+  together they imply a coverage that did not exist until #625 was filed.
 - Removing the source-root fallback carries an in-tree cost. Two paths that reach
   a commit or promotion set `default_output_root_id`
   (`crates/voom-control-plane/src/artifact/commit/mod_test.rs:1467`,
@@ -198,7 +197,7 @@ untouched.
   construct it as `None` and depend on the fallback, including
   `crates/voom-cli/tests/support/voom_cli.rs:48-50`. Each of the latter that
   reaches a commit or promotion must gain an explicit output root, and that work
-  belongs to the resolver change above, not to #497's closure.
+  belongs to #625, not to #497's closure.
 - **The amendment is discoverable from the records it amends.** This repository's
   convention is a `## Later decision:` section added to the amended record in the
   same commit as the amending one — ADR 0050's commit `b3ccc609` did exactly that
@@ -215,7 +214,7 @@ untouched.
   as `artifact_target_root`, so the two cannot disagree." After this record there
   is no such rule, so #484's criterion becomes "name the resolved output root"
   without the fallback clause. Its own subject, `declaration_for`, is untouched by
-  the resolver change; only the criterion's wording is.
+  #625; only the criterion's wording is.
 - #616 is unblocked to implement the same-library, same-owner-node configuration
   check above, at `create_library_root`, `update_library_root`, and the
   owner-assignment path. Its premise changes: it must **not** implement the
@@ -251,13 +250,13 @@ untouched.
   `compliance execute --staging-root` call on it, so a default run never reaches a
   commit. That layout is untested rather than passing, and no CI run exercises it —
   the weekly job runs `just chaos-e2e-ci` (`justfile:249-252`), which is the Rust
-  harness only. #623 must not run before the resolver change lands, or it will
-  assert a layout the code still rejects.
+  harness only. #623 must not run before #625 lands, or it will assert a layout
+  the code still rejects.
 - Removing the fallback is a behavior change for any deployment relying on the
   implicit "write beside the source" default; it must now set `--output-root`
   explicitly. The project is pre-release, so no migration or deprecation window is
   owed.
-- Nothing in this record ships behavior. Until the resolver change lands, the
+- Nothing in this record ships behavior. Until #625 lands, the
   emergent nesting requirement still binds at run time and the in-tree fixtures
   still depend on the fallback.
 
