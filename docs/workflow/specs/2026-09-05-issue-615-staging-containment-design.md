@@ -37,7 +37,8 @@ leaves the defect half-fixed, so both are settled in one record.
    introducing one is forbidden.
 3. The rule #616 enforces at configuration time is same-library and
    same-owner-node agreement between a root and each root it names as a default,
-   with no filesystem path comparison — plus the two completeness points the
+   plus the requirement that a named staging root itself carry a
+   `default_output_root_id`, with no filesystem path comparison — plus the two completeness points the
    record states: the owner-assignment path (`assign_library_root_owner_in_tx`)
    can invalidate a pairing without writing a default column and must be checked
    in both directions, and a pairing is undecidable only while an owner is still
@@ -46,8 +47,8 @@ leaves the defect half-fixed, so both are settled in one record.
    clause of ADR 0055.
 
 The record also names what it does *not* authorize: the resolver change in
-`operation_source.rs` that implements decisions 1 and 4 is owned by no open issue,
-and #623 is sequenced behind it.
+`operation_source.rs` that implements decisions 1 and 4 is owned by #625, filed
+from this record's consequences, and #623 is sequenced behind it.
 
 ## Alternatives
 
@@ -59,8 +60,8 @@ here; that is where a later reader looks.
 In scope: `docs/adr/0097-*.md` (new), one new row in `docs/adr/README.md`, and
 these two design artifacts.
 
-Out of scope, with owners: the resolver change itself (no owner today — the record
-says so) and the configuration-time validation (#616); the `--staging-root` /
+Out of scope, with owners: the resolver change itself (#625); the
+configuration-time validation (#616); the `--staging-root` /
 `default_staging_root_id` reconciliation (#618); the chaos-harness layout
 reconciliation (#623); retiring the in-tree fixture dependency on the fallback
 (the resolver change); anything that extends the transitional control-plane

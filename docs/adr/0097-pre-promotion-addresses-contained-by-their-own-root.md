@@ -133,9 +133,13 @@ condition and the owner-assignment path below, not the whole check.
 
 `voom library root add` and `voom library root update` reject a
 `--staging-root <id>`, `--output-root <id>`, or `--backup-root <id>` value on root
-R when the named root does not exist, does not belong to R's library, or resolves
-to an owner node other than R's. They perform **no** filesystem path comparison
-between roots.
+R when the named root does not exist, does not belong to R's library, resolves to
+an owner node other than R's, or — for a `--staging-root <id>` value — does not
+itself carry a `default_output_root_id`. That last clause is what the first
+decision makes necessary: promotion resolves the durable output address from the
+staging root's own output default, so a staging root without one is a
+configuration that fails after a transcode rather than at configuration time.
+They perform **no** filesystem path comparison between roots.
 
 Two completeness points bind that rule. First, a third path can invalidate a
 pairing without writing a default column. `require_default_ids_in_library`
@@ -164,9 +168,11 @@ is still absent are inherited by the run-time pre-mutation check.
 ### An unaddressable destination fails closed
 
 `artifact_target_root`'s silent fallback to the source root is removed. When no
-`default_output_root_id` is configured for the source root, resolving a durable
-commit target fails with an actionable error naming the root and the
-`voom library root update --output-root <id>` that fixes it. This converges both
+`default_output_root_id` is configured for the root whose output default is being
+resolved — the source media root at commit, the artifact's own staging root at
+promotion — resolving a durable commit target fails with an actionable error
+naming that root and the `voom library root update --output-root <id>` that fixes
+it. This converges both
 routes on `destination_root`'s fail-closed semantics, for the reason
 `destination_root` already gives: an unaddressable destination must fail rather
 than be guessed.
@@ -254,8 +260,24 @@ untouched.
   the code still rejects.
 - Removing the fallback is a behavior change for any deployment relying on the
   implicit "write beside the source" default; it must now set `--output-root`
-  explicitly. The project is pre-release, so no migration or deprecation window is
+  explicitly. Because promotion resolves the output default from the staging root,
+  every root named as a `default_staging_root_id` must now carry an output default
+  too — the configuration-time clause above is what stops that surfacing after a
+  transcode. The project is pre-release, so no migration or deprecation window is
   owed.
+- **Accepted residual: a staging root can be retired while it is another root's
+  staging default.** `retire_library_root_in_tx`
+  (`crates/voom-store/src/repo/library/library_roots.rs:438-458`) guards only that
+  the root is not already retired; it consults no default column, and
+  `require_default_ids_in_library`'s `state != 'retired'` predicate gates the write
+  of a default, never the later retirement of a root already named as one. Moving
+  the containment root onto the staging root — the root whose purpose is
+  transience — means a committed-but-unpromoted artifact can now outlive its
+  containment root. The first rejected alternative below argues from exactly this
+  epoch-and-retirement lifecycle against path nesting, and honesty requires
+  applying it to the option taken as well. This is accepted and unowned: no issue
+  covers it, and closing it would need a retirement-time referential check that no
+  criterion here asks for.
 - Nothing in this record ships behavior. Until #625 lands, the
   emergent nesting requirement still binds at run time and the in-tree fixtures
   still depend on the fallback.

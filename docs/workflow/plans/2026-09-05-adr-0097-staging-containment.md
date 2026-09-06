@@ -16,7 +16,7 @@ Tech stack: Markdown records under `docs/adr/`, gated by
 `scripts/check-adr-index.sh` (invoked as `just check-adr-index`, which `just ci`
 runs and which the `prek` pre-commit hook also runs on staged `docs/adr/` changes).
 
-Expected implementation size: 310–325 changed lines (M) — derived from the file map below: one 315-line record plus one index row.
+Expected implementation size: 330–350 changed lines (M) — derived from the file map below: one 336-line record, two ~16-line appended back-reference sections, and one index row.
 
 That line has been revised on every commit of this branch (200–210 → 255–270 →
 295–315 → this one), tracking a record that grew 202 → 260 → 302 → 315 under three
@@ -66,6 +66,8 @@ correction. The four decisions themselves have not grown since the first draft.
 |---|---|---|
 | `docs/adr/0097-pre-promotion-addresses-contained-by-their-own-root.md` | created | The decision, its context, consequences, and rejected alternatives |
 | `docs/adr/README.md` | changed (one row appended) | The index entry `check-adr-index` requires |
+| `docs/adr/0055-node-owned-roots-and-relative-file-locations.md` | changed (section appended) | `## Later decision:` back-reference to ADR 0097 |
+| `docs/adr/0069-byte-work-tickets-declare-canonical-artifact-access.md` | changed (section appended) | `## Later decision:` back-reference to ADR 0097 |
 | `docs/workflow/specs/2026-09-05-issue-615-staging-containment-design.md` | created | The design record: problem, decisions, scope, verification contracts |
 | `docs/workflow/plans/2026-09-05-adr-0097-staging-containment.md` | created | This plan |
 
@@ -111,8 +113,8 @@ their own storage root`, to build the index row.
    prefix — because the two readings give opposite verdicts on the transitional
    `--staging-root` path.
 3. In `## Consequences`, say what #616 and #618 are each unblocked to do,
-   reference #623 with the layout the decision implies, and name the resolver
-   change that no open issue owns.
+   reference #623 with the layout the decision implies, and name #625 as the
+   owner of the resolver change.
 4. Assert every citation. First confirm the cited sources are unchanged from the
    base, then check each line. Run from the worktree root:
 
@@ -162,6 +164,8 @@ their own storage root`, to build the index row.
    scripts/chaos-e2e-local.sh|160|execute_policy" = "execute"
    scripts/chaos-e2e-local.sh|166|--staging-root
    scripts/check-adr-index.sh|21|row_prefix
+   docs/adr/0069-byte-work-tickets-declare-canonical-artifact-access.md|212|## Consequences
+   crates/voom-store/src/repo/library/library_roots.rs|438|retire_library_root_in_tx
    justfile|249|chaos-e2e-ci:
    docs/adr/0055-node-owned-roots-and-relative-file-locations.md|103|falling back to the same
    docs/adr/0069-byte-work-tickets-declare-canonical-artifact-access.md|256|unwrap_or(source)
