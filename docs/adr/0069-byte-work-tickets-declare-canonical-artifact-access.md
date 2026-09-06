@@ -427,3 +427,19 @@ decode — where raising cannot spread.
   producer. Rejected because scanning does read bytes and #421 moves exactly that work to
   the owner node; classifying it false to shed an unexercised branch would put the wrong
   answer in a closed vocabulary that #421 then has to correct.
+
+## Later decision: fail-closed destination resolution
+
+ADR 0097 removes the rule the first Consequences bullet above describes
+(`:255-257`). `default_output_root_id.unwrap_or(source)` is no longer how a
+destination resolves: with no output root configured the resolution fails closed
+with an actionable error, so `artifact_target_root` no longer implements the
+fallback this record attributes to ADR 0055.
+
+The limitation that bullet records is otherwise unchanged — an output-producing
+operation still declares `write` on the root it reads from, and resolving the
+destination still needs an access plan this slice does not have. That limitation
+remains one this record accepts, not an alternative it declined. Only the
+description of how the destination would resolve is amended. This record's own
+decision, that byte-work tickets declare canonical artifact access, is untouched.
+Issue #615 carries the analysis.

@@ -96,3 +96,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0094](0094-stress-one-node-session-with-many-runner-workers.md) | Stress one node session with many runner workers |
 | [0095](0095-preseed-stress-recovery-with-process-crashed-attempts.md) | Preseed stress recovery with process-crashed attempts |
 | [0096](0096-run-scheduled-resource-cells-on-isolated-runners.md) | Run scheduled resource cells on isolated runners |
+| [0097](0097-pre-promotion-addresses-contained-by-their-own-root.md) | Pre-promotion artifact addresses are contained by their own storage root |

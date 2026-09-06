@@ -138,3 +138,19 @@ and #423 still removes path-bearing worker requests.
   design must define fencing and migration explicitly.
 - **Implement reference-only worker requests here.** Rejected because #423 owns
   that coordinated worker-protocol and worker rollout.
+
+## Later decision: pre-promotion address containment
+
+ADR 0097 amends one clause of the artifact-finalization paragraph above
+(`:101-105`). "Falling back to the same root" no longer holds: when no
+`default_output_root_id` is configured for the resolving root, resolving a
+durable commit target now fails closed rather than silently selecting the source
+root, converging on the semantics the media-dispatch envelope path already used.
+
+The rest of that paragraph stands. A resolver still proves the target path is
+contained by its target root and derives the relative locator before recording the
+result. What ADR 0097 settles, and this record left open, is *which* root a
+pre-promotion `.committed` address is contained by: the registered root resolved
+for the staging role, not the output root. Root identity, the provider-relative
+location model, and the containment requirement itself are untouched. Issue #615
+carries the analysis.
