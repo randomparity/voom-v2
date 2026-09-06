@@ -297,7 +297,9 @@ fn require_contained(
         return Ok(());
     }
     Err(VoomError::Config(format!(
-        "{operation_label} path escaped storage root {storage_root_id}"
+        "{operation_label} path escaped storage root {storage_root_id}: {} is not inside {}",
+        path.display(),
+        root_path.display()
     )))
 }
 
