@@ -181,8 +181,8 @@ async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
     );
 
     // The rejection has to tell an operator which path was rejected and what it
-    // was measured against; a storage root id alone sent issue #491 back to the
-    // source to reconstruct the constraint. Assert the two paths as one
+    // was measured against; a storage root id alone leaves the constraint to be
+    // reconstructed from source (issue #617). Assert the two paths as one
     // rendered phrase rather than two `contains` calls: `outside_dir` is a
     // textual-prefix sibling of `root_dir`, so `contains(root_dir)` alone is
     // satisfied by the rejected path and would still pass if the root were
