@@ -86,7 +86,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 async-trait = "0.1.89"
 blake3 = "1.5"
 bytes = "1.7"
-constant_time_eq = "0.5.0"
+constant_time_eq = "0.6.0"
 http = "1.4"
 http-body = "1"
 http-body-util = "0.1"
