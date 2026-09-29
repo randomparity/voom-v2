@@ -10,18 +10,17 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 check="$script_dir/check-payload-deny-unknown.sh"
 
 failures=0
+work=$(mktemp -d -t voom-payload-selftest.XXXXXX)
+trap 'rm -R "$work"' EXIT
 
 # expect_exit <expected-code> <fixture-body>
 # Writes the body to a single source file, a scope file naming it, runs the guard.
 expect_exit() {
 	local want="$1" body="$2"
-	local work
-	work=$(mktemp -d)
 	printf '%s\n' "$body" >"$work/fixture.rs"
 	printf '%s\n' "$work/fixture.rs" >"$work/scope.txt"
 	local got=0
 	(PAYLOAD_CONTRACT_SCOPE="$work/scope.txt" "$check" >/dev/null 2>&1) || got=$?
-	rm -rf "$work"
 	if [[ "$got" -ne "$want" ]]; then
 		echo "FAIL: expected exit $want, got $got for body:" >&2
 		printf '%s\n' "$body" >&2
@@ -154,6 +153,70 @@ struct GenuineExempt { a: u32 }'
 expect_exit 0 '#[derive(Deserialize)]
 /// Unlike a serde(tag = "kind") enum, this one is untagged.
 enum PlainMentionsTag { Variant { y: u32 } }'
+
+# Match coordinates compare numerically across line-number digit boundaries.
+expect_exit 0 '// prefix
+// prefix
+// prefix
+// prefix
+// prefix
+// prefix
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NearEnd { a: u32 }
+// trailing line'
+
+# POSIX awk treats assignment-shaped operands as variables unless made paths.
+# The source must still be read even when there are no named-field AST matches.
+printf '%s\n' '#[derive(
+Deserialize)]
+struct Tuple(u32);' >"$work/fixture=payload.rs"
+printf '%s\n' 'fixture=payload.rs' >"$work/assignment-scope.txt"
+status=0
+output=$(cd "$work" && PAYLOAD_CONTRACT_SCOPE="$work/assignment-scope.txt" "$check" 2>&1) || status=$?
+if [[ "$status" -ne 1 || "$output" != *'fixture=payload.rs:1 — multi-line'* ]]; then
+	echo "FAIL: assignment-shaped source path was not checked: $output" >&2
+	failures=$((failures + 1))
+fi
+
+# Diagnostic ordering is part of the hook contract: unsupported derives first,
+# then named structs, then tagged enums, with one actionable location per finding.
+printf '%s\n' '#[derive(Deserialize)]
+struct First { a: u32 }
+#[derive(Deserialize)]
+struct Second { b: u32 }
+#[serde(tag = "kind")]
+enum Inline { A { a: u32 } }
+#[derive(
+Debug)]
+struct Multiline { a: u32 }' >"$work/fixture.rs"
+printf '%s\n' "$work/fixture.rs" >"$work/scope.txt"
+status=0
+output=$(PAYLOAD_CONTRACT_SCOPE="$work/scope.txt" "$check" 2>&1) || status=$?
+locations=$(printf '%s\n' "$output" | grep -F "$work/fixture.rs:" | sed -E 's/.*:([0-9]+) —.*/\1/')
+if [[ "$status" -ne 1 || "$locations" != $'7\n2\n4\n6' || "$output" != *'4 violation(s).'* ]]; then
+	echo "FAIL: payload diagnostic locations/count/order changed: $output" >&2
+	failures=$((failures + 1))
+fi
+
+# A failing scanner or processor must never look like a clean guard. Stubs only
+# replace external tool boundaries; the real guard handles their outputs/exits.
+expect_tool_error() {
+	local tool="$1" body="$2" status=0 output=""
+	mkdir -p "$work/bin"
+	printf '#!/usr/bin/env bash\n%s\n' "$body" >"$work/bin/$tool"
+	chmod +x "$work/bin/$tool"
+	output=$(PATH="$work/bin:$PATH" PAYLOAD_CONTRACT_SCOPE="$work/scope.txt" "$check" 2>&1) || status=$?
+	rm "$work/bin/$tool"
+	if [[ "$status" -ne 2 || "$output" == *'check-payload-deny-unknown: OK'* ]]; then
+		echo "FAIL: $tool failure expected exit 2 without OK, got $status: $output" >&2
+		failures=$((failures + 1))
+	fi
+}
+expect_tool_error ast-grep 'exit 2'
+expect_tool_error ast-grep 'exit 1'
+expect_tool_error ast-grep 'echo malformed; exit 1'
+expect_tool_error awk 'exit 7'
 
 if [[ "$failures" -gt 0 ]]; then
 	echo "check-payload-deny-unknown-selftest: $failures failure(s)." >&2
