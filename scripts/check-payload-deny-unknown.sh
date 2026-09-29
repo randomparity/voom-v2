@@ -79,118 +79,139 @@ rule:
     has: { kind: field_declaration_list }
 '
 
-# Emit "file:line" (1-based) for every node a rule matches across the scope.
-# `--json=stream` writes one JSON object per match, one per line. Per object we
-# pull the "file" string and the FIRST `"start":{"line":N` (which is the match
-# range's start; the leading "text" field carries no nested start.line), then
-# convert ast-grep's 0-based line to the 1-based line `sed`/editors use. Parsing
-# per line keeps us independent of the object's field order (the field order is
-# ast-grep-version-sensitive: in 0.42 "file" trails "range"). No jq dependency,
-# same grep/sed discipline as check-paused-time-db.sh.
-# `scan` exits non-zero when an error-severity rule matches; tolerate under set -e.
-matches() {
-	local rule="$1" jline file line0
-	ast-grep scan --inline-rules "$rule" --json=stream "${scope[@]}" 2>/dev/null |
-		while IFS= read -r jline; do
-			file=$(printf '%s' "$jline" | grep -oE '"file":"[^"]*"' | head -1 | sed 's/^"file":"//; s/"$//')
-			line0=$(printf '%s' "$jline" | grep -oE '"start":\{"line":[0-9]+' | head -1 | grep -oE '[0-9]+$')
-			[[ -z "$file" || -z "$line0" ]] && continue
-			printf '%s:%s\n' "$file" "$((line0 + 1))"
-		done | sort -u || true
-}
-
-# The text region in which THIS item's attributes live, bound to the item alone
-# (no cross-item shadowing): the contiguous attribute (`#[...]`) / line-comment
-# (`//`) / blank block immediately ABOVE `line`, plus the item header from `line`
-# down to the line that opens its body `{`. Covering both sides makes the scan
-# robust to whether ast-grep anchors the match at the first attribute or at the
-# struct/enum keyword. Assumes single-line `#[derive(...)]` (enforced below).
-item_region() {
-	local file="$1" line="$2" n text
-	# Upward: contiguous attribute/comment/blank block.
-	n=$((line - 1))
-	while [[ "$n" -ge 1 ]]; do
-		text=$(sed -n "${n}p" "$file")
-		printf '%s\n' "$text" | grep -qE '^[[:space:]]*(#\[|//|$)' || break
-		printf '%s\n' "$text"
-		n=$((n - 1))
-	done
-	# Downward: item header through the line that opens the body.
-	n="$line"
-	while [[ "$n" -le "$((line + 40))" ]]; do
-		text=$(sed -n "${n}p" "$file")
-		[[ -z "$text" && "$n" -gt "$line" ]] && break
-		printf '%s\n' "$text"
-		printf '%s\n' "$text" | grep -q '{' && break
-		n=$((n + 1))
-	done
-}
-
-# True when the item's region carries a genuine exemption marker: a line-comment
-# whose LEADING content is `payload-contract: exempt`. Anchored so doc-comment
-# (`///`) prose that merely mentions the phrase mid-sentence cannot exempt a
-# struct (the escape-hatch leak). Both gates share this, so they cannot drift.
-is_exempt() {
-	printf '%s' "$1" | grep -qE '^[[:space:]]*//[[:space:]]*payload-contract: exempt'
-}
-
-errors=0
-
-# Fail closed on multi-line `#[derive(` (open paren ends the line): the per-item
-# region scan assumes single-line derives, so reject the unsupported shape loudly
-# instead of risking a silent miss. (None exist in scope today; rustfmt keeps
-# these inline.)
-for f in "${scope[@]}"; do
-	while IFS= read -r ml; do
-		[[ -z "$ml" ]] && continue
-		echo "check-payload-deny-unknown: $f:${ml%%:*} — multi-line #[derive(...)] is unsupported; keep it single-line" >&2
-		errors=$((errors + 1))
-	done < <(grep -nE '#\[derive\($' "$f" 2>/dev/null || true)
-done
-
-# Rule 1: a named-field struct that derives Deserialize must carry
-# deny_unknown_fields (or an exemption marker).
-while IFS= read -r hit; do
-	[[ -z "$hit" ]] && continue
-	file="${hit%%:*}"
-	line="${hit##*:}"
-	region=$(item_region "$file" "$line")
-	is_exempt "$region" && continue
-	# Gate on the `#[derive(...)]` line, not the whole region: a Serialize-only
-	# struct whose doc comment says "Deserialize" must not be treated as a
-	# Deserialize struct.
-	printf '%s' "$region" | grep -E '^[[:space:]]*#\[derive\(' | grep -q 'Deserialize' || continue
-	# Gate on a `#[serde(...)]` line so a comment mentioning the attribute cannot
-	# count as coverage.
-	printf '%s' "$region" | grep -E '^[[:space:]]*#\[serde\(' | grep -q 'deny_unknown_fields' && continue
-	echo "check-payload-deny-unknown: $file:$line — Deserialize struct missing #[serde(deny_unknown_fields)]" >&2
-	echo "  Add the attribute, or mark '// payload-contract: exempt — <reason>'. See docs/adr/0013." >&2
-	errors=$((errors + 1))
-done < <(matches "$rule_named_struct")
-
-# Rule 2: a tagged enum (serde tag) must not use inline struct-variants
-# (deny_unknown_fields is a no-op there) — extract each to a newtype struct. Plain
-# (untagged) enums with struct variants are normal Rust and are NOT flagged, so
-# the `serde(tag` test is bound to the enum's own region, not a preceding item.
-while IFS= read -r hit; do
-	[[ -z "$hit" ]] && continue
-	file="${hit%%:*}"
-	line="${hit##*:}"
-	region=$(item_region "$file" "$line")
-	is_exempt "$region" && continue
-	# Gate on a `#[serde(...)]` line carrying `tag` as a whole word: a plain enum
-	# whose comment mentions serde(tag must not be flagged, `untagged` must not
-	# match, and the attribute is found regardless of key order
-	# (`#[serde(rename_all = "...", tag = "...")]`).
-	printf '%s' "$region" | grep -E '^[[:space:]]*#\[serde\(' | grep -qE '\btag\b' || continue
-	echo "check-payload-deny-unknown: $file:$line — tagged enum has an inline struct-variant" >&2
-	echo "  Extract each variant's content to a named struct (newtype variant) — deny_unknown_fields is a no-op on inline variants — or mark '// payload-contract: exempt — <reason>'. See docs/adr/0013." >&2
-	errors=$((errors + 1))
-done < <(matches "$rule_enum_inline_struct_variant")
-
-if [[ "$errors" -gt 0 ]]; then
-	echo "check-payload-deny-unknown: $errors violation(s)." >&2
-	exit 1
+# Keep shape selection structural; only classify each item's own source region.
+# Capture scanner status outside process substitution so tool failures propagate.
+rule="$rule_named_struct"$'\n---\n'"$rule_enum_inline_struct_variant"
+scan_status=0
+scan_output=$(ast-grep scan --inline-rules "$rule" --json=stream "${scope[@]}" 2>/dev/null) || scan_status=$?
+if [[ "$scan_status" -gt 1 || ("$scan_status" -eq 1 && -z "$scan_output") ]]; then
+	echo "check-payload-deny-unknown: ast-grep scan failed. Check the installed tool with 'just setup'." >&2
+	exit 2
 fi
 
-echo "check-payload-deny-unknown: OK"
+matches=""
+while IFS= read -r jline; do
+	[[ -z "$jline" ]] && continue
+	if [[ "$jline" =~ \"file\":\"([^\"]*)\" ]]; then
+		file=${BASH_REMATCH[1]}
+	else
+		echo "check-payload-deny-unknown: could not parse ast-grep file" >&2
+		exit 2
+	fi
+	if [[ "$jline" =~ \"start\":\{\"line\":([0-9]+) ]]; then
+		line=$((BASH_REMATCH[1] + 1))
+	else
+		echo "check-payload-deny-unknown: could not parse ast-grep line" >&2
+		exit 2
+	fi
+	if [[ "$jline" =~ \"ruleId\":\"(named-struct|enum-inline-struct-variant)\" ]]; then
+		matches+="${BASH_REMATCH[1]}|$file:$line"$'\n'
+	else
+		echo "check-payload-deny-unknown: could not parse ast-grep rule" >&2
+		exit 2
+	fi
+done <<<"$scan_output"
+matches=$(printf '%s' "$matches" | sort -u) || {
+	echo "check-payload-deny-unknown: could not sort ast-grep matches" >&2
+	exit 2
+}
+
+# POSIX awk caches each scoped source in one pass. Attribute association retains
+# the old contiguous upward block and inclusive 41-line downward header limit;
+# multiline serde handling remains the separate correctness work in issue #259.
+processor_status=0
+awk '
+BEGIN {
+    for (i = 2; i < ARGC; i++) {
+        original = ARGV[i]
+        if (original ~ /^[[:alpha:]_][[:alnum:]_]*=/) ARGV[i] = "./" original
+        paths[ARGV[i]] = original
+    }
+}
+function diagnose(file, line, message) {
+    print "check-payload-deny-unknown: " file ":" line " — " message > "/dev/stderr"
+    errors++
+}
+function item_region(file, line, n, text, region) {
+    region = ""
+    for (n = line - 1; n >= 1; n--) {
+        text = source[file, n]
+        if (text !~ /^[[:space:]]*(#\[|\/\/|$)/) break
+        region = region text "\n"
+    }
+    for (n = line; n <= line + 40; n++) {
+        text = source[file, n]
+        if (text == "" && n > line) break
+        region = region text "\n"
+        if (index(text, "{")) break
+    }
+    return region
+}
+function classify(kind, file, line, region, lines, count, i, exempt, derives, deny, tag) {
+    region = item_region(file, line)
+    count = split(region, lines, "\n")
+    for (i = 1; i <= count; i++) {
+        if (lines[i] ~ /^[[:space:]]*\/\/[[:space:]]*payload-contract: exempt/) exempt = 1
+        if (lines[i] ~ /^[[:space:]]*#\[derive\(/ && index(lines[i], "Deserialize")) derives = 1
+        if (lines[i] ~ /^[[:space:]]*#\[serde\(/) {
+            if (index(lines[i], "deny_unknown_fields")) deny = 1
+            if (lines[i] ~ /(^|[^[:alnum:]_])tag([^[:alnum:]_]|$)/) tag = 1
+        }
+    }
+    if (exempt) return
+    if (kind == "named-struct" && derives && !deny) {
+        diagnose(file, line, "Deserialize struct missing #[serde(deny_unknown_fields)]")
+        print "  Add the attribute, or mark '\''// payload-contract: exempt — <reason>'\''. See docs/adr/0013." > "/dev/stderr"
+    }
+    if (kind == "enum-inline-struct-variant" && tag) {
+        diagnose(file, line, "tagged enum has an inline struct-variant")
+        print "  Extract each variant'\''s content to a named struct (newtype variant) — deny_unknown_fields is a no-op on inline variants — or mark '\''// payload-contract: exempt — <reason>'\''. See docs/adr/0013." > "/dev/stderr"
+    }
+}
+FILENAME == "-" {
+    if ($0 == "") next
+    separator = index($0, "|")
+    kind = substr($0, 1, separator - 1)
+    hit = substr($0, separator + 1)
+    file = hit
+    sub(/:[0-9]+$/, "", file)
+    line = hit
+    sub(/^.*:/, "", line)
+    count[kind]++
+    files[kind, count[kind]] = file
+    anchors[kind, count[kind]] = line + 0
+    next
+}
+{
+    file = paths[FILENAME]
+    source[file, FNR] = $0
+    lengths[file] = FNR
+    if ($0 ~ /#\[derive\($/) {
+        diagnose(file, FNR, "multi-line #[derive(...)] is unsupported; keep it single-line")
+    }
+}
+END {
+    for (pass = 1; pass <= 2; pass++) {
+        kind = pass == 1 ? "named-struct" : "enum-inline-struct-variant"
+        for (i = 1; i <= count[kind]; i++) {
+            file = files[kind, i]
+            line = anchors[kind, i]
+            if (line < 1 || line > lengths[file]) {
+                print "check-payload-deny-unknown: ast-grep location does not resolve" > "/dev/stderr"
+                exit 2
+            }
+            classify(kind, file, line)
+        }
+    }
+    if (errors) {
+        print "check-payload-deny-unknown: " errors " violation(s)." > "/dev/stderr"
+        exit 1
+    }
+    print "check-payload-deny-unknown: OK"
+}
+' - "${scope[@]}" <<<"$matches" || processor_status=$?
+if [[ "$processor_status" -gt 1 ]]; then
+	echo "check-payload-deny-unknown: source processing failed. Check awk and scoped source files." >&2
+	exit 2
+fi
+exit "$processor_status"
