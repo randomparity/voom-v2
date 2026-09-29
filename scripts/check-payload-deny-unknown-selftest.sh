@@ -179,6 +179,29 @@ if [[ "$status" -ne 1 || "$output" != *'fixture=payload.rs:1 — multi-line'* ]]
 	failures=$((failures + 1))
 fi
 
+# Distinct scope spellings can normalize to the same awk operand. Both must
+# retain their own source identity, including repeated multiline diagnostics.
+printf '%s\n' '#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Aliased { a: u32 }' >"$work/fixture=payload.rs"
+printf '%s\n' 'fixture=payload.rs' './fixture=payload.rs' >"$work/assignment-scope.txt"
+status=0
+output=$(cd "$work" && PAYLOAD_CONTRACT_SCOPE="$work/assignment-scope.txt" "$check" 2>&1) || status=$?
+if [[ "$status" -ne 0 || "$output" != 'check-payload-deny-unknown: OK' ]]; then
+	echo "FAIL: aliased source spellings were not both cached: $output" >&2
+	failures=$((failures + 1))
+fi
+printf '%s\n' '#[derive(
+Deserialize)]
+struct Tuple(u32);' >"$work/fixture=payload.rs"
+status=0
+output=$(cd "$work" && PAYLOAD_CONTRACT_SCOPE="$work/assignment-scope.txt" "$check" 2>&1) || status=$?
+locations=$(printf '%s\n' "$output" | grep ' — multi-line' | sed 's/^check-payload-deny-unknown: //; s/ —.*//')
+if [[ "$status" -ne 1 || "$locations" != $'fixture=payload.rs:1\n./fixture=payload.rs:1' || "$output" != *'2 violation(s).'* ]]; then
+	echo "FAIL: aliased source diagnostic identity/order changed: $output" >&2
+	failures=$((failures + 1))
+fi
+
 # Diagnostic ordering is part of the hook contract: unsupported derives first,
 # then named structs, then tagged enums, with one actionable location per finding.
 printf '%s\n' '#[derive(Deserialize)]
