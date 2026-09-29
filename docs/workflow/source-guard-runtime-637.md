@@ -7,8 +7,12 @@ and replaces payload per-line subprocesses with one POSIX awk source pass.
 
 Measurements below use the unchanged production Rust tree at the issue base and
 ast-grep 0.45.3 / just 1.58.0. Baseline values are medians of two sequential paired
-runs. Candidate values are a final sequential run after the last source-operand
-regression fix. Every recipe exited 0 in both baseline samples and the final run.
+runs. Candidate values are the sequential sample at commit `6417c1d4`, before
+the later alias-identity regression fix. Every recipe exited 0 in both baseline
+samples and that candidate run. The later fix preserves distinct scope spellings
+that normalize to one awk operand; its native and Linux guard/selftest runs pass.
+The production scope has no such aliases; these timings were not remeasured
+after the alias fix.
 
 | Recipe | macOS baseline (s) | macOS candidate (s) | Linux baseline (s) | Linux candidate (s) |
 | --- | ---: | ---: | ---: | ---: |
