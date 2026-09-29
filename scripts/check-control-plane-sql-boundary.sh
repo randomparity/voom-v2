@@ -77,7 +77,7 @@ scan_inline_rule() {
 	scan_output=$(ast-grep scan --inline-rules "$rule" --json=stream "$@" 2>/dev/null)
 	scan_status=$?
 	set -e
-	if [[ "$scan_status" -gt 1 ]]; then
+	if [[ "$scan_status" -gt 1 || ("$scan_status" -eq 1 && -z "$scan_output") ]]; then
 		echo "check-control-plane-sql-boundary: ast-grep scan failed" >&2
 		exit 2
 	fi
@@ -810,6 +810,31 @@ resolve_file() {
 		index=$((index + 1))
 	done
 }
+
+# Alias resolution is file-local. A file without a syntactic sqlx namespace
+# cannot seed its relation graph; strings/comments are not namespace nodes.
+candidate_rule=$'id: sqlx-file-candidate\nlanguage: rust\nseverity: error\nrule:\n  any:'
+candidate_rule+=$'\n    - kind: identifier\n    - kind: type_identifier\n  regex: ^(r#)?sqlx$'
+candidate_output=""
+scan_inline_rule candidate_output "$candidate_rule" "${source_files[@]}"
+candidate_files=()
+while IFS= read -r json_line; do
+	[[ -z "$json_line" ]] && continue
+	parse_json_match "$json_line"
+	candidate_files+=("$match_file")
+done <<<"$candidate_output"
+if [[ "${#candidate_files[@]}" -eq 0 ]]; then
+	echo "control-plane SQL boundary: OK"
+	exit 0
+fi
+candidate_list=$(printf '%s\n' "${candidate_files[@]}" | sort -u) || {
+	echo "check-control-plane-sql-boundary: could not sort candidate files" >&2
+	exit 2
+}
+source_files=()
+while IFS= read -r source_file; do
+	source_files+=("$source_file")
+done <<<"$candidate_list"
 
 load_import_inventory "${source_files[@]}"
 load_type_relations "${source_files[@]}"
