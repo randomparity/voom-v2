@@ -125,7 +125,8 @@ BEGIN {
     for (i = 2; i < ARGC; i++) {
         original = ARGV[i]
         if (original ~ /^[[:alpha:]_][[:alnum:]_]*=/) ARGV[i] = "./" original
-        paths[ARGV[i]] = original
+        path_count[ARGV[i]]++
+        paths[ARGV[i], path_count[ARGV[i]]] = original
     }
 }
 function diagnose(file, line, message) {
@@ -183,7 +184,8 @@ FILENAME == "-" {
     next
 }
 {
-    file = paths[FILENAME]
+    if (FNR == 1) read_count[FILENAME]++
+    file = paths[FILENAME, read_count[FILENAME]]
     source[file, FNR] = $0
     lengths[file] = FNR
     if ($0 ~ /#\[derive\($/) {
