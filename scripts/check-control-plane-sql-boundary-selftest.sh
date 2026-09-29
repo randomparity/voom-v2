@@ -1266,6 +1266,29 @@ fn integration_fixture() {
 RUST
 expect_clean clean "$work/clean"
 
+# Candidate filtering must retain namespaces in raw paths and macro token trees,
+# while a comment/string-only file is still a safe no-candidate control.
+mkdir -p "$work/candidate-control"
+printf '%s\n' 'fn safe() { let _ = "sqlx"; } // sqlx::query' >"$work/candidate-control/safe.rs"
+expect_clean "no namespace candidates" "$work/candidate-control"
+printf '%s\n' 'fn bad() { sqlx::r#query("select 1"); }' >"$work/candidate-control/raw.rs"
+expect_violations "raw namespace candidate" "$work/candidate-control" 1 'sqlx::query'
+rm "$work/candidate-control/raw.rs"
+printf '%s\n' 'fn bad() { opaque!(sqlx); }' >"$work/candidate-control/macro.rs"
+expect_violations "macro namespace candidate" "$work/candidate-control" 1 'sqlx macro token'
+
+# Scanner failures are errors even on an otherwise clean input tree.
+mkdir -p "$work/tool-bin"
+for scanner_body in 'exit 2' 'exit 1' 'echo malformed; exit 1'; do
+	printf '#!/usr/bin/env bash\n%s\n' "$scanner_body" >"$work/tool-bin/ast-grep"
+	chmod +x "$work/tool-bin/ast-grep"
+	status=0
+	output=$(PATH="$work/tool-bin:$PATH" "$check" "$work/candidate-control" 2>&1) || status=$?
+	if [[ "$status" -ne 2 || "$output" == *'boundary: OK'* ]]; then
+		fail "scanner failure expected exit 2 without OK, got $status: $output"
+	fi
+done
+
 if [[ "$failures" -gt 0 ]]; then
 	echo "check-control-plane-sql-boundary-selftest: $failures failure(s)." >&2
 	exit 1
