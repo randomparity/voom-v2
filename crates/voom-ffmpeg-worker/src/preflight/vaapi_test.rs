@@ -411,16 +411,18 @@ fn vaapi_preflight_rejects_a_probe_encode_that_produced_no_output() {
 #[cfg(unix)]
 #[test]
 fn vaapi_capacity_probe_failure_reports_diagnostic_uncertainty() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("vaapi space '\";$()& ")
+        .tempdir()
+        .unwrap();
     let (_fake, mut config) = proven_device(temp.path());
     config.max_sessions = 3;
-    let counter = temp.path().join("encode-count");
     let ffmpeg = vaapi_ffmpeg_stub(
         temp.path(),
         &format!(
-            "printf x >> {counter}; if [ \"$(wc -c < {counter})\" -gt 1 ]; then \
-             echo 'device busy' >&2; exit 1; fi; {ENCODE_OK}",
-            counter = counter.display()
+            "counter=\"${{0%/*}}/encode-count\"; printf x >> \"$counter\"; \
+             if [ \"$(wc -c < \"$counter\")\" -gt 1 ]; then \
+             echo 'device busy' >&2; exit 1; fi; {ENCODE_OK}"
         ),
         "exit 0",
     );
@@ -433,6 +435,10 @@ fn vaapi_capacity_probe_failure_reports_diagnostic_uncertainty() {
     assert!(
         error.contains("VAAPI capacity probe for 3 concurrent"),
         "the message must name the declaration that did not prove: {error}"
+    );
+    assert!(
+        error.contains("device busy"),
+        "the fixture must reach the intended encoder failure: {error}"
     );
     assert!(
         error.contains("cannot be attributed"),
@@ -477,17 +483,19 @@ fn vaapi_probe_encode_expiry_names_the_codec_that_did_not_prove() {
 #[cfg(unix)]
 #[test]
 fn vaapi_capacity_clock_expiry_names_the_declaration() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("vaapi space '\";$()& ")
+        .tempdir()
+        .unwrap();
     let (_fake, mut config) = proven_device(temp.path());
     config.max_sessions = 2;
     config.clocks.capacity_clock = Duration::from_millis(150);
-    let counter = temp.path().join("encode-count");
     let ffmpeg = vaapi_ffmpeg_stub(
         temp.path(),
         &format!(
-            "printf x >> {counter}; if [ \"$(wc -c < {counter})\" -gt 1 ]; then sleep 30; fi; \
-             {ENCODE_OK}",
-            counter = counter.display()
+            "counter=\"${{0%/*}}/encode-count\"; printf x >> \"$counter\"; \
+             if [ \"$(wc -c < \"$counter\")\" -gt 1 ]; then sleep 30; fi; \
+             {ENCODE_OK}"
         ),
         "exit 0",
     );
@@ -500,6 +508,10 @@ fn vaapi_capacity_clock_expiry_names_the_declaration() {
     assert!(
         error.contains("VAAPI capacity probe for 2 concurrent"),
         "capacity-clock expiry stays a capacity diagnostic: {error}"
+    );
+    assert!(
+        error.contains("exceeded"),
+        "the fixture must expire the capacity clock: {error}"
     );
 }
 
