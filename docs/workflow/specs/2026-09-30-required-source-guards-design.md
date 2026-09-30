@@ -33,10 +33,12 @@ there is no single-OS coverage claim or consolidation.
 
 The campaign root alone applies the operator-approved main protection after the new check
 contexts exist: both guard names bound to GitHub Actions app 15368, strict=false,
-enforce_admins=true, no required reviews or actor restrictions. Existing required checks
-are none; this approval does not require platform jobs. Re-read settings before applying,
+enforce_admins=true, no required reviews or actor restrictions. No required checks existed at
+preflight; this approval does not require platform jobs. Re-read settings before applying,
 stop for a changed policy, and read back the exact effective configuration afterward.
-Use the exact approved payload retained in issue640 trajectory5920460337, with contexts[].
+The approved policy is retained in issue640 trajectory5920460337. The API rejected combining
+`contexts: []` with `checks` (HTTP 422, no mutation); the same approved policy was applied
+using the accepted `checks` representation alone and independently read back.
 The worker never writes repository settings. Failed guard jobs must remain merge-blocking
 for the administrator actor too; settings inspection alone is not the fault proof.
 
