@@ -1,4 +1,4 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -370,38 +370,18 @@ fn malformed_result_handler() -> OperationHandler {
 }
 
 fn verify_worker_command() -> WorkerCommand {
-    if let Some(binary) = std::env::var_os("CARGO_BIN_EXE_voom-verify-artifact-worker") {
-        return WorkerCommand::new(binary);
-    }
-    WorkerCommand::new(build_verify_worker_binary())
-}
-
-fn build_verify_worker_binary() -> PathBuf {
-    let status = Command::new("cargo")
-        .args([
-            "build",
-            "-q",
-            "-p",
-            "voom-verify-artifact-worker",
-            "--bin",
-            "voom-verify-artifact-worker",
-        ])
-        .status()
-        .unwrap();
+    let binary = voom_test_support::worker::cargo_bin_or_build(
+        "voom-verify-artifact-worker",
+        "voom-verify-artifact-worker",
+    )
+    .unwrap_or_else(|error| panic!("failed to resolve verify worker: {error}"));
     assert!(
-        status.success(),
-        "failed to build voom-verify-artifact-worker"
+        binary.is_file(),
+        "prebuilt worker binary missing at {}; run `cargo build --workspace \
+         --all-features --all-targets`",
+        binary.display()
     );
-    target_debug_dir().join("voom-verify-artifact-worker")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let current_exe = std::env::current_exe().unwrap();
-    let exe_dir = current_exe.parent().unwrap();
-    if exe_dir.file_name() == Some(OsStr::new("deps")) {
-        return exe_dir.parent().unwrap().to_path_buf();
-    }
-    exe_dir.to_path_buf()
+    WorkerCommand::new(binary)
 }
 
 fn verify_request(path: &Path, expected_bytes: &[u8]) -> VerifyArtifactRequest {
@@ -434,4 +414,67 @@ fn frame_body(frames: &[ProgressFrame]) -> Vec<u8> {
 
 fn blake3_checksum(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+#[test]
+fn prebuilt_verify_worker_does_not_invoke_cargo() {
+    const PROBE: &str = "VOOM_PREBUILT_VERIFY_PROBE";
+    const EXPECTED: &str = "VOOM_PREBUILT_VERIFY_EXPECTED";
+    const BINARY: &str = "voom-verify-artifact-worker";
+    if std::env::var_os(PROBE).is_some() {
+        assert_eq!(
+            verify_worker_command().program,
+            std::env::var_os(EXPECTED).unwrap()
+        );
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let deps = debug.join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    let source = std::env::current_exe().unwrap();
+    let executable = deps.join(source.file_name().unwrap());
+    std::fs::copy(&source, &executable).unwrap();
+    let worker = debug.join(format!("{BINARY}{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(&source, &worker).unwrap();
+    for mode in ["present", "missing", "missing-override", "fallback"] {
+        if mode == "missing" {
+            std::fs::remove_file(&worker).unwrap();
+        }
+        let mut command = Command::new(&executable);
+        command
+            .args([
+                "--exact",
+                "artifact::worker::tests::prebuilt_verify_worker_does_not_invoke_cargo",
+                "--nocapture",
+            ])
+            .env(PROBE, mode)
+            .env(EXPECTED, &worker)
+            .env_remove(format!("CARGO_BIN_EXE_{BINARY}"))
+            .env("PATH", "");
+        if mode == "fallback" {
+            command.env_remove("VOOM_TEST_PREBUILT_WORKERS");
+        } else {
+            command.env("VOOM_TEST_PREBUILT_WORKERS", "1");
+        }
+        if mode == "missing-override" {
+            command.env(format!("CARGO_BIN_EXE_{BINARY}"), &worker);
+        }
+        let output = command.output().unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert_eq!(
+            output.status.success(),
+            mode == "present",
+            "{mode}: {output:?}"
+        );
+        if mode.starts_with("missing") {
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains("prebuilt worker binary missing"), "{error}");
+            assert!(error.contains("cargo build --workspace"), "{error}");
+        } else if mode == "fallback" {
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains("failed to resolve verify worker"), "{error}");
+            assert!(!error.contains("prebuilt worker binary missing"), "{error}");
+        }
+    }
 }
