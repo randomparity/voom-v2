@@ -9,7 +9,8 @@ setup:
     rustup show active-toolchain || rustup toolchain install stable
     rustup component add clippy rustfmt
     @echo "==> Installing cargo tools (idempotent)"
-    cargo install --locked cargo-audit cargo-deny prek cargo-llvm-cov ast-grep
+    cargo install --locked cargo-audit cargo-deny prek cargo-llvm-cov ast-grep \
+        cargo-nextest@0.9.143
     @echo "==> Verifying uv + Python 3.13"
     @command -v uv >/dev/null || { echo "Install uv: https://docs.astral.sh/uv/"; exit 1; }
     uv python install 3.13
@@ -48,8 +49,10 @@ test:
     # concurrently-running test execs it (ETXTBSY). Same feature set as the test run.
     cargo build --workspace --all-features --all-targets
     # Guard test-target wiring without the workspace's --all-features override.
-    VOOM_TEST_PREBUILT_WORKERS=1 cargo test -p voom-control-plane
-    VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --all-features
+    VOOM_TEST_PREBUILT_WORKERS=1 cargo nextest run -p voom-control-plane
+    VOOM_TEST_PREBUILT_WORKERS=1 cargo nextest run --workspace --all-features
+    # nextest does not run doctests.
+    cargo test --doc --workspace --all-features
 
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc \

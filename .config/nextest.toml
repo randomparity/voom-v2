@@ -1,0 +1,13 @@
+# cargo-nextest configuration. `just test` runs the suite through nextest, one
+# process per test. See docs/adr/0099-run-the-test-suite-with-cargo-nextest.md.
+
+[test-groups]
+process-providers = { max-threads = 1 }
+
+# PROCESS_PROVIDER_TEST_LOCK serializes these tests inside one libtest process.
+# Under nextest each test is its own process and that static lock is inert, so
+# this group carries the same serialization. The whole module is grouped rather
+# than the individual guarded tests so a new guarded test cannot be missed.
+[[profile.default.overrides]]
+filter = 'package(voom-control-plane) & test(/^workflow::durable_workflow::tests::/)'
+test-group = 'process-providers'
