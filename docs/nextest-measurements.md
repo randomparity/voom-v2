@@ -25,8 +25,9 @@ Official release SHA-256 digests were verified before using either archive:
 Linux ran as a non-root user with zero effective capabilities. Its source was a bind mount;
 its target and pinned `.test-tmp` were native storage. This is local GNU/Linux evidence,
 not hosted Ubuntu compatibility evidence. Neither environment was an isolated benchmark host.
-The existing `.cargo/config.toml` temp pin remained active; the real pinned-temp guard passed
-for each runner/OS. Five real media workers passed ready/shutdown checks in every combination.
+Cargo passed the pinned-temp guard against both target directories on each OS, using the
+existing `.cargo/config.toml` pin. Nextest runtime temp propagation remains unverified.
+Five real media workers passed ready/shutdown checks in every combination.
 All 23 prebuilt worker executables were inventoried and hashed.
 
 The frozen schedule was C18/N4/N8 screening on each OS, one common candidate selected by
