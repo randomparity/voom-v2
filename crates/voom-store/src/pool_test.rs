@@ -148,6 +148,24 @@ async fn connect_refuses_adversarial_memory_lookalike_path() {
     );
 }
 
+/// Memory statistics put every `SQLite` allocation behind one process-wide mutex,
+/// which serialized concurrent pooled connections (ADR 0098). `SQLite` reports this
+/// option only when it differs from the default, so dropping the
+/// `LIBSQLITE3_FLAGS` entry in `.cargo/config.toml` reddens this test.
+#[tokio::test]
+async fn bundled_sqlite_is_built_without_memory_statistics() {
+    let pool = connect("sqlite::memory:").await.unwrap();
+    let options: Vec<String> = sqlx::query_scalar("PRAGMA compile_options")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(
+        options.iter().any(|option| option == "DEFAULT_MEMSTATUS=0"),
+        "bundled SQLite was built with memory statistics on; check the LIBSQLITE3_FLAGS \
+         entry in .cargo/config.toml (ADR 0098). compile_options: {options:?}"
+    );
+}
+
 #[tokio::test]
 async fn on_disk_openers_use_wal_journal_mode() {
     let tmp = tempfile::tempdir().unwrap();
