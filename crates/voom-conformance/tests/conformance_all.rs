@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use voom_conformance::manifest::{Manifest, resolve_active, validate_operation_coverage};
+use voom_conformance::manifest::{
+    ActiveBinary, Manifest, resolve_active, validate_operation_coverage,
+};
 use voom_conformance::{Harness, SuiteResult};
 
 const REQUIRED_ACTIVE: &[&str] = &[
@@ -47,7 +49,7 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
         assert_all_passed(&combined);
         return;
     }
-    if let Err(e) = ensure_fake_worker_bins_built() {
+    if let Err(e) = ensure_fake_worker_bins_built(&manifest.active) {
         let mut combined = SuiteResult::default();
         combined.fail("fake_worker_bins_build", e);
         assert_all_passed(&combined);
@@ -145,8 +147,22 @@ fn record_shutdown(
     }
 }
 
-fn ensure_fake_worker_bins_built() -> Result<(), String> {
+fn ensure_fake_worker_bins_built(active: &[ActiveBinary]) -> Result<(), String> {
     static BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    if std::env::var_os("VOOM_TEST_PREBUILT_WORKERS").is_some() {
+        for entry in active {
+            let path = resolve_active(entry).map_err(|error| error.to_string())?;
+            if !path.is_file() {
+                return Err(format!(
+                    "prebuilt worker binary missing at {}; run `cargo build --workspace \
+                     --all-features --all-targets` or unset VOOM_TEST_PREBUILT_WORKERS",
+                    path.display()
+                ));
+            }
+        }
+        return Ok(());
+    }
+
     BUILD
         .get_or_init(|| {
             let mut command = std::process::Command::new("cargo");
@@ -177,4 +193,67 @@ fn workspace_root() -> PathBuf {
         .parent()
         .and_then(Path::parent)
         .map_or_else(|| PathBuf::from("."), PathBuf::from)
+}
+
+#[test]
+fn prebuilt_fake_workers_do_not_invoke_cargo() -> Result<(), Box<dyn std::error::Error>> {
+    const PROBE: &str = "VOOM_PREBUILT_FAKE_PROBE";
+    let executable = std::env::current_exe()?;
+    if let Ok(mode) = std::env::var(PROBE) {
+        let path = if mode == "present" {
+            executable
+        } else {
+            executable.join("missing-worker")
+        };
+        let entry = ActiveBinary {
+            name: "prebuilt-probe".to_owned(),
+            target: "fake-scanner".to_owned(),
+            status: "active".to_owned(),
+            required: true,
+            operations: Vec::new(),
+            path: Some(path),
+        };
+        let result = ensure_fake_worker_bins_built(&[entry]);
+        match mode.as_str() {
+            "present" => result.map_err(std::io::Error::other)?,
+            "missing" => {
+                let error = result.err().ok_or("missing worker unexpectedly accepted")?;
+                if !error.contains("prebuilt worker binary missing")
+                    || !error.contains("cargo build --workspace")
+                {
+                    return Err(error.into());
+                }
+            }
+            "fallback" => {
+                if !matches!(&result, Err(error) if error.contains("build failed to start")) {
+                    return Err(format!("fallback did not invoke Cargo: {result:?}").into());
+                }
+            }
+            _ => return Err("unknown probe mode".into()),
+        }
+        return Ok(());
+    }
+    for mode in ["present", "missing", "fallback"] {
+        let mut command = std::process::Command::new(&executable);
+        command
+            .args([
+                "--exact",
+                "prebuilt_fake_workers_do_not_invoke_cargo",
+                "--nocapture",
+            ])
+            .env(PROBE, mode)
+            .env("PATH", "");
+        if mode == "fallback" {
+            command.env_remove("VOOM_TEST_PREBUILT_WORKERS");
+        } else {
+            command.env("VOOM_TEST_PREBUILT_WORKERS", "1");
+        }
+        let output = command.output()?;
+        if !output.status.success()
+            || !String::from_utf8_lossy(&output.stdout).contains("running 1 test")
+        {
+            return Err(format!("{mode}: {output:?}").into());
+        }
+    }
+    Ok(())
 }
