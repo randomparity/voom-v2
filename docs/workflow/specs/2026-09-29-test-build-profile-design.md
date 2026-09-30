@@ -9,7 +9,8 @@ improvement or a measured no-go, preserving worker safety and diagnostic usefuln
 The operator approved this experiment on 2026-09-29 through campaign #637–#641.
 Frozen scope: [WORK:SCOPE](https://github.com/randomparity/voom-v2/issues/638#issuecomment-5902874805).
 The later [approval](https://github.com/randomparity/voom-v2/issues/638#issuecomment-5903209786)
-fixes the eight-full-run schedule below. Complexity M; fixed design denominator 250.
+authorized the original schedule. A later operator decision, “approve the test-only
+repair and fresh experiment” ([scope delta](https://github.com/randomparity/voom-v2/issues/638#issuecomment-5903733342)), authorizes the bounded repair and fresh schedule below. Complexity M; fixed design denominator 250.
 
 ## Design and ownership
 
@@ -22,7 +23,17 @@ it. Full local variable/type debugging remains available using Cargo's environme
 overrides. Record that tradeoff explicitly; do not claim equivalent debugger data.
 
 The workspace recipe continues to own worker prebuilding. Tests continue to use
-`VOOM_TEST_PREBUILT_WORKERS=1`; no worker fallback or executable lookup changes.
+`VOOM_TEST_PREBUILT_WORKERS=1`. Repair two test-only bypasses: conformance
+`ensure_fake_worker_bins_built` checks resolved manifest binaries and returns before
+Cargo when prebuilt mode is present; missing files report the path and prebuild
+command. Its existing standalone Cargo fallback remains. Artifact unit-test
+`verify_worker_command` reuses the existing `voom-test-support::cargo_bin_or_build`
+and rejects a missing resolved path, replacing its duplicate package-build helper.
+This dev dependency already exists; conformance adds no dependency. No production
+lookup changes. Focused child-process regressions isolate environment changes, run
+with Cargo absent from PATH, and prove existing and missing prebuilt paths for both
+entrypoints. The child uses its own executable as a harmless existing fixture;
+no shared worker is renamed, overwritten or executed by the probes.
 No ownership migration, obsolete production path or new compatibility path is needed.
 Feature consistency is examined through Cargo artifacts/features, but a selection
 change requires a separate concrete design decision; this experiment changes debug
@@ -58,16 +69,21 @@ fingerprint evidence. Count bytes recursively, including macOS split debug files
 using the same measurement boundary after each sequence.
 
 Run exactly eight full `just test` measurements: two per profile per OS. Use warm
-compilation targets for these totals; the already completed baseline macOS warm
-run counts as one. These are direct warm build-plus-test totals. Report measured
+compilation targets for these totals, all on the repaired source. The two earlier
+full runs remain historical and do not count toward these eight. Repeat the
+compile-state matrix on repaired source; retain earlier observations separately. These are direct warm build-plus-test totals. Report measured
 cold/restored compilation separately. Any sum combining them with observed test
 runtime is labeled a projection and is not direct cold/restored full-suite evidence.
 Record order and ranges rather than guaranteed savings from two observations.
 
-Before each remaining full run, finish its compilation sequence and hash/stat the
-worker binaries; compare after tests. The initial baseline run predates this
-instrumentation and cannot establish executable-identity preservation. For later
-runs, any worker change, missing executable, test failure or ignored-set discrepancy
+Before each fresh full run, finish its compilation sequence and hash/stat the
+worker binaries; compare bytes/hash after tests and retain inode/mtime observations.
+Cargo may replace a same-byte top-level artifact during the initial prebuild; inode
+change alone is not byte corruption. Capture identity immediately after the recipe
+prebuild as well as after both test passes using an ignored Cargo command observer
+that forwards unchanged arguments/env and records identities only at phase exits.
+No worker bytes may change after prebuild completes. Any worker byte change, missing
+executable, test failure or ignored-set discrepancy
 requires investigation before accepting the sample. Preserve existing opt-in skips.
 
 On both OSs/profiles, run a deliberately failing temporary Cargo test package with
@@ -87,9 +103,9 @@ simulated-restored samples, smaller artifacts, preserved useful diagnostics, and
 no repeatable regression in direct warm total cost. Where observed ranges overlap,
 state uncertainty; do not claim a warm runtime gain. If the evidence is ambiguous
 or loses useful diagnostics, retain the current profile and record measured no-go.
-A selected change still owes full `just ci`, configured hooks, independent review
-and exact-head Ubuntu/macOS/coverage/audit Actions. No-op profile conclusions owe
-documentation checks and report review, not a claimed code improvement.
+Both profile outcomes retain Rust test repairs and therefore owe full `just ci`,
+configured hooks, independent review and exact-head Ubuntu/macOS/coverage/audit
+Actions. A rejected profile is not a documentation-only change.
 
 ## Failure model
 
