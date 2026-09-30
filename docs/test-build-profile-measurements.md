@@ -169,7 +169,7 @@ are libraries: `zeroize`, `secrecy`, `base64`, `cc`, `serde`, `tracing-serde`, `
 `serde_urlencoded`, `deranged`, `tokio-stream`, `tokio-util`, `tracing-subscriber`,
 `tokio`, `time`, `sqlx-core`, `h2`, `hyper`, `hyper-util`, `sqlx`, `sqlx-sqlite`.
 The 23 workspace units comprise 12 libraries, the control-plane unit-test target,
-and10 integration targets. Direct feature differences include default features on
+and 10 integration targets. Direct feature differences include default features on
 `zeroize`, `base64`, `serde_core`; `serde_json/raw_value`; `cc/parallel`;
 `tokio/full,signal,parking_lot`; `hyper-util/client-proxy,service`; and the
 control-plane test feature. Other rebuilds inherit the changed dependency graph.
