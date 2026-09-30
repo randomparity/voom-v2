@@ -269,7 +269,9 @@ fn make_executable(path: &Path) {
 #[test]
 fn capacity_failure_reaps_remaining_processes() {
     let sleeper = Command::new("/bin/sh")
-        .args(["-c", "sleep 60"])
+        // `exec` so the reaped pid is `sleep` itself: dash forks a non-exec'd
+        // command, and killing only the shell would orphan a 60s grandchild.
+        .args(["-c", "exec sleep 60"])
         .spawn()
         .unwrap();
     let sleeper_pid = sleeper.id();
