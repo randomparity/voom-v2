@@ -419,9 +419,13 @@ fn blake3_checksum(bytes: &[u8]) -> String {
 #[test]
 fn prebuilt_verify_worker_does_not_invoke_cargo() {
     const PROBE: &str = "VOOM_PREBUILT_VERIFY_PROBE";
+    const EXPECTED: &str = "VOOM_PREBUILT_VERIFY_EXPECTED";
     const BINARY: &str = "voom-verify-artifact-worker";
     if std::env::var_os(PROBE).is_some() {
-        let _ = verify_worker_command();
+        assert_eq!(
+            verify_worker_command().program,
+            std::env::var_os(EXPECTED).unwrap()
+        );
         return;
     }
     let directory = tempfile::tempdir().unwrap();
@@ -445,6 +449,7 @@ fn prebuilt_verify_worker_does_not_invoke_cargo() {
                 "--nocapture",
             ])
             .env(PROBE, mode)
+            .env(EXPECTED, &worker)
             .env_remove(format!("CARGO_BIN_EXE_{BINARY}"))
             .env("PATH", "");
         if mode == "fallback" {
