@@ -211,7 +211,7 @@ async fn init_is_idempotent_on_same_pool() {
 }
 
 #[tokio::test]
-async fn single_shot_replacement_has_no_polling() {
+async fn failed_migration_rolls_back_to_partial_and_preserves_diagnostic() {
     let pool = connect("sqlite::memory:").await.unwrap();
     // Seed a Partial fixture ahead of the transaction so a full rollback
     // (migration 1 fails immediately) returns to exactly this state, not
@@ -244,24 +244,28 @@ async fn single_shot_replacement_has_no_polling() {
         no_tx: false,
     };
 
-    let start = tokio::time::Instant::now();
     let mut conn = pool.acquire().await.unwrap();
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.unwrap();
     tx.ensure_migrations_table().await.unwrap();
-    let migrate_result = broken.run_direct(&mut *tx).await;
-    assert!(migrate_result.is_err(), "invalid SQL must fail run_direct");
+    let migration_error = broken
+        .run_direct(&mut *tx)
+        .await
+        .expect_err("invalid SQL must fail run_direct");
     drop(tx); // rolls back, releasing the lock
     drop(conn); // return the sole :memory: pool connection before probing
     let after = probe_schema(&pool).await.unwrap();
-    let elapsed = start.elapsed();
 
     assert!(
         matches!(after, SchemaState::Partial { .. }),
         "expected Partial after rollback to the pre-seeded fixture, got {after:?}"
     );
+    let classified = classify_migration_failure(&after, &migration_error);
+    let VoomError::Migration(message) = classified else {
+        panic!("expected Migration after rollback, got {classified:?}");
+    };
     assert!(
-        elapsed < std::time::Duration::from_millis(25),
-        "single-shot classification must not poll or sleep: took {elapsed:?}"
+        message.contains(&migration_error.to_string()),
+        "migration classification must preserve the underlying error: {message}"
     );
 }
 
