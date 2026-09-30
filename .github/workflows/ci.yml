@@ -33,7 +33,9 @@ jobs:
         with:
           tool: ast-grep
       - name: Source checks
-        run: just source-checks
+        run: |
+          printf '%s\n' '#[cfg(test)] mod tests {}' > crates/voom-core/src/q640_guard_fault.rs
+          just source-checks
 
   test:
     name: test (${{ matrix.os }})
