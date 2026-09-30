@@ -18,3 +18,12 @@
 # See docs/adr/0079-deterministic-test-temp-root.md.
 [env]
 TMPDIR = { value = ".test-tmp", relative = true, force = true }
+
+# Build the bundled SQLite without memory statistics. With them on, every SQLite
+# allocation takes one process-wide mutex, which serialized concurrent pooled
+# connections -- the voom-store unit suite ran no faster on 8 threads than on 1.
+# Applies to release builds too; nothing reads SQLite's memory accounting.
+# `force = true` so an inherited LIBSQLITE3_FLAGS cannot silently drop it.
+#
+# See docs/adr/0098-build-bundled-sqlite-without-memstatus.md.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_DEFAULT_MEMSTATUS=0", force = true }
