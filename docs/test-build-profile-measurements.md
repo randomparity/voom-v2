@@ -163,12 +163,12 @@ build scripts report debug0 in both arms.
 | Warm prebuild / default / all-feature |41 /0 /41|CLI invalidation recurs; default-feature variants are cached.|
 | Simulated restored prebuild / default / all-feature |183 /23 /41|Workspace outputs were removed; both dependency feature variants remain cached.|
 
-The28 default-pass dependency units represent24 packages. `serde_core`, `serde_json`,
+The 28 default-pass dependency units represent 24 packages. `serde_core`, `serde_json`,
 `blake3` and `libsqlite3-sys` each contribute a build script and library; the others
 are libraries: `zeroize`, `secrecy`, `base64`, `cc`, `serde`, `tracing-serde`, `either`,
 `serde_urlencoded`, `deranged`, `tokio-stream`, `tokio-util`, `tracing-subscriber`,
 `tokio`, `time`, `sqlx-core`, `h2`, `hyper`, `hyper-util`, `sqlx`, `sqlx-sqlite`.
-The23 workspace units comprise12 libraries, the control-plane unit-test target,
+The 23 workspace units comprise 12 libraries, the control-plane unit-test target,
 and10 integration targets. Direct feature differences include default features on
 `zeroize`, `base64`, `serde_core`; `serde_json/raw_value`; `cc/parallel`;
 `tokio/full,signal,parking_lot`; `hyper-util/client-proxy,service`; and the
@@ -177,7 +177,7 @@ control-plane test feature. Other rebuilds inherit the changed dependency graph.
 `crates/voom-cli/build.rs` watches `.git/HEAD` and `.git/refs/heads`, but `.git` is
 a file in a linked worktree. An earlier retained Cargo fingerprint reproduction reported a missing watched
 file. The current source retains those watches and the fresh artifact records show
-the same41 CLI units rebuilding. This unchanged behavior
+the same 41 CLI units rebuilding. This unchanged behavior
 occurs in both profiles and is reported as a separate follow-up candidate; this
 change does not fix it or count its removal as savings.
 
@@ -265,3 +265,9 @@ above remains explicit; final guardrails and hosted checks cover the subsequent 
 
 Full `just ci`, configured hooks and exact-head hosted compatibility remain release
 gates for these Rust test changes even though the profile outcome is no-go.
+
+Local `just ci` passed at `efa36ca3838280ac57ff72bbfeaae339081a2b97`
+(exit 0, 349.027 seconds), including 4,872 passed and 23 explicitly ignored test
+occurrences. The following documentation-only gate reference does not change the
+verified Rust sources, manifests, profiles or recipes. Configured hooks passed for
+the Rust assertion commit; exact-head hosted checks remain a separate release gate.
