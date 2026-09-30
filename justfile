@@ -21,15 +21,20 @@ setup:
     @echo "==> Setup complete. Try: just ci"
 
 # Run the exact set of checks GitHub Actions runs
-ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-selftest \
+ci: source-checks platform-checks
+    @echo "==> All CI checks passed"
+
+# Source guards retain both GNU and BSD coverage in CI
+source-checks: check-test-layout check-paused-time-db check-paused-time-db-selftest \
     check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
     check-transaction-openers check-transaction-openers-selftest \
-    check-adr-index check-adr-index-selftest select-ffmpeg-asset-selftest \
-    run-constrained-selftest constrained-recipes-selftest \
-    test doc deny audit
-    @echo "==> All CI checks passed"
+    check-adr-index check-adr-index-selftest
+
+# Keep platform verification on both supported CI runners
+platform-checks: fmt-check lint select-ffmpeg-asset-selftest \
+    run-constrained-selftest constrained-recipes-selftest test doc deny audit
 
 # Individual checks (also called by `ci`)
 fmt:
