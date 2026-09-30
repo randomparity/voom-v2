@@ -27,7 +27,7 @@ The workspace recipe continues to own worker prebuilding. Tests continue to use
 `ensure_fake_worker_bins_built` checks resolved manifest binaries and returns before
 Cargo when prebuilt mode is present; missing files report the path and prebuild
 command. Its existing standalone Cargo fallback remains. Artifact unit-test
-`verify_worker_command` reuses the existing `voom-test-support::cargo_bin_or_build`
+`verify_worker_command` reuses the existing `voom_test_support::worker::cargo_bin_or_build`
 and rejects a missing resolved path, replacing its duplicate package-build helper.
 This dev dependency already exists; conformance adds no dependency. No production
 lookup changes. Focused child-process regressions isolate environment changes, run
@@ -57,8 +57,7 @@ Run through `just --command`; capture Cargo JSON artifacts and timings separatel
 
 - Cold: empty target, pre-fetched registry; this is cold compilation, not cold network.
 - Simulated restored cache: retain registry dependency artifacts from a populated
-  target, remove only workspace-package outputs with `cargo clean -p` for the
-  enumerated workspace members. Report this exact simulation; it is not a real
+  target, remove only workspace-package outputs with `cargo clean --workspace`. Report this exact simulation; it is not a real
   rust-cache restore or an estimate of archive transfer time.
 - Warm: immediately repeat with source/toolchain/profile/target unchanged.
 
@@ -68,10 +67,29 @@ artifact freshness and feature sets; explain changed build units with source or
 fingerprint evidence. Count bytes recursively, including macOS split debug files,
 using the same measurement boundary after each sequence.
 
-Run exactly eight full `just test` measurements: two per profile per OS. Use warm
-compilation targets for these totals, all on the repaired source. The two earlier
-full runs remain historical and do not count toward these eight. Repeat the
-compile-state matrix on repaired source; retain earlier observations separately. These are direct warm build-plus-test totals. Report measured
+Collect eight completed full `just test` measurements: two per profile per OS,
+in baseline/candidate/candidate/baseline order within each OS. Use warm compilation
+targets for these totals, all on one frozen source incorporating the two-entrypoint
+repair and the separate [migration-test prerequisite #644](https://github.com/randomparity/voom-v2/issues/644)
+merged by [PR #645](https://github.com/randomparity/voom-v2/pull/645). Repeat both OS
+compile-state matrices in new empty targets at this shared source. The original
+both-OS experiment authorization and prerequisite repair authorize this necessary
+same-source comparison; the prerequisite approval did not separately renew it.
+
+The operator subsequently approved a twenty-invocation cap. Ten invocations from
+the preceding repaired-source experiment (four completed macOS runs and six failed
+Linux partial runs) remain historical and consume that cap. Eight fresh successful
+runs bring the planned count to eighteen; stop once the required eight complete.
+Verified environment failures may be replaced after diagnosis within the cap;
+arbitrary source failures require a checkpoint. Retain every failed attempt.
+The two original unrepaired runs remain separate historical evidence.
+
+Linux now uses a non-root user without effective capabilities, a native ext4 volume
+at the unchanged pinned `.test-tmp` path, jq, and MKVToolNix 102. CPU count (18),
+allocated memory (32 GiB), swap (1 GiB), toolchain and test concurrency stay fixed.
+Both fresh Linux compile and full phases use these same corrected conditions;
+earlier root/host-shared-temp compilation is historical, not a paired baseline.
+These are direct warm build-plus-test totals. Report measured
 cold/restored compilation separately. Any sum combining them with observed test
 runtime is labeled a projection and is not direct cold/restored full-suite evidence.
 Record order and ranges rather than guaranteed savings from two observations.
