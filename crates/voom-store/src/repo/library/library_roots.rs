@@ -445,6 +445,7 @@ impl SqliteLibraryRepo {
         if current.state == StorageRootState::Retired {
             return Err(root_state_conflict(id, current.state, "retire"));
         }
+        require_no_live_default_references(tx, id).await?;
         let result = sqlx::query(
             "UPDATE library_roots SET state = 'retired', enabled = 0, updated_at = ? \
              WHERE id = ? AND state != 'retired'",
@@ -535,6 +536,55 @@ async fn transition_state(
     .map_err(|error| VoomError::database_context(format!("library_roots {operation}"), error))?;
     require_one_row(result.rows_affected(), id, operation)?;
     required_root_in_tx(tx, id).await
+}
+
+/// Refuse retiring a root that another non-retired root still names as a default (#626).
+/// Self-references retire with the root; retired referencers can no longer be updated.
+async fn require_no_live_default_references(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: StorageRootId,
+) -> Result<(), VoomError> {
+    let rows = sqlx::query(
+        "SELECT id, default_output_root_id IS ?1 AS output_ref, \
+                default_staging_root_id IS ?1 AS staging_ref, \
+                default_backup_root_id IS ?1 AS backup_ref \
+         FROM library_roots WHERE id != ?1 AND state != 'retired' \
+           AND ?1 IN (default_output_root_id, default_staging_root_id, default_backup_root_id) \
+         ORDER BY id",
+    )
+    .bind(root_i64(id)?)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("library_roots default references", error))?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut referencing = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let raw: i64 = row
+            .try_get("id")
+            .map_err(|error| map_row_err("library_roots", error))?;
+        let mut columns = Vec::new();
+        for (alias, column) in [
+            ("output_ref", "default_output_root_id"),
+            ("staging_ref", "default_staging_root_id"),
+            ("backup_ref", "default_backup_root_id"),
+        ] {
+            let hit: bool = row
+                .try_get(alias)
+                .map_err(|error| map_row_err("library_roots", error))?;
+            if hit {
+                columns.push(column);
+            }
+        }
+        let root = StorageRootId(u64_from_i64(raw, "library_roots.id")?);
+        referencing.push(format!("root {root} ({})", columns.join(", ")));
+    }
+    Err(VoomError::Conflict(format!(
+        "storage root {id} cannot retire while other roots name it as a default: {}; \
+         repoint those defaults or retire the referencing roots first",
+        referencing.join(", ")
+    )))
 }
 
 async fn get_root_in_tx(

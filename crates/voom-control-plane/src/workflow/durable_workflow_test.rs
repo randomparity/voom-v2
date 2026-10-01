@@ -35,6 +35,7 @@ use voom_worker_protocol::{
 };
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+const OUT_OF_PROCESS_WATCHDOG_BUDGET: Duration = Duration::from_mins(1);
 static PROCESS_PROVIDER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -434,8 +435,11 @@ impl DurableWorkflowFixture {
     async fn start_all_fake_providers_with_max_parallel(max_parallel: u32) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
         fixture.enable_owner_node_emulation().await?;
-        fixture.executor_options.timing.heartbeat_timeout = Duration::from_secs(2);
-        fixture.executor_options.timing.progress_idle_timeout = Duration::from_secs(2);
+        // Healthy out-of-process workers: the watchdog cannot tell a worker the
+        // runner has not scheduled from a hung one, so a 2s budget flakes under
+        // host load (issue #649). Nothing here asserts a timeout.
+        fixture.executor_options.timing.heartbeat_timeout = OUT_OF_PROCESS_WATCHDOG_BUDGET;
+        fixture.executor_options.timing.progress_idle_timeout = OUT_OF_PROCESS_WATCHDOG_BUDGET;
         for provider in provider_specs() {
             if let Err(err) = fixture
                 .register_process_provider(provider, max_parallel)
