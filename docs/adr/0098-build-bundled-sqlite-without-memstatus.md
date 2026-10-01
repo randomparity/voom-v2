@@ -41,8 +41,13 @@ Set `LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"` in the `[env]` table of
 
 `libsqlite3-sys`'s build script appends that variable's `-D` flags to the
 amalgamation compile and declares `rerun-if-env-changed` on it, so a change
-rebuilds SQLite. Cargo applies `[env]` to every build in the workspace, so
-test, dev and release binaries all get the same SQLite.
+rebuilds SQLite. Cargo applies `[env]` to every cargo invocation run from
+inside the repository, including `release.yml`'s release build, so test, dev
+and release binaries built here all get the same SQLite. Cargo finds
+`.cargo/config.toml` from the current directory, not the manifest, so a
+`--manifest-path` build run from elsewhere or a `cargo install` of a workspace
+crate does not get the flag. That build loses the speedup, not correctness.
+ADR 0079's `TMPDIR` entry has the same reach.
 
 `bundled_sqlite_is_built_without_memory_statistics` asserts `PRAGMA
 compile_options` reports `DEFAULT_MEMSTATUS=0`. SQLite reports that option only
