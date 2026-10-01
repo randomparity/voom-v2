@@ -14,7 +14,7 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use super::{kill_and_wait, process_group_has_members, signal_process_group};
-use voom_core::{OperationKind, TicketOperation, VoomError};
+use voom_core::{OperationKind, TicketOperation};
 use voom_worker_protocol::{
     LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor,
     VideoAcceleratorDescriptor,
@@ -581,5 +581,5 @@ async fn failed_signal_to_a_populated_process_group_is_an_error() {
     let result = signal_process_group(process_group_id, "BOGUS").await;
 
     kill_and_wait(&mut child).await.unwrap();
-    assert!(matches!(result, Err(VoomError::WorkerCrash(_))));
+    assert!(matches!(result, Err(voom_core::VoomError::WorkerCrash(_))));
 }
