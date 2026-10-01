@@ -89,7 +89,7 @@ All routine actions go through `just` (see `justfile`):
 | `just ci` | Run the exact CI suite locally: `fmt-check`, `lint`, `check-test-layout`, `test`, `doc`, `deny`, `audit`. |
 | `just fmt` / `just fmt-check` | `cargo fmt --all` (write / check). |
 | `just lint` | `cargo clippy --workspace --all-targets --all-features -- -D warnings`. |
-| `just test` | `cargo test --workspace --all-features`. |
+| `just test` | Prebuild all targets, compile-check default-feature `voom-control-plane` tests, then `cargo test --workspace --all-features`. |
 | `just audit` / `just deny` | Supply-chain checks (`cargo-audit`, `cargo-deny`). |
 | `just run -- <args>` | Invoke the `voom` CLI from source. |
 | `just smoke` | End-to-end check of `version` / `health` / `init` against an ephemeral SQLite. |
