@@ -345,6 +345,11 @@ impl Actor {
             child_id,
             child,
             helper_readiness,
+            #[cfg(test)]
+            {
+                helper_readiness
+                    && credentials.worker_id.0 == tests::PROCESS_EXIT_BEFORE_DISPATCH_WORKER
+            },
             shutdown_rx,
             reply,
             self.milestones.clone(),
@@ -621,6 +626,7 @@ async fn watch_child(
     child_id: ChildId,
     mut child: Child,
     helper_readiness: bool,
+    #[cfg(test)] exit_before_ready_reply: bool,
     mut shutdown: oneshot::Receiver<()>,
     spawn_reply: SpawnReply,
     milestones: TestMilestones,
@@ -636,6 +642,32 @@ async fn watch_child(
                 pid: pid.unwrap_or_default(),
                 bound,
             };
+            #[cfg(test)]
+            if exit_before_ready_reply {
+                let exit = shutdown_child(child_id, &mut child, &mut stdin).await;
+                let error = match &exit {
+                    Ok(status) if status.code == Some(102) => {
+                        let _ = spawn_reply.send(Ok(ready));
+                        return WatcherCompletion {
+                            child_id,
+                            ready: true,
+                            exit,
+                            spawn_failure: None,
+                        };
+                    }
+                    Ok(status) => readiness_error(
+                        child_id,
+                        format!("pre-dispatch helper must exit102 after readiness: {status:?}"),
+                    ),
+                    Err(error) => error.clone(),
+                };
+                return WatcherCompletion {
+                    child_id,
+                    ready: false,
+                    exit,
+                    spawn_failure: Some((spawn_reply, error)),
+                };
+            }
             let _ = spawn_reply.send(Ok(ready));
             let exit = wait_or_shutdown(child_id, &mut child, &mut stdin, &mut shutdown).await;
             WatcherCompletion {
