@@ -221,8 +221,10 @@ pub(crate) async fn destination_root(
         .find_map(|owner| root_default(owner, role))
         .ok_or_else(|| {
             VoomError::Config(format!(
-                "media dispatch envelope: no default {role:?} root configured for \
-                 storage root {configured_root_id}"
+                "no default {role} root configured for storage root {configured_root_id}; \
+                 configure one with `voom library root update --root-id {configured_root_id} \
+                 --{role}-root <id>`",
+                role = role.as_str()
             ))
         })
 }

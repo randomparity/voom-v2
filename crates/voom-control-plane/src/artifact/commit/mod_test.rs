@@ -308,7 +308,7 @@ async fn commit_accepts_relative_provider_locator_for_rooted_target() {
     let relative_root = dir.path().strip_prefix(&current_dir).unwrap();
     let relative_root_id = StorageRootId(9_000_002);
     insert_active_test_root(&cp, relative_root_id, relative_root).await;
-    set_test_default_output_root(&cp, relative_root_id).await;
+    set_test_default_staging_root(&cp, relative_root_id).await;
     let target = dir.path().join("relative-root-target.bin");
 
     let report = commit_with_node(
@@ -503,15 +503,15 @@ async fn recovery_uses_prepared_rooted_target_after_default_changes() {
     let replacement_root_id = StorageRootId(9_000_003);
     insert_active_test_root(&cp, prepared_root_id, dir.path()).await;
     insert_active_test_root(&cp, replacement_root_id, &overlap).await;
-    set_test_default_output_root(&cp, prepared_root_id).await;
+    set_test_default_staging_root(&cp, prepared_root_id).await;
 
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = overlap.join("target.bin");
     spawn_and_drive_to_applied_not_completed(&cp, &node, staged.artifact_handle_id, &target).await;
 
-    // The default output root changed after prepare; recovery must finalize
+    // The default staging root changed after prepare; recovery must finalize
     // into the pinned target root, not the new default.
-    set_test_default_output_root(&cp, replacement_root_id).await;
+    set_test_default_staging_root(&cp, replacement_root_id).await;
     let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
     let location_id = report.result_file_location_id.unwrap();
     let stored_root_id: i64 =
@@ -1466,8 +1466,8 @@ async fn insert_active_test_root(cp: &ControlPlane, id: StorageRootId, path: &Pa
     .unwrap();
 }
 
-async fn set_test_default_output_root(cp: &ControlPlane, id: StorageRootId) {
-    sqlx::query("UPDATE library_roots SET default_output_root_id = ? WHERE id = 9000001")
+async fn set_test_default_staging_root(cp: &ControlPlane, id: StorageRootId) {
+    sqlx::query("UPDATE library_roots SET default_staging_root_id = ? WHERE id = 9000001")
         .bind(i64::try_from(id.0).unwrap())
         .execute(cp.pool_for_test())
         .await
