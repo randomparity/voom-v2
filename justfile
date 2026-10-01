@@ -9,7 +9,9 @@ setup:
     rustup show active-toolchain || rustup toolchain install stable
     rustup component add clippy rustfmt
     @echo "==> Installing cargo tools (idempotent)"
-    cargo install --locked cargo-audit cargo-deny prek cargo-llvm-cov ast-grep
+    # prek is pinned to the last release whose MSRV (1.95) fits rust-toolchain.toml;
+    # 0.5.x requires rustc 1.96. Raise the pin together with the toolchain channel.
+    cargo install --locked cargo-audit cargo-deny prek@0.4.14 cargo-llvm-cov ast-grep
     @echo "==> Verifying uv + Python 3.13"
     @command -v uv >/dev/null || { echo "Install uv: https://docs.astral.sh/uv/"; exit 1; }
     uv python install 3.13
