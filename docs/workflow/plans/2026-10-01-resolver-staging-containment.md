@@ -7,8 +7,11 @@ Architecture: `operation_source.rs` gains two entry points sharing the existing 
 Spec: `docs/workflow/specs/2026-10-01-resolver-staging-containment-design.md`.
 Stack: Rust 2024, tokio, sqlx/SQLite; tests via `cargo test`.
 
-Expected implementation size: 220–300 changed lines (M) — two resolver entry points (~90),
-five focused tests (~130), one test-support helper (~15) and ~12 fixture call-site edits.
+Expected implementation size: 500–530 changed lines (M) — two resolver entry points (~115),
+six focused tests with their root-building helpers (~300), one test-support helper (~21) and
+~15 fixture call-site edits (~70). Corrected after the build: the first estimate (220–300)
+predated the design review's chained-phase test and the scope audit's coordinator promotion
+test, and undercounted the per-test root setup (struct literals, sibling directories).
 
 ## Global Constraints
 
