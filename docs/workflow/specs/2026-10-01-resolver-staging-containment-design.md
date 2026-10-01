@@ -104,4 +104,6 @@ opt in, so the change would silently alter unrelated envelope tests.
 
 Focused tests in `crates/voom-control-plane/src/operation_source_test.rs` cover Success 1–4,
 each observed red under a deliberate fault on its side (staging or output); Success 5 is the
-suite run. `destination_root` message: covered by Success 2's assertion.
+suite run. `promotion_resolves_the_artifact_roots_own_output_default` in
+`crates/voom-control-plane/src/workflow/coordinator/mod_test.rs` proves `promotion.rs` takes the
+output route (Success 3). `destination_root` message: covered by Success 2's assertion.

@@ -28,7 +28,7 @@ test, and undercounted the per-test root setup (struct literals, sibling directo
 |---|---|
 | `crates/voom-store/src/test_support.rs` | add `set_test_storage_root_self_defaults` |
 | `crates/voom-control-plane/src/operation_source.rs` | replace `resolve_artifact_target`/`artifact_target_root` with `resolve_pre_promotion_target`, `resolve_output_target`, `resolve_target_in_root`, `library_root` |
-| `crates/voom-control-plane/src/operation_source_test.rs` | port two tests; add four |
+| `crates/voom-control-plane/src/operation_source_test.rs` | port two tests; add five |
 | `crates/voom-control-plane/src/artifact/commit/prepare.rs` | call `resolve_pre_promotion_target` |
 | `crates/voom-control-plane/src/workflow/coordinator/promotion.rs` | call `resolve_output_target` |
 | `crates/voom-control-plane/src/workflow/plan/envelope.rs` | actionable `destination_root` message |
@@ -103,7 +103,7 @@ Verification (`Mode: focused-test`, file `operation_source_test.rs`, command
 
 Steps:
 
-1. Write the four tests; run the command; expect compile failure (missing functions) — the red.
+1. Write the five tests; run the command; expect compile failure (missing functions) — the red.
 2. In `operation_source.rs` replace `resolve_artifact_target` and `artifact_target_root` with
    `resolve_pre_promotion_target(cp, label, source_storage_root_id, path)`,
    `resolve_output_target(cp, label, storage_root_id, path)` (both returning
