@@ -314,6 +314,9 @@ async fn fixture() -> (ControlPlane, Db, TempDir) {
     voom_store::test_support::set_test_storage_root_path(&pool, dir.path())
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_self_defaults(&pool)
+        .await
+        .unwrap();
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
         .unwrap()

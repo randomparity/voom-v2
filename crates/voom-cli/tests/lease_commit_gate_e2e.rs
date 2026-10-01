@@ -41,6 +41,9 @@ async fn manual_lock_blocks_commit_and_force_release_unblocks_it() {
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_self_defaults(&pool)
+        .await
+        .unwrap();
     sqlx::query("UPDATE library_roots SET provider_locator = ?, display_locator = ? WHERE id = ?")
         .bind(dir.path().display().to_string())
         .bind(dir.path().display().to_string())

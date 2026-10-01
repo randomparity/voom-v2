@@ -225,6 +225,27 @@ pub async fn set_test_storage_root_path(pool: &SqlitePool, path: &Path) -> Resul
     Ok(())
 }
 
+/// Make the shared active test root its own staging and output default — the
+/// pairing ADR 0097 requires before a commit (staging) or a promotion (output)
+/// can resolve its target root.
+///
+/// # Errors
+///
+/// Returns a database error if the fixture row cannot be updated.
+pub async fn set_test_storage_root_self_defaults(pool: &SqlitePool) -> Result<(), VoomError> {
+    sqlx::query(
+        "UPDATE library_roots SET default_staging_root_id = id, default_output_root_id = id \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(TEST_STORAGE_ROOT_ID.0).map_err(|error| {
+        VoomError::database(format!("test storage root id conversion: {error}"))
+    })?)
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("set test storage-root defaults", error))?;
+    Ok(())
+}
+
 /// Convert a historical absolute-path fixture into a valid provider-relative
 /// locator without preserving any global-path semantics.
 #[must_use]

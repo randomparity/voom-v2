@@ -62,14 +62,14 @@ async fn operator_runs_media_pipeline_through_cli() {
         .await
         .unwrap();
     // Point the shared storage root at the library directory and make it its
-    // own staging/backup default, so envelope destinations resolve inside the
-    // operator-visible tree.
+    // own staging/output/backup default, so envelope destinations, commits, and
+    // promotion all resolve inside the operator-visible tree (ADR 0097).
     voom_store::test_support::set_test_storage_root_path(&pool, &library)
         .await
         .unwrap();
     sqlx::query(
         "UPDATE library_roots SET default_staging_root_id = id, \
-         default_backup_root_id = id WHERE id = ?",
+         default_output_root_id = id, default_backup_root_id = id WHERE id = ?",
     )
     .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
     .execute(&pool)

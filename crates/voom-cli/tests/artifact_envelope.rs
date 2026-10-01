@@ -16,7 +16,7 @@ use voom_control_plane::workers::RegisterNodeInput;
 use voom_core::{NodeKind, ProviderLocator, StorageProviderKind, StorageRootId};
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
-    HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    HiddenFilePolicy, LibraryRootUpdate, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
@@ -348,6 +348,16 @@ async fn seed() -> Seeded {
     cp.activate_library_root(storage_root.id, "artifact-envelope-fixture".to_owned())
         .await
         .unwrap();
+    // ADR 0097: the commit target is contained by the staging root.
+    cp.update_library_root(
+        storage_root.id,
+        LibraryRootUpdate {
+            default_staging_root_id: Some(Some(storage_root.id)),
+            ..LibraryRootUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
     let source = seed_scanned_files(
         &cp,
         &url,

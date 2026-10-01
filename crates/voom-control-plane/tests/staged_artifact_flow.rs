@@ -215,6 +215,9 @@ async fn fixture() -> (ControlPlane, Db, TempDir) {
     voom_store::test_support::set_test_storage_root_path(&pool, dir.path())
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_self_defaults(&pool)
+        .await
+        .unwrap();
     // Background stand-in for the storage-owner agent (ADR 0074): drives the
     // fenced commit intent so non-blocked commits converge.
     voom_test_support::commit_node::install_and_spawn_driver(&pool);

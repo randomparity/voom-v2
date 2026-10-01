@@ -42,12 +42,12 @@ impl VoomTestDb {
         let pool = voom_store::connect(&self.url).await?;
         let root_id = voom_store::test_support::seed_test_storage_root(&pool).await?;
         voom_store::test_support::set_test_storage_root_path(&pool, path).await?;
-        // Make the root its own staging and backup default so envelope
-        // destinations resolve inside the library tree rather than escaping the
-        // storage root during commit.
+        // Make the root its own staging, output, and backup default so envelope
+        // destinations resolve inside the library tree, commits are contained by
+        // the staging root, and promotion resolves an output root (ADR 0097).
         sqlx::query(
             "UPDATE library_roots SET default_staging_root_id = id, \
-             default_backup_root_id = id WHERE id = ?",
+             default_output_root_id = id, default_backup_root_id = id WHERE id = ?",
         )
         .bind(i64::try_from(root_id.0)?)
         .execute(&pool)

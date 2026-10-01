@@ -293,6 +293,9 @@ async fn fixture() -> (
     )
     .await
     .unwrap();
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     // Drive fenced commit intents to convergence from a simulated node.
     let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
     node.install(cp.pool_for_test()).await.unwrap();

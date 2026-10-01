@@ -1441,6 +1441,9 @@ async fn fixture() -> (
     )
     .await
     .unwrap();
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     (cp, db, artifact_tempdir())
 }
 

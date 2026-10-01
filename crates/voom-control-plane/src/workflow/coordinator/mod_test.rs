@@ -3720,6 +3720,9 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
     use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
 
     let (cp, _db) = cp().await;
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let working = root.join(".committed").join("remux");
@@ -3829,6 +3832,9 @@ async fn promote_terminal_artifacts_ignores_unscoped_working_dir_artifacts() {
     use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
 
     let (cp, _db) = cp().await;
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let working = root.join(".committed").join("remux");
@@ -3879,6 +3885,9 @@ async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
     use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
 
     let (cp, _db) = cp().await;
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let working = root.join(".committed").join("remux");

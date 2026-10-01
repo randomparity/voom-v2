@@ -212,7 +212,8 @@ impl ScenarioRun {
                 .map_err(|error| io::Error::other(error.to_string()))?;
             sqlx::query(
                 "UPDATE library_roots SET provider_locator = ?, display_locator = ?, \
-                 default_staging_root_id = id, default_backup_root_id = id WHERE id = ?",
+                 default_staging_root_id = id, default_output_root_id = id, \
+                 default_backup_root_id = id WHERE id = ?",
             )
             .bind(library.display().to_string())
             .bind(library.display().to_string())
