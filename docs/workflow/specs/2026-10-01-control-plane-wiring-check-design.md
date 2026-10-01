@@ -8,13 +8,13 @@ regression class: an integration target of `voom-control-plane` that calls API g
 `#[cfg(any(test, feature = "test"))]` without declaring `required-features = ["test"]`. The
 workspace `--all-features` run cannot see that class, because it turns the feature on.
 
-The step also executes the whole control-plane suite a second time. That execution adds no
-behavioral coverage: every `feature = "test"` gate in `crates/voom-control-plane/src` is
-`any(test, feature = "test")` on an additive accessor item (`lib.rs`, eleven `pub fn`
-accessors), and the crate's other feature-bearing dependencies (`voom-core/test`,
-`voom-store/test`) are enabled by its dev-dependencies in both modes. The default-feature run
-therefore executes the same code the all-features run executes, minus the two
-`required-features` targets.
+The step also executes the whole control-plane suite a second time. Every `feature = "test"`
+gate in `crates/voom-control-plane/src` is `any(test, feature = "test")` on an additive accessor
+item (`lib.rs`, eleven `pub fn` accessors), and `voom-core/test` and `voom-store/test` are on in
+both modes through dev-dependencies. So the second run executes the same control-plane code,
+minus the two `required-features` targets, against a smaller unified dependency feature set
+(`cargo tree -e features -i tokio`: the `-p` graph lacks tokio's `full`, `signal` and
+`parking_lot`, which other workspace members enable). No shipped binary is built from that graph.
 
 ## Design
 
@@ -60,10 +60,10 @@ is compile-only and why. The `just test` row in `AGENTS.md` is updated to name t
    workspace run, worker prebuild and prebuilt-worker env must stay unchanged (approved
    exclusions).
 3. Accepted failure classes:
-   - Codegen- or link-only failures (post-monomorphization const errors, linker errors) that
-     appear only in the default-feature graph — the code is identical to the all-features
-     build except for additive accessors, so a codegen failure would also fail the
-     all-features build of the same items.
+   - Codegen-, link- or runtime-only failures that appear only under the `-p` graph's smaller
+     dependency feature set — the guard's job is the #359 compile/wiring class, which
+     `cargo check` still type-checks under that exact feature set, and no shipped binary is
+     built from that graph.
    - Default-feature compile regressions in crates other than `voom-control-plane` — the old
      step did not cover them either.
 4. Covered elsewhere: behavioral execution of every control-plane test — the unchanged
