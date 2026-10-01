@@ -585,6 +585,119 @@ async fn retire_is_terminal_and_library_delete_is_restricted() {
     ));
 }
 
+async fn retire(
+    repo: &SqliteLibraryRepo,
+    id: StorageRootId,
+    now: OffsetDateTime,
+) -> Result<LibraryRoot, VoomError> {
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: retire")
+        .await
+        .unwrap();
+    let result = repo.retire_library_root_in_tx(&mut tx, id, now).await;
+    match &result {
+        Ok(_) => commit(tx).await.unwrap(),
+        Err(_) => rollback(tx).await.unwrap(),
+    }
+    result
+}
+
+/// Set all three default columns at once; `None` clears a column.
+async fn set_defaults(
+    repo: &SqliteLibraryRepo,
+    id: StorageRootId,
+    [staging, output, backup]: [Option<StorageRootId>; 3],
+    now: OffsetDateTime,
+) {
+    let update = LibraryRootUpdate {
+        default_staging_root_id: Some(staging),
+        default_output_root_id: Some(output),
+        default_backup_root_id: Some(backup),
+        ..LibraryRootUpdate::default()
+    };
+    repo.update_library_root(id, update, now).await.unwrap();
+}
+
+// ADR 0097: a staging default contains pre-promotion artifacts, so retiring it while a
+// live root still resolves to it would strand them (#626).
+#[tokio::test]
+async fn retire_refuses_a_root_other_live_roots_name_as_a_default() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "films", true).await;
+    let owner = node(&repo, "node-a", NodeStatus::Active).await;
+    let create = |locator: &'static str, seconds| {
+        repo.create_library_root(new_root(library_id, owner, locator), at(seconds))
+    };
+    let target = create("/staging", 1).await.unwrap();
+    let staging_user = create("/media", 2).await.unwrap();
+    let output_user = create("/other", 3).await.unwrap();
+    let retired_user = create("/old", 4).await.unwrap();
+    let t = Some(target.id);
+    set_defaults(&repo, staging_user.id, [t, None, None], at(5)).await;
+    set_defaults(&repo, output_user.id, [None, t, t], at(6)).await;
+    set_defaults(&repo, retired_user.id, [None, t, None], at(7)).await;
+    retire(&repo, retired_user.id, at(8)).await.unwrap();
+    set_defaults(&repo, target.id, [t, None, None], at(9)).await;
+
+    let error = retire(&repo, target.id, at(10)).await.unwrap_err();
+    let expected = format!(
+        "storage root {} cannot retire while other roots name it as a default: \
+         root {} (default_staging_root_id), \
+         root {} (default_output_root_id, default_backup_root_id); \
+         repoint those defaults or retire the referencing roots first",
+        target.id, staging_user.id, output_user.id
+    );
+    assert!(
+        matches!(&error, VoomError::Conflict(message) if *message == expected),
+        "{error:?}"
+    );
+    let unchanged = repo.get_library_root(target.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.state, StorageRootState::Configured);
+    assert!(unchanged.enabled);
+
+    let own = Some(staging_user.id);
+    set_defaults(&repo, staging_user.id, [own, None, None], at(11)).await;
+    set_defaults(&repo, output_user.id, [None, None, None], at(12)).await;
+    let retired = retire(&repo, target.id, at(13)).await.unwrap();
+    assert_eq!(retired.state, StorageRootState::Retired);
+}
+
+// Validation loss is an observed fact (ADR 0055) and reversible by reactivation, so a
+// referenced root must still be able to record it (#626).
+#[tokio::test]
+async fn mark_unavailable_is_not_refused_for_a_referenced_default() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "films", true).await;
+    let owner = node(&repo, "node-a", NodeStatus::Active).await;
+    let target = repo
+        .create_library_root(new_root(library_id, owner, "/staging"), at(1))
+        .await
+        .unwrap();
+    let user = repo
+        .create_library_root(
+            NewLibraryRoot {
+                default_staging_root_id: Some(target.id),
+                ..new_root(library_id, owner, "/media")
+            },
+            at(2),
+        )
+        .await
+        .unwrap();
+    let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: mark unavailable")
+        .await
+        .unwrap();
+    repo.activate_library_root_in_tx(&mut tx, target.id, "volume-identity".to_owned(), at(3))
+        .await
+        .unwrap();
+    let unavailable = repo
+        .mark_library_root_unavailable_in_tx(&mut tx, target.id, at(4))
+        .await
+        .unwrap();
+    commit(tx).await.unwrap();
+    assert_eq!(unavailable.state, StorageRootState::Unavailable);
+    let user = repo.get_library_root(user.id).await.unwrap().unwrap();
+    assert_eq!(user.default_staging_root_id, Some(target.id));
+}
+
 #[tokio::test]
 async fn corrupt_persisted_root_data_is_a_database_error() {
     let (repo, _tmp) = repo().await;
