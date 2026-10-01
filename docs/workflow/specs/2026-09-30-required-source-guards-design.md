@@ -132,7 +132,7 @@ Any failure stops this six-execution schedule without replacement. Existing faul
 retained; there is no second guard-fault run. Report any setup/image/cache variance and no
 promised speedup. Six new runs are estimated at 1.5–2.5 hours, not guaranteed.
 
-## Approved local shutdown-test repair (2026-10-01)
+## Approved shutdown-test repair (2026-10-01)
 
 The human approved exactly "Approve 640's one file repair". Only the existing
 `graceful_shutdown_finishes_an_inflight_request` in crates/voom-api/src/server_test.rs changes.
@@ -145,10 +145,22 @@ This removes the socket-observation await from the grace window, not general wal
 preemption sensitivity. The controlled300ms delay yielded empty response after shutdown joined;
 that proves a legal fixture failure path, not the actual hosted occurrence's cause.
 
-Current authority is local repair only: CI10/12, two held; branch review5/5 exhausted.
-No push, hosted execution, replacement, further branch review or MERGE-READY. Proposed caps16/7
-were not granted. Fresh comparison and final branch review require a separate decision; prior
+The initial repair grant was local-only: CI10/12, two held; branch review5/5 exhausted.
+That grant did not permit push, hosted execution or further branch review. The subsequent
+comparison grant below supersedes this stop only within its bounds; prior
 success/failure evidence remains retained. Full quest success criteria above remain unfinished.
 Validate the exact test and its server-test siblings, fmt and workspace lint, plus normal hooks.
 Updated whole-design review/scope audit precede implementation; updated security review follows.
 The narrow test-only change adds no ADR decision or production API, ownership, timeout or resource.
+
+## Approved comparison continuation
+
+The human subsequently answered "approved" to three fresh baseline runs FIRST, then three
+unchanged final-candidate runs with all four repaired source files identical in both arms.
+Total CI cap16 includes10 consumed; the old two held slots are reallocated into six, not eight.
+Whole-branch cap7 includes5 actual (4 valid,1 noncanonical), permitting at most two more passes.
+No failed/cancelled/incomplete sample is automatically replaced. Historical evidence remains.
+Use the same two-file baseline/candidate composition procedure, normal hooks and full local ci;
+archive each immutable attempt completely before the next. No intervening candidate push.
+No new diagnostic, repair, settings, issue or merge exception. Root admits scripts, gate evidence
+and review artifacts before dependent pushes. All other scope and failure-model limits remain.
