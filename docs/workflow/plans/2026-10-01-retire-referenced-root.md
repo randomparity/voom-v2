@@ -123,4 +123,4 @@ artifact, which stays unowned; retirement now refuses while any other non-retire
 default column; `active -> unavailable` is deliberately unguarded (ADR 0055 validation-loss
 fact, reversible); the rest of the record stands; link the spec.
 Verification: `task-test-not-applicable` — prose; run `just check-adr-index`.
-Commit `docs(adr): record 0097's retirement residual as closed by #626`.
+Commit `docs(adr): record that #626 narrows 0097's retirement residual`.
