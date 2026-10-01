@@ -353,3 +353,21 @@ deliberately left unguarded: under ADR 0055 it records an observed validation lo
 is reversible by reactivation, so refusing it would only keep a lost root persisted as
 `active`. The rest of this record stands. The design is
 `docs/workflow/specs/2026-10-01-retire-referenced-root-design.md`.
+
+## Later decision: commit resolves the staging root
+
+Issue #625 implements this record and settles a tension in its text. The role paragraph
+under the first decision (`:102-110`) and the fail-closed decision (`:172-178`) name "the
+source media root at commit" as a root whose `default_output_root_id` is resolved. That no
+longer holds. The commit address is the pre-promotion address this record contains in the
+staging root, and the promotion clause beside it ("the artifact's own root … is the staging
+root") holds only if commit records the location under that root.
+
+Commit (`prepare.rs`) now resolves its containment root through `destination_root` for
+`DestinationRole::Staging` of the source root, leaf lookup included, and records the
+committed location under it. An unconfigured staging default fails closed and names
+`voom library root update --root-id <id> --staging-root <id>`. The output default is
+resolved only at promotion, from the artifact's own root, with no fallback. A manual
+`voom artifact commit --target`, which no promotion follows, must target the staging root,
+and its result stays there. The rest of this record stands. The design is
+`docs/workflow/specs/2026-10-01-resolver-staging-containment-design.md`.
