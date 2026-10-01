@@ -8,7 +8,7 @@ Spec: `docs/workflow/specs/2026-10-01-resolver-staging-containment-design.md`.
 Stack: Rust 2024, tokio, sqlx/SQLite; tests via `cargo test`.
 
 Expected implementation size: 220–300 changed lines (M) — two resolver entry points (~90),
-four focused tests (~110), one test-support helper (~15) and ~12 fixture call-site edits.
+five focused tests (~130), one test-support helper (~15) and ~12 fixture call-site edits.
 
 ## Global Constraints
 
@@ -57,9 +57,11 @@ pub async fn set_test_storage_root_self_defaults(pool: &SqlitePool) -> Result<()
 ```
 
 2. Call it after the shared root is seeded/pointed in: `voom-api/src/commit_test.rs` fixture,
-   commit `mod_test.rs` `fixture()` (via `cp.pool_for_test()`), `inspect_test.rs` and
-   coordinator `mod_test.rs` fixtures that commit/promote, `commit_use_lease_gate.rs`,
-   `recover_commit_gate.rs`, `staged_artifact_flow.rs`, `lease_commit_gate_e2e.rs`.
+   commit `mod_test.rs` `fixture()` and `inspect_test.rs` `fixture()` (via
+   `cp.pool_for_test()`), `commit_use_lease_gate.rs`, `recover_commit_gate.rs`,
+   `staged_artifact_flow.rs`, `lease_commit_gate_e2e.rs`. Coordinator `mod_test.rs` has no
+   fixture (it uses the shared `crate::cases::cp`, which stays unchanged): call it after
+   `cp().await` in each `promote_terminal_artifacts_*` test that promotes.
 3. Where a fixture already sets `default_staging_root_id = id` by SQL
    (`operator_execution_e2e.rs`, `published_grammar_execution.rs`, `voom_cli.rs`
    `configure_local_root`), add `default_output_root_id = id` to that same statement.
@@ -85,6 +87,8 @@ Verification (`Mode: focused-test`, file `operation_source_test.rs`, command
 - `pre_promotion_target_rejects_cross_library_staging_root` — S's staging default in another
   library (SQL update bypassing config validation) → `VoomError::Database` "default staging
   root". Red before: no staging lookup.
+- `chained_phase_staging_root_resolves_to_itself` — S names T as staging default, T has no
+  own default: `resolve_pre_promotion_target(T, path under T)` → `Ok((T, ..))`.
 - Ported: the cross-library output test and the escape test call `resolve_output_target`; the
   escape test first sets the root's `default_output_root_id = id`.
 
@@ -108,13 +112,17 @@ Steps:
 5. Commit `mod_test.rs`: rename `set_test_default_output_root` to
    `set_test_default_staging_root`, updating `default_staging_root_id`; its two callers' comment
    "default output root changed" → "default staging root changed".
-6. Run the focused command → pass; observe one test red by temporarily restoring
-   `.unwrap_or(storage_root_id)` in `resolve_output_target`, then revert.
+6. Run the focused command → pass. Observe red per side, reverting each fault: restore
+   `.unwrap_or(storage_root_id)` in `resolve_output_target` (output fail-closed test red); use
+   `source_storage_root_id` as the containment root in `resolve_pre_promotion_target`
+   (staging-containment and staging fail-closed tests red).
 7. `just fmt-check && just lint && just test` → exit 0. Commit
    `fix(control-plane): contain commit targets in the staging root (ADR 0097)`.
 
 ## Task 3 — full gate
 
-`just ci` → exit 0 (Success 5). No commit unless a fix is needed.
+`just ci` → exit 0 (Success 5). `just chaos-e2e-ci` when its tools are installed (it is the
+only exerciser of `configure_local_root`); otherwise report it as not run. No commit unless a
+fix is needed.
 
 Rollback: revert the Task 2 commit; Task 1 is behavior-neutral on its own.

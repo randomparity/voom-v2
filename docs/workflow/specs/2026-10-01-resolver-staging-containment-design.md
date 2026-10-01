@@ -19,7 +19,11 @@ Reading adopted: ADR 0097's Decision cites `prepare.rs` beside the output-defaul
 title, Context, first decision, the #615 spec, and the promotion clause ("the artifact's own root
 … is the staging root") only hold if commit records the location under the staging root. Commit
 therefore resolves the staging root; promotion resolves the output default of the artifact's
-root (the staging root after commit). Recorded in `WORK:SCOPE` on #625.
+root (the staging root after commit). Recorded in `WORK:SCOPE` on #625; for `prepare.rs` this
+spec supersedes ADR 0097's sentences that commit resolves the source root's output default
+(its Decision's role paragraph and "An unaddressable destination fails closed"). Authority: the
+#625 charter outcome. Consequence: a manual `voom artifact commit --target` (no promotion
+follows) must target the staging root and its result is durably recorded there.
 
 ## Decision
 
@@ -27,6 +31,9 @@ root (the staging root after commit). Recorded in `WORK:SCOPE` on #625.
    `(StorageRootId, ProviderRelativeLocator, PathBuf)` triple.
    - `resolve_pre_promotion_target(cp, label, source_root_id, path)` — containment root is
      `destination_root(cp, DestinationRole::Staging, source_root_id)`. Called by `prepare.rs`.
+     It deliberately keeps `destination_root`'s leaf lookup, which is the route ADR 0097 names:
+     a chained phase commits with the phase-1 artifact's root (the staging root T) as source,
+     and T resolves to itself when another root names it as staging default.
    - `resolve_output_target(cp, label, root_id, path)` — containment root is `root_id`'s own
      `default_output_root_id`; `None` fails with `VoomError::Config`:
      `<label>: storage root <id> has no default output root; configure one with
@@ -48,7 +55,8 @@ root (the staging root after commit). Recorded in `WORK:SCOPE` on #625.
    root (9000001) its own staging and output default — a configuration ADR 0097's #616 rule
    accepts. Measured blast radius before fixtures: 60 failing tests in 9 suites (plan file map).
    `crates/voom-cli/tests/support/voom_cli.rs` `configure_local_root` adds `default_output_root_id
-   = id` beside its staging/backup defaults so the chaos harness keeps working unchanged.
+   = id` beside its staging/backup defaults so the chaos harness (its only caller) is configured
+   to keep working; the plan runs `just chaos-e2e-ci` where its tools are installed.
 
 Rejected: routing promotion through `destination_root(Output, …)` — its leaf lookup is a
 fallback ADR 0097 forbids ("must carry its own output default"); one entry point with a role
@@ -62,12 +70,14 @@ opt in, so the change would silently alter unrelated envelope tests.
   `voom compliance execute`; the owner-node commit flow; the coordinator's transitional
   promotion path (ADR 0050, not extended).
 - **Invariants at stake:** a committed location is recorded under the root that contains it;
-  no target resolves to a root the operator did not configure; every resolution failure happens
-  before any durable mutation (prepare's pre-mutation error path, promotion before the move).
+  no target resolves to a root the operator did not configure; a resolution failure happens
+  before any durable mutation (prepare's pre-mutation error path; promotion before the move and
+  the location repoint — the output directory may already have been created).
 - **Accepted:** deployments relying on the implicit source-root fallback now fail closed until
   they set `--staging-root`/`--output-root` (pre-release, no migration owed — ADR 0097). A staging
-  root without an output default still fails at promotion, after a transcode (bounded: one
-  failed promotion with an actionable message; config-time prevention is #616). A
+  root without an output default still fails at promotion, after a transcode (bounded: at most
+  the in-flight file window of pipelines per run, each with the actionable message; config-time
+  prevention is #616). A
   `voom artifact commit --target` outside the staging root is rejected even when it lies in the
   output root — the decision itself.
 - **Covered elsewhere:** config-time pairing validation (#616); `--staging-root` flag
@@ -79,7 +89,9 @@ opt in, so the change would silently alter unrelated envelope tests.
 1. Commit resolves its containment root via `destination_root(Staging, source)`; a target
    under the staging root resolves to the staging root id; a target under the output root but
    outside the staging root is rejected `CONFIG_INVALID` "path escaped storage root".
-2. Commit with no staging default fails `CONFIG_INVALID` naming the root and `--staging-root`.
+2. Commit from a source root that neither has a staging default nor is named as one fails
+   `CONFIG_INVALID` naming the root and `--staging-root`; a source root named as another root's
+   staging default (chained phase) resolves to itself.
 3. Promotion/output resolution with no output default fails `CONFIG_INVALID` naming the root and
    `voom library root update --root-id <id> --output-root <id>`, even when the target lies inside
    the root itself (no fallback).
@@ -88,6 +100,6 @@ opt in, so the change would silently alter unrelated envelope tests.
 
 ## Validation
 
-Focused tests in `crates/voom-control-plane/src/operation_source_test.rs` cover Success 1–4
-(each observed red against the pre-change resolver or a deliberate fault); Success 5 is the
+Focused tests in `crates/voom-control-plane/src/operation_source_test.rs` cover Success 1–4,
+each observed red under a deliberate fault on its side (staging or output); Success 5 is the
 suite run. `destination_root` message: covered by Success 2's assertion.
