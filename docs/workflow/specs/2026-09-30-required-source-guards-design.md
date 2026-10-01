@@ -77,7 +77,7 @@ Do not add a reusable failure switch to production workflows. Retain both commit
   report it. Administrative editing can later remove protection; proof covers observed policy.
 - Covered elsewhere: guard parsing/performance #637; build/profile #638; runner/concurrency
   #639; sharding/artifacts #641; hook redesign #485. Existing media/constrained/supply-chain
-  behavior stays in platform jobs. The exact approved mode11 fixture prerequisite below is included; unrelated failures are reported, not silently repaired.
+  behavior stays in platform jobs. The exact approved fixture prerequisites below are included; unrelated failures are reported, not silently repaired.
 
 ## Validation
 
@@ -92,7 +92,7 @@ Publish timing and enforcement evidence in the PR/issue report so the measured c
 stays unchanged across its three runs. Any implementation correction invalidates candidate
 comparability and requires operator guidance before expanding the twelve-execution cap.
 
-## Approved fixture prerequisite and fresh comparison
+## Approved fixture prerequisite and historical comparison
 
 The operator explicitly approved this bounded prerequisite in WORK:SCOPE comment5923384871.
 A controlled local probe forced the existing child-exit readiness arm and observed exit102
@@ -119,7 +119,7 @@ normal hooks, updated security and whole-branch review precede shipping. Source-
 isolation and mode selection are reviewed against normal build behavior. No timing sleep or
 passing rerun is accepted as repair evidence.
 
-Fresh baseline first: on this same PR, commit only justfile and ci.yml back to db063448 bytes,
+Historical schedule (stopped after candidate1 failure): on this same PR, commit only justfile and ci.yml back to db063448 bytes,
 retaining the repaired fixture and current docs. Normal hooks/local verification precede push;
 that push starts baseline1, then two explicit attempts of its same immutable run/head produce
 baseline2/3. Missing new guard contexts during the temporary baseline keep merge blocked;
@@ -131,3 +131,24 @@ Capture attempt-local timestamps, runner images/cache outcomes and full logs bef
 Any failure stops this six-execution schedule without replacement. Existing fault proof is
 retained; there is no second guard-fault run. Report any setup/image/cache variance and no
 promised speedup. Six new runs are estimated at 1.5–2.5 hours, not guaranteed.
+
+## Approved local shutdown-test repair (2026-10-01)
+
+The human approved exactly "Approve 640's one file repair". Only the existing
+`graceful_shutdown_finishes_an_inflight_request` in crates/voom-api/src/server_test.rs changes.
+Its handler is already started and waiting. Pin the real shutdown_on future, poll once,
+and notify release immediately in that same poll. Preserve Some(250ms) shutdown grace and
+existing1s deadlines. Retain a completed first-poll result rather than poll it again; otherwise
+await the pending future. Join request and shutdown before asserting initial pending, strict
+response suffix done with actual-response diagnostic, then listener refusal. No wrapper bypass.
+This removes the socket-observation await from the grace window, not general wall-clock or
+preemption sensitivity. The controlled300ms delay yielded empty response after shutdown joined;
+that proves a legal fixture failure path, not the actual hosted occurrence's cause.
+
+Current authority is local repair only: CI10/12, two held; branch review5/5 exhausted.
+No push, hosted execution, replacement, further branch review or MERGE-READY. Proposed caps16/7
+were not granted. Fresh comparison and final branch review require a separate decision; prior
+success/failure evidence remains retained. Full quest success criteria above remain unfinished.
+Validate the exact test and its server-test siblings, fmt and workspace lint, plus normal hooks.
+Updated whole-design review/scope audit precede implementation; updated security review follows.
+The narrow test-only change adds no ADR decision or production API, ownership, timeout or resource.
