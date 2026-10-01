@@ -157,6 +157,84 @@ async fn node_session_activates_all_workers_once() {
     assert_eq!(counts, (1, 3));
 }
 
+/// Issue #628: a lane that dies while the session runs must end the session
+/// with that lane's error. Before the fix the session only joined its lanes
+/// after `stop`, so the stress harness saw an orphaned lease and reported a
+/// drain timeout instead of the server error.
+#[tokio::test]
+async fn node_session_reports_dead_lane_before_stop() {
+    let fixture = RemoteRunnerFixture::new().await;
+    let base = fixture.config();
+    let workers = (0..2)
+        .map(|index| super::RemoteWorkerConfig {
+            logical_name: format!("dead-lane-worker-{index}"),
+            operations: base.operations.clone(),
+            artifact_access: base.artifact_access.clone(),
+            max_parallel: 1,
+        })
+        .collect();
+    let session = super::RemoteNodeSession::new(
+        super::RemoteNodeSessionConfig {
+            base_url: base.base_url,
+            node_id: base.node_id,
+            token: base.token,
+            workers,
+            max_polls: 3,
+            idle_timeout: std::time::Duration::from_millis(100),
+            poll_interval: std::time::Duration::from_millis(5),
+            lease_ttl_seconds: 1,
+            healthy_heartbeat_ttl_seconds: 3,
+        },
+        std::sync::Arc::new(super::RemoteExecutionState::new(std::sync::Arc::new(
+            CompleteAll,
+        ))),
+    );
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let mut task = tokio::spawn({
+        let session = session.clone();
+        async move { session.run_until_stopped(stop_rx).await }
+    });
+    let worker_ids = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let ids = session.active_worker_ids().await;
+            if ids.len() == 2 {
+                return ids;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let dead = worker_ids[1];
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM workers WHERE id = ?")
+        .bind(i64::try_from(dead.0).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .retire_worker(
+            dead,
+            u64::try_from(epoch).unwrap(),
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await;
+
+    assert!(
+        joined.is_ok(),
+        "the session must end with the dead lane's error while stop is unsent"
+    );
+    let error = joined.unwrap().unwrap().unwrap_err();
+    assert!(
+        matches!(error, super::RemoteRunnerError::Api { .. }),
+        "expected the server's API error, got {error}"
+    );
+}
+
 #[tokio::test]
 async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
     let fixture = RemoteRunnerFixture::new().await;
