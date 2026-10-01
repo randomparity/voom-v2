@@ -26,14 +26,7 @@ Interfaces: consumes `required_root_in_tx`, `root_i64`, `u64_from_i64`, `map_row
 (all existing in that module/imports). Adds private
 `async fn require_no_live_default_references(tx: &mut Transaction<'_, Sqlite>, id: StorageRootId) -> Result<(), VoomError>`.
 
-Verification:
-- Retire refusal, message, exclusions, and success-after-repoint — `focused-test`:
-  `retire_refuses_a_root_other_live_roots_name_as_a_default`; red: `retire` returns `Ok`
-  (the `unwrap_err` panics). Green: `cargo test -p voom-store --lib retire_refuses_a_root`.
-- Unavailable policy — `focused-test`:
-  `mark_unavailable_is_not_refused_for_a_referenced_default`; green on main and after the
-  change; red if the guard is wired into `transition_state`. Green:
-  `cargo test -p voom-store --lib mark_unavailable_is_not_refused`.
+Verification: the spec's Validation entries for criteria 1–4 (two `focused-test` cases).
 
 Steps:
 1. Add to the test file a helper and the two tests:
@@ -46,8 +39,9 @@ async fn retire(
 ) -> Result<LibraryRoot, VoomError> {
     let mut tx = crate::tx::begin_read_then_write(&repo.pool, "test: retire").await.unwrap();
     let result = repo.retire_library_root_in_tx(&mut tx, id, now).await;
-    if result.is_ok() {
-        commit(tx).await.unwrap();
+    match &result {
+        Ok(_) => commit(tx).await.unwrap(),
+        Err(_) => rollback(tx).await.unwrap(),
     }
     result
 }
@@ -56,11 +50,8 @@ async fn retire(
    The refusal test creates `target` (`/staging`), `staging_user` (staging default = target),
    `output_user` (output and backup defaults = target), and `retired_user` (output default =
    target, then retired via `retire`); then sets target's own staging default to itself.
-   It asserts `retire(target)` is `VoomError::Conflict` whose message equals exactly
-   `storage root {target} cannot retire while other roots name it as a default: root
-   {staging_user} (default_staging_root_id), root {output_user} (default_output_root_id,
-   default_backup_root_id); repoint those defaults or retire the referencing roots first`,
-   and that target's persisted state is still `Configured`. It then repoints
+   It asserts `retire(target)` is `VoomError::Conflict` whose message equals exactly the
+   spec's Decision 1 text (referencers in id order, retired and self references absent), and that target's persisted state is still `Configured`. It then repoints
    `staging_user`'s staging default to itself, clears both `output_user` defaults
    (`Some(None)`), and asserts `retire(target)` returns state `Retired`.
    The policy test creates `target` and a referencer (staging = target), then in one
@@ -125,9 +116,10 @@ async fn require_no_live_default_references(
 ## Task 2 — ADR 0097 later decision
 
 File: append to `docs/adr/0097-pre-promotion-addresses-contained-by-their-own-root.md`
-a `## Later decision: retirement refuses a referenced default` section: issue #626 closes the
+a `## Later decision: retirement refuses a referenced default` section: issue #626 narrows the
 Consequences residual "a staging root can be retired while it is another root's staging
-default"; retirement now refuses while any other non-retired root names the root in any
+default" — repointing the default and then retiring can still strand a committed-but-unpromoted
+artifact, which stays unowned; retirement now refuses while any other non-retired root names the root in any
 default column; `active -> unavailable` is deliberately unguarded (ADR 0055 validation-loss
 fact, reversible); the rest of the record stands; link the spec.
 Verification: `task-test-not-applicable` — prose; run `just check-adr-index`.

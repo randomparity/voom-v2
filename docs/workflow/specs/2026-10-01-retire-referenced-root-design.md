@@ -20,11 +20,12 @@ records this as an accepted, unowned residual.
    columns, ordered by id. A non-empty result returns `VoomError::Conflict`:
    `storage root <id> cannot retire while other roots name it as a default: root <a>
    (default_staging_root_id), root <b> (default_output_root_id, default_backup_root_id);
-   repoint those defaults or retire the referencing roots first`. Nothing is written and the
-   control-plane wrapper appends no event (it already rolls back on error).
+   repoint those defaults or retire the referencing roots first`. Nothing is written.
 2. **Excluded referencers.** A root's reference to itself does not block (retiring it retires
    the referencer too). A retired referencer does not block: `update_library_root` refuses
-   retired rows, so the operator could never clear that reference.
+   retired rows, so the operator could never clear that reference. Mutual references (a
+   staging root whose output default is its referencer) resolve by repointing one side,
+   possibly to itself.
 3. **`active -> unavailable` stays unguarded.** ADR 0055 makes `unavailable` the record of an
    observed validation loss, reversible by reactivation under the same owner. Refusing it
    would keep a lost root persisted as `active`, which is worse than recording the loss. The
@@ -33,8 +34,7 @@ records this as an accepted, unowned residual.
    default` section (the convention ADRs 0019/0025/0027/0034/0055/0069 follow); its body is
    not edited.
 
-Rejected: auto-clearing referencing defaults (operator exclusion); a separate "require clear
-first" mode (identical to refusal — the operator clears or repoints, then retires).
+Rejected: auto-clearing referencing defaults (operator exclusion).
 
 ## Failure model
 
@@ -45,7 +45,8 @@ first" mode (identical to refusal — the operator clears or repoints, then reti
 - **Accepted:** a concurrent create/update adding a reference during retire. Retire runs
   under `BEGIN IMMEDIATE`; create also does, and update's deferred transaction cannot upgrade
   a pre-retire WAL snapshot to a write, so it fails instead of writing a stale reference.
-  Repointing a staging default between commit and promotion is not guarded (not in the
+  Repointing a staging default between commit and promotion, then retiring, still strands
+  an unpromoted artifact; it is not guarded (not in the
   charter; reported as a follow-up candidate). Disabling a referenced root is not guarded
   (not in the charter). The error lists every referencer; library root counts are small.
 - **Covered elsewhere:** pairing validation at configuration time (#616); resolver
