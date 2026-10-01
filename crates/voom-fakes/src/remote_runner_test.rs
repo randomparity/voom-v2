@@ -398,7 +398,12 @@ async fn process_crash_rejects_child_that_exits_between_readiness_and_dispatch()
     assert!(
         error
             .to_string()
-            .contains("without connection termination evidence")
+            .contains("without connection termination evidence"),
+        "unexpected process-crash error: {error}"
+    );
+    assert!(
+        error.to_string().contains("exit=Some(102)"),
+        "unexpected pre-dispatch exit: {error}"
     );
 }
 

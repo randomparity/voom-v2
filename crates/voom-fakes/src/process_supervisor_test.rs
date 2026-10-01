@@ -33,7 +33,7 @@ const READY_IGNORE_STDIN: u64 = 7;
 const PROCESS_CRASH_WORKER: u64 = 8;
 const PROCESS_CLEAN_EXIT_WORKER: u64 = 9;
 const PROCESS_STAY_ALIVE_WORKER: u64 = 10;
-const PROCESS_EXIT_BEFORE_DISPATCH_WORKER: u64 = 11;
+pub(super) const PROCESS_EXIT_BEFORE_DISPATCH_WORKER: u64 = 11;
 
 #[test]
 fn process_supervisor_test_helper() {
@@ -92,6 +92,7 @@ fn run_process_worker_exit_before_dispatch() -> ! {
         .block_on(HttpServer::new(credentials, handler).serve(bind))
         .unwrap_or_else(|_| std::process::exit(118));
     write_helper_output(format!("BOUND addr={}\n", running.bound).as_bytes());
+    wait_for_stdin_close();
     std::process::exit(102);
 }
 
