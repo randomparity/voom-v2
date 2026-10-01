@@ -336,3 +336,20 @@ untouched.
   record.** judgment: issue #615's fifth acceptance criterion requires this record
   to settle the fallback, and splitting it out would leave the defect half-fixed in
   exactly the way that criterion names.
+
+## Later decision: retirement refuses a referenced default
+
+Issue #626 narrows the Consequences residual above, "a staging root can be retired
+while it is another root's staging default" (`:270-282`). `retire_library_root_in_tx`
+now refuses, with a conflict naming each referencing root and column, while any other
+non-retired root names the target in `default_output_root_id`,
+`default_staging_root_id`, or `default_backup_root_id`. A root's reference to itself
+and references held by retired roots do not block.
+
+The residual is narrowed, not closed. An operator who repoints the staging default and
+then retires the old root can still strand a committed-but-unpromoted artifact; that
+case remains accepted and unowned. The `active -> unavailable` transition is
+deliberately left unguarded: under ADR 0055 it records an observed validation loss and
+is reversible by reactivation, so refusing it would only keep a lost root persisted as
+`active`. The rest of this record stands. The design is
+`docs/workflow/specs/2026-10-01-retire-referenced-root-design.md`.
