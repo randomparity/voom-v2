@@ -14,6 +14,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  source-guards:
+    name: source guards (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      - name: Install ast-grep
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d  # v2.85.12
+        with:
+          tool: ast-grep
+      - name: Source checks
+        run: just source-checks
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -36,11 +57,6 @@ jobs:
       - name: Install cargo-deny + cargo-audit
         run: cargo install --locked cargo-deny cargo-audit
 
-      - name: Install ast-grep
-        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d  # v2.85.12
-        with:
-          tool: ast-grep
-
       - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -51,8 +67,8 @@ jobs:
         if: runner.os == 'macOS'
         run: brew list ffmpeg mkvtoolnix >/dev/null 2>&1 || brew install ffmpeg mkvtoolnix
 
-      - name: just ci
-        run: just ci
+      - name: Platform checks
+        run: just platform-checks
 
   coverage:
     name: coverage
