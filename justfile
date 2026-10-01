@@ -286,3 +286,10 @@ stress:
         export VOOM_TEST_PREBUILT_WORKERS=1
     fi
     cargo test -p voom-fakes --lib distributed_stress_conserves_every_ticket -- --ignored --nocapture
+
+# Bounded opt-in artifact transfer experiment for issue 641; not part of normal CI.
+sharding-feasibility *ARGS:
+    python3 scripts/ci-sharding-feasibility.py {{ARGS}}
+
+sharding-feasibility-selftest:
+    python3 scripts/ci-sharding-feasibility-test.py
