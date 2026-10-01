@@ -278,11 +278,11 @@ impl RemoteNodeSession {
         }
 
         let active = self.active.lock().await.clone();
-        let mut tasks = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
         let mut heartbeat_stop = stop.clone();
         let heartbeat_worker = active_workers[0];
         let heartbeat_controller = controller.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             let mut keys = IdempotencyKeys::new(&new_run_id());
             while !*heartbeat_stop.borrow() {
                 heartbeat_controller
@@ -298,7 +298,7 @@ impl RemoteNodeSession {
                 }
             }
             Ok(RemoteRunnerSummary::default())
-        }));
+        });
         for (worker, runner) in active.into_values() {
             let acquire_gate = Arc::new(tokio::sync::Mutex::new(()));
             for _ in 0..runner.config.max_parallel {
@@ -307,27 +307,28 @@ impl RemoteNodeSession {
                 let gate = self.recovery_gate.clone();
                 let acquire_gate = acquire_gate.clone();
                 let lane_stop = stop.clone();
-                tasks.push(tokio::spawn(async move {
+                tasks.spawn(async move {
                     run_session_lane(runner, worker, executions, gate, acquire_gate, lane_stop)
                         .await
-                }));
+                });
             }
         }
 
+        // A task that fails before stop ends the session with its error at once;
+        // returning drops the set, which aborts the remaining tasks.
+        let mut summary = RemoteRunnerSummary::default();
         while !*stop.borrow() {
-            if stop.changed().await.is_err() {
-                break;
+            tokio::select! {
+                changed = stop.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                Some(joined) = tasks.join_next() => summary.add(&joined_lane(joined)?),
             }
         }
-        let mut summary = RemoteRunnerSummary::default();
-        for task in tasks {
-            let lane = task.await.map_err(|error| {
-                RemoteRunnerError::Protocol(format!("runner lane join: {error}"))
-            })??;
-            summary.acquired += lane.acquired;
-            summary.completed += lane.completed;
-            summary.failed += lane.failed;
-            summary.idle_polls += lane.idle_polls;
+        while let Some(joined) = tasks.join_next().await {
+            summary.add(&joined_lane(joined)?);
         }
         Ok(summary)
     }
@@ -348,6 +349,12 @@ impl RemoteNodeSession {
             healthy_heartbeat_ttl_seconds: self.config.healthy_heartbeat_ttl_seconds,
         }
     }
+}
+
+fn joined_lane(
+    joined: Result<Result<RemoteRunnerSummary, RemoteRunnerError>, tokio::task::JoinError>,
+) -> Result<RemoteRunnerSummary, RemoteRunnerError> {
+    joined.map_err(|error| RemoteRunnerError::Protocol(format!("runner lane join: {error}")))?
 }
 
 async fn run_session_lane(
@@ -442,6 +449,15 @@ pub struct RemoteRunnerSummary {
     pub completed: u32,
     pub failed: u32,
     pub idle_polls: u32,
+}
+
+impl RemoteRunnerSummary {
+    fn add(&mut self, lane: &Self) {
+        self.acquired += lane.acquired;
+        self.completed += lane.completed;
+        self.failed += lane.failed;
+        self.idle_polls += lane.idle_polls;
+    }
 }
 
 #[derive(Debug)]

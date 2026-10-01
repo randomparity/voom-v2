@@ -27,7 +27,7 @@ use crate::process_supervisor::{
 use crate::remote_runner::{
     ExecutionAction, ExecutionRecord, ProcessCrashObservation, RemoteExecutionState,
     RemoteFaultPolicy, RemoteNodeSession, RemoteNodeSessionConfig, RemoteRunnerConfig,
-    RemoteSyntheticRunner, RemoteWorkerConfig,
+    RemoteRunnerError, RemoteRunnerSummary, RemoteSyntheticRunner, RemoteWorkerConfig,
 };
 
 const STRESS_START: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -710,6 +710,90 @@ async fn process_crash_owner_reaps_before_propagating_post_spawn_panic() {
     assert!(finished.completion.unwrap_err().is_panic());
 }
 
+/// Issue #628: a session that dies during activation must fail the activation
+/// wait with its own error, not with "worker activation timed out".
+#[tokio::test]
+async fn worker_wait_reports_dead_session_error() {
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = closed.local_addr().unwrap();
+    drop(closed);
+    let session = RemoteNodeSession::new(
+        RemoteNodeSessionConfig {
+            base_url: format!("http://{address}"),
+            node_id: voom_core::NodeId(1),
+            token: "unused-token".to_owned().into(),
+            workers: vec![RemoteWorkerConfig {
+                logical_name: "dead-session".to_owned(),
+                operations: vec![OperationKind::TranscodeVideo],
+                artifact_access: vec!["shared_mount".to_owned()],
+                max_parallel: 1,
+            }],
+            max_polls: 1,
+            idle_timeout: StdDuration::from_secs(1),
+            poll_interval: StdDuration::from_millis(10),
+            lease_ttl_seconds: 1,
+            healthy_heartbeat_ttl_seconds: 3,
+        },
+        Arc::new(RemoteExecutionState::new(Arc::new(StressFaultPolicy(
+            StressConfig::default(),
+        )))),
+    );
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let mut tasks = SessionTasks::new();
+    tasks.spawn({
+        let session = session.clone();
+        async move { session.run_until_stopped(stop_rx).await }
+    });
+    let started = tokio::time::Instant::now();
+
+    let error = wait_for_workers(&[session], &mut tasks, 1, StdDuration::from_mins(1))
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.starts_with("remote session failed before stop: http:"),
+        "expected the session's http error, got {error}"
+    );
+    assert!(started.elapsed() < StdDuration::from_secs(5), "{error}");
+}
+
+#[tokio::test]
+async fn session_check_reports_finished_sessions() {
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut running = SessionTasks::new();
+    running.spawn(async move {
+        let _ = release_rx.await;
+        Ok(RemoteRunnerSummary::default())
+    });
+    let mut failed = SessionTasks::new();
+    failed.spawn(async { Err(RemoteRunnerError::Protocol("lane died".to_owned())) });
+    let mut ended = SessionTasks::new();
+    ended.spawn(async { Ok(RemoteRunnerSummary::default()) });
+
+    assert_eq!(ensure_sessions_running(&mut running), Ok(()));
+    assert_eq!(
+        first_session_failure(&mut failed).await,
+        "remote session failed before stop: protocol: lane died"
+    );
+    assert_eq!(
+        first_session_failure(&mut ended).await,
+        "remote session ended before stop"
+    );
+}
+
+async fn first_session_failure(tasks: &mut SessionTasks) -> String {
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            if let Err(error) = ensure_sessions_running(tasks) {
+                return error;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "opt-in distributed stress harness; run with just stress"]
 #[expect(
@@ -897,22 +981,22 @@ async fn run_stress(config: StressConfig) -> Result<(), String> {
         ));
     }
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let tasks = sessions
-        .iter()
-        .cloned()
-        .map(|session| {
-            let stop = stop_rx.clone();
-            tokio::spawn(async move { session.run_until_stopped(stop).await })
-        })
-        .collect::<Vec<_>>();
+    let mut tasks = SessionTasks::new();
+    for session in &sessions {
+        let session = session.clone();
+        let stop = stop_rx.clone();
+        tasks.spawn(async move { session.run_until_stopped(stop).await });
+    }
     wait_for_workers(
         &sessions,
+        &mut tasks,
         config.nodes * config.runners_per_node,
         config.drain_timeout,
     )
     .await?;
     let deadline = tokio::time::Instant::now() + config.drain_timeout;
     loop {
+        ensure_sessions_running(&mut tasks)?;
         recover_abandoned(&cp, &pool, &clock, &sessions, &executions, &mut recovered).await?;
         let tickets = SqliteTicketRepo::new(pool.clone())
             .list(
@@ -951,8 +1035,8 @@ async fn run_stress(config: StressConfig) -> Result<(), String> {
         tokio::time::sleep(StdDuration::from_millis(10)).await;
     }
     stop_tx.send(true).map_err(|error| error.to_string())?;
-    for task in tasks {
-        task.await
+    while let Some(joined) = tasks.join_next().await {
+        joined
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
     }
@@ -1102,13 +1186,30 @@ fn stress_payload(index: usize) -> Value {
     })
 }
 
+type SessionTasks = tokio::task::JoinSet<Result<RemoteRunnerSummary, RemoteRunnerError>>;
+
+/// Fail with a session's own error when any session ended before stop.
+///
+/// Under the harness's `ManualClock` a dead session's leases never expire, so
+/// without this check the failure surfaces only as an activation or drain timeout.
+fn ensure_sessions_running(tasks: &mut SessionTasks) -> Result<(), String> {
+    match tasks.try_join_next() {
+        None => Ok(()),
+        Some(Err(error)) => Err(format!("remote session task failed before stop: {error}")),
+        Some(Ok(Err(error))) => Err(format!("remote session failed before stop: {error}")),
+        Some(Ok(Ok(_))) => Err("remote session ended before stop".to_owned()),
+    }
+}
+
 async fn wait_for_workers(
     sessions: &[RemoteNodeSession],
+    tasks: &mut SessionTasks,
     expected: usize,
     timeout: StdDuration,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        ensure_sessions_running(tasks)?;
         let mut total = 0;
         for session in sessions {
             total += session.active_worker_ids().await.len();
