@@ -23,7 +23,9 @@ root (the staging root after commit). Recorded in `WORK:SCOPE` on #625; for `pre
 spec supersedes ADR 0097's sentences that commit resolves the source root's output default
 (its Decision's role paragraph and "An unaddressable destination fails closed"). Authority: the
 #625 charter outcome. Consequence: a manual `voom artifact commit --target` (no promotion
-follows) must target the staging root and its result is durably recorded there.
+follows) must target the staging root and its result is durably recorded there. ADR 0097 gains an
+appended `## Later decision: commit resolves the staging root` section recording this (the
+repository's amendment convention); its body is not edited.
 
 ## Decision
 

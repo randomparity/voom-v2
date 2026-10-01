@@ -30,6 +30,7 @@ five focused tests (~130), one test-support helper (~15) and ~12 fixture call-si
 | `crates/voom-control-plane/src/workflow/coordinator/promotion.rs` | call `resolve_output_target` |
 | `crates/voom-control-plane/src/workflow/plan/envelope.rs` | actionable `destination_root` message |
 | `crates/voom-control-plane/src/workflow/plan/binding.rs` | drop `expect(dead_code)` on `DestinationRole::Output` |
+| `docs/adr/0097-pre-promotion-addresses-contained-by-their-own-root.md` | append `## Later decision: commit resolves the staging root` |
 | fixtures (measured: 60 failing tests in 9 suites) | `voom-api/src/commit_test.rs`; `voom-control-plane/src/artifact/commit/mod_test.rs` (`fixture()`, and `set_test_default_output_root` → `set_test_default_staging_root`); `artifact/inspect_test.rs`; `workflow/coordinator/mod_test.rs`; `voom-control-plane/tests/{commit_use_lease_gate,recover_commit_gate,staged_artifact_flow}.rs`; `voom-cli/tests/{artifact_envelope,lease_commit_gate_e2e,operator_execution_e2e}.rs`; `voom-cli/tests/support/{published_grammar_execution,voom_cli}.rs` |
 
 ## Task 1 — test-root defaults (green on the old resolver)
@@ -89,6 +90,11 @@ Verification (`Mode: focused-test`, file `operation_source_test.rs`, command
   root". Red before: no staging lookup.
 - `chained_phase_staging_root_resolves_to_itself` — S names T as staging default, T has no
   own default: `resolve_pre_promotion_target(T, path under T)` → `Ok((T, ..))`.
+- Coordinator `mod_test.rs` `promotion_resolves_the_artifact_roots_own_output_default` — the
+  artifact root (9000001, no staging default) names a distinct output root O (new active root,
+  same library, own dir containing the `--output-dir`); promotion lands the location on O. Red
+  if `promotion.rs` called `resolve_pre_promotion_target` (no staging default) or used the
+  fallback (root 9000001 recorded).
 - Ported: the cross-library output test and the escape test call `resolve_output_target`; the
   escape test first sets the root's `default_output_root_id = id`.
 
@@ -119,7 +125,18 @@ Steps:
 7. `just fmt-check && just lint && just test` → exit 0. Commit
    `fix(control-plane): contain commit targets in the staging root (ADR 0097)`.
 
-## Task 3 — full gate
+## Task 3 — ADR 0097 note
+
+Verification: `Mode: task-test-not-applicable` — append-only prose in an ADR; `just
+check-adr-index` covers the record's structure. Append to ADR 0097 a `## Later decision:
+commit resolves the staging root` section (issue #625): `prepare.rs` resolves its containment
+root through `destination_root(Staging, source)` and records the committed location under it;
+the Decision's role paragraph and "An unaddressable destination fails closed" sentences naming
+"the source media root at commit" no longer hold; the output default is resolved at promotion
+from the artifact's own root; a manual `voom artifact commit` lands in the staging root. Link
+this spec. Commit `docs(adr): record the commit-side reading of ADR 0097`.
+
+## Task 4 — full gate
 
 `just ci` → exit 0 (Success 5). `just chaos-e2e-ci` when its tools are installed (it is the
 only exerciser of `configure_local_root`); otherwise report it as not run. No commit unless a
