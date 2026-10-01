@@ -378,13 +378,29 @@ async fn graceful_shutdown_finishes_an_inflight_request() -> TestResult {
         b"GET /wait HTTP/1.1\r\nHost: localhost\r\n\r\n",
     ));
     started.notified().await;
-    let shutdown = tokio::spawn(server.shutdown_on(std::future::ready(())));
+    let shutdown = server.shutdown_on(std::future::ready(()));
+    tokio::pin!(shutdown);
+    let first_poll = std::future::poll_fn(|cx| {
+        let state = std::future::Future::poll(shutdown.as_mut(), cx);
+        release.notify_one();
+        Poll::Ready(state)
+    })
+    .await;
+    let waited_for_request = first_poll.is_pending();
+    let (response, shutdown) = tokio::join!(request, async {
+        match first_poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => shutdown.await,
+        }
+    });
+    shutdown?;
+    let response = String::from_utf8(response??)?;
+    assert!(
+        waited_for_request,
+        "shutdown finished before releasing the request"
+    );
+    assert!(response.ends_with("done"), "actual response: {response:?}");
     assert_connection_refused(addr).await?;
-    release.notify_one();
-
-    let response = String::from_utf8(request.await??)?;
-    assert!(response.ends_with("done"));
-    shutdown.await??;
     Ok(())
 }
 
