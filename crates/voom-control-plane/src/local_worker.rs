@@ -1202,7 +1202,9 @@ async fn signal_process_group(process_group_id: u32, signal: &str) -> Result<(),
                 "starting kill for process group {process_group_id}: {error}"
             ))
         })?;
-    if status.success() {
+    // The group can empty between a caller's membership check and this signal;
+    // kill then exits 1 (ESRCH), which is the outcome the caller wanted.
+    if status.success() || !local_process_group_has_members(process_group_id).await? {
         return Ok(());
     }
     Err(VoomError::WorkerCrash(format!(

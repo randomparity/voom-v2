@@ -13,7 +13,7 @@ use super::{
     validate_local_worker_config,
 };
 #[cfg(target_os = "linux")]
-use super::{kill_and_wait, process_group_has_members};
+use super::{kill_and_wait, process_group_has_members, signal_process_group};
 use voom_core::{OperationKind, TicketOperation};
 use voom_worker_protocol::{
     LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor,
@@ -542,4 +542,22 @@ async fn failed_startup_cleanup_terminates_the_worker_process_group() {
     kill_and_wait(&mut child).await.unwrap();
 
     assert!(!process_group_has_members(process_group_id).unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn signalling_a_process_group_that_already_exited_succeeds() {
+    use std::process::Stdio;
+
+    use tokio::process::Command;
+
+    let mut child = Command::new("true");
+    child.stdin(Stdio::null()).process_group(0);
+    let mut child = child.spawn().unwrap();
+    let process_group_id = child.id().unwrap();
+    child.wait().await.unwrap();
+
+    signal_process_group(process_group_id, "KILL")
+        .await
+        .unwrap();
 }
