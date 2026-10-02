@@ -30,7 +30,10 @@ run. The two decisions need different evidence.
    listener refuses at once; a live worker's listener accepts the connection in the kernel
    even while the process is stopped or busy. A connect that succeeds, times out, or fails
    any other way is inconclusive and the row is kept.
-2. A row with no recorded endpoint keeps today's behaviour: it is retired.
+2. A row with no recorded endpoint is retired only when it was registered more than
+   `UNRECORDED_ENDPOINT_GRACE` (15 min) ago. A starting supervisor records its endpoint or
+   retires its own row within its startup deadline (at most 465 s, VideoToolbox) plus its
+   registry writes, so an older endpoint-less row has no supervisor still starting it.
 3. Self-heal treats a retirement `CONFLICT` as done when re-reading the row shows it
    retired. Worker epochs advance only on retirement, so the conflict means a peer
    retired the row first.
@@ -39,15 +42,17 @@ run. The two decisions need different evidence.
 
 ## Consequences
 
-- A live sibling with a recorded endpoint is not retired by a starting peer's self-heal,
-  however long it takes to answer.
+- A live sibling is not retired by a starting peer's self-heal, however long its worker
+  takes to answer or, within the grace, to record its endpoint.
 - A worker whose process is alive but wedged with its port open is no longer self-healed.
   Dispatch still excludes it through the probe. Its supervisor still retires it on
   shutdown, or an operator can retire it by hand.
-- A stale row whose port another process has since bound is kept until that port frees.
-  The dispatch probe excludes it when that process does not speak the handshake.
-- A row registered but not yet given an endpoint (a peer mid-startup) is still retired.
-  That race remains open (decision 2).
+- A stale row whose port another process has since bound is kept until that port frees,
+  as the handshake verdict also kept it. When the new owner is another voom worker, the
+  unauthenticated dispatch handshake passes too, so the stale row stays dispatchable until
+  that worker exits.
+- A row left endpoint-less by a supervisor killed mid-startup is healed only after the
+  15-minute grace.
 - A peer that starts while a sibling's worker is shutting down can still retire that row
   correctly, and the sibling's shutdown then reports `CONFLICT`. `shutdown_and_retire` is
   unchanged here.
@@ -64,6 +69,11 @@ run. The two decisions need different evidence.
   supervisor and a TTL that is again a timing guess.
 - **Treat `already retired` as success in `shutdown_and_retire` only.** judgment: the live
   worker stays retired and undispatchable; it hides the wrong verdict rather than fixing it.
+- **Remove self-heal and rely on dispatch exclusion.** judgment: self-heal is the only
+  automatic reaper for node-less local rows; without it hard-killed rows accumulate and each
+  costs a dispatch probe per run.
+- **Retire endpoint-less rows at once, as before.** judgment: a peer mid-startup has no
+  endpoint yet, so this retires a live sibling — the #667 failure by another path.
 - **Do nothing.** verified: the triage repro (stop the first `mkvtoolnix` worker child with
   SIGSTOP, start a second supervisor, resume and shut the first down) exits 2 with a
   `CONFLICT` envelope on stdout at base `08d779bd`, Linux x86_64.
