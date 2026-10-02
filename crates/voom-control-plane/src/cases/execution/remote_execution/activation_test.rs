@@ -343,7 +343,34 @@ async fn activation_persists_accelerator_only_on_the_transcode_capability() {
     let transcode_extra = serde_json::from_str::<serde_json::Value>(&rows[1].2).unwrap();
     assert_eq!(transcode_extra["accelerator"]["backend"], "vaapi");
 }
+
+/// Keeps a thread-scoped log capture alive together with the dispatcher that protects it.
+struct LogCapture {
+    _default: tracing::subscriber::DefaultGuard,
+    _interest_peer: tracing::Dispatch,
+}
+
 impl LogBuffer {
+    /// Installs this buffer as the current thread's subscriber.
+    ///
+    /// tracing-core caches each callsite's interest process-wide. While exactly one dispatcher
+    /// is registered, it computes that interest from the default subscriber of whichever thread
+    /// first reaches the callsite, so a parallel test without a subscriber can cache the quota
+    /// warning as never-enabled and starve this capture (#609). A second live dispatcher makes
+    /// registration consult every registered dispatcher, so the capture's interest always counts.
+    fn capture(&self) -> LogCapture {
+        let interest_peer = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(self.clone())
+            .finish();
+        LogCapture {
+            _default: tracing::subscriber::set_default(subscriber),
+            _interest_peer: interest_peer,
+        }
+    }
+
     fn text(&self) -> String {
         String::from_utf8(
             self.0
@@ -519,27 +546,14 @@ async fn remote_activation_samples_quota_window_after_writer_serialization() {
 async fn remote_activation_quota_rejection_is_operator_visible_without_secrets() {
     let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
     let registered = register_remote_node(&cp).await;
-    for ordinal in 1..=5 {
-        cp.remote_activate(activation_input_for(
-            registered.node.id,
-            registered.token.clone(),
-            ordinal,
-        ))
-        .await
-        .unwrap();
-    }
+    exhaust_activation_quota(&cp, &registered).await;
     let mut rejected = activation_input_for(registered.node.id, registered.token, 6);
     rejected.idempotency_key = "secret-idempotency-key".to_owned();
     rejected.request_hash = "secret-request-hash".to_owned();
     rejected.workers[0].logical_name = "secret-worker-name".to_owned();
     let rejected_incarnation = rejected.incarnation_id.to_string();
     let logs = LogBuffer::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let _capture = logs.capture();
     let error = cp.remote_activate(rejected).await.unwrap_err();
 
     assert_eq!(error.error_code(), ErrorCode::Conflict);
@@ -575,6 +589,52 @@ async fn remote_activation_quota_rejection_is_operator_visible_without_secrets()
     assert!(
         !output.contains(&rejected_incarnation),
         "captured activation logs:\n{output}"
+    );
+}
+
+/// Regression for #609. Callsite interest is registered once per process, so this test can only
+/// fail without the fix when it is the first to reach the quota warning, as when run alone.
+#[tokio::test(flavor = "current_thread")]
+async fn quota_rejection_capture_survives_first_hit_on_unsubscribed_thread() {
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    exhaust_activation_quota(&cp, &registered).await;
+    let logs = LogBuffer::default();
+    let _capture = logs.capture();
+
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+                let registered = register_remote_node(&cp).await;
+                exhaust_activation_quota(&cp, &registered).await;
+                cp.remote_activate(activation_input_for(
+                    registered.node.id,
+                    registered.token,
+                    6,
+                ))
+                .await
+                .unwrap_err();
+            });
+    })
+    .join()
+    .unwrap();
+    cp.remote_activate(activation_input_for(
+        registered.node.id,
+        registered.token,
+        6,
+    ))
+    .await
+    .unwrap_err();
+
+    let output = logs.text();
+    assert!(
+        output.contains("remote node activation quota exceeded"),
+        "a quota warning first reached on a thread without a subscriber must still reach \
+         this thread's capture; captured activation logs:\n{output}"
     );
 }
 
@@ -1405,6 +1465,21 @@ fn activation_input_for(
     input.request_hash = format!("activation-body-{ordinal}");
     input.incarnation_id = format!("{ordinal:032x}").parse().unwrap();
     input
+}
+
+async fn exhaust_activation_quota(
+    cp: &crate::ControlPlane,
+    registered: &crate::workers::RegisteredNode,
+) {
+    for ordinal in 1..=5 {
+        cp.remote_activate(activation_input_for(
+            registered.node.id,
+            registered.token.clone(),
+            ordinal,
+        ))
+        .await
+        .unwrap();
+    }
 }
 
 async fn activation_row_counts(cp: &crate::ControlPlane) -> Vec<i64> {
