@@ -624,13 +624,14 @@ async fn worker_status(cp: &ControlPlane, id: WorkerId) -> WorkerStatus {
         .status
 }
 
-/// A port held bound but not listening: connects are refused, and no other test can
-/// take the port while the socket lives.
-fn refusing_endpoint() -> (tokio::net::TcpSocket, SocketAddr) {
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let endpoint = socket.local_addr().unwrap();
-    (socket, endpoint)
+/// A loopback address with nothing bound to it: bind an ephemeral port, then release it.
+/// Holding the port bound without listening would refuse on Linux, but macOS drops the
+/// SYN for a bound socket instead of resetting it, so the connect would time out.
+fn closed_endpoint() -> SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -654,7 +655,7 @@ async fn self_heal_retires_a_row_whose_endpoint_refuses() {
     // A hard-killed supervisor's worker leaves a closed port: that row is stale
     // and must not accumulate.
     let (cp, _tmp) = crate::cases::cp().await;
-    let (_socket, endpoint) = refusing_endpoint();
+    let endpoint = closed_endpoint();
     let kind = LocalWorkerKind::Mkvtoolnix;
     let worker = register_local_row(&cp, kind, cp.clock().now(), Some(endpoint)).await;
 

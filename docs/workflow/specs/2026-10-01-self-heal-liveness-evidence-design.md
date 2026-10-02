@@ -99,8 +99,9 @@ Unit tests live in `crates/voom-control-plane/src/local_worker_test.rs`.
   `self_heal_keeps_a_row_whose_endpoint_accepts_but_never_answers`. Red at base: the row is
   retired (the 500 ms handshake times out).
   Green: `cargo test -p voom-control-plane --lib -- self_heal_ retire_stale_worker_ grace`.
-- Success 2 — Mode: focused-test. `self_heal_retires_a_row_whose_endpoint_refuses` (the port
-  is held bound without listening, so no other test can take it); also
+- Success 2 — Mode: focused-test. `self_heal_retires_a_row_whose_endpoint_refuses` (an
+  ephemeral port bound then released; a socket held bound without listening refuses on Linux
+  but macOS drops the SYN, so the connect would time out there); also
   `start_local_worker_self_heals_a_stale_same_name_worker` in
   `crates/voom-control-plane/tests/local_worker_lifecycle.rs`.
 - Success 3 — Mode: focused-test. `self_heal_keeps_a_fresh_row_without_an_endpoint` (red at
