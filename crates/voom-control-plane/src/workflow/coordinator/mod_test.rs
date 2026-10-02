@@ -3720,6 +3720,9 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
     use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
 
     let (cp, _db) = cp().await;
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let working = root.join(".committed").join("remux");
@@ -3829,6 +3832,9 @@ async fn promote_terminal_artifacts_ignores_unscoped_working_dir_artifacts() {
     use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
 
     let (cp, _db) = cp().await;
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let working = root.join(".committed").join("remux");
@@ -3874,11 +3880,108 @@ async fn promote_terminal_artifacts_ignores_unscoped_working_dir_artifacts() {
     );
 }
 
+/// ADR 0097: promotion resolves the durable output root from the artifact's own
+/// root's `default_output_root_id`. Here that output root is a distinct root
+/// and the artifact's root names no staging default, so the promotion lands on
+/// the output root only if `promote_artifact` takes the output route — the
+/// staging route fails closed and the removed fallback would record the
+/// artifact's own root.
+#[tokio::test]
+async fn promotion_resolves_the_artifact_roots_own_output_default() {
+    use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
+    use voom_core::{NodeId, ProviderLocator, StorageProviderKind};
+    use voom_store::repo::library::library_roots::{
+        HiddenFilePolicy, LibraryRootUpdate, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    };
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let working = root.join(".committed").join("remux");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let locator = out_dir.display().to_string();
+    let output_root = cp
+        .create_library_root(NewLibraryRoot {
+            library_id: voom_core::LibraryId(9_000_001),
+            owner_node_id: NodeId(9_000_001),
+            provider_kind: StorageProviderKind::LocalFilesystem,
+            provider_locator: ProviderLocator::new(locator.clone()).unwrap(),
+            display_locator: locator,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            extension_allowlist: Vec::new(),
+            scan_mode: LibraryScanMode::ManualRecursive,
+            symlink_policy: SymlinkPolicy::Reject,
+            hidden_file_policy: HiddenFilePolicy::Ignore,
+            max_depth: None,
+            stability_seconds: 0,
+            debounce_seconds: 0,
+            default_output_root_id: None,
+            default_staging_root_id: None,
+            default_backup_root_id: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    cp.activate_library_root(output_root.id, "promotion-output".to_owned())
+        .await
+        .unwrap();
+    cp.update_library_root(
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        LibraryRootUpdate {
+            default_output_root_id: Some(Some(output_root.id)),
+            ..LibraryRootUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    let artifact_path = working.join("run-a").join("Movie.remux.mkv");
+    let artifact = seed_terminal_artifact(
+        &cp,
+        "/library/run-a/Movie.mkv",
+        "hash-run-a",
+        &artifact_path,
+    )
+    .await;
+    let plan = PromotionPlan {
+        pairs: vec![PromotionPair {
+            working_dir: working,
+            output_dir: out_dir.clone(),
+        }],
+    };
+
+    cp.promote_terminal_artifacts(
+        &plan,
+        &[artifact.location_id],
+        std::path::Path::new(""),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let location = cp
+        .identity()
+        .list_live_file_locations_by_version(artifact.version_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|location| location.id == artifact.location_id)
+        .unwrap();
+    let (storage_root_id, relative) = location.rooted_address().unwrap();
+    assert_eq!(storage_root_id, output_root.id);
+    assert_eq!(relative.as_str(), "Movie.remux.mkv");
+    assert!(out_dir.join("Movie.remux.mkv").is_file());
+}
+
 #[tokio::test]
 async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
     use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
 
     let (cp, _db) = cp().await;
+    voom_store::test_support::set_test_storage_root_self_defaults(cp.pool_for_test())
+        .await
+        .unwrap();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let working = root.join(".committed").join("remux");

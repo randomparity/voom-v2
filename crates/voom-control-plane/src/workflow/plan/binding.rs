@@ -515,7 +515,6 @@ pub(crate) mod media_dispatch {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum DestinationRole {
         /// `LibraryRoot.default_output_root_id`
-        #[cfg_attr(not(test), expect(dead_code))] // T8: output-root destinations
         Output,
         /// `LibraryRoot.default_staging_root_id`
         Staging,

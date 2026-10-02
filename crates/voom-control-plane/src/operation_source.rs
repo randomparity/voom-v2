@@ -7,11 +7,13 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use voom_core::{FileLocationId, FileVersionId, ProviderRelativeLocator, StorageRootId, VoomError};
-use voom_store::repo::library::library_roots::EffectiveLibraryRoot;
+use voom_store::repo::library::library_roots::{EffectiveLibraryRoot, LibraryRoot};
 use voom_store::repo::media::identity::{FileLocation, FileLocationAddress, FileLocationRepo};
 
 use crate::ControlPlane;
 use crate::artifact::fs::{canonical_existing_file_no_symlink, canonical_new_leaf_no_symlink};
+use crate::workflow::plan::binding::media_dispatch::DestinationRole;
+use crate::workflow::plan::envelope::destination_root;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SelectedSource {
@@ -155,14 +157,85 @@ pub(crate) async fn resolve_root_relative_existing_path(
     Ok(canonical)
 }
 
-pub(crate) async fn resolve_artifact_target(
+/// Resolve a pre-promotion commit target inside the staging root that
+/// `destination_root` resolves for the source root (ADR 0097).
+///
+/// The commit address is scratch awaiting promotion, so it is contained by the
+/// registered staging root, never by an output root; an unconfigured staging
+/// default fails closed.
+pub(crate) async fn resolve_pre_promotion_target(
     cp: &ControlPlane,
     operation_label: &'static str,
     source_storage_root_id: StorageRootId,
     requested_target: &std::path::Path,
 ) -> Result<(StorageRootId, ProviderRelativeLocator, PathBuf), VoomError> {
-    let (target_storage_root_id, root_path) =
-        artifact_target_root(cp, operation_label, source_storage_root_id).await?;
+    let source = library_root(cp, source_storage_root_id).await?;
+    let staging_root_id =
+        destination_root(cp, DestinationRole::Staging, source_storage_root_id).await?;
+    resolve_target_in_root(
+        cp,
+        operation_label,
+        DestinationRole::Staging,
+        &source,
+        staging_root_id,
+        requested_target,
+    )
+    .await
+}
+
+/// Resolve a durable output target inside the `default_output_root_id` of
+/// `storage_root_id` itself (ADR 0097).
+///
+/// There is no fallback to `storage_root_id`: an unconfigured output default
+/// fails closed with the command that configures one.
+pub(crate) async fn resolve_output_target(
+    cp: &ControlPlane,
+    operation_label: &'static str,
+    storage_root_id: StorageRootId,
+    requested_target: &std::path::Path,
+) -> Result<(StorageRootId, ProviderRelativeLocator, PathBuf), VoomError> {
+    let root = library_root(cp, storage_root_id).await?;
+    let output_root_id = root.default_output_root_id.ok_or_else(|| {
+        VoomError::Config(format!(
+            "{operation_label}: storage root {storage_root_id} has no default output root; \
+             configure one with `voom library root update --root-id {storage_root_id} \
+             --output-root <id>`"
+        ))
+    })?;
+    resolve_target_in_root(
+        cp,
+        operation_label,
+        DestinationRole::Output,
+        &root,
+        output_root_id,
+        requested_target,
+    )
+    .await
+}
+
+async fn resolve_target_in_root(
+    cp: &ControlPlane,
+    operation_label: &'static str,
+    role: DestinationRole,
+    naming: &LibraryRoot,
+    target_storage_root_id: StorageRootId,
+    requested_target: &std::path::Path,
+) -> Result<(StorageRootId, ProviderRelativeLocator, PathBuf), VoomError> {
+    let target = cp
+        .effective_library_root(target_storage_root_id)
+        .await?
+        .ok_or_else(|| VoomError::NotFound(format!("storage root {target_storage_root_id}")))?;
+    if target.root.library_id != naming.library_id {
+        return Err(VoomError::database(format!(
+            "storage root {} default {} root {target_storage_root_id} \
+             belongs to library {}, expected {}",
+            naming.id,
+            role.as_str(),
+            target.root.library_id,
+            naming.library_id
+        )));
+    }
+    let root_path = require_effective_local_root_path(cp, operation_label, &target).await?;
     let canonical_target = canonical_new_leaf_no_symlink(requested_target).await?;
     rooted_target_address(
         operation_label,
@@ -172,36 +245,14 @@ pub(crate) async fn resolve_artifact_target(
     )
 }
 
-async fn artifact_target_root(
+async fn library_root(
     cp: &ControlPlane,
-    operation_label: &'static str,
-    source_storage_root_id: StorageRootId,
-) -> Result<(StorageRootId, PathBuf), VoomError> {
-    let source = cp
-        .effective_library_root(source_storage_root_id)
+    storage_root_id: StorageRootId,
+) -> Result<LibraryRoot, VoomError> {
+    cp.libraries
+        .get_library_root(storage_root_id)
         .await?
-        .ok_or_else(|| VoomError::NotFound(format!("storage root {source_storage_root_id}")))?;
-    let source_library_id = source.root.library_id;
-    let target_storage_root_id = source
-        .root
-        .default_output_root_id
-        .unwrap_or(source_storage_root_id);
-    let target = if target_storage_root_id == source_storage_root_id {
-        source
-    } else {
-        cp.effective_library_root(target_storage_root_id)
-            .await?
-            .ok_or_else(|| VoomError::NotFound(format!("storage root {target_storage_root_id}")))?
-    };
-    if target.root.library_id != source_library_id {
-        return Err(VoomError::database(format!(
-            "storage root {source_storage_root_id} default output root {target_storage_root_id} \
-             belongs to library {}, expected {source_library_id}",
-            target.root.library_id
-        )));
-    }
-    let root_path = require_effective_local_root_path(cp, operation_label, &target).await?;
-    Ok((target_storage_root_id, root_path))
+        .ok_or_else(|| VoomError::NotFound(format!("storage root {storage_root_id}")))
 }
 
 fn rooted_target_address(

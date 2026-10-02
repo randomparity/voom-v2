@@ -227,7 +227,7 @@ async fn read_prepare_inputs(
     };
     let source = read_commit_source_facts(cp, tx, input.artifact_handle_id, &context).await?;
     let (target_storage_root_id, target_relative_locator, resolved_target_path) =
-        crate::operation_source::resolve_artifact_target(
+        crate::operation_source::resolve_pre_promotion_target(
             cp,
             "artifact commit",
             source.source_storage_root_id,

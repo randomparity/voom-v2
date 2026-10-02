@@ -736,7 +736,7 @@ impl ControlPlane {
         let dest_dir = ensure_output_dir(dest_dir).await?;
         let dest = dest_dir.join(file_name);
         let (target_storage_root_id, target_relative_locator, dest) =
-            crate::operation_source::resolve_artifact_target(
+            crate::operation_source::resolve_output_target(
                 self,
                 "workflow promotion",
                 artifact.storage_root_id,

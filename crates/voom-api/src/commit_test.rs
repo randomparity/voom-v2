@@ -57,6 +57,9 @@ async fn commit_fixture() -> CommitApiFixture {
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_self_defaults(&pool)
+        .await
+        .unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();
     let cp = cp.with_local_node_id(Some(voom_core::NodeId(9_000_001)));
     let node = SimulatedOwnerNode::new().unwrap();
