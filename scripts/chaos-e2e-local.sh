@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Known limitation (#623): this script is not exercised by default or in CI
+# (`just chaos-e2e-ci` runs the Rust harness only), and it is stale against the
+# current CLI. `voom scan` takes `--root <id>` for a node-owned storage root, so
+# the `scan --path` calls below fail with BAD_ARGS, and nothing here registers a
+# node, library, or root. Neither CHAOS_EXECUTE_POLICY=report nor =execute reaches
+# a policy step until that is repaired.
+#
+# Staging layout for the execute path (ADR 0097): `--staging-root` must be a
+# registered root that some root names as `default_staging_root_id`, with an
+# output default registered, as crates/voom-cli/tests/chaos_librarian_e2e.rs does
+# for the scan root. A sibling directory no `library_roots` row describes is not
+# a staging root. Registering that configuration here, and reconciling the
+# `--staging-root` flag with `default_staging_root_id`, is owned by #618.
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 chaos_dir="$repo_root/third_party/chaos-librarian"
 
@@ -158,13 +172,13 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
         policy_input_set_id="$(jq -r '.data.input_set.input_set_id // empty' "$policy_input_out")"
         policy_report_out="$workdir/policy-report-$checkpoint.json"
         if [[ "$execute_policy" = "execute" ]]; then
-          mkdir -p "$workdir/staging-$checkpoint" "$workdir/output-$checkpoint"
+          mkdir -p "$library_dir/voom-output"
           set +e
           "$voom_bin" --database-url "$url" compliance execute \
             --policy-version-id "$policy_version_id" \
             --input-set-id "$policy_input_set_id" \
-            --staging-root "$workdir/staging-$checkpoint" \
-            --output-dir "$workdir/output-$checkpoint" > "$policy_report_out"
+            --staging-root "$library_dir" \
+            --output-dir "$library_dir/voom-output" > "$policy_report_out"
           policy_report_rc=$?
           set -e
           policy_status="executed"

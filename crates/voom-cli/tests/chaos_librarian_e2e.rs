@@ -244,11 +244,17 @@ async fn transcode_required_settles_through_owner_node_and_commits_hevc_mkv() {
             .any(|node| node["operation_kind"] == "transcode_video")
     );
 
-    // The staging flag mirrors the storage-root path (the library): the
-    // coordinator's promotion plan pairs `<staging>/.committed/<op>` working
-    // dirs with the operator output dir, and a staging root outside the storage
-    // root makes the commit path escape it.
+    // ADR 0097: the staging path must be a registered root that some root names
+    // as `default_staging_root_id`; no nesting relative to the output directory
+    // is required. `configure_local_root` makes the scan root its own staging
+    // default, so the scan root conforms. The CLI does not reject other paths
+    // itself, so assert the layout here to keep an unregistered sibling out.
     let stage = run.scan_root();
+    assert!(
+        db.is_registered_staging_root(&stage).await.unwrap(),
+        "staging path {} names no registered default_staging_root_id root",
+        stage.display()
+    );
     let out = stage.join("voom-output");
     let execute = run_voom(
         &db.url,
@@ -631,4 +637,15 @@ async fn seed_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> 
         .await
         .unwrap();
     SeededChaosRun { run, db, seeded }
+}
+
+#[tokio::test]
+async fn staging_path_outside_registered_roots_is_not_a_staging_root() {
+    let library = tempfile::tempdir().unwrap();
+    let sibling = tempfile::tempdir().unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    db.configure_local_root(library.path()).await.unwrap();
+
+    assert!(db.is_registered_staging_root(library.path()).await.unwrap());
+    assert!(!db.is_registered_staging_root(sibling.path()).await.unwrap());
 }
