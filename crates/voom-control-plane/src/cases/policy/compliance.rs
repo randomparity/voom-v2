@@ -7,8 +7,8 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde_json::json;
 use voom_core::{
-    ErrorCode, FailureClass, FileVersionId, OperationKind, PROTOCOL_VERSION, PolicyInputSetId,
-    PolicyVersionId, TicketId, TicketOperation, VoomError, WorkerId,
+    ErrorCode, FailureClass, FileVersionId, OperationKind, PolicyInputSetId, PolicyVersionId,
+    TicketId, TicketOperation, VoomError, WorkerId,
 };
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::PlanOperationKind;
@@ -1191,7 +1191,7 @@ impl ControlPlane {
     }
 
     /// [`Self::policy_runtime_registry`] with each worker's recorded endpoint
-    /// probed for liveness, dropping any whose `handshake` does not succeed
+    /// probed for liveness, dropping any whose authenticated identity does not match
     /// within [`LIVENESS_PROBE_TIMEOUT`]. A stale endpoint left by a
     /// hard-killed `run-local` is excluded here so `execute` fails fast before
     /// dispatch instead of mid-workflow after partial commits.
@@ -1205,8 +1205,8 @@ impl ControlPlane {
         Ok(self.probe_live_runtimes(registered).await)
     }
 
-    /// Drop every worker whose endpoint does not complete a handshake within
-    /// [`LIVENESS_PROBE_TIMEOUT`], returning only the reachable runtimes.
+    /// Drop workers whose endpoint does not authenticate the recorded identity within
+    /// [`LIVENESS_PROBE_TIMEOUT`], returning only the authenticated runtimes.
     async fn probe_live_runtimes(
         &self,
         mut registry: WorkerRuntimeRegistry,
@@ -1215,7 +1215,7 @@ impl ControlPlane {
         for (worker_id, runtime) in registry.entries() {
             let probe = tokio::time::timeout(
                 LIVENESS_PROBE_TIMEOUT,
-                runtime.client.handshake(PROTOCOL_VERSION),
+                runtime.client.identity(&runtime.credentials),
             )
             .await;
             if !matches!(probe, Ok(Ok(_))) {

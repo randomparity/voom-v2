@@ -779,6 +779,92 @@ async fn live_policy_runtime_registry_drops_unreachable_endpoint() {
 }
 
 #[tokio::test]
+async fn live_policy_runtime_registry_requires_recorded_identity() {
+    use std::sync::Arc;
+    use voom_worker_protocol::{
+        ClientHandle, HttpClient, HttpServer, ServerHandle, WorkerCredentials,
+    };
+
+    let (cp, _tmp) = cp().await;
+    let credentials = WorkerCredentials {
+        worker_id: voom_core::WorkerId(670),
+        worker_epoch: 1,
+        secret: secrecy::SecretString::from("liveness-test-secret"),
+    };
+    let running = HttpServer::new(
+        credentials.clone(),
+        Arc::new(|_| {
+            Box::pin(async {
+                Err(voom_worker_protocol::ProtocolError::InvalidPayload {
+                    detail: "liveness probe must not dispatch".to_owned(),
+                })
+            })
+        }),
+    )
+    .serve("127.0.0.1:0".parse().unwrap())
+    .await
+    .unwrap();
+    let client = Arc::new(HttpClient::new(running.bound));
+    let handshake = client.handshake(voom_core::PROTOCOL_VERSION).await;
+    let self_identity = client.identity(&credentials).await;
+    let mut wrong_id = credentials.clone();
+    wrong_id.worker_id = voom_core::WorkerId(671);
+    let mut wrong_epoch = credentials.clone();
+    wrong_epoch.worker_epoch += 1;
+    let mut wrong_secret = credentials.clone();
+    wrong_secret.secret = secrecy::SecretString::from("other-liveness-test-secret");
+    let mut observed = Vec::new();
+    for (expected, retained) in [
+        (credentials, true),
+        (wrong_id, false),
+        (wrong_epoch, false),
+        (wrong_secret, false),
+    ] {
+        let worker_id = expected.worker_id;
+        let mut registry = WorkerRuntimeRegistry::new();
+        registry.register_in_process_runtime(worker_id, client.clone(), expected);
+        let live = cp.probe_live_runtimes(registry).await;
+        observed.push((live.get(worker_id).is_ok(), retained));
+    }
+    running.shutdown.send(()).unwrap();
+    running.joined.await.unwrap();
+
+    assert!(
+        handshake.is_ok(),
+        "the replacement speaks the worker protocol"
+    );
+    assert!(
+        self_identity.is_ok(),
+        "the replacement has a valid own identity"
+    );
+    for (actual, expected) in observed {
+        assert_eq!(actual, expected, "liveness must bind the recorded identity");
+    }
+}
+
+#[tokio::test]
+async fn live_policy_runtime_registry_drops_nonresponsive_endpoint() {
+    let (cp, _tmp) = cp().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let worker_id = register_policy_worker_with_extra(
+        &cp,
+        OperationKind::TranscodeVideo,
+        "policy-test-nonresponsive",
+        serde_json::json!({
+            "endpoint": listener.local_addr().unwrap().to_string(),
+            "secret": "policy-nonresponsive-secret",
+        }),
+    )
+    .await;
+    let live = tokio::time::timeout(Duration::from_secs(2), cp.live_policy_runtime_registry())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(live.get(worker_id).is_err());
+    drop(listener);
+}
+
+#[tokio::test]
 async fn execute_reports_actionable_error_when_no_live_worker_for_remux() {
     let (cp, _tmp) = cp().await;
     let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
