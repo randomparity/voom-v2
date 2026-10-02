@@ -87,7 +87,9 @@ async fn start_local_worker_self_heals_a_stale_same_name_worker() {
     let first_id = first.handle().worker_id;
     // Simulate a hard kill that left a stale registered row: drop the running
     // worker without retiring it. Drop kills the child but leaves the DB row.
+    let first_endpoint = first.handle().endpoint;
     drop(first);
+    wait_until_closed(first_endpoint).await;
 
     let second = cp
         .start_local_worker(LocalWorkerKind::Ffmpeg)
@@ -178,6 +180,19 @@ async fn shutdown_stops_worker_when_durable_retirement_fails() {
         TcpStream::connect(endpoint).await.is_err(),
         "the child process must stop before retirement failure is returned"
     );
+}
+
+/// `drop` sends SIGKILL without waiting for the exit. A hard-killed supervisor's worker
+/// is a closed port once the process is gone; wait for that state before restarting.
+async fn wait_until_closed(endpoint: std::net::SocketAddr) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(endpoint).await.is_ok() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "killed worker still accepts connections on {endpoint}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 async fn live_worker_ids(cp: &ControlPlane, base: &str) -> Vec<u64> {

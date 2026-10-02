@@ -10,12 +10,14 @@
 //! discover and dispatch to it. The child's stdin is kept piped; closing it
 //! triggers the worker's watchdog shutdown.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::Stdio;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
 use voom_core::{OperationKind, TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
@@ -29,6 +31,7 @@ use voom_worker_protocol::{
 };
 
 use crate::ControlPlane;
+use crate::cases::policy::compliance::runtime_metadata;
 use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_hex_128};
 use voom_store::tx::begin_write_first;
 
@@ -41,6 +44,12 @@ pub(crate) const VAAPI_STARTUP_TIMEOUT: Duration = VAAPI_PREFLIGHT_BUDGET;
 pub(crate) const VIDEOTOOLBOX_STARTUP_TIMEOUT: Duration = VIDEOTOOLBOX_PREFLIGHT_BUDGET;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_HEAL_SCAN_LIMIT: u32 = 1000;
+/// Bound on the refused-connect check. Only an inconclusive endpoint waits this long;
+/// a closed loopback port refuses at once (ADR 0102).
+const SELF_HEAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// Age after which a row with no recorded endpoint has no supervisor still starting it:
+/// every startup deadline plus its registry writes ends well within it (ADR 0102).
+const UNRECORDED_ENDPOINT_GRACE: Duration = Duration::from_mins(15);
 
 /// The kind of bundled mutation worker to launch locally.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -418,8 +427,13 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Retire same-kind rows a hard-killed supervisor left behind. A row with a recorded
+    /// endpoint is retired only when that endpoint refuses connections: a busy or stopped
+    /// live worker still accepts them, and the dispatch handshake probe cannot tell the two
+    /// apart. A row without one is retired only once no supervisor can still be starting it
+    /// (ADR 0102).
     async fn self_heal_stale_workers(&self, kind: LocalWorkerKind) -> Result<(), VoomError> {
-        let live_runtimes = self.live_policy_runtime_registry().await?;
+        let endpoints = self.recorded_endpoints(kind).await?;
         let inspections = self
             .list_worker_inspections(None, SELF_HEAL_SCAN_LIMIT)
             .await?;
@@ -436,12 +450,60 @@ impl ControlPlane {
             ) {
                 continue;
             }
-            if live_runtimes.contains(worker.id) {
-                continue;
+            let stale = match endpoints.get(&worker.id) {
+                Some(endpoint) => endpoint_refuses_connections(*endpoint).await,
+                None => worker.registered_at + UNRECORDED_ENDPOINT_GRACE < now,
+            };
+            if stale {
+                self.retire_stale_worker(worker.id, worker.epoch, now)
+                    .await?;
             }
-            self.retire_worker(worker.id, worker.epoch, now).await?;
         }
         Ok(())
+    }
+
+    async fn recorded_endpoints(
+        &self,
+        kind: LocalWorkerKind,
+    ) -> Result<HashMap<WorkerId, SocketAddr>, VoomError> {
+        let operations: Vec<TicketOperation> = kind
+            .operations()
+            .iter()
+            .copied()
+            .map(TicketOperation::from)
+            .collect();
+        let mut endpoints = HashMap::new();
+        for capability in self
+            .workers
+            .runtime_capabilities_for_operations(&operations)
+            .await?
+        {
+            if let Some((endpoint, _secret)) = runtime_metadata(&capability.extra)? {
+                endpoints.insert(capability.worker_id, endpoint);
+            }
+        }
+        Ok(endpoints)
+    }
+
+    /// Retire a row self-heal judged stale. Worker epochs advance only on retirement, so a
+    /// conflict on a row that now reads retired means a starting peer retired it first.
+    async fn retire_stale_worker(
+        &self,
+        id: WorkerId,
+        epoch: u64,
+        now: time::OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        match self.retire_worker(id, epoch, now).await {
+            Ok(_) => Ok(()),
+            Err(error @ VoomError::Conflict(_)) => {
+                let retired = self
+                    .get_worker_inspection(id)
+                    .await?
+                    .is_some_and(|inspection| inspection.worker.status == WorkerStatus::Retired);
+                if retired { Ok(()) } else { Err(error) }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn register_spawn_and_claim(
@@ -619,6 +681,15 @@ async fn current_epoch(cp: &ControlPlane, worker_id: WorkerId) -> Result<u64, Vo
         .await?
         .ok_or_else(|| VoomError::NotFound(format!("local worker {} not found", worker_id.0)))?;
     Ok(inspection.worker.epoch)
+}
+
+/// Positive evidence that nothing listens on a recorded endpoint (ADR 0102). A
+/// successful connect, a timeout, or any other error is inconclusive.
+async fn endpoint_refuses_connections(endpoint: SocketAddr) -> bool {
+    matches!(
+        timeout(SELF_HEAL_CONNECT_TIMEOUT, TcpStream::connect(endpoint)).await,
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused
+    )
 }
 
 fn spawn_worker(
