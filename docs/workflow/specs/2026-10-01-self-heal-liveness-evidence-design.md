@@ -107,7 +107,9 @@ Unit tests live in `crates/voom-control-plane/src/local_worker_test.rs`.
   base: retired) and `self_heal_retires_a_row_without_an_endpoint_after_the_grace`;
   `unrecorded_endpoint_grace_outlasts_every_startup_timeout` pins the bound.
 - Success 4 — Mode: focused-test. `retire_stale_worker_accepts_a_row_a_peer_already_retired`.
-  Red with a plain `retire_worker` call: `CONFLICT`.
+  Red with a plain `retire_worker` call: `CONFLICT`. The call from `self_heal_stale_workers`
+  into `retire_stale_worker` is covered by inspection only: no test can force two starters
+  to interleave between the scan and the retire without a scheduling seam.
 - Success 5 — Mode: task-test-not-applicable. Changed surface: a test helper's panic
   message. No executable consumer reads it; a test of its text would snapshot prose.
 - Success 6 — Mode: focused-test. Existing
