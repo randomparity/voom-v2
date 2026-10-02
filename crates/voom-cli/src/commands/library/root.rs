@@ -177,9 +177,18 @@ async fn update(cp: &ControlPlane, local: Local, args: LibraryRootUpdateArgs) ->
         max_depth: args.max_depth,
         stability_seconds: args.stability_seconds,
         debounce_seconds: args.debounce_seconds,
-        default_output_root_id: args.output_root.map(|id| Some(StorageRootId(id))),
-        default_staging_root_id: args.staging_root.map(|id| Some(StorageRootId(id))),
-        default_backup_root_id: args.backup_root.map(|id| Some(StorageRootId(id))),
+        default_output_root_id: args
+            .output_root
+            .map(|id| Some(StorageRootId(id)))
+            .or(args.clear_output_root.then_some(None)),
+        default_staging_root_id: args
+            .staging_root
+            .map(|id| Some(StorageRootId(id)))
+            .or(args.clear_staging_root.then_some(None)),
+        default_backup_root_id: args
+            .backup_root
+            .map(|id| Some(StorageRootId(id)))
+            .or(args.clear_backup_root.then_some(None)),
     };
     emit_root(
         cp,

@@ -724,10 +724,19 @@ pub struct LibraryRootUpdateArgs {
     pub debounce_seconds: Option<u32>,
     #[arg(long)]
     pub output_root: Option<u64>,
+    /// Clear the default output root.
+    #[arg(long, conflicts_with = "output_root")]
+    pub clear_output_root: bool,
     #[arg(long)]
     pub staging_root: Option<u64>,
+    /// Clear the default staging root.
+    #[arg(long, conflicts_with = "staging_root")]
+    pub clear_staging_root: bool,
     #[arg(long)]
     pub backup_root: Option<u64>,
+    /// Clear the default backup root.
+    #[arg(long, conflicts_with = "backup_root")]
+    pub clear_backup_root: bool,
 }
 
 macro_rules! value_enum_to_store {
