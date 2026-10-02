@@ -312,8 +312,9 @@ impl LocalWorker {
         let status = self.child.wait().unwrap();
         assert!(
             status.success(),
-            "run-local {} exited nonzero ({status}); stderr:\n{}",
+            "run-local {} exited nonzero ({status}); stdout:\n{}\nstderr:\n{}",
             self.kind,
+            self.stdout_lines.join("\n"),
             self.stderr_snapshot()
         );
         let last = self.stdout_lines.last().unwrap_or_else(|| {

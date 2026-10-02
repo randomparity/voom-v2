@@ -3,18 +3,22 @@
 //! worker binary built as a sibling) lives in
 //! `tests/local_worker_lifecycle.rs`.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use super::{
-    LocalVideoAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig, READINESS_LIMIT_BYTES,
-    ResolvedLocalVideoAcceleratorConfig, VAAPI_STARTUP_TIMEOUT, VIDEOTOOLBOX_STARTUP_TIMEOUT,
+    LocalVideoAcceleratorConfig, LocalWorkerKind, NVIDIA_STARTUP_TIMEOUT, NvidiaLocalWorkerConfig,
+    READINESS_LIMIT_BYTES, ResolvedLocalVideoAcceleratorConfig, STARTUP_TIMEOUT,
+    UNRECORDED_ENDPOINT_GRACE, VAAPI_STARTUP_TIMEOUT, VIDEOTOOLBOX_STARTUP_TIMEOUT,
     VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig, is_full_nvidia_uuid, parse_bound_line,
     parse_ioreg_platform_uuid, platform_resource_id, validate_bound_accelerator,
     validate_local_worker_config,
 };
 #[cfg(target_os = "linux")]
 use super::{kill_and_wait, process_group_has_members, signal_process_group};
-use voom_core::{OperationKind, TicketOperation};
+use crate::ControlPlane;
+use voom_core::{OperationKind, TicketOperation, WorkerId, WorkerKind, WorkerStatus};
+use voom_store::repo::execution::workers::{NewWorker, Worker};
 use voom_worker_protocol::{
     LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor,
     VideoAcceleratorDescriptor,
@@ -582,4 +586,142 @@ async fn failed_signal_to_a_populated_process_group_is_an_error() {
 
     kill_and_wait(&mut child).await.unwrap();
     assert!(matches!(result, Err(voom_core::VoomError::WorkerCrash(_))));
+}
+
+async fn register_local_row(
+    cp: &ControlPlane,
+    kind: LocalWorkerKind,
+    registered_at: time::OffsetDateTime,
+    endpoint: Option<SocketAddr>,
+) -> Worker {
+    let worker = cp
+        .register_supervisor_worker(NewWorker {
+            name: format!(
+                "{}-{}",
+                kind.base_name(),
+                crate::worker_process::random_hex_128()
+            ),
+            kind: WorkerKind::Local,
+            registered_at,
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    if let Some(endpoint) = endpoint {
+        cp.record_local_worker_registry(kind, worker.id, "s3cret", endpoint, None)
+            .await
+            .unwrap();
+    }
+    worker
+}
+
+async fn worker_status(cp: &ControlPlane, id: WorkerId) -> WorkerStatus {
+    cp.get_worker_inspection(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .worker
+        .status
+}
+
+/// A loopback address with nothing bound to it: bind an ephemeral port, then release it.
+/// Holding the port bound without listening would refuse on Linux, but macOS drops the
+/// SYN for a bound socket instead of resetting it, so the connect would time out.
+fn closed_endpoint() -> SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn self_heal_keeps_a_row_whose_endpoint_accepts_but_never_answers() {
+    // A busy or SIGSTOPped live worker still owns its listener, so the kernel
+    // accepts connections it never answers. Retiring that row makes the worker
+    // undispatchable for life and fails its supervisor's shutdown (#667).
+    let (cp, _tmp) = crate::cases::cp().await;
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let kind = LocalWorkerKind::Mkvtoolnix;
+    let endpoint = Some(stalled.local_addr().unwrap());
+    let worker = register_local_row(&cp, kind, cp.clock().now(), endpoint).await;
+
+    cp.self_heal_stale_workers(kind).await.unwrap();
+
+    assert_ne!(worker_status(&cp, worker.id).await, WorkerStatus::Retired);
+}
+
+#[tokio::test]
+async fn self_heal_retires_a_row_whose_endpoint_refuses() {
+    // A hard-killed supervisor's worker leaves a closed port: that row is stale
+    // and must not accumulate.
+    let (cp, _tmp) = crate::cases::cp().await;
+    let endpoint = closed_endpoint();
+    let kind = LocalWorkerKind::Mkvtoolnix;
+    let worker = register_local_row(&cp, kind, cp.clock().now(), Some(endpoint)).await;
+
+    cp.self_heal_stale_workers(kind).await.unwrap();
+
+    assert_eq!(worker_status(&cp, worker.id).await, WorkerStatus::Retired);
+}
+
+#[tokio::test]
+async fn self_heal_keeps_a_fresh_row_without_an_endpoint() {
+    // A sibling between registering its row and recording its endpoint is live;
+    // retiring it reproduces #667 by another path.
+    let (cp, _tmp) = crate::cases::cp().await;
+    let kind = LocalWorkerKind::Mkvtoolnix;
+    let worker = register_local_row(&cp, kind, cp.clock().now(), None).await;
+
+    cp.self_heal_stale_workers(kind).await.unwrap();
+
+    assert_ne!(worker_status(&cp, worker.id).await, WorkerStatus::Retired);
+}
+
+#[tokio::test]
+async fn self_heal_retires_a_row_without_an_endpoint_after_the_grace() {
+    // Past every startup deadline no supervisor is still starting the row, so a
+    // supervisor killed mid-startup does not leave it registered forever.
+    let (cp, _tmp) = crate::cases::cp().await;
+    let kind = LocalWorkerKind::Mkvtoolnix;
+    let registered_at = cp.clock().now() - UNRECORDED_ENDPOINT_GRACE - Duration::from_secs(1);
+    let worker = register_local_row(&cp, kind, registered_at, None).await;
+
+    cp.self_heal_stale_workers(kind).await.unwrap();
+
+    assert_eq!(worker_status(&cp, worker.id).await, WorkerStatus::Retired);
+}
+
+#[test]
+fn unrecorded_endpoint_grace_outlasts_every_startup_timeout() {
+    // The grace is only evidence of an abandoned row if every supervisor has given
+    // up starting by then, with room left for its registry writes.
+    let longest = [
+        STARTUP_TIMEOUT,
+        NVIDIA_STARTUP_TIMEOUT,
+        VAAPI_STARTUP_TIMEOUT,
+        VIDEOTOOLBOX_STARTUP_TIMEOUT,
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    assert!(UNRECORDED_ENDPOINT_GRACE >= longest + Duration::from_mins(5));
+}
+
+#[tokio::test]
+async fn retire_stale_worker_accepts_a_row_a_peer_already_retired() {
+    // Two starters can both judge one stale row dead; the slower one must not
+    // fail its own startup because the faster one retired the row first.
+    let (cp, _tmp) = crate::cases::cp().await;
+    let kind = LocalWorkerKind::Mkvtoolnix;
+    let worker = register_local_row(&cp, kind, cp.clock().now(), None).await;
+    let now = cp.clock().now();
+    cp.retire_worker(worker.id, worker.epoch, now)
+        .await
+        .unwrap();
+
+    cp.retire_stale_worker(worker.id, worker.epoch, now)
+        .await
+        .unwrap();
+
+    assert_eq!(worker_status(&cp, worker.id).await, WorkerStatus::Retired);
 }

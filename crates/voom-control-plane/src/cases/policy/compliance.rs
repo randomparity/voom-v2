@@ -1503,7 +1503,7 @@ fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &
 /// Extract the direct-dispatch endpoint a worker's capability metadata
 /// carries. Agent-supervised workers are envelope-dispatched (ADR 0075) and
 /// carry no endpoint: they contribute no runtime and are skipped, not errors.
-fn runtime_metadata(
+pub(crate) fn runtime_metadata(
     extra: &serde_json::Value,
 ) -> Result<Option<(SocketAddr, SecretString)>, VoomError> {
     let endpoint = extra.get("endpoint").and_then(serde_json::Value::as_str);
