@@ -1,8 +1,9 @@
 //! Production control-plane supervisor for a locally-launched mutation worker.
 //!
 //! [`ControlPlane::start_local_worker`] productizes the test-only
-//! `voom-test-support` launch helper: it self-heals unreachable same-kind
-//! workers, preserves reachable siblings, registers a node-less worker row,
+//! `voom-test-support` launch helper: it self-heals same-kind workers
+//! whose endpoint refuses connections or never recorded one within the grace
+//! (ADR 0102), preserves the rest, registers a node-less worker row,
 //! spawns the bundled mutation-worker binary (`voom-ffmpeg-worker` /
 //! `voom-mkvtoolnix-worker`) resolved as a sibling of the running executable,
 //! reads its bound endpoint from stdout, then records a capability carrying
@@ -223,8 +224,9 @@ impl RunningLocalWorker {
 impl ControlPlane {
     /// Launch a bundled mutation worker locally and register it for discovery.
     ///
-    /// Self-heals unreachable same-kind workers left by a previous hard kill,
-    /// preserves reachable siblings, registers a node-less worker row, spawns
+    /// Self-heals same-kind workers left by a previous hard kill whose endpoint
+    /// refuses connections or never recorded one within the grace (ADR 0102),
+    /// preserves the rest, registers a node-less worker row, spawns
     /// the bundled binary, reads its bound endpoint, then records the
     /// endpoint+secret capability and an execute grant. On spawn or bind failure
     /// the just-registered worker row is retired so no dangling worker is left
@@ -452,7 +454,7 @@ impl ControlPlane {
             }
             let stale = match endpoints.get(&worker.id) {
                 Some(endpoint) => endpoint_refuses_connections(*endpoint).await,
-                None => worker.registered_at + UNRECORDED_ENDPOINT_GRACE < now,
+                None => now - worker.registered_at > UNRECORDED_ENDPOINT_GRACE,
             };
             if stale {
                 self.retire_stale_worker(worker.id, worker.epoch, now)
