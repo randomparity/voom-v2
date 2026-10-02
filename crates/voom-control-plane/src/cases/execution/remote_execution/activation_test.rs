@@ -357,7 +357,9 @@ impl LogBuffer {
     /// is registered, it computes that interest from the default subscriber of whichever thread
     /// first reaches the callsite, so a parallel test without a subscriber can cache the quota
     /// warning as never-enabled and starve this capture (#609). A second live dispatcher makes
-    /// registration consult every registered dispatcher, so the capture's interest always counts.
+    /// registration consult every registered dispatcher, so the capture's interest counts. One
+    /// tracing-core window remains: a callsite's very first registration that started before
+    /// this capture existed can still finish by storing its single-dispatcher interest.
     fn capture(&self) -> LogCapture {
         let interest_peer = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let subscriber = tracing_subscriber::fmt()
