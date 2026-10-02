@@ -54,6 +54,28 @@ impl VoomTestDb {
         .await?;
         Ok(root_id)
     }
+
+    /// Whether `path` is the locator of a registered root that some root names
+    /// as its `default_staging_root_id` (ADR 0097). `compliance execute
+    /// --staging-root` does not itself reject any other path, so harnesses
+    /// assert this before passing one.
+    pub async fn is_registered_staging_root(
+        &self,
+        path: &Path,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let pool = voom_store::connect(&self.url).await?;
+        let locators: Vec<String> = sqlx::query_scalar(
+            "SELECT provider_locator FROM library_roots WHERE id IN \
+             (SELECT default_staging_root_id FROM library_roots \
+              WHERE default_staging_root_id IS NOT NULL)",
+        )
+        .fetch_all(&pool)
+        .await?;
+        let wanted = path.canonicalize()?;
+        Ok(locators
+            .iter()
+            .any(|locator| Path::new(locator).canonicalize().is_ok_and(|p| p == wanted)))
+    }
 }
 
 pub fn run_voom<I, S>(database_url: &str, args: I) -> Result<VoomOutput, Box<dyn std::error::Error>>
