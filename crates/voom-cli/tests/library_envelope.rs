@@ -222,6 +222,131 @@ mod library_envelope {
     }
 
     #[tokio::test]
+    async fn root_defaults_clear_independently_then_allow_retirement() {
+        let fx = fixture().await;
+        let (_path, _dir) = library_and_root(&fx.url);
+        let target_dir = tempfile::tempdir().unwrap();
+        let (code, target) = run(
+            &fx.url,
+            &[
+                "library",
+                "root",
+                "add",
+                "--library-id",
+                "1",
+                "--owner-node-id",
+                "1",
+                "--provider",
+                "local_filesystem",
+                "--provider-locator",
+                target_dir.path().to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 0, "{target}");
+        let target_id = target["data"]["root_id"].as_u64().unwrap();
+        let target_arg = target_id.to_string();
+        let (code, set) = run(
+            &fx.url,
+            &[
+                "library",
+                "root",
+                "update",
+                "--root-id",
+                "1",
+                "--output-root",
+                &target_arg,
+                "--staging-root",
+                &target_arg,
+                "--backup-root",
+                &target_arg,
+            ],
+        );
+        assert_eq!(code, 0, "{set}");
+        let fields = [
+            "default_output_root_id",
+            "default_staging_root_id",
+            "default_backup_root_id",
+        ];
+        let (code, unchanged) = run(
+            &fx.url,
+            &[
+                "library",
+                "root",
+                "update",
+                "--root-id",
+                "1",
+                "--stability-seconds",
+                "9",
+            ],
+        );
+        assert_eq!(code, 0, "{unchanged}");
+        for field in fields {
+            assert_eq!(set["data"][field], target_id);
+            assert_eq!(unchanged["data"][field], target_id);
+        }
+        let (code, blocked) = run(
+            &fx.url,
+            &["library", "root", "retire", "--root-id", &target_arg],
+        );
+        assert_eq!(code, 2);
+        assert_eq!(blocked["error"]["code"], "CONFLICT");
+        for (index, flag) in [
+            "--clear-output-root",
+            "--clear-staging-root",
+            "--clear-backup-root",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (code, cleared) = run(
+                &fx.url,
+                &["library", "root", "update", "--root-id", "1", flag],
+            );
+            assert_eq!(code, 0, "{cleared}");
+            let (code, persisted) = run(&fx.url, &["library", "root", "show", "--root-id", "1"]);
+            assert_eq!(code, 0, "{persisted}");
+            for (field_index, field) in fields.iter().enumerate() {
+                let expected = if field_index <= index {
+                    Value::Null
+                } else {
+                    target_id.into()
+                };
+                assert_eq!(cleared["data"][field], expected);
+                assert_eq!(persisted["data"][field], expected);
+            }
+            assert_eq!(persisted["data"]["stability_seconds"], 9);
+        }
+        let (code, retired) = run(
+            &fx.url,
+            &["library", "root", "retire", "--root-id", &target_arg],
+        );
+        assert_eq!(code, 0, "{retired}");
+        assert_eq!(retired["data"]["state"], "retired");
+    }
+
+    #[test]
+    fn root_defaults_clear_conflicts_are_bad_args() {
+        for (set, clear) in [
+            ("--output-root", "--clear-output-root"),
+            ("--staging-root", "--clear-staging-root"),
+            ("--backup-root", "--clear-backup-root"),
+        ] {
+            for tail in [[set, "2", clear], [clear, set, "2"]] {
+                let mut args = vec!["library", "root", "update", "--root-id", "1"];
+                args.extend(tail);
+                let (code, error) = run("sqlite:///unavailable-root-defaults-test.db", &args);
+                assert_eq!(code, 1, "{error}");
+                assert_eq!(error["status"], "error");
+                assert_eq!(error["error"]["code"], "BAD_ARGS");
+                let message = error["error"]["message"].as_str().unwrap();
+                assert!(message.contains("cannot be used with"), "{message}");
+                assert!(message.contains(set), "{message}");
+                assert!(message.contains(clear), "{message}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn root_retire_preserves_identity() {
         let fx = fixture().await;
         let (_path, _dir) = library_and_root(&fx.url);
