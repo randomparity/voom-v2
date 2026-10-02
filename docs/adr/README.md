@@ -99,3 +99,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0097](0097-pre-promotion-addresses-contained-by-their-own-root.md) | Pre-promotion artifact addresses are contained by their own storage root |
 | [0098](0098-build-bundled-sqlite-without-memstatus.md) | Build bundled SQLite without the global memory-statistics mutex |
 | [0101](0101-independent-required-source-checks.md) | Schedule source checks independently and require their results |
+| [0102](0102-self-heal-retires-only-on-a-refused-endpoint.md) | Local-worker self-heal retires only on a refused endpoint |
