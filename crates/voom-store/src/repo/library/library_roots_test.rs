@@ -506,6 +506,104 @@ async fn partial_root_updates_preserve_unrelated_settings_and_can_clear_defaults
     assert_eq!(cleared.default_output_root_id, None);
 }
 
+// A zero busy timeout distinguishes the opener from the later UPDATE without
+// depending on when another task gets scheduled (ADR 0083).
+#[tokio::test]
+async fn update_root_contends_at_transaction_open() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "films", true).await;
+    let owner = node(&repo, "node-a", NodeStatus::Active).await;
+    let root = repo
+        .create_library_root(new_root(library_id, owner, "/media"), at(1))
+        .await
+        .unwrap();
+    let mut connections = Vec::new();
+    for _ in 0..repo.pool.options().get_max_connections() {
+        let mut connection = repo.pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA busy_timeout = 0")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        connections.push(connection);
+    }
+    for mut connection in connections {
+        connection.return_to_pool().await;
+    }
+    let holder = repo.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let update = LibraryRootUpdate {
+        default_output_root_id: Some(Some(root.id)),
+        debounce_seconds: Some(45),
+        ..LibraryRootUpdate::default()
+    };
+
+    let result = repo
+        .update_library_root(root.id, update.clone(), at(2))
+        .await;
+    holder.rollback().await.unwrap();
+    let error = result.unwrap_err();
+    assert!(
+        matches!(&error, VoomError::Database { .. }),
+        "writer contention must remain a database error: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("library_roots: update_library_root"),
+        "the update must contend at its opener, not upgrade a read snapshot: {error}"
+    );
+    assert_eq!(
+        repo.get_library_root(root.id).await.unwrap(),
+        Some(root.clone())
+    );
+
+    let updated = repo
+        .update_library_root(root.id, update, at(2))
+        .await
+        .unwrap();
+    assert_eq!(updated.default_output_root_id, Some(root.id));
+    assert_eq!(updated.debounce_seconds, 45);
+    assert_eq!(repo.get_library_root(root.id).await.unwrap(), Some(updated));
+}
+
+#[tokio::test]
+async fn update_root_waits_out_a_writer() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "films", true).await;
+    let owner = node(&repo, "node-a", NodeStatus::Active).await;
+    let root = repo
+        .create_library_root(new_root(library_id, owner, "/media"), at(1))
+        .await
+        .unwrap();
+    let holder = repo.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let update = repo.update_library_root(
+        root.id,
+        LibraryRootUpdate {
+            default_output_root_id: Some(Some(root.id)),
+            debounce_seconds: Some(45),
+            ..LibraryRootUpdate::default()
+        },
+        at(2),
+    );
+    tokio::pin!(update);
+
+    // Retain the future across the bounded pending observation. This arm cannot
+    // prove it reached SQLite before release; the zero-timeout case proves the
+    // serialization point independently of scheduling.
+    let pending = tokio::time::timeout(std::time::Duration::from_millis(200), &mut update).await;
+    holder.rollback().await.unwrap();
+    assert!(
+        pending.is_err(),
+        "update returned while the writer held its lock: {pending:?}"
+    );
+    let updated = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+        .await
+        .expect("update did not finish after the competing writer released its lock")
+        .expect("update must wait for the writer instead of failing a lock upgrade");
+    assert_eq!(updated.default_output_root_id, Some(root.id));
+    assert_eq!(updated.debounce_seconds, 45);
+    assert_eq!(repo.get_library_root(root.id).await.unwrap(), Some(updated));
+}
+
 #[tokio::test]
 async fn set_root_enabled_distinguishes_missing_from_retired() {
     let (repo, _tmp) = repo().await;

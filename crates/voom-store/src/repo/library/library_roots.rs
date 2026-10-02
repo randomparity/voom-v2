@@ -13,7 +13,7 @@ use super::super::common::{
 };
 use super::libraries::is_unique_violation;
 use super::{SqliteLibraryRepo, commit, rollback};
-use crate::tx::{begin_read_then_write, begin_write_first};
+use crate::tx::begin_read_then_write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryScanMode {
@@ -304,7 +304,8 @@ impl SqliteLibraryRepo {
             update.default_backup_root_id.flatten(),
         ];
         let timestamp = iso8601(now)?;
-        let mut tx = begin_write_first(&self.pool, "library_roots: update_library_root").await?;
+        let mut tx =
+            begin_read_then_write(&self.pool, "library_roots: update_library_root").await?;
         let update_result = async {
             require_default_ids_in_library(&mut tx, current.library_id, &updated_defaults).await?;
             update_root_settings(&mut tx, id, &update, &timestamp).await
