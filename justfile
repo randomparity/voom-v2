@@ -15,6 +15,7 @@ setup:
     @echo "==> Verifying uv + Python 3.13"
     @command -v uv >/dev/null || { echo "Install uv: https://docs.astral.sh/uv/"; exit 1; }
     uv python install 3.13
+    just setup-workflow-tools
     @echo "==> Installing git hooks"
     prek install
     prek auto-update --cooldown-days 7
@@ -27,7 +28,8 @@ ci: source-checks platform-checks
     @echo "==> All CI checks passed"
 
 # Source guards retain both GNU and BSD coverage in CI
-source-checks: check-test-layout check-paused-time-db check-paused-time-db-selftest \
+source-checks: check-workflows check-workflows-selftest check-test-layout \
+    check-paused-time-db check-paused-time-db-selftest \
     check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
@@ -37,6 +39,16 @@ source-checks: check-test-layout check-paused-time-db check-paused-time-db-selft
 # Keep platform verification on both supported CI runners
 platform-checks: fmt-check lint select-ffmpeg-asset-selftest \
     run-constrained-selftest constrained-recipes-selftest test doc deny audit
+
+# Pin the same workflow analyzers locally and in source CI jobs
+setup-workflow-tools:
+    ./scripts/setup-workflow-tools.sh
+
+check-workflows:
+    ./scripts/check-workflows.sh
+
+check-workflows-selftest:
+    ./scripts/check-workflows-selftest.sh
 
 # Individual checks (also called by `ci`)
 fmt:
