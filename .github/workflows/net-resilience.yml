@@ -46,12 +46,43 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Open tracking issue
+      - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+
+          title="Scheduled net-resilience run failed"
+          # Search failure must not be mistaken for absence. Job-token search permission
+          # remains unverified until the first scheduled failure.
+          if ! search_json=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "in:title \"$title\" author:app/github-actions" \
+            --limit 50 \
+            --json number,title,author); then
+            echo "::error::could not search for an existing tracking issue; refusing to file a possible duplicate"
+            exit 1
+          fi
+
+          # Search narrows by containment; only an exact title from a bot is reusable.
+          existing=$(jq -r --arg title "$title" '
+            [ .[]
+              | select(.title == $title and .author.is_bot? == true)
+              | .number
+            ] | first // empty' <<<"$search_json")
+
+          if [[ -n $existing ]]; then
+            gh issue comment "$existing" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "The weekly scheduled net-resilience workflow failed again. Run: $RUN_URL"
+            exit 0
+          fi
+
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Scheduled net-resilience run failed" \
+            --title "$title" \
+            --label bug \
+            --label status:needs-triage \
             --body "The weekly scheduled net-resilience workflow failed. Run: $RUN_URL"
