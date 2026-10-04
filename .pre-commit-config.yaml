@@ -152,11 +152,12 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
-      # Deliberately lighter than CI's `just test` (no --all-features prebuild)
-      # to keep commits fast; the full feature-set test run is a CI gate.
+      # Deliberately lighter than CI's `just test` (default features, not
+      # --all-features) to keep commits fast; the full feature-set test run is a
+      # CI gate. Prebuilds workers so tests never relink one mid-exec (#586).
       - id: cargo-test
-        name: cargo test --quiet
-        entry: cargo test --workspace --quiet
+        name: just test-hook
+        entry: just test-hook
         language: system
         pass_filenames: false
         files: '\.rs$'
