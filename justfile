@@ -71,6 +71,12 @@ test:
     cargo check -p voom-control-plane --tests
     VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --all-features
 
+# Light per-commit test run (default features). Prebuilds every binary so test
+# helpers never relink a worker another test is executing (ETXTBSY, #586).
+test-hook:
+    cargo build --workspace --all-targets
+    VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --quiet
+
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc \
         --workspace --all-features --no-deps --document-private-items

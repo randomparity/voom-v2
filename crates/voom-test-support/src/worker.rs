@@ -338,9 +338,10 @@ pub fn cargo_build_package(package: &str) -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
-    // `--all-features` matches how `just test` builds the workspace. Without it,
-    // this `-p` build resolves a different feature set for shared deps and relinks
-    // the worker binary, which races with a concurrent test exec'ing it (ETXTBSY).
+    // Fallback for runs without `VOOM_TEST_PREBUILT_WORKERS`. This `-p` build can
+    // resolve a different feature set than the workspace build and republish the
+    // worker binary, racing a concurrent test that execs it (ETXTBSY/ENOENT).
+    // `just test` and `just test-hook` prebuild and set the variable to avoid it.
     let status = Command::new("cargo")
         .args(["build", "-p", package, "--all-features"])
         .arg("--target-dir")
