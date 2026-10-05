@@ -148,9 +148,89 @@ VoomError>` and makes `prepare::prepare_commit_in_tx(cp, tx, CommitArtifactInput
 -> Result<PreparedCommit, PrepareCommitError>` `pub(super)`.
 
 Steps:
-1. Tests in `mod_test.rs`: the failure-then-retry test (already written on the branch) and its
-   helpers `clear_test_default_staging_root`, `intent_staging_location_id`,
-   `file_location_retired` (placed before `artifact_tempdir`). Add the fencing test after it:
+1. Tests in `mod_test.rs`. Insert before `recovery_abort_fails_closed_when_a_receipt_lands_after_classification`
+   the failure-then-retry test:
+
+```rust
+#[tokio::test]
+async fn failed_reprepare_keeps_the_old_attempt_recoverable_until_the_default_returns() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    let task = spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let old_intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    node_authorize(&cp, &node, old_intent_id).await.unwrap();
+    task.abort();
+    let old_record_id = latest_record_id(&cp, staged.artifact_handle_id).await;
+    let old_staging_location_id = intent_staging_location_id(&cp, old_intent_id).await;
+
+    // The operator cleared the staging default after prepare: the successor
+    // cannot resolve its containment root (ADR 0097 fails closed). Recovery
+    // must not durably abort the old attempt it cannot replace.
+    clear_test_default_staging_root(&cp).await;
+    let err = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::CommitFailure);
+    assert_eq!(intent_state(&cp, old_intent_id).await, "authorized");
+    assert_eq!(record_state(&cp, old_record_id).await, "pending");
+    assert!(!file_location_retired(&cp, old_staging_location_id).await);
+    assert_eq!(
+        count_commit_records(&cp, staged.artifact_handle_id).await,
+        1
+    );
+
+    // Once the operator restores the default, the same recovery succeeds.
+    set_test_default_staging_root(&cp, voom_store::test_support::TEST_STORAGE_ROOT_ID).await;
+    let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Pending);
+    assert_ne!(report.commit_record_id, old_record_id);
+    assert_eq!(intent_state(&cp, old_intent_id).await, "aborted");
+    assert_eq!(record_state(&cp, old_record_id).await, "failed");
+    assert!(file_location_retired(&cp, old_staging_location_id).await);
+    assert!(!target.exists());
+}
+```
+
+   Insert these helpers immediately before `fn artifact_tempdir()`:
+
+```rust
+async fn clear_test_default_staging_root(cp: &ControlPlane) {
+    sqlx::query("UPDATE library_roots SET default_staging_root_id = NULL WHERE id = 9000001")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
+async fn intent_staging_location_id(
+    cp: &ControlPlane,
+    intent_id: ArtifactCommitIntentId,
+) -> voom_core::FileLocationId {
+    let id: i64 =
+        sqlx::query_scalar("SELECT staging_location_id FROM artifact_commit_intents WHERE id = ?")
+            .bind(i64::try_from(intent_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    voom_core::FileLocationId(u64::try_from(id).unwrap())
+}
+
+async fn file_location_retired(cp: &ControlPlane, id: voom_core::FileLocationId) -> bool {
+    let retired_at: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(i64::try_from(id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    retired_at.is_some()
+}
+```
+
+   Add the fencing test after the failure-then-retry test:
 
 ```rust
 #[tokio::test]

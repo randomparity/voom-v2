@@ -39,9 +39,10 @@ read and our commit. The default that prepare resolves is therefore the one in f
 the successor commits. This closes the window instead of narrowing it. ADR 0097's
 fail-closed behavior is unchanged.
 
-**Checked ID conversion.** `list_live_file_locations_by_version_in_tx` now reaches
-prepare. It currently maps a negative stored id to `VoomError::Internal`, so it moves to
-the shared `u64_from_i64`. A corrupt row is then a database error, as AGENTS.md requires.
+**Checked ID conversion.** `list_live_file_locations_by_version_in_tx` already reaches
+prepare through the commit safety gate, and source selection now calls it too. It maps a
+negative stored id to `VoomError::Internal`, so it moves to the shared `u64_from_i64`. A
+corrupt row is then a database error, as AGENTS.md requires.
 
 **Errors.** A pre-mutation prepare failure keeps today's public result,
 `VoomError::CommitFailure(<prepare message>)`. A storage failure after the pending row
@@ -84,9 +85,17 @@ Rejected alternatives:
      fails. Nothing durable changed, and the caller gets `CommitFailure`.
    - Recovery holds the write lock while prepare canonicalizes paths. Ordinary prepare
      already does this, and the cost is bounded by one prepare.
-   - A prepare failure that persists, such as a default that is never restored, leaves the
-     old attempt pending or `recovery_required` until an operator acts. This is the
-     intended recoverable state.
+   - A prepare failure that persists leaves the old attempt pending or
+     `recovery_required`. Until prepare can succeed, it keeps the handle's commit slot, the
+     intent's lease refusal on its pinned scope, and the node's open-intent listing. For a
+     cleared default the operator restores it. For a repointed default the operator
+     reverts it, because `record.target_path` lies inside the old staging root. A failure
+     with no operator action, such as a retired source version, wedges the handle at the
+     operator-required cost ADR 0074 already accepts. This narrows ADR 0074's
+     pending-expiry release ("one dead node cannot freeze a lease scope") to recoveries
+     that can prepare a successor. The release was already transient: a successful
+     re-prepare pins a new intent on the same scope for the same owner. Before this change,
+     the failure case bought the release by stranding the work.
 4. Covered elsewhere
    - Durable placement state: #677.
    - Root-retirement guard: #678.
