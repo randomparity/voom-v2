@@ -39,8 +39,9 @@ Three earlier decisions bound the answer:
    Commit sets `placement_state` to the record's `placement_intent` in the same statement
    that marks it committed. The caller supplies the intent through
    `CommitArtifactInput::placement_intent`. Manual `voom artifact commit` passes
-   `retained`; a workflow commit into its `.committed/<op>` working dir passes `staged`. A
-   recovery successor copies its predecessor record's intent.
+   `retained`. Every producer of workflow results passes `staged`, including the
+   node-owned path that #416–#425 builds. Promotion refuses a non-`staged` record and
+   fails the run. A recovery successor copies its predecessor record's intent.
 2. **Enforcement.** Migration 0044 adds both columns with `ALTER TABLE ADD COLUMN`,
    backfills existing rows, and enforces the per-state rule with two `BEFORE` triggers.
    The rule: intent present; state non-NULL exactly when committed and equal to the
@@ -48,9 +49,10 @@ Three earlier decisions bound the answer:
    terminal. The triggers check one row, the same scope as the table's CHECK.
 3. **Terminal states outside the move.** A superseded intermediate that the coordinator
    reclaims stays `staged`, and its result location is retired. "Staged with a retired
-   result location" means withdrawn: no bytes remain and no move will follow. A promoted
-   output with no commit record (a sidecar or other ticket result) has no placement
-   state. The move succeeds and writes nothing.
+   result location" means withdrawn: no bytes remain and no move will follow. Sidecar
+   outputs carry commit records and follow `staged → placed`. A scoped location with no
+   committed record has no placement state, so the move succeeds and writes nothing.
+   This is defensive: no in-tree producer emits such a location today.
 4. **Ruling on ADR 0050's transitional path.** The control plane may persist this state.
    It is a lifecycle fact about a durable record, not an observation of bytes. The
    transitional move writes `placed` only inside its existing address-update transaction,
@@ -69,9 +71,11 @@ Three earlier decisions bound the answer:
    event taxonomy do not change.
 6. **#678's guard contract.** Retiring a root is refused while a `committed` record whose
    placement is `staged` or `retained` has its live result location on that root. A
-   `placed` result never blocks: it lives on an output root, and retiring non-staging roots
-   is outside #663. A withdrawn intermediate never blocks, because its location is
-   retired. A later decision owns any guard for output roots.
+   `placed` result never blocks. It lives on the configured output root, which may be the
+   same root when a root is its own output default. Retiring a root while it holds placed
+   outputs is the output-root question that #663 excludes, and the stranding in the
+   coincident case is accepted under that exclusion. A withdrawn intermediate never blocks,
+   because its location is retired. A later decision owns any guard for output roots.
 
 ## Consequences
 
@@ -95,10 +99,12 @@ Three earlier decisions bound the answer:
 - **Rebuild `artifact_commit_records` with a table CHECK.** verified: in SQLite 3.51.2
   with `PRAGMA foreign_keys=ON`, `DROP TABLE` of a parent row referenced through
   `ON DELETE RESTRICT` fails with `FOREIGN KEY constraint failed (19)` (scratch
-  reproduction of a parent/child pair during design of #677). Four tables reference this
-  one (`0001:1281`, `0001:1572`, `0038:46`, `0043:40`). Migrations run in one transaction,
-  where `PRAGMA foreign_keys` cannot be toggled (`0001_schema.sql:4-5`). A rebuild would
-  cascade into rebuilding every child table.
+  reproduction of a parent/child pair during design of #677). `RESTRICT` acts at once, so
+  `PRAGMA defer_foreign_keys` does not help. Three tables reference this one
+  (`0001:1281`, `0001:1572`, `0043:40`). Migrations run in one transaction, where
+  `PRAGMA foreign_keys` cannot be toggled (`0001_schema.sql:4-5`). judgment: copying all
+  three children as well (0043 shows one child rebuild) would triple the migration and
+  add no guarantee that the triggers lack.
 - **Add the per-state rule as a column CHECK on `ADD COLUMN`.** verified: the same SQLite
   rejects `ALTER TABLE p ADD COLUMN y TEXT CHECK ((state='committed') = (y IS NOT NULL))`
   with `CHECK constraint failed` while a committed row exists. The constraint is tested

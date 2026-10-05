@@ -106,7 +106,7 @@ before the backfill.
 ### Migration bookkeeping
 
 - `voom-store/src/migrator.rs` registers version 7, `commit_result_placement`.
-- `schema_test.rs` expects 7 migrations.
+- `schema_test.rs` and `init_test.rs:16` expect 7 migrations.
 - `init_test.rs`'s base-schema upgrade count rises from 5 to 6.
 - `migrator_test.rs` `apply_through_0041` selects `version <= 4` instead of `len - 2`, so
   its 0042 guard tests keep their meaning.
@@ -150,10 +150,15 @@ Focused commands: `cargo test -p voom-store`, `cargo test -p voom-control-plane`
 
 - Migration (`crates/voom-store/src/migrator_test.rs`,
   `migration_0044_backfills_placement_for_populated_commit_records`). Seed a database at
-  version 6 with five records: pending `.committed`; committed manual; committed
-  `.committed` unmoved; committed `.committed` repointed out; failed. Run `init_on`.
-  Assert intents and states (`staged`/NULL, `retained`/`retained`, `staged`/`staged`,
-  `staged`/`placed`, `retained`/NULL) and that the index exists.
+  version 6 with five records:
+  - pending `.committed`;
+  - committed manual;
+  - committed `.committed`, unmoved;
+  - committed `.committed`, repointed out;
+  - failed, with target `/root/.committed/audio/e.mka`.
+
+  Run `init_on`. Assert the intents and states (`staged`/NULL, `retained`/`retained`,
+  `staged`/`staged`, `staged`/`placed`, `staged`/NULL), and that the index exists.
 - Triggers (`crates/voom-store/src/repo/media/artifacts/tests.rs`,
   `placement_triggers_reject_invalid_rows`). Each case fails with the trigger message:
   - insert without an intent;

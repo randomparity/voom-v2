@@ -192,7 +192,8 @@ const MIGRATION_0044_SQL: &str =
    Then append `Migration::new(7, Cow::Borrowed("commit_result_placement"),
    MigrationType::Simple, Cow::Borrowed(MIGRATION_0044_SQL), false)` to the vector.
 3. Bookkeeping:
-   - In `schema_test.rs`, change `assert_eq!(expected_migrations(), 6)` to `7`.
+   - In `schema_test.rs` and `init_test.rs:16`, change
+     `assert_eq!(expected_migrations(), 6)` to `7`.
    - In `init_test.rs`, change `assert_eq!(report.migrations_applied, 5)` to `6` and
      append "and 0044 (commit result placement)" to the comment above it.
    - In `migrator_test.rs`, rename `apply_through_0041` to `apply_through_version(pool,

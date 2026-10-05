@@ -380,5 +380,6 @@ committed record now states whether its result was meant to move to an output ro
 (`placed`). A manual `voom artifact commit` result, which "stays there" under the decision
 above, is recorded `retained`. The residual "accepted and unowned" in "Later decision:
 retirement refuses a referenced default" now has an owner, #678. ADR 0103 settles that
-guard's contract: `staged` and `retained` results with a live location on the root block
-its retirement, and `placed` results do not. The rest of this record stands.
+guard's contract. `staged` and `retained` results with a live location on the root block
+its retirement. `placed` results do not, even when a root is its own output default. The
+rest of this record stands.
