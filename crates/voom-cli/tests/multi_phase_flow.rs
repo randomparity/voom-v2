@@ -87,9 +87,10 @@ async fn multi_phase_execute_then_report_by_job_id() {
         .await
         .unwrap();
     // Envelope destinations resolve through the library root's staging/backup
-    // defaults; point both at the seeded test root.
+    // defaults, and promotion through its output default; point all three at
+    // the seeded test root.
     sqlx::query(
-        "UPDATE library_roots SET default_staging_root_id = id, \
+        "UPDATE library_roots SET default_staging_root_id = id, default_output_root_id = id, \
          default_backup_root_id = id WHERE id = ?",
     )
     .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
@@ -123,7 +124,10 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let input_id = input.id.0;
 
     let out_dir = root.join("out");
-    let staging_root = root.join("stage");
+    // The owner node commits under the envelope's staging root, so the run's
+    // `--staging-root` names the same root for promotion's working dirs to
+    // match the committed paths (the flag/envelope split is #618).
+    let staging_root = root.clone();
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
     let execute = run_voom(
         &url,
@@ -145,6 +149,20 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let execute_json = assert_execute_committed_two_phases(&url, &execute).await;
     let job_id = execute_json["data"]["summary"]["job_id"].as_u64().unwrap();
     let run_phases = execute_json["data"]["phases"].as_array().unwrap();
+    let file_phases = execute_json["data"]["file_phases"].as_array().unwrap();
+    let produced = |ordinal| {
+        file_phase_at(file_phases, ordinal)["produced_file_version_id"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(
+        (
+            placement_of(&url, produced(0)).await,
+            placement_of(&url, produced(1)).await
+        ),
+        (("staged".to_owned(), true), ("placed".to_owned(), false)),
+        "ADR 0103: reclaimed intermediates stay staged; moved tips are placed"
+    );
 
     assert_report_reads_back_chain(&url, job_id, run_phases);
 }
@@ -348,6 +366,22 @@ fn single_file_input(file: ScannedFile) -> PolicyInputSetDraft {
 
 fn cargo_build(package: &str) {
     voom_test_support::worker::cargo_build_package(package).unwrap();
+}
+
+/// The placement state of the committed record that produced `version`, and
+/// whether its result location is retired.
+async fn placement_of(url: &str, version: u64) -> (String, bool) {
+    let pool = voom_store::connect(url).await.unwrap();
+    sqlx::query_as(
+        "SELECT c.placement_state, fl.retired_at IS NOT NULL \
+         FROM artifact_commit_records c \
+         JOIN file_locations fl ON fl.id = c.result_file_location_id \
+         WHERE c.result_file_version_id = ? AND c.state = 'committed'",
+    )
+    .bind(i64::try_from(version).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap()
 }
 
 /// The `produced_from_version_id` (chain parent) recorded for a file version,
