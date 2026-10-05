@@ -24,7 +24,9 @@ use voom_store::repo::media::identity::FileLocationRepo;
 
 use crate::ControlPlane;
 use crate::artifact::commit::intent::{RESOLVED_NOT_APPLIED_REASON, guard_intent_scope_in_tx};
-use crate::artifact::commit::prepare::evaluate_commit_safety_gate;
+use crate::artifact::commit::prepare::{
+    PrepareCommitError, evaluate_commit_safety_gate, prepare_commit_in_tx,
+};
 use crate::artifact::commit::{CommitArtifactInput, CommitArtifactReport};
 use crate::cases::commit_tx;
 use voom_store::tx::{begin_read_only, begin_read_then_write, begin_write_first};
@@ -180,7 +182,8 @@ async fn finalize_recovered(
     })
 }
 
-/// Abort a classified intent and prepare a fresh successor generation. The
+/// Abort a classified intent and prepare a fresh successor generation in one
+/// transaction, so the abort never commits without its successor. The
 /// abort only lands when the intent is unchanged since the classification
 /// snapshot: a receipt or supplemental receipt journaled in between bumps
 /// `intent_epoch`, and the abort fails closed for a fresh `recover_commit`
@@ -239,17 +242,24 @@ pub(super) async fn abort_and_reprepare_report(
             .retire_file_location_in_tx(&mut tx, intent.staging_location_id, now, location.epoch)
             .await?;
     }
-    commit_tx(tx).await?;
-
-    let prepared = crate::artifact::commit::prepare::prepare_commit(
+    // The successor prepares on the same transaction: if it fails, dropping
+    // the transaction rolls the abort back and the classified attempt stays
+    // recoverable (#665).
+    let prepared = prepare_commit_in_tx(
         cp,
+        &mut tx,
         CommitArtifactInput {
             artifact_handle_id: record.artifact_handle_id,
             target_path: std::path::PathBuf::from(&record.target_path),
         },
+        now,
     )
     .await
-    .map_err(|error| VoomError::CommitFailure(error.to_string()))?;
+    .map_err(|error| match error {
+        PrepareCommitError::PreMutation(report) => VoomError::CommitFailure(report.message),
+        PrepareCommitError::AfterPending(error) => VoomError::CommitFailure(error.to_string()),
+    })?;
+    commit_tx(tx).await?;
     Ok(CommitArtifactReport {
         commit_record_id: prepared.record.id,
         artifact_handle_id: prepared.record.artifact_handle_id,

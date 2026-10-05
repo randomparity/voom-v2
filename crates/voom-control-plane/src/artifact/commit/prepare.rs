@@ -61,7 +61,7 @@ pub(super) enum PrepareCommitError {
     AfterPending(VoomError),
 }
 
-async fn prepare_commit_in_tx(
+pub(super) async fn prepare_commit_in_tx(
     cp: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     input: CommitArtifactInput,
@@ -88,10 +88,13 @@ async fn prepare_commit_in_tx(
     // live rooted location (ADR 0075). Byte-free on purpose — identity rows
     // only, no stat/canonicalize; the node resolves this handle against its
     // own bound roots when it materializes staging during `applying`.
-    let source_location =
-        crate::operation_source::select_location(cp, inputs.source.source_file_version_id, None)
-            .await
-            .map_err(|err| pre_mutation_error(&inputs.context, &err))?;
+    let source_location = crate::operation_source::select_location_in_tx(
+        cp,
+        tx,
+        inputs.source.source_file_version_id,
+    )
+    .await
+    .map_err(|err| pre_mutation_error(&inputs.context, &err))?;
     let (source_storage_root_id, source_locator) = source_location
         .rooted_address()
         .map_err(|err| pre_mutation_error(&inputs.context, &err))?;
