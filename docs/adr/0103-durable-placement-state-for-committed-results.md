@@ -58,15 +58,19 @@ Three earlier decisions bound the answer:
 4. **Ruling on ADR 0050's transitional path.** The control plane may persist this state.
    It is a lifecycle fact about a durable record, not an observation of bytes. The
    transitional move writes `placed` only inside its existing address-update transaction,
-   with a compare-and-set from `staged`. It refuses, before moving bytes, a result whose
-   record is not `staged`. `promotion_plan()` gains no capability. The node-owned
+   with a compare-and-set from `staged`. It refuses, before moving that artifact's bytes,
+   a result whose record is not `staged`. The refusal applies per artifact: tips already
+   moved in the same run stay `placed`, and the run cannot complete until an operator or a
+   later decision changes the refused record. `promotion_plan()` gains no capability. The node-owned
    successor (#425) must write the same `staged → placed` transition in the transaction
    that records the new address.
 5. **#622 superseded.** Ground one no longer holds: a skipped tip whose record is `placed`
    was already moved, and one that is still `staged` never was. Ground two no longer holds
-   either. The state belongs to the commit lifecycle, which #425 inherits, not to the
-   transitional path. #622's reconsideration condition (b) also points at a discriminator.
-   This ADR therefore authorizes #679, on this surface only: when promotion skips a live
+   on its own: the state belongs to the commit lifecycle, which #425 inherits, not to the
+   transitional path. The #679 warning itself is new behavior in the transitional skip
+   branch. This ADR accepts it as a bounded extension of ADR 0050's frozen path, and #425
+   must carry the same warning. #622's reconsideration condition (b) also points at a
+   discriminator. This ADR therefore authorizes #679, on this surface only: when promotion skips a live
    chain tip that matches no working dir and whose record is `staged`, it emits one
    warning-level log naming the commit record and the file location. `placed`, `retained`
    and record-less tips stay silent. The run's outcome, resume behavior, and the
@@ -77,7 +81,9 @@ Three earlier decisions bound the answer:
    same root when a root is its own output default. Retiring a root while it holds placed
    outputs is the output-root question that #663 excludes, and the stranding in the
    coincident case is accepted under that exclusion. A withdrawn intermediate never blocks,
-   because its location is retired. A later decision owns any guard for output roots.
+   because its location is retired. A `staged` result of a branch that never promotes,
+   such as a blocked or failed run, blocks until a run promotes it. Giving #678 another
+   way out is a later decision. A later decision also owns any guard for output roots.
 
 ## Consequences
 
@@ -89,10 +95,16 @@ Three earlier decisions bound the answer:
   promotion scope contains it.
 - A workflow resumed across the upgrade still promotes. Its unmoved tips were backfilled
   `staged`.
-- Readers that ask "what still awaits a move" must join a live result location. `staged`
-  alone also matches withdrawn intermediates.
-- The window in which bytes are moved before the address transaction remains as it was.
-  The new write adds no step before the move other than a read.
+- `staged` with a live result location means "committed for a move that has not
+  happened". That includes results of branches that never promote. `staged` alone also
+  matches withdrawn intermediates, so readers join a live result location.
+- The window in which bytes are moved before the address transaction keeps its timing.
+  The new write adds no step before the move other than a read. A failed `placed` write is
+  a new way into that window. It rolls the repoint back and leaves the record `staged`.
+  Today no path recovers from that window, whatever the cause. A resumed promotion stops
+  at `resolve_output_target`, which refuses the existing destination
+  (`artifact/fs.rs:84-88`) before `move_terminal_artifact`'s existing-destination branch
+  can run. That gap predates this record, and fixing it is a separate change.
 - Every insert into `artifact_commit_records` must name `placement_intent`. Test fixtures
   that insert rows directly change with this ADR.
 

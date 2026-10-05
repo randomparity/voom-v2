@@ -128,7 +128,12 @@ before the backfill.
    - Bytes never move for a result whose record is not `staged`.
 3. Accepted failure classes
    - The pre-transaction byte-move crash window (bytes at the destination, address not
-     repointed) is existing behavior that ADR 0050 accepts until #425. It is unchanged.
+     repointed) is existing behavior that ADR 0050 accepts until #425. A failed `placed`
+     write is a new way into it, and it is rare: the record would have to change between
+     the pre-check and the transaction, or the write would have to fail. Recovery from the
+     window is an existing gap, reported as a follow-up (ADR 0103 Consequences).
+   - A refused non-`staged` tip fails the run after earlier tips moved. The refusal is per
+     artifact, and no in-tree producer creates the case (ADR 0103 decision 4).
    - The upgrade backfill misclassifies only when a manual commit targeted a
      `.committed` path. Such a commit becomes `staged`, which is harmless because no
      promotion scope contains it (ADR 0103 Consequences).
@@ -136,8 +141,9 @@ before the backfill.
      whose commit-time `target_path` lacked the component is backfilled `retained`, not
      `placed`. Pre-release databases are disposable, and #678 then over-blocks rather
      than strands.
-   - `staged` also matches withdrawn intermediates. Consumers join live locations
-     (ADR 0103).
+   - `staged` also matches withdrawn intermediates, and it stays on results of branches
+     that never promote (a blocked or failed run). Consumers join live locations, and #678
+     blocks on those results until a run promotes them (ADR 0103).
 4. Covered elsewhere
    - The retire guard: #678. The tip warning: #679. Node-owned placement: #425.
    - Staging-root flag and config-time pairing: #618 and #616.
