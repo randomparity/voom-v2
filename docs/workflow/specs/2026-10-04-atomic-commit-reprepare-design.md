@@ -88,13 +88,16 @@ Rejected alternatives:
      `recovery_required`. Until prepare can succeed, it keeps the handle's commit slot, the
      intent's lease refusal on its pinned scope, and the node's open-intent listing. For a
      cleared default the operator restores it. For a repointed default the operator
-     reverts it, because `record.target_path` lies inside the old staging root. A failure
-     with no operator action, such as a retired source version, wedges the handle at the
-     operator-required cost ADR 0074 already accepts. This narrows ADR 0074's
-     pending-expiry release ("one dead node cannot freeze a lease scope") to recoveries
-     that can prepare a successor. The release was already transient: a successful
-     re-prepare pins a new intent on the same scope for the same owner. Before this change,
-     the failure case bought the release by stranding the work.
+     reverts it, because `record.target_path` lies inside the old staging root.
+   - That narrows ADR 0074's pending-expiry release ("one dead node cannot freeze a lease
+     scope indefinitely") to recoveries that can prepare a successor. This is a new
+     accepted cost, not one ADR 0074 already accepts. The operator accepted it on
+     2026-10-05 as a direct consequence of the frozen outcome, with no ADR. When prepare can never succeed —
+     a retired source version, or a dead node's retired or inactive staging root — no
+     operator path aborts the intent, so its lease scope stays frozen. The release was
+     already transient on success, because a successful re-prepare pins a new intent on
+     the same scope for the same owner. Before this change, the failure case bought the
+     release by stranding the work.
 4. Covered elsewhere
    - Durable placement state: #677.
    - Root-retirement guard: #678.
