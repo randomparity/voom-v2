@@ -13,9 +13,13 @@ ADR 0103.
 
 Tech stack: Rust workspace, tokio, sqlx (SQLite), existing crates only.
 
-Expected implementation size: 650–850 changed lines (L) — the file map below. About 90 SQL
-lines, about 160 store lines, about 60 control-plane production lines, about 50 lines of
-mechanical caller and fixture edits, and about 350–500 test lines.
+Expected implementation size: 1150–1300 changed lines (L) — the file map below. About 70 SQL
+lines, about 200 store lines, about 45 control-plane production lines, about 60 lines of
+mechanical caller and fixture edits, and about 850 test lines. The estimate was revised after
+the build. The original 650–850 under-counted the test fixtures: building a committed record
+for the promotion tests takes about 180 lines (handle, staging location, verification,
+pending commit, commit), and the migration, trigger, and lifecycle seeds take about 330. The
+required work did not change.
 
 ## Global Constraints
 
