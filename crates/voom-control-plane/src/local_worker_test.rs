@@ -708,7 +708,7 @@ fn unrecorded_endpoint_grace_outlasts_every_startup_timeout() {
 }
 
 #[tokio::test]
-async fn retire_stale_worker_accepts_a_row_a_peer_already_retired() {
+async fn retire_unless_peer_retired_accepts_a_row_a_peer_already_retired() {
     // Two starters can both judge one stale row dead; the slower one must not
     // fail its own startup because the faster one retired the row first.
     let (cp, _tmp) = crate::cases::cp().await;
@@ -719,9 +719,70 @@ async fn retire_stale_worker_accepts_a_row_a_peer_already_retired() {
         .await
         .unwrap();
 
-    cp.retire_stale_worker(worker.id, worker.epoch, now)
+    cp.retire_unless_peer_retired(worker.id, worker.epoch, now)
         .await
         .unwrap();
 
     assert_eq!(worker_status(&cp, worker.id).await, WorkerStatus::Retired);
+}
+
+/// A stand-in for a bundled worker: exits when its stdin closes, like the real watchdog.
+fn stdin_watchdog_worker(id: WorkerId) -> super::RunningLocalWorker {
+    let mut child = tokio::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take();
+    super::RunningLocalWorker {
+        child,
+        stdin,
+        handle: super::LocalWorkerHandle {
+            worker_id: id,
+            kind: LocalWorkerKind::Mkvtoolnix,
+            endpoint: closed_endpoint(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn shutdown_succeeds_when_a_peer_retired_the_row_first() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let worker = register_local_row(&cp, LocalWorkerKind::Mkvtoolnix, cp.clock().now(), None).await;
+    let running = stdin_watchdog_worker(worker.id);
+    cp.retire_worker(worker.id, worker.epoch, cp.clock().now())
+        .await
+        .unwrap();
+
+    running.shutdown_and_retire(&cp).await.unwrap();
+
+    assert_eq!(worker_status(&cp, worker.id).await, WorkerStatus::Retired);
+}
+
+#[tokio::test]
+async fn shutdown_surfaces_a_missing_worker_row() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let running = stdin_watchdog_worker(WorkerId(u64::MAX >> 2));
+
+    let err = running.shutdown_and_retire(&cp).await.unwrap_err();
+
+    assert!(matches!(err, voom_core::VoomError::NotFound(_)), "{err}");
+}
+
+#[tokio::test]
+async fn retire_unless_peer_retired_surfaces_a_conflict_on_a_live_row() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let worker = register_local_row(&cp, LocalWorkerKind::Mkvtoolnix, cp.clock().now(), None).await;
+
+    let err = cp
+        .retire_unless_peer_retired(worker.id, worker.epoch + 1, cp.clock().now())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, voom_core::VoomError::Conflict(_)), "{err}");
+    assert_eq!(
+        worker_status(&cp, worker.id).await,
+        WorkerStatus::Registered
+    );
 }
