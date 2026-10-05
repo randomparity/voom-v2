@@ -216,8 +216,8 @@ impl RunningLocalWorker {
         }
         let now = cp.clock().now();
         let epoch = current_epoch(cp, self.handle.worker_id).await?;
-        cp.retire_worker(self.handle.worker_id, epoch, now).await?;
-        Ok(())
+        cp.retire_unless_peer_retired(self.handle.worker_id, epoch, now)
+            .await
     }
 }
 
@@ -457,7 +457,7 @@ impl ControlPlane {
                 None => now - worker.registered_at > UNRECORDED_ENDPOINT_GRACE,
             };
             if stale {
-                self.retire_stale_worker(worker.id, worker.epoch, now)
+                self.retire_unless_peer_retired(worker.id, worker.epoch, now)
                     .await?;
             }
         }
@@ -487,9 +487,10 @@ impl ControlPlane {
         Ok(endpoints)
     }
 
-    /// Retire a row self-heal judged stale. Worker epochs advance only on retirement, so a
-    /// conflict on a row that now reads retired means a starting peer retired it first.
-    async fn retire_stale_worker(
+    /// Retire a worker row, treating one a peer already retired as done. Worker epochs advance
+    /// only on retirement, so a conflict on a row that now reads retired means a peer's
+    /// self-heal or shutdown retired it first.
+    async fn retire_unless_peer_retired(
         &self,
         id: WorkerId,
         epoch: u64,
