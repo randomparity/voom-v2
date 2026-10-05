@@ -193,6 +193,11 @@ async fn failed_reprepare_keeps_the_old_attempt_recoverable_until_the_default_re
     assert_eq!(record_state(&cp, old_record_id).await, "failed");
     assert!(file_location_retired(&cp, old_staging_location_id).await);
     assert!(!target.exists());
+    // ADR 0074: the successor's expected facts are pinned from verification.
+    let (size_bytes, content_hash) =
+        successor_expected_facts(&cp, report.commit_record_id).await;
+    assert_eq!(size_bytes, u64::try_from(b"source bytes".len()).unwrap());
+    assert_eq!(content_hash, blake3_checksum(b"source bytes"));
 }
 ```
 
@@ -217,6 +222,25 @@ async fn intent_staging_location_id(
             .await
             .unwrap();
     voom_core::FileLocationId(u64::try_from(id).unwrap())
+}
+
+async fn successor_expected_facts(
+    cp: &ControlPlane,
+    record_id: ArtifactCommitRecordId,
+) -> (u64, String) {
+    let mut tx = voom_store::tx::begin_read_only(cp.pool_for_test(), "test: successor facts")
+        .await
+        .unwrap();
+    let intent = cp
+        .artifact_commit_intents
+        .get_by_commit_record_in_tx(&mut tx, record_id)
+        .await
+        .unwrap()
+        .unwrap();
+    (
+        intent.expected_facts.size_bytes,
+        intent.expected_facts.content_hash,
+    )
 }
 
 async fn file_location_retired(cp: &ControlPlane, id: voom_core::FileLocationId) -> bool {
@@ -365,7 +389,7 @@ fn single_live_rooted(
     .await
     .map_err(|error| match error {
         PrepareCommitError::PreMutation(report) => VoomError::CommitFailure(report.message),
-        PrepareCommitError::AfterPending(error) => error,
+        PrepareCommitError::AfterPending(error) => VoomError::CommitFailure(error.to_string()),
     })?;
     commit_tx(tx).await?;
 ```

@@ -44,9 +44,8 @@ prepare through the commit safety gate, and source selection now calls it too. I
 negative stored id to `VoomError::Internal`, so it moves to the shared `u64_from_i64`. A
 corrupt row is then a database error, as AGENTS.md requires.
 
-**Errors.** A pre-mutation prepare failure keeps today's public result,
-`VoomError::CommitFailure(<prepare message>)`. A storage failure after the pending row
-(`AfterPending`) propagates unchanged instead of being re-labelled as `CommitFailure`.
+**Errors.** Every re-prepare failure keeps today's public result,
+`VoomError::CommitFailure(<prepare message>)`, so no error code changes.
 
 Ownership is unchanged. Recovery stays in control-plane orchestration, and SQL and
 checked conversions stay in `voom-store`. There is no migration, schema change, or new
@@ -110,8 +109,9 @@ All tests are in `crates/voom-control-plane/src/artifact/commit/mod_test.rs` unl
   (failure, then retry). Clear the staging default after authorize and run recovery. It
   returns `CommitFailure`, and the old intent stays `authorized`, its record `pending`,
   its staging location live, with one record in total. Restore the default and run
-  recovery again. It returns a pending successor, and the old intent is `aborted`, its
-  record `failed`, its staging location retired. Red at `d674cebd`.
+  recovery again. It returns a pending successor whose intent's expected facts equal the
+  verification's size and checksum. The old intent is `aborted`, its record `failed`, its
+  staging location retired. Red at `d674cebd`.
 - `recovery_fences_the_aborted_intent_after_reprepare` (fencing). After a successful
   re-prepare, `applying` and `complete` reports on the old intent are rejected, and the
   successor intent stays `pending` with no receipt.
