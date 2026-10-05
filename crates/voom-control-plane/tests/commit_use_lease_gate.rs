@@ -76,6 +76,7 @@ async fn blocking_use_lease_fails_commit_before_target_is_written() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: verified.artifact_handle_id,
             target_path: target_path.clone(),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -118,6 +119,7 @@ async fn released_lease_does_not_block_commit() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: verified.artifact_handle_id,
             target_path: dir.path().join("released-target.mp4"),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap();
@@ -152,6 +154,7 @@ async fn ttl_expired_lease_does_not_block_commit() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: verified.artifact_handle_id,
             target_path: dir.path().join("expired-target.mp4"),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap();
@@ -184,6 +187,7 @@ async fn advisory_lease_is_recorded_in_commit_event() {
     cp.commit_artifact(CommitArtifactInput {
         artifact_handle_id: verified.artifact_handle_id,
         target_path: dir.path().join("advisory-target.mp4"),
+        placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
     })
     .await
     .unwrap();

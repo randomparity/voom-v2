@@ -81,6 +81,19 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     );
 
     assert_eq!(show["data"]["artifact"]["state"], "committed");
+    // ADR 0103: a manual commit is deliberately left at its commit address.
+    let placement: (String, Option<String>) = sqlx::query_as(
+        "SELECT placement_intent, placement_state FROM artifact_commit_records \
+         WHERE artifact_handle_id = ? AND state = 'committed'",
+    )
+    .bind(i64::try_from(artifact_handle_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        placement,
+        ("retained".to_owned(), Some("retained".to_owned()))
+    );
     let mut json = Value::Array(vec![verify, commit, show]);
     redact_artifact_snapshot(
         &mut json,

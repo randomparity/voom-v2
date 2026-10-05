@@ -404,6 +404,7 @@ async fn stage_verify_and_commit_bytes(
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target,
+            placement_intent: crate::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap();

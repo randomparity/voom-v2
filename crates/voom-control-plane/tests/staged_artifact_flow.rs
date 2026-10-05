@@ -94,6 +94,7 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target_path.clone(),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap();
@@ -157,6 +158,7 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: unverified.artifact_handle_id,
             target_path: dir.path().join("unverified-target.mp4"),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -166,6 +168,7 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: verified.artifact_handle_id,
             target_path: dir.path().join("drift-target.mp4"),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();

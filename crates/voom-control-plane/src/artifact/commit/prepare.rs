@@ -106,6 +106,7 @@ pub(super) async fn prepare_commit_in_tx(
         expected_facts: inputs.expected_facts,
         source_storage_root_id,
         source_provider_relative_locator: source_locator.clone(),
+        placement_intent: input.placement_intent,
         context: inputs.verified_staging.context.clone(),
     };
     let record = create_prepared_record(cp, tx, &draft, &staged_path, &scope, now).await?;
@@ -171,7 +172,7 @@ async fn create_prepared_record(
             },
         }),
         started_at: now,
-        placement_intent: voom_store::repo::media::artifacts::CommitPlacementIntent::Retained,
+        placement_intent: draft.placement_intent,
     };
     let record = create_pending_commit_with_started_event_in_tx(
         &cp.artifacts,
@@ -300,6 +301,7 @@ struct PendingIntentDraft {
     /// rooted address, pinned byte-free at prepare (ADR 0075).
     source_storage_root_id: StorageRootId,
     source_provider_relative_locator: voom_core::ProviderRelativeLocator,
+    placement_intent: voom_store::repo::media::artifacts::CommitPlacementIntent,
     context: PreMutationContext,
 }
 
