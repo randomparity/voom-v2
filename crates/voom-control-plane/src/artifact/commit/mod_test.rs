@@ -535,7 +535,7 @@ async fn recover_commit_aborts_receiptless_authorized_and_reprepares() {
 
     // Authorized but receipt-less: the node never mutated, so recovery may
     // safely abort and prepare a fresh successor generation.
-    let original_record_id =
+    let (original_record_id, _) =
         spawn_and_drive_authorize_only(&cp, &node, staged.artifact_handle_id, &target).await;
     assert!(!target.exists());
 
@@ -552,11 +552,8 @@ async fn failed_reprepare_keeps_the_old_attempt_recoverable_until_the_default_re
     let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = dir.path().join("target.bin");
-    let task = spawn_commit_task(&cp, staged.artifact_handle_id, &target);
-    let old_intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
-    node_authorize(&cp, &node, old_intent_id).await.unwrap();
-    task.abort();
-    let old_record_id = latest_record_id(&cp, staged.artifact_handle_id).await;
+    let (old_record_id, old_intent_id) =
+        spawn_and_drive_authorize_only(&cp, &node, staged.artifact_handle_id, &target).await;
     let old_staging_location_id = intent_staging_location_id(&cp, old_intent_id).await;
 
     // The operator cleared the staging default after prepare: the successor
@@ -613,8 +610,8 @@ async fn recovery_fences_the_aborted_intent_after_reprepare() {
             .unwrap();
     let new_intent_id = ArtifactCommitIntentId(u64::try_from(new_intent_id).unwrap());
 
-    // A node still holding the aborted intent's fence cannot journal,
-    // report, or complete over the successor generation.
+    // A node still holding the aborted intent's fence can neither journal
+    // nor complete over the successor generation.
     let applying = node_report_applying(&cp, &node, old_intent_id)
         .await
         .unwrap_err();
@@ -699,10 +696,8 @@ async fn recover_commit_requires_operator_when_target_already_exists() {
     // node wrote it before journaling): the fresh successor prepare fails
     // closed instead of clobbering the occupying file, and the old attempt
     // stays recoverable once the operator clears the target.
-    let task = spawn_commit_task(&cp, staged.artifact_handle_id, &target);
-    let old_intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
-    node_authorize(&cp, &node, old_intent_id).await.unwrap();
-    task.abort();
+    let (_, old_intent_id) =
+        spawn_and_drive_authorize_only(&cp, &node, staged.artifact_handle_id, &target).await;
     std::fs::write(&target, b"occupying bytes").unwrap();
 
     let err = cp
@@ -1779,19 +1774,19 @@ async fn spawn_and_wait_pending_intent(
 }
 
 /// Spawn a commit, authorize it, and leave the commit task waiting with an
-/// authorized receipt-less intent. Returns the stuck record id.
+/// authorized receipt-less intent. Returns the stuck record and intent ids.
 async fn spawn_and_drive_authorize_only(
     cp: &ControlPlane,
     node: &SimulatedOwnerNode,
     artifact_handle_id: ArtifactHandleId,
     target_path: &Path,
-) -> ArtifactCommitRecordId {
+) -> (ArtifactCommitRecordId, ArtifactCommitIntentId) {
     let task = spawn_commit_task(cp, artifact_handle_id, target_path);
     let intent_id = wait_pending_intent_id(cp, artifact_handle_id).await;
     node_authorize(cp, node, intent_id).await.unwrap();
     let record_id = latest_record_id(cp, artifact_handle_id).await;
     task.abort();
-    record_id
+    (record_id, intent_id)
 }
 
 /// Spawn a commit and drive the node half to "applied but not completed":
