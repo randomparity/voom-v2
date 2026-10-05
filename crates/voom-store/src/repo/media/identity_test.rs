@@ -1579,6 +1579,53 @@ async fn list_live_file_locations_by_version_in_tx_excludes_retired() {
     tx.commit().await.unwrap();
 }
 
+#[tokio::test]
+async fn list_live_file_locations_by_version_in_tx_reports_negative_id_as_database_error() {
+    // A negative id can only come from corrupt storage; it must surface as a
+    // database error, not an internal invariant failure (AGENTS.md).
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "neg".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    let location = repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/negative.mkv",
+                ),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE file_locations SET id = -7 WHERE id = ?")
+        .bind(i64::try_from(location.id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let err = repo
+        .list_live_file_locations_by_version_in_tx(&mut tx, version.id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Database { .. }), "got {err:?}");
+}
+
 // ---- retire_file_location_in_tx (M2 method; sibling-test gap plug) ------
 
 async fn fresh_with_one_live_location() -> (

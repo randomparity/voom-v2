@@ -1726,11 +1726,7 @@ impl FileLocationRepo for SqliteIdentityRepo {
         .await
         .map_err(|e| VoomError::database_context("file_locations list live in_tx", e))?;
         rows.into_iter()
-            .map(|id| {
-                u64::try_from(id)
-                    .map(FileLocationId)
-                    .map_err(|e| VoomError::Internal(format!("file_locations id signedness: {e}")))
-            })
+            .map(|id| u64_from_i64(id, "file_locations.id").map(FileLocationId))
             .collect()
     }
 
