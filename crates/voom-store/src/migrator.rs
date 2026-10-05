@@ -45,6 +45,13 @@ const MIGRATION_0042_SQL: &str =
 const MIGRATION_0043_SQL: &str =
     include_str!("../../../migrations/0043_commit_intent_source_handle.sql");
 
+/// Migration 0044 (physical version 7): durable placement state for committed
+/// results (issue #677, ADR 0103). Adds `placement_intent`/`placement_state`
+/// to `artifact_commit_records`, backfills existing rows, and enforces the
+/// per-row rule with triggers; see the file header.
+const MIGRATION_0044_SQL: &str =
+    include_str!("../../../migrations/0044_commit_result_placement.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -100,6 +107,13 @@ pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("commit_intent_source_handle"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0043_SQL),
+            false,
+        ),
+        Migration::new(
+            7,
+            Cow::Borrowed("commit_result_placement"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0044_SQL),
             false,
         ),
     ]),

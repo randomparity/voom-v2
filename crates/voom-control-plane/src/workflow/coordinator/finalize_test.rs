@@ -1232,6 +1232,7 @@ async fn create_pending_commit(
                     },
                 }),
                 started_at: T0,
+                placement_intent: voom_store::repo::media::artifacts::CommitPlacementIntent::Staged,
             },
         )
         .await

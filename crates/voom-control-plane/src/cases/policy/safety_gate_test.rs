@@ -203,9 +203,10 @@ async fn seed_recovery_required_commit(cp: &ControlPlane) -> FileVersionId {
     sqlx::query(
         "INSERT INTO artifact_commit_records \
          (artifact_handle_id, source_file_version_id, verification_id, target_path, state, \
-          failure_class, error_code, message, recovery_reason, report, started_at, finished_at) \
+          failure_class, error_code, message, recovery_reason, report, started_at, finished_at, \
+          placement_intent) \
          VALUES (?, ?, ?, '/a.mkv', 'recovery_required', 'io', 'COMMIT_FAILURE', 'partial', \
-                 'operator must inspect', '{}', ?, ?)",
+                 'operator must inspect', '{}', ?, ?, 'retained')",
     )
     .bind(handle)
     .bind(i64::try_from(file_version_id.0).unwrap())

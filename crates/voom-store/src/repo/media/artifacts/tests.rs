@@ -341,9 +341,10 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
         "INSERT INTO artifact_commit_records \
          (artifact_handle_id, source_file_version_id, verification_id, target_path, \
           result_file_version_id, result_file_location_id, state, report, started_at, \
-          promotion_started_at, finished_at) \
+          promotion_started_at, finished_at, placement_intent, placement_state) \
          VALUES (?, ?, ?, '/media/source.mkv', ?, ?, 'committed', '{}', \
-                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+                 'retained', 'retained')",
     )
     .bind(i64::try_from(handle.id.0).unwrap())
     .bind(i64::try_from(source_version_id.0).unwrap())
@@ -2594,6 +2595,7 @@ fn pending_commit(
             },
         }),
         started_at: OffsetDateTime::UNIX_EPOCH,
+        placement_intent: CommitPlacementIntent::Retained,
     }
 }
 
@@ -3027,7 +3029,8 @@ async fn committed_ticket_evidence_rejects_each_corrupt_durable_kind() {
             "ticket_payload",
         ),
         (
-            "UPDATE artifact_commit_records SET state = 'unknown' WHERE id = 1",
+            "UPDATE artifact_commit_records SET state = 'unknown', placement_state = NULL \
+             WHERE id = 1",
             "artifact_commit_records.state",
         ),
         (
@@ -3125,15 +3128,221 @@ async fn seed_workflow_evidence(pool: &sqlx::SqlitePool) {
           '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
         "INSERT INTO artifact_commit_records (id, artifact_handle_id, source_file_version_id, \
          verification_id, target_path, result_file_version_id, result_file_location_id, state, \
-         report, started_at, promotion_started_at, finished_at) VALUES \
+         report, started_at, promotion_started_at, finished_at, placement_intent, \
+         placement_state) VALUES \
          (1, 1, 1, 1, '/output.mkv', 2, 1, 'committed', '{}', '1970-01-01T00:00:00Z', \
-          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 'retained', 'retained')",
         "INSERT INTO artifact_commit_records (id, artifact_handle_id, source_file_version_id, \
          verification_id, target_path, result_file_version_id, result_file_location_id, state, \
-         report, started_at, promotion_started_at, finished_at) VALUES \
+         report, started_at, promotion_started_at, finished_at, placement_intent, \
+         placement_state) VALUES \
          (2, 2, 1, 2, '/sidecar.srt', 3, 2, 'committed', '{}', '1970-01-01T00:00:00Z', \
-          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 'retained', 'retained')",
     ] {
         sqlx::query(statement).execute(pool).await.unwrap();
+    }
+}
+
+/// Commit a fresh handle's pending record through the sidecar finalize path,
+/// with the given placement intent.
+async fn committed_with_intent(
+    pool: &sqlx::SqlitePool,
+    repo: &SqliteArtifactRepo,
+    worker_id: voom_core::WorkerId,
+    intent: CommitPlacementIntent,
+    name: &str,
+) -> ArtifactCommitRecord {
+    let (source_version_id, _) = source_version_and_location(pool).await;
+    let handle = create_staged_handle(repo, source_version_id).await;
+    let staging = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: ArtifactLocationKind::Staging,
+            value: format!("/staging/{name}"),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let target_path = format!("/media/{name}");
+    let mut tx = pool.begin().await.unwrap();
+    let verification = repo
+        .record_verification_in_tx(
+            &mut tx,
+            successful_verification(handle.id, staging.id, worker_id, &staging.value, name, 1),
+        )
+        .await
+        .unwrap();
+    let mut new_record =
+        pending_commit(handle.id, source_version_id, verification.id, &target_path);
+    new_record.placement_intent = intent;
+    let pending = repo
+        .create_pending_commit_in_tx(&mut tx, new_record)
+        .await
+        .unwrap();
+    assert_eq!(pending.placement_intent, intent);
+    assert_eq!(pending.placement_state, None);
+    let committed = repo
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: pending.id,
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(&target_path),
+                target_path,
+                content_hash: format!("{name}-hash"),
+                size_bytes: 2048,
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                finished_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    committed.commit_record
+}
+
+#[tokio::test]
+async fn placement_lifecycle_copies_intent_and_marks_placed() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let worker = verification_worker(&pool).await;
+
+    let staged =
+        committed_with_intent(&pool, &repo, worker, CommitPlacementIntent::Staged, "a.mkv").await;
+    assert_eq!(staged.placement_state, Some(CommitPlacementState::Staged));
+    let location = staged.result_file_location_id.unwrap();
+    let found = repo
+        .get_commit_record_by_result_location(location)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.id, staged.id);
+
+    let mut tx = pool.begin().await.unwrap();
+    let placed = repo
+        .mark_result_placed_in_tx(&mut tx, staged.id)
+        .await
+        .unwrap();
+    assert_eq!(placed.placement_state, Some(CommitPlacementState::Placed));
+    let again = repo
+        .mark_result_placed_in_tx(&mut tx, staged.id)
+        .await
+        .unwrap_err();
+    assert_eq!(again.error_code(), ErrorCode::Conflict);
+    tx.commit().await.unwrap();
+
+    // A deliberately retained result is never placed.
+    let retained = committed_with_intent(
+        &pool,
+        &repo,
+        worker,
+        CommitPlacementIntent::Retained,
+        "b.mkv",
+    )
+    .await;
+    assert_eq!(
+        retained.placement_state,
+        Some(CommitPlacementState::Retained)
+    );
+    let mut tx = pool.begin().await.unwrap();
+    let err = repo
+        .mark_result_placed_in_tx(&mut tx, retained.id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    drop(tx);
+
+    assert!(
+        repo.get_commit_record_by_result_location(FileLocationId(999_999))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn placement_triggers_reject_invalid_rows() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let pending = pending_record_fixture(&pool, &repo).await;
+    let worker = sqlx::query_scalar::<_, i64>("SELECT id FROM workers WHERE name = 'verifier'")
+        .fetch_one(&pool)
+        .await
+        .map(|id| voom_core::WorkerId(u64::try_from(id).unwrap()))
+        .unwrap();
+    let retained = committed_with_intent(
+        &pool,
+        &repo,
+        worker,
+        CommitPlacementIntent::Retained,
+        "r.mkv",
+    )
+    .await;
+    let placed =
+        committed_with_intent(&pool, &repo, worker, CommitPlacementIntent::Staged, "p.mkv").await;
+    let mut tx = pool.begin().await.unwrap();
+    repo.mark_result_placed_in_tx(&mut tx, placed.id)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let id = |record: &ArtifactCommitRecord| i64::try_from(record.id.0).unwrap();
+    let insert = |intent: Option<&str>, state: Option<&str>| {
+        format!(
+            "INSERT INTO artifact_commit_records (artifact_handle_id, source_file_version_id, \
+             verification_id, target_path, state, report, started_at, placement_intent, \
+             placement_state) SELECT artifact_handle_id, source_file_version_id, \
+             verification_id, '/media/other.mkv', 'failed', report, started_at, {}, {} \
+             FROM artifact_commit_records WHERE id = {}",
+            intent.map_or("NULL".to_owned(), |v| format!("'{v}'")),
+            state.map_or("NULL".to_owned(), |v| format!("'{v}'")),
+            id(&pending),
+        )
+    };
+    let cases = [
+        ("insert without an intent", insert(None, None)),
+        (
+            "insert a non-committed row with a state",
+            insert(Some("staged"), Some("staged")),
+        ),
+        (
+            "commit without a state",
+            format!(
+                "UPDATE artifact_commit_records SET state = 'committed', \
+                 result_file_version_id = 1, result_file_location_id = 1, \
+                 finished_at = started_at WHERE id = {}",
+                id(&pending)
+            ),
+        ),
+        (
+            "place a retained result",
+            format!(
+                "UPDATE artifact_commit_records SET placement_state = 'placed' WHERE id = {}",
+                id(&retained)
+            ),
+        ),
+        (
+            "change the intent",
+            format!(
+                "UPDATE artifact_commit_records SET placement_intent = 'staged', \
+                 placement_state = 'staged' WHERE id = {}",
+                id(&retained)
+            ),
+        ),
+        (
+            "leave placed",
+            format!(
+                "UPDATE artifact_commit_records SET placement_state = 'staged' WHERE id = {}",
+                id(&placed)
+            ),
+        ),
+    ];
+    for (case, statement) in cases {
+        let error = sqlx::query(&statement).execute(&pool).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("placement violates its per-state rule"),
+            "{case}: {error}"
+        );
     }
 }

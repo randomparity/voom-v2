@@ -171,6 +171,7 @@ async fn create_prepared_record(
             },
         }),
         started_at: now,
+        placement_intent: voom_store::repo::media::artifacts::CommitPlacementIntent::Retained,
     };
     let record = create_pending_commit_with_started_event_in_tx(
         &cp.artifacts,

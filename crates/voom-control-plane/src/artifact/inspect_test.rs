@@ -552,6 +552,8 @@ async fn create_pending_commit(
                 temp_path: Some(format!("{target_path}.tmp")),
                 report: serde_json::json!({ "test": true }),
                 started_at: OffsetDateTime::UNIX_EPOCH,
+                placement_intent:
+                    voom_store::repo::media::artifacts::CommitPlacementIntent::Retained,
             },
         )
         .await

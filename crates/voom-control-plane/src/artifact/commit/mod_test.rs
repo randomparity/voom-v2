@@ -1730,6 +1730,8 @@ async fn create_pending_commit_result(
                     },
                 }),
                 started_at: OffsetDateTime::UNIX_EPOCH,
+                placement_intent:
+                    voom_store::repo::media::artifacts::CommitPlacementIntent::Retained,
             },
         )
         .await;

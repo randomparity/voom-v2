@@ -146,9 +146,9 @@ async fn fixture() -> (SqlitePool, TempDatabase, ArtifactCommitRecordId) {
     let res = sqlx::query(
         "INSERT INTO artifact_commit_records \
          (artifact_handle_id, source_file_version_id, verification_id, target_path, state, \
-          report, started_at) \
+          report, started_at, placement_intent) \
          VALUES (9000001, 9000001, 9000001, 'committed/intent-fixture.mkv', 'pending', \
-                 '{}', '1970-01-01T00:00:00Z')",
+                 '{}', '1970-01-01T00:00:00Z', 'retained')",
     )
     .execute(&pool)
     .await
