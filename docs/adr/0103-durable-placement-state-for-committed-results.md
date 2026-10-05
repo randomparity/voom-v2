@@ -41,7 +41,9 @@ Three earlier decisions bound the answer:
    `CommitArtifactInput::placement_intent`. Manual `voom artifact commit` passes
    `retained`. Every producer of workflow results passes `staged`, including the
    node-owned path that #416–#425 builds. Promotion refuses a non-`staged` record and
-   fails the run. A recovery successor copies its predecessor record's intent.
+   fails the run. The issue's "run without an output dir" never yields `retained` today:
+   `promotion_plan()` always carries an output target, because the target dirs have
+   defaults. A recovery successor copies its predecessor record's intent.
 2. **Enforcement.** Migration 0044 adds both columns with `ALTER TABLE ADD COLUMN`,
    backfills existing rows, and enforces the per-state rule with two `BEFORE` triggers.
    The rule: intent present; state non-NULL exactly when committed and equal to the

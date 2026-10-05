@@ -109,7 +109,7 @@ impl SqliteArtifactRepo {
 -- Migration 0044 (physical version 7): durable placement state for committed
 -- results (issue #677, ADR 0103).
 --
--- `artifact_commit_records` has four incoming ON DELETE RESTRICT foreign keys,
+-- `artifact_commit_records` has three incoming ON DELETE RESTRICT foreign keys,
 -- so it cannot be rebuilt inside the migration transaction, and a per-state
 -- column CHECK added by ALTER TABLE is tested against existing committed rows
 -- before any backfill. The columns are therefore added with domain CHECKs only,
