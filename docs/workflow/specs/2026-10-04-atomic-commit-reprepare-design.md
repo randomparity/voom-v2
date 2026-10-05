@@ -84,20 +84,21 @@ Rejected alternatives:
      fails. Nothing durable changed, and the caller gets `CommitFailure`.
    - Recovery holds the write lock while prepare canonicalizes paths. Ordinary prepare
      already does this, and the cost is bounded by one prepare.
-   - A prepare failure that persists leaves the old attempt pending or
-     `recovery_required`. Until prepare can succeed, it keeps the handle's commit slot, the
-     intent's lease refusal on its pinned scope, and the node's open-intent listing. For a
-     cleared default the operator restores it. For a repointed default the operator
-     reverts it, because `record.target_path` lies inside the old staging root.
-   - That narrows ADR 0074's pending-expiry release ("one dead node cannot freeze a lease
-     scope indefinitely") to recoveries that can prepare a successor. This is a new
-     accepted cost, not one ADR 0074 already accepts. The operator accepted it on
-     2026-10-05 as a direct consequence of the frozen outcome, with no ADR. When prepare can never succeed —
-     a retired source version, or a dead node's retired or inactive staging root — no
-     operator path aborts the intent, so its lease scope stays frozen. The release was
-     already transient on success, because a successful re-prepare pins a new intent on
-     the same scope for the same owner. Before this change, the failure case bought the
-     release by stranding the work.
+   - This change narrows ADR 0074's lease release on abort ("one dead node cannot freeze
+     a lease scope indefinitely") to recoveries that can prepare a successor. ADR 0074 does
+     not already accept this cost. The operator accepted it on 2026-10-05 as a direct
+     consequence of the frozen outcome, with no ADR. While prepare keeps failing, the old
+     attempt stays pending or `recovery_required` and keeps the handle's commit slot, the
+     intent's lease refusal on its pinned scope, and the node's open-intent listing. On
+     success the release was already transient, because a successful re-prepare pins a new
+     intent on the same scope for the same owner. Before this change, the failure case got
+     the release only by stranding the work.
+   - Transient causes hold until an operator fixes them. These are a cleared staging
+     default (restore it), a repointed default (revert it, because `record.target_path`
+     lies inside the old staging root), and an occupied target (clear it).
+   - Permanent causes are a retired source version, or a dead node's retired or inactive
+     staging root. These currently leave the intent stuck with no abort path, so its lease
+     scope stays frozen. This is a known gap with a follow-up for the orchestrator to file.
 4. Covered elsewhere
    - Durable placement state: #677.
    - Root-retirement guard: #678.
