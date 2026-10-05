@@ -62,12 +62,51 @@ pub(crate) async fn select_location(
         .into_iter()
         .filter(|location| matches!(location.address, FileLocationAddress::Rooted { .. }))
         .collect::<Vec<_>>();
-    match rooted_locations.as_slice() {
-        [location] => Ok(location.clone()),
-        [] => Err(VoomError::Config(format!(
+    single_live_rooted(file_version_id, rooted_locations)
+}
+
+/// [`select_location`] on the caller's transaction, without an explicit
+/// location id. Commit preparation needs it: inside commit recovery the same
+/// transaction has just retired the aborted attempt's staging location, and a
+/// pool read cannot see that uncommitted retirement.
+pub(crate) async fn select_location_in_tx(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    file_version_id: FileVersionId,
+) -> Result<FileLocation, VoomError> {
+    let mut rooted_locations = Vec::new();
+    for id in cp
+        .identity
+        .list_live_file_locations_by_version_in_tx(tx, file_version_id)
+        .await?
+    {
+        let location = cp
+            .identity
+            .get_file_location_in_tx(tx, id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::database(format!(
+                    "live file_location {id} vanished in its transaction"
+                ))
+            })?;
+        if matches!(location.address, FileLocationAddress::Rooted { .. }) {
+            rooted_locations.push(location);
+        }
+    }
+    single_live_rooted(file_version_id, rooted_locations)
+}
+
+fn single_live_rooted(
+    file_version_id: FileVersionId,
+    rooted_locations: Vec<FileLocation>,
+) -> Result<FileLocation, VoomError> {
+    let mut locations = rooted_locations.into_iter();
+    match (locations.next(), locations.next()) {
+        (Some(location), None) => Ok(location),
+        (None, _) => Err(VoomError::Config(format!(
             "file_version {file_version_id} has no live rooted source locations"
         ))),
-        _ => Err(VoomError::Config(format!(
+        (Some(_), Some(_)) => Err(VoomError::Config(format!(
             "file_version {file_version_id} has multiple live rooted source locations"
         ))),
     }
