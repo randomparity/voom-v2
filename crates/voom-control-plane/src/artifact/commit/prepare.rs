@@ -15,8 +15,8 @@ use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommi
 use voom_store::repo::library::library_roots::LibraryRoot;
 use voom_store::repo::media::artifact_commit_intents::NewArtifactCommitIntent;
 use voom_store::repo::media::artifacts::{
-    ArtifactExpectedFacts, ArtifactLocationKind, ArtifactVerification, LiveArtifactLocation,
-    NewArtifactCommitRecord,
+    ArtifactExpectedFacts, ArtifactLocationKind, ArtifactVerification, CommitPlacementIntent,
+    LiveArtifactLocation, NewArtifactCommitRecord,
 };
 use voom_store::repo::media::commit_safety_gate::check_lineage_commit_leases_in_tx;
 use voom_store::repo::media::identity::{FileLocationRepo, FileVersionRepo, NewFileLocation};
@@ -301,7 +301,7 @@ struct PendingIntentDraft {
     /// rooted address, pinned byte-free at prepare (ADR 0075).
     source_storage_root_id: StorageRootId,
     source_provider_relative_locator: voom_core::ProviderRelativeLocator,
-    placement_intent: voom_store::repo::media::artifacts::CommitPlacementIntent,
+    placement_intent: CommitPlacementIntent,
     context: PreMutationContext,
 }
 
