@@ -404,6 +404,7 @@ async fn stage_verify_and_commit_bytes(
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target,
+            placement_intent: crate::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap();
@@ -552,6 +553,8 @@ async fn create_pending_commit(
                 temp_path: Some(format!("{target_path}.tmp")),
                 report: serde_json::json!({ "test": true }),
                 started_at: OffsetDateTime::UNIX_EPOCH,
+                placement_intent:
+                    voom_store::repo::media::artifacts::CommitPlacementIntent::Retained,
             },
         )
         .await

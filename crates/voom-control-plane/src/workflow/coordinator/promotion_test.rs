@@ -459,3 +459,357 @@ async fn cleanup_failure_before_delete_keeps_location_live() {
         "failed deletion must not retire a still-present location"
     );
 }
+
+// --- placement state (ADR 0103) ---
+
+const T0: time::OffsetDateTime = time::OffsetDateTime::UNIX_EPOCH;
+
+/// Ingest a source file beside `path` and return its version.
+async fn source_version(cp: &ControlPlane, path: &Path) -> FileVersionId {
+    use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
+    let source_path = path.with_extension("source");
+    write(&source_path, b"source bytes").await;
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &source_path.display().to_string(),
+                ),
+                content_hash: format!("source-{}", path.display()),
+                size_bytes: 12,
+                observed_at: T0,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("source fixture was not created");
+    };
+    file_version_id
+}
+
+/// A staged artifact handle derived from `source` with a succeeded verification.
+async fn verified_handle(
+    cp: &ControlPlane,
+    source: FileVersionId,
+    name: &str,
+) -> (
+    voom_core::ArtifactHandleId,
+    voom_core::ids::ArtifactVerificationId,
+) {
+    use voom_store::repo::media::artifacts::{
+        ArtifactHandleAccessMode, ArtifactLocationKind, ArtifactVerificationStatus,
+        NewArtifactHandle, NewArtifactLocation, NewArtifactVerification,
+    };
+    let worker = cp
+        .register_worker(crate::cases::workers::RegisterWorkerInput {
+            name: format!("placement-{name}"),
+            kind: voom_core::WorkerKind::Synthetic,
+        })
+        .await
+        .unwrap();
+    let handle = cp
+        .create_artifact_handle(NewArtifactHandle {
+            size_bytes: Some(14),
+            checksum: Some("terminal".to_owned()),
+            privacy_class: "internal".to_owned(),
+            durability_class: "staging".to_owned(),
+            allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
+            mutability: "immutable".to_owned(),
+            source_lineage: Some(serde_json::json!({"kind": "test"})),
+            file_version_id: Some(source),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let staging = cp
+        .record_artifact_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: ArtifactLocationKind::Staging,
+            value: format!("/staging/{}.mkv", handle.id.0),
+            observed_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = voom_store::tx::begin_read_then_write(&cp.pool, "promotion_test: verification")
+        .await
+        .unwrap();
+    let verification = cp
+        .artifacts()
+        .record_verification_in_tx(
+            &mut tx,
+            NewArtifactVerification {
+                artifact_handle_id: handle.id,
+                artifact_location_id: staging.id,
+                path: staging.value.clone(),
+                worker_id: worker.id,
+                workflow_ticket_id: None,
+                workflow_lease_id: None,
+                status: ArtifactVerificationStatus::Succeeded,
+                expected_size_bytes: 14,
+                expected_checksum: "terminal".to_owned(),
+                observed_size_bytes: Some(14),
+                observed_checksum: Some("terminal".to_owned()),
+                failure_class: None,
+                error_code: None,
+                message: None,
+                report: serde_json::json!({}),
+                started_at: T0,
+                finished_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    commit_tx(tx).await.unwrap();
+    (handle.id, verification.id)
+}
+
+/// A file at `path` whose live location is the result of a committed record
+/// with `intent`, shaped as `promote_terminal_artifacts` hands it over.
+async fn committed_result(
+    cp: &ControlPlane,
+    path: &Path,
+    intent: voom_store::repo::media::artifacts::CommitPlacementIntent,
+) -> WorkingDirArtifact {
+    use voom_store::repo::media::artifacts::{NewArtifactCommitRecord, NewSidecarArtifactCommit};
+    use voom_store::repo::media::identity::FileLocationRepo;
+    use voom_store::test_support::{TEST_STORAGE_ROOT_ID, test_relative_locator};
+
+    write(path, b"terminal bytes").await;
+    let source = source_version(cp, path).await;
+    let target_path = path.display().to_string();
+    let (handle, verification) = verified_handle(cp, source, &target_path).await;
+    let locator = test_relative_locator(&target_path);
+    let mut tx = begin_write_first(&cp.pool, "promotion_test: committed_result")
+        .await
+        .unwrap();
+    let pending = cp
+        .artifacts()
+        .create_pending_commit_in_tx(
+            &mut tx,
+            NewArtifactCommitRecord {
+                artifact_handle_id: handle,
+                source_file_version_id: source,
+                verification_id: verification,
+                target_path: target_path.clone(),
+                temp_path: None,
+                report: serde_json::json!({
+                    "rooted_target": {
+                        "storage_root_id": TEST_STORAGE_ROOT_ID.0,
+                        "provider_relative_locator": locator.as_str(),
+                    },
+                }),
+                started_at: T0,
+                placement_intent: intent,
+            },
+        )
+        .await
+        .unwrap();
+    let committed = cp
+        .artifacts()
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: pending.id,
+                target_path,
+                storage_root_id: TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: locator.clone(),
+                content_hash: "terminal".to_owned(),
+                size_bytes: 14,
+                observed_at: T0,
+                finished_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    commit_tx(tx).await.unwrap();
+    let epoch = cp
+        .identity()
+        .get_file_location(committed.file_location_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .epoch;
+    WorkingDirArtifact {
+        location_id: committed.file_location_id,
+        asset_id: committed.file_asset_id,
+        storage_root_id: TEST_STORAGE_ROOT_ID,
+        provider_relative_locator: locator,
+        epoch,
+    }
+}
+
+async fn placement_fixture() -> (
+    ControlPlane,
+    voom_test_support::TempDatabase,
+    tempfile::TempDir,
+) {
+    let (cp, db) = crate::cases::cp().await;
+    voom_store::test_support::set_test_storage_root_self_defaults(&cp.pool)
+        .await
+        .unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    tokio::fs::create_dir_all(tmp.path().join("working"))
+        .await
+        .unwrap();
+    (cp, db, tmp)
+}
+
+async fn placement_of(
+    cp: &ControlPlane,
+    location: FileLocationId,
+) -> Option<voom_store::repo::media::artifacts::CommitPlacementState> {
+    cp.artifacts()
+        .get_commit_record_by_result_location(location)
+        .await
+        .unwrap()
+        .and_then(|record| record.placement_state)
+}
+
+async fn locator_of(cp: &ControlPlane, location: FileLocationId) -> String {
+    use voom_store::repo::media::identity::FileLocationRepo;
+    let location = cp
+        .identity()
+        .get_file_location(location)
+        .await
+        .unwrap()
+        .unwrap();
+    location.rooted_address().unwrap().1.as_str().to_owned()
+}
+
+#[tokio::test]
+async fn promotion_marks_a_staged_result_placed() {
+    use voom_store::repo::media::artifacts::{CommitPlacementIntent, CommitPlacementState};
+    let (cp, _db, tmp) = placement_fixture().await;
+    let path = tmp.path().join("working/out.mkv");
+    let dest_dir = tmp.path().join("output");
+    let artifact = committed_result(&cp, &path, CommitPlacementIntent::Staged).await;
+
+    cp.promote_artifact(&artifact, &path, &dest_dir)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        placement_of(&cp, artifact.location_id).await,
+        Some(CommitPlacementState::Placed)
+    );
+    assert!(dest_dir.join("out.mkv").exists());
+}
+
+#[tokio::test]
+async fn promotion_refuses_a_retained_result_before_moving_bytes() {
+    use voom_store::repo::media::artifacts::{CommitPlacementIntent, CommitPlacementState};
+    let (cp, _db, tmp) = placement_fixture().await;
+    let path = tmp.path().join("working/out.mkv");
+    let dest_dir = tmp.path().join("output");
+    let artifact = committed_result(&cp, &path, CommitPlacementIntent::Retained).await;
+    let before = locator_of(&cp, artifact.location_id).await;
+
+    let error = cp
+        .promote_artifact(&artifact, &path, &dest_dir)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(path.exists(), "a retained result's bytes must not move");
+    assert!(!dest_dir.join("out.mkv").exists());
+    assert_eq!(locator_of(&cp, artifact.location_id).await, before);
+    assert_eq!(
+        placement_of(&cp, artifact.location_id).await,
+        Some(CommitPlacementState::Retained)
+    );
+}
+
+#[tokio::test]
+async fn promotion_of_a_result_without_a_commit_record_writes_no_placement() {
+    use voom_store::repo::media::identity::{DiscoveredFile, FileLocationRepo, IngestOutcome};
+    let (cp, _db, tmp) = placement_fixture().await;
+    let path = tmp.path().join("working/out.mkv");
+    let dest_dir = tmp.path().join("output");
+    write(&path, b"no commit record").await;
+    let locator = voom_store::test_support::test_relative_locator(&path.display().to_string());
+    let IngestOutcome::NewFileAsset {
+        file_asset_id,
+        file_location_id,
+        ..
+    } = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: locator.clone(),
+                content_hash: "no-commit-record".to_owned(),
+                size_bytes: 16,
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("record-less fixture was not created");
+    };
+    let epoch = cp
+        .identity()
+        .get_file_location(file_location_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .epoch;
+    let artifact = WorkingDirArtifact {
+        location_id: file_location_id,
+        asset_id: file_asset_id,
+        storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        provider_relative_locator: locator,
+        epoch,
+    };
+
+    cp.promote_artifact(&artifact, &path, &dest_dir)
+        .await
+        .unwrap();
+
+    assert!(dest_dir.join("out.mkv").exists());
+    assert!(
+        cp.artifacts()
+            .get_commit_record_by_result_location(file_location_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn placement_failure_rolls_back_the_address_repoint() {
+    use voom_store::repo::media::artifacts::{CommitPlacementIntent, CommitPlacementState};
+    let (cp, _db, tmp) = placement_fixture().await;
+    let path = tmp.path().join("working/out.mkv");
+    let dest_dir = tmp.path().join("output");
+    let artifact = committed_result(&cp, &path, CommitPlacementIntent::Staged).await;
+    let before = locator_of(&cp, artifact.location_id).await;
+    sqlx::query(
+        "CREATE TRIGGER test_refuse_placed BEFORE UPDATE OF placement_state \
+         ON artifact_commit_records WHEN NEW.placement_state = 'placed' \
+         BEGIN SELECT RAISE(ABORT, 'test refuses placed'); END",
+    )
+    .execute(&cp.pool)
+    .await
+    .unwrap();
+
+    cp.promote_artifact(&artifact, &path, &dest_dir)
+        .await
+        .unwrap_err();
+
+    // The `placed` write and the address repoint share one transaction: the
+    // refused write leaves the location where it was. (The bytes already moved:
+    // the accepted pre-transaction window, spec Failure model 3.)
+    assert_eq!(locator_of(&cp, artifact.location_id).await, before);
+    assert_eq!(
+        placement_of(&cp, artifact.location_id).await,
+        Some(CommitPlacementState::Staged)
+    );
+}

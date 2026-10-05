@@ -371,3 +371,15 @@ resolved only at promotion, from the artifact's own root, with no fallback. A ma
 `voom artifact commit --target`, which no promotion follows, must target the staging root,
 and its result stays there. The rest of this record stands. The design is
 `docs/workflow/specs/2026-10-01-resolver-staging-containment-design.md`.
+
+## Later decision: committed results carry a placement state
+
+Issue #677 records [ADR 0103](0103-durable-placement-state-for-committed-results.md). Every
+committed record now states whether its result was meant to move to an output root
+(`staged`), was deliberately left at its commit address (`retained`), or has moved
+(`placed`). A manual `voom artifact commit` result, which "stays there" under the decision
+above, is recorded `retained`. The residual "accepted and unowned" in "Later decision:
+retirement refuses a referenced default" now has an owner, #678. ADR 0103 settles that
+guard's contract. `staged` and `retained` results with a live location on the root block
+its retirement. `placed` results do not, even when a root is its own output default. The
+rest of this record stands.

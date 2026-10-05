@@ -15,7 +15,9 @@ use voom_core::{
     ArtifactHandleId, ErrorCode, FileLocationId, FileVersionId, ProviderRelativeLocator,
     StorageRootId, VoomError,
 };
-use voom_store::repo::media::artifacts::{ArtifactCommitRecord, ArtifactCommitState};
+use voom_store::repo::media::artifacts::{
+    ArtifactCommitRecord, ArtifactCommitState, CommitPlacementIntent,
+};
 
 use crate::ControlPlane;
 
@@ -45,6 +47,10 @@ const COMMIT_CONVERGENCE_POLL: Duration = Duration::from_millis(200);
 pub struct CommitArtifactInput {
     pub artifact_handle_id: ArtifactHandleId,
     pub target_path: PathBuf,
+    /// Whether a move to an output root follows this commit (ADR 0103):
+    /// `Staged` for a workflow commit into its working dir, `Retained` for a
+    /// result deliberately left at its commit address.
+    pub placement_intent: CommitPlacementIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

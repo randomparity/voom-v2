@@ -94,6 +94,7 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target_path.clone(),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap();
@@ -157,6 +158,7 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: unverified.artifact_handle_id,
             target_path: dir.path().join("unverified-target.mp4"),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -166,6 +168,7 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: verified.artifact_handle_id,
             target_path: dir.path().join("drift-target.mp4"),
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -291,10 +294,12 @@ async fn inject_recovery_required(url: &str, staged: &StagedFixture, dir: &Path)
         "INSERT INTO artifact_commit_records \
          (artifact_handle_id, source_file_version_id, verification_id, target_path, \
           result_file_version_id, result_file_location_id, state, failure_class, error_code, \
-          message, recovery_reason, temp_path, report, started_at, promotion_started_at, finished_at) \
+          message, recovery_reason, temp_path, report, started_at, promotion_started_at, finished_at, \
+          placement_intent) \
          VALUES (?, ?, ?, ?, NULL, NULL, 'recovery_required', 'commit_failure', \
           'DB_UNREACHABLE', 'injected recovery for integration inspection', 'promotion_started', ?, \
-          '{\"test\":true}', '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z')",
+          '{\"test\":true}', '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z', \
+          'retained')"
     )
     .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
     .bind(i64::try_from(staged.source_file_version_id.0).unwrap())

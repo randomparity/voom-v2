@@ -591,6 +591,7 @@ impl StagedOutputSettlement<'_> {
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: artifact.handle_id,
                 target_path: target_path.clone(),
+                placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Staged,
             })
             .await
             .map_err(|error| VoomError::CommitFailure(error.to_string()))?;

@@ -264,6 +264,64 @@ impl ArtifactCommitState {
     }
 }
 
+/// What the committer expects after commit (ADR 0103): a move to an output
+/// root (`Staged`) or none (`Retained`). Set at prepare; never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitPlacementIntent {
+    Staged,
+    Retained,
+}
+
+impl CommitPlacementIntent {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::Retained => "retained",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, VoomError> {
+        match s {
+            "staged" => Ok(Self::Staged),
+            "retained" => Ok(Self::Retained),
+            other => Err(VoomError::database(format!(
+                "artifact_commit_records.placement_intent {other:?} not in vocab"
+            ))),
+        }
+    }
+}
+
+/// Where a committed result is (ADR 0103). `None` until the record commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitPlacementState {
+    Staged,
+    Retained,
+    Placed,
+}
+
+impl CommitPlacementState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::Retained => "retained",
+            Self::Placed => "placed",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, VoomError> {
+        match s {
+            "staged" => Ok(Self::Staged),
+            "retained" => Ok(Self::Retained),
+            "placed" => Ok(Self::Placed),
+            other => Err(VoomError::database(format!(
+                "artifact_commit_records.placement_state {other:?} not in vocab"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewArtifactCommitRecord {
     pub artifact_handle_id: ArtifactHandleId,
@@ -273,6 +331,7 @@ pub struct NewArtifactCommitRecord {
     pub temp_path: Option<String>,
     pub report: JsonValue,
     pub started_at: OffsetDateTime,
+    pub placement_intent: CommitPlacementIntent,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +344,8 @@ pub struct ArtifactCommitRecord {
     pub result_file_version_id: Option<FileVersionId>,
     pub result_file_location_id: Option<FileLocationId>,
     pub state: ArtifactCommitState,
+    pub placement_intent: CommitPlacementIntent,
+    pub placement_state: Option<CommitPlacementState>,
     pub failure_class: Option<FailureClass>,
     pub error_code: Option<ErrorCode>,
     pub message: Option<String>,

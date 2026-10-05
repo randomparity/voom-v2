@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
 use voom_store::repo::execution::workflow_summaries::FilePhaseSummary;
+use voom_store::repo::media::artifacts::CommitPlacementState;
 use voom_store::repo::media::identity::{FileLocationAddress, FileLocationRepo, FileVersionRepo};
 
 use crate::ControlPlane;
@@ -720,7 +721,9 @@ impl ControlPlane {
         Ok(None)
     }
 
-    /// Move a terminal artifact into `dest_dir` and repoint its location.
+    /// Move a terminal artifact into `dest_dir`, repoint its location, and mark
+    /// its commit record `placed` in the same transaction (ADR 0103). A result
+    /// whose record is not `staged` is refused before any byte moves.
     async fn promote_artifact(
         &self,
         artifact: &WorkingDirArtifact,
@@ -743,6 +746,23 @@ impl ControlPlane {
                 &dest,
             )
             .await?;
+        let record = self
+            .artifacts
+            .get_commit_record_by_result_location(artifact.location_id)
+            .await?;
+        if let Some(record) = &record
+            && record.placement_state != Some(CommitPlacementState::Staged)
+        {
+            return Err(VoomError::Conflict(format!(
+                "terminal artifact location {} is the result of commit record {} whose \
+                 placement is {}; only a staged result is moved to an output root (ADR 0103)",
+                artifact.location_id,
+                record.id,
+                record
+                    .placement_state
+                    .map_or("unset", CommitPlacementState::as_str),
+            )));
+        }
         move_terminal_artifact(current, &dest, artifact.location_id).await?;
         let mut tx = begin_write_first(&self.pool, "promotion: promote_artifact").await?;
         self.identity
@@ -755,6 +775,11 @@ impl ControlPlane {
                 self.clock().now(),
             )
             .await?;
+        if let Some(record) = record {
+            self.artifacts
+                .mark_result_placed_in_tx(&mut tx, record.id)
+                .await?;
+        }
         commit_tx(tx).await?;
         Ok(())
     }

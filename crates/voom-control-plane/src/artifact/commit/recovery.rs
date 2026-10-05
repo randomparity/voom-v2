@@ -251,6 +251,7 @@ pub(super) async fn abort_and_reprepare_report(
         CommitArtifactInput {
             artifact_handle_id: record.artifact_handle_id,
             target_path: std::path::PathBuf::from(&record.target_path),
+            placement_intent: record.placement_intent,
         },
         now,
     )

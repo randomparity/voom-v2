@@ -81,6 +81,19 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     );
 
     assert_eq!(show["data"]["artifact"]["state"], "committed");
+    // ADR 0103: a manual commit is deliberately left at its commit address.
+    let placement: (String, Option<String>) = sqlx::query_as(
+        "SELECT placement_intent, placement_state FROM artifact_commit_records \
+         WHERE artifact_handle_id = ? AND state = 'committed'",
+    )
+    .bind(i64::try_from(artifact_handle_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        placement,
+        ("retained".to_owned(), Some("retained".to_owned()))
+    );
     let mut json = Value::Array(vec![verify, commit, show]);
     redact_artifact_snapshot(
         &mut json,
@@ -560,10 +573,12 @@ async fn inject_recovery_required(
         "INSERT INTO artifact_commit_records \
          (artifact_handle_id, source_file_version_id, verification_id, target_path, \
           result_file_version_id, result_file_location_id, state, failure_class, error_code, \
-          message, recovery_reason, temp_path, report, started_at, promotion_started_at, finished_at) \
+          message, recovery_reason, temp_path, report, started_at, promotion_started_at, finished_at, \
+          placement_intent) \
          VALUES (?, ?, ?, ?, NULL, NULL, 'recovery_required', 'commit_failure', \
           'DB_UNREACHABLE', 'injected recovery for CLI inspection', 'promotion_started', ?, \
-          '{\"test\":true}', '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z')",
+          '{\"test\":true}', '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z', \
+          'retained')"
     )
     .bind(i64::try_from(artifact_handle_id).unwrap())
     .bind(source_file_version_id)

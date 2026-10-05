@@ -22,3 +22,4 @@ pub use inspect::{
     CommitSummary, PathFacts, PathObservation, RecoverySummary, VerificationSummary,
 };
 pub use verify::{VerifyArtifactInput, VerifyArtifactReport};
+pub use voom_store::repo::media::artifacts::CommitPlacementIntent;

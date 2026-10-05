@@ -1,9 +1,9 @@
 use super::{
     ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitRecordId, ArtifactCommitState,
-    ArtifactHandleId, ArtifactVerificationId, ArtifactVerificationStatus, FileAssetId,
-    FileLocationId, FileVersionId, JsonValue, NewArtifactCommitRecord, NewSidecarArtifactCommit,
-    OffsetDateTime, SidecarArtifactCommit, SqliteArtifactRepo, VoomError, parse_error_code,
-    parse_failure_class,
+    ArtifactHandleId, ArtifactVerificationId, ArtifactVerificationStatus, CommitPlacementIntent,
+    CommitPlacementState, FileAssetId, FileLocationId, FileVersionId, JsonValue,
+    NewArtifactCommitRecord, NewSidecarArtifactCommit, OffsetDateTime, SidecarArtifactCommit,
+    SqliteArtifactRepo, VoomError, parse_error_code, parse_failure_class,
 };
 use sqlx::Row;
 
@@ -15,7 +15,7 @@ const SELECT_ARTIFACT_COMMIT_RECORD_COLS: &str = "SELECT c.id, c.artifact_handle
     c.source_file_version_id, c.verification_id, c.target_path, c.result_file_version_id, \
     c.result_file_location_id, c.state, c.failure_class, c.error_code, c.message, \
     c.recovery_reason, c.temp_path, c.report, c.started_at, c.promotion_started_at, \
-    c.finished_at";
+    c.finished_at, c.placement_intent, c.placement_state";
 
 type CommitVerificationRow = (
     i64,
@@ -398,8 +398,8 @@ impl SqliteArtifactRepo {
         let res = sqlx::query(
             "INSERT INTO artifact_commit_records \
              (artifact_handle_id, source_file_version_id, verification_id, target_path, \
-              state, temp_path, report, started_at) \
-             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+              placement_intent, state, temp_path, report, started_at) \
+             VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
         )
         .bind(i64_from_u64(
             input.artifact_handle_id.0,
@@ -418,6 +418,7 @@ impl SqliteArtifactRepo {
             concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
         )?)
         .bind(&input.target_path)
+        .bind(input.placement_intent.as_str())
         .bind(&input.temp_path)
         .bind(report)
         .bind(&started_at)
@@ -437,6 +438,8 @@ impl SqliteArtifactRepo {
             result_file_version_id: None,
             result_file_location_id: None,
             state: ArtifactCommitState::Pending,
+            placement_intent: input.placement_intent,
+            placement_state: None,
             failure_class: None,
             error_code: None,
             message: None,
@@ -466,7 +469,8 @@ impl SqliteArtifactRepo {
         // `committed`/`failed` remain terminal and are still rejected.
         let res = sqlx::query(
             "UPDATE artifact_commit_records \
-             SET state = 'committed', result_file_version_id = ?, result_file_location_id = ?, \
+             SET state = 'committed', placement_state = placement_intent, \
+                 result_file_version_id = ?, result_file_location_id = ?, \
                  promotion_started_at = ?, finished_at = ?, \
                  failure_class = NULL, error_code = NULL, message = NULL, recovery_reason = NULL \
              WHERE id = ? AND state IN ('pending', 'recovery_required')",
@@ -592,6 +596,63 @@ impl SqliteArtifactRepo {
             .await
             .map_err(|e| VoomError::database_context("artifact_commit_records get", e))?;
         row.as_ref().map(row_to_commit_record).transpose()
+    }
+
+    /// The committed record whose result is `location`, if any (ADR 0103).
+    ///
+    /// # Errors
+    /// `Database` when more than one committed record names the location.
+    pub async fn get_commit_record_by_result_location(
+        &self,
+        location: FileLocationId,
+    ) -> Result<Option<ArtifactCommitRecord>, VoomError> {
+        let sql = SELECT_ARTIFACT_COMMIT_RECORD_COLS.to_owned()
+            + " FROM artifact_commit_records c \
+               WHERE c.result_file_location_id = ? AND c.state = 'committed' LIMIT 2";
+        let rows = sqlx::query(&sql)
+            .bind(i64_from_u64(
+                location.0,
+                "artifact_commit_records.result_file_location_id",
+            )?)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| VoomError::database_context("artifact_commit_records by location", e))?;
+        if rows.len() > 1 {
+            return Err(VoomError::database(format!(
+                "file_locations {location} is the result of more than one committed record"
+            )));
+        }
+        rows.first().map(row_to_commit_record).transpose()
+    }
+
+    /// Record that a `staged` committed result reached its output root, in the
+    /// caller's address-update transaction (ADR 0103 decision 4).
+    ///
+    /// # Errors
+    /// `Conflict` when the record is not committed and `staged`.
+    pub async fn mark_result_placed_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+    ) -> Result<ArtifactCommitRecord, VoomError> {
+        let res = sqlx::query(
+            "UPDATE artifact_commit_records SET placement_state = 'placed' \
+             WHERE id = ? AND state = 'committed' AND placement_state = 'staged'",
+        )
+        .bind(i64_from_u64(id.0, "artifact_commit_records.id")?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("artifact_commit_records place", e))?;
+        if res.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "artifact_commit_records place: id={id} is not a committed staged result"
+            )));
+        }
+        get_commit_record_in_tx(tx, id).await?.ok_or_else(|| {
+            VoomError::Internal(format!(
+                "artifact_commit_records post-place get vanished: {id}"
+            ))
+        })
     }
 
     pub async fn list_commit_records(
@@ -739,7 +800,8 @@ async fn finalize_sidecar_commit_record_in_tx(
 ) -> Result<ArtifactCommitRecord, VoomError> {
     let res = sqlx::query(
         "UPDATE artifact_commit_records \
-         SET state = 'committed', result_file_version_id = ?, result_file_location_id = ?, \
+         SET state = 'committed', placement_state = placement_intent, \
+             result_file_version_id = ?, result_file_location_id = ?, \
              promotion_started_at = NULL, finished_at = ?, failure_class = NULL, \
              error_code = NULL, message = NULL, recovery_reason = NULL \
          WHERE id = ? AND state IN ('pending', 'recovery_required')",
@@ -790,6 +852,7 @@ async fn validate_sidecar_commit_input(
             temp_path: pending.temp_path.clone(),
             report: pending.report.clone(),
             started_at: pending.started_at,
+            placement_intent: pending.placement_intent,
         },
     )
     .await?;
@@ -829,6 +892,30 @@ async fn get_commit_record_in_tx(
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records get", e))?;
     row.as_ref().map(row_to_commit_record).transpose()
+}
+
+fn optional_u64(value: Option<i64>) -> Result<Option<u64>, VoomError> {
+    value
+        .map(|v| u64_from_i64(v, concat!(module_path!(), ": ", stringify!(v))))
+        .transpose()
+}
+
+fn row_to_placement(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<(CommitPlacementIntent, Option<CommitPlacementState>), VoomError> {
+    let intent: String = row
+        .try_get("placement_intent")
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
+    let state: Option<String> = row
+        .try_get("placement_state")
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
+    Ok((
+        CommitPlacementIntent::parse(&intent)?,
+        state
+            .as_deref()
+            .map(CommitPlacementState::parse)
+            .transpose()?,
+    ))
 }
 
 fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitRecord, VoomError> {
@@ -883,6 +970,7 @@ fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitR
     let finished_at: Option<String> = row
         .try_get("finished_at")
         .map_err(|e| map_row_err("artifact_commit_records", e))?;
+    let (placement_intent, placement_state) = row_to_placement(row)?;
 
     Ok(ArtifactCommitRecord {
         id: ArtifactCommitRecordId(u64_from_i64(
@@ -902,17 +990,11 @@ fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitR
             concat!(module_path!(), ": ", stringify!(verification_id)),
         )?),
         target_path,
-        result_file_version_id: result_file_version_id
-            .map(|v| {
-                u64_from_i64(v, concat!(module_path!(), ": ", stringify!(v))).map(FileVersionId)
-            })
-            .transpose()?,
-        result_file_location_id: result_file_location_id
-            .map(|v| {
-                u64_from_i64(v, concat!(module_path!(), ": ", stringify!(v))).map(FileLocationId)
-            })
-            .transpose()?,
+        result_file_version_id: optional_u64(result_file_version_id)?.map(FileVersionId),
+        result_file_location_id: optional_u64(result_file_location_id)?.map(FileLocationId),
         state: ArtifactCommitState::parse(&state)?,
+        placement_intent,
+        placement_state,
         failure_class: failure_class
             .as_deref()
             .map(|value| parse_failure_class(value, "artifact_commit_records.failure_class"))

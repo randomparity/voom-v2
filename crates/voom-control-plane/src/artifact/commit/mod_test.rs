@@ -12,8 +12,8 @@ use voom_core::{
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::media::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitState, ArtifactLocationKind, NewArtifactCommitRecord,
-    NewArtifactLocation,
+    ArtifactCommitFailure, ArtifactCommitState, ArtifactLocationKind, CommitPlacementState,
+    NewArtifactCommitRecord, NewArtifactLocation,
 };
 use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationRepo, FileVersionRepo, IngestOutcome, NewFileLocation,
@@ -47,6 +47,7 @@ async fn unverified_commit_is_rejected_before_pending_record() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
+            placement_intent: CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -85,6 +86,7 @@ async fn stale_verification_for_retired_or_different_staging_location_is_rejecte
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: dir.path().join("target.bin"),
+            placement_intent: CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -110,6 +112,7 @@ async fn staged_byte_drift_is_detected_by_the_node_and_requires_recovery() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
+            placement_intent: CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -134,6 +137,7 @@ async fn existing_target_is_rejected_before_pending_record() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
+            placement_intent: CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -163,6 +167,7 @@ async fn conflicting_target_is_reported_mismatched_and_requires_recovery() {
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: staged.artifact_handle_id,
                 target_path: task_target,
+                placement_intent: CommitPlacementIntent::Retained,
             })
             .await
     });
@@ -223,6 +228,7 @@ async fn successful_commit_promotes_target_records_identity_retires_staging_and_
         CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
+            placement_intent: CommitPlacementIntent::Retained,
         },
     )
     .await
@@ -317,6 +323,7 @@ async fn commit_accepts_relative_provider_locator_for_rooted_target() {
         CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
+            placement_intent: CommitPlacementIntent::Retained,
         },
     )
     .await
@@ -365,6 +372,7 @@ async fn concurrent_independent_commits_all_complete() {
                 .commit_artifact(CommitArtifactInput {
                     artifact_handle_id,
                     target_path,
+                    placement_intent: CommitPlacementIntent::Retained,
                 })
                 .await;
             driver.await.unwrap().unwrap();
@@ -395,6 +403,7 @@ async fn injected_failure_after_prepare_terminates_cleanly_without_recovery() {
         CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
+            placement_intent: CommitPlacementIntent::Retained,
         },
         &FailAfterPrepare,
     )
@@ -424,6 +433,7 @@ async fn staged_drift_is_reported_mismatched_without_promotion() {
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: staged.artifact_handle_id,
                 target_path: task_target,
+                placement_intent: CommitPlacementIntent::Retained,
             })
             .await
     });
@@ -470,6 +480,7 @@ async fn recover_commit_finalizes_directly_from_matching_applied_receipt() {
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: staged.artifact_handle_id,
                 target_path: task_target,
+                placement_intent: CommitPlacementIntent::Retained,
             })
             .await
     });
@@ -544,6 +555,77 @@ async fn recover_commit_aborts_receiptless_authorized_and_reprepares() {
     assert_eq!(report.state, ArtifactCommitState::Pending);
     assert_ne!(report.commit_record_id, original_record_id);
     assert!(!target.exists());
+    // ADR 0103: the successor keeps its predecessor's placement intent.
+    let successor = cp
+        .artifacts()
+        .get_commit_record(report.commit_record_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(successor.placement_intent, CommitPlacementIntent::Retained);
+}
+
+#[tokio::test]
+async fn recovery_successor_inherits_staged_intent() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    let task = spawn_commit_task_with(
+        &cp,
+        staged.artifact_handle_id,
+        &target,
+        CommitPlacementIntent::Staged,
+    );
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    node_authorize(&cp, &node, intent_id).await.unwrap();
+    task.abort();
+
+    let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
+
+    let successor = cp
+        .artifacts()
+        .get_commit_record(report.commit_record_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(successor.placement_intent, CommitPlacementIntent::Staged);
+    assert_eq!(successor.placement_state, None);
+}
+
+#[tokio::test]
+async fn commit_records_the_requested_placement() {
+    for intent in [
+        CommitPlacementIntent::Retained,
+        CommitPlacementIntent::Staged,
+    ] {
+        let (cp, _db, dir) = fixture().await;
+        let node = simulated_node(&cp).await;
+        let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+        let report = commit_with_node(
+            &cp,
+            &node,
+            CommitArtifactInput {
+                artifact_handle_id: staged.artifact_handle_id,
+                target_path: dir.path().join("target.bin"),
+                placement_intent: intent,
+            },
+        )
+        .await
+        .unwrap();
+        let record = cp
+            .artifacts()
+            .get_commit_record(report.commit_record_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.placement_intent, intent);
+        let expected = match intent {
+            CommitPlacementIntent::Staged => CommitPlacementState::Staged,
+            CommitPlacementIntent::Retained => CommitPlacementState::Retained,
+        };
+        assert_eq!(record.placement_state, Some(expected));
+    }
 }
 
 #[tokio::test]
@@ -640,6 +722,7 @@ async fn recovery_abort_fails_closed_when_a_receipt_lands_after_classification()
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: staged.artifact_handle_id,
                 target_path: task_target,
+                placement_intent: CommitPlacementIntent::Retained,
             })
             .await
     });
@@ -793,6 +876,7 @@ async fn blocking_use_lease_blocks_prepare_before_pending_record() {
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: dir.path().join("target.bin"),
+            placement_intent: CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -932,6 +1016,7 @@ async fn remote_open_commit_intents_lists_caller_owned_open_intents_only() {
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: handle,
                 target_path: task_target,
+                placement_intent: CommitPlacementIntent::Retained,
             })
             .await
     });
@@ -1464,6 +1549,7 @@ async fn recover_commit_without_non_terminal_commit_is_conflict() {
         CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: dir.path().join("target.bin"),
+            placement_intent: CommitPlacementIntent::Retained,
         },
     )
     .await
@@ -1489,6 +1575,7 @@ async fn convergence_deadline_names_pending_intent_and_keeps_record_recoverable(
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
+            placement_intent: CommitPlacementIntent::Retained,
         })
         .await
         .unwrap_err();
@@ -1730,6 +1817,8 @@ async fn create_pending_commit_result(
                     },
                 }),
                 started_at: OffsetDateTime::UNIX_EPOCH,
+                placement_intent:
+                    voom_store::repo::media::artifacts::CommitPlacementIntent::Retained,
             },
         )
         .await;
@@ -1751,6 +1840,20 @@ fn spawn_commit_task(
     artifact_handle_id: ArtifactHandleId,
     target_path: &Path,
 ) -> tokio::task::JoinHandle<Result<CommitArtifactReport, CommitArtifactCommandError>> {
+    spawn_commit_task_with(
+        cp,
+        artifact_handle_id,
+        target_path,
+        CommitPlacementIntent::Retained,
+    )
+}
+
+fn spawn_commit_task_with(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: &Path,
+    placement_intent: CommitPlacementIntent,
+) -> tokio::task::JoinHandle<Result<CommitArtifactReport, CommitArtifactCommandError>> {
     let task_cp = cp.clone();
     let task_target = target_path.to_path_buf();
     tokio::spawn(async move {
@@ -1758,6 +1861,7 @@ fn spawn_commit_task(
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id,
                 target_path: task_target,
+                placement_intent,
             })
             .await
     })

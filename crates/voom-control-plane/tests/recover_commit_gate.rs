@@ -85,6 +85,7 @@ async fn blocking_lease_cannot_enter_a_pinned_recovery_scope() {
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: verified.artifact_handle_id,
                 target_path: task_target,
+                placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
             })
             .await
     });
@@ -166,6 +167,7 @@ async fn clean_recovery_redrive_completes_and_records_evaluated_leases() {
             .commit_artifact(CommitArtifactInput {
                 artifact_handle_id: verified.artifact_handle_id,
                 target_path: task_target,
+                placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
             })
             .await
     });

@@ -5,8 +5,8 @@ use serde::Serialize;
 use voom_control_plane::artifact::{
     ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
     CommitArtifactInput, CommitArtifactPreMutationReport, CommitArtifactReport,
-    CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
-    VerificationSummary, VerifyArtifactInput, VerifyArtifactReport,
+    CommitPlacementIntent, CommitRecoveryReport, CommitSummary, PathFacts, PathObservation,
+    RecoverySummary, VerificationSummary, VerifyArtifactInput, VerifyArtifactReport,
 };
 use voom_core::{ArtifactHandleId, ErrorCode};
 use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
@@ -287,6 +287,7 @@ async fn commit(
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: ArtifactHandleId(artifact_handle_id),
             target_path: target_path.to_path_buf(),
+            placement_intent: CommitPlacementIntent::Retained,
         })
         .await
     {

@@ -254,6 +254,7 @@ fn spawn_commit_task(
         cp.commit_artifact(CommitArtifactInput {
             artifact_handle_id: handle,
             target_path: target,
+            placement_intent: voom_control_plane::artifact::CommitPlacementIntent::Retained,
         })
         .await
     })

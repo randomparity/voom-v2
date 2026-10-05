@@ -15,8 +15,8 @@ use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommi
 use voom_store::repo::library::library_roots::LibraryRoot;
 use voom_store::repo::media::artifact_commit_intents::NewArtifactCommitIntent;
 use voom_store::repo::media::artifacts::{
-    ArtifactExpectedFacts, ArtifactLocationKind, ArtifactVerification, LiveArtifactLocation,
-    NewArtifactCommitRecord,
+    ArtifactExpectedFacts, ArtifactLocationKind, ArtifactVerification, CommitPlacementIntent,
+    LiveArtifactLocation, NewArtifactCommitRecord,
 };
 use voom_store::repo::media::commit_safety_gate::check_lineage_commit_leases_in_tx;
 use voom_store::repo::media::identity::{FileLocationRepo, FileVersionRepo, NewFileLocation};
@@ -106,6 +106,7 @@ pub(super) async fn prepare_commit_in_tx(
         expected_facts: inputs.expected_facts,
         source_storage_root_id,
         source_provider_relative_locator: source_locator.clone(),
+        placement_intent: input.placement_intent,
         context: inputs.verified_staging.context.clone(),
     };
     let record = create_prepared_record(cp, tx, &draft, &staged_path, &scope, now).await?;
@@ -171,6 +172,7 @@ async fn create_prepared_record(
             },
         }),
         started_at: now,
+        placement_intent: draft.placement_intent,
     };
     let record = create_pending_commit_with_started_event_in_tx(
         &cp.artifacts,
@@ -299,6 +301,7 @@ struct PendingIntentDraft {
     /// rooted address, pinned byte-free at prepare (ADR 0075).
     source_storage_root_id: StorageRootId,
     source_provider_relative_locator: voom_core::ProviderRelativeLocator,
+    placement_intent: CommitPlacementIntent,
     context: PreMutationContext,
 }
 
