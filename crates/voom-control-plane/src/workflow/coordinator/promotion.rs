@@ -483,6 +483,32 @@ async fn copy_into_place(
 }
 
 impl ControlPlane {
+    /// Warn once when a skipped chain tip is a `staged` result: it matches no
+    /// working dir, so it never reaches an output root (ADR 0103 section 5).
+    /// `placed`, `retained` and record-less tips are expected skips and stay
+    /// silent. Log only: the run's outcome and events do not change.
+    async fn warn_if_staged_tip_is_skipped(
+        &self,
+        artifact: &WorkingDirArtifact,
+        current: &Path,
+    ) -> Result<(), VoomError> {
+        let record = self
+            .artifacts
+            .get_commit_record_by_result_location(artifact.location_id)
+            .await?;
+        if let Some(record) = record
+            && record.placement_state == Some(CommitPlacementState::Staged)
+        {
+            tracing::warn!(
+                commit_record = %record.id,
+                location = %current.display(),
+                "skipped a staged result that matches no promotion working dir; \
+                 it was never promoted to an output root"
+            );
+        }
+        Ok(())
+    }
+
     /// Promote scoped terminal (chain-tip) artifacts out of their working dirs
     /// into the operator's `--output-dir`, repointing each artifact's durable
     /// location at the promoted path so the chain tip resolves there.
@@ -491,7 +517,8 @@ impl ControlPlane {
     /// succeeded ticket result locations for sidecar outputs. Only a version that
     /// is its asset's chain tip is promoted; intermediate artifacts stay in the
     /// working dir. Idempotent: once promoted, a location no longer lives under a
-    /// working dir, so a re-run or resume skips it. Mirrors the commit's add-only
+    /// working dir, so a re-run or resume skips it (silently, unless its commit
+    /// record is still `staged`; see `warn_if_staged_tip_is_skipped`). Mirrors the commit's add-only
     /// contract — a destination collision fails the run.
     pub(super) async fn promote_terminal_artifacts(
         &self,
@@ -526,6 +553,8 @@ impl ControlPlane {
             )
             .await?;
             let Some((working_dir, output_dir)) = dirs.pair_for(&current) else {
+                self.warn_if_staged_tip_is_skipped(&artifact, &current)
+                    .await?;
                 continue;
             };
             let source_dir = self
