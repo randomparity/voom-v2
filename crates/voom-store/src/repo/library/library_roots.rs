@@ -447,6 +447,7 @@ impl SqliteLibraryRepo {
             return Err(root_state_conflict(id, current.state, "retire"));
         }
         require_no_live_default_references(tx, id).await?;
+        require_no_unplaced_committed_results(tx, id).await?;
         let result = sqlx::query(
             "UPDATE library_roots SET state = 'retired', enabled = 0, updated_at = ? \
              WHERE id = ? AND state != 'retired'",
@@ -585,6 +586,58 @@ async fn require_no_live_default_references(
         "storage root {id} cannot retire while other roots name it as a default: {}; \
          repoint those defaults or retire the referencing roots first",
         referencing.join(", ")
+    )))
+}
+
+/// Most blocking commit records the retire refusal lists before summarizing the rest.
+const RETIRE_BLOCKER_LIST_LIMIT: i64 = 5;
+
+/// Refuse retiring a root that still holds the live result location of a committed record
+/// whose placement is `staged` or `retained` (#678, ADR 0103 section 6). `placed` results
+/// and withdrawn (retired) locations never block.
+async fn require_no_unplaced_committed_results(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: StorageRootId,
+) -> Result<(), VoomError> {
+    let rows = sqlx::query(
+        "SELECT r.id AS record_id, r.placement_state, count(*) OVER () AS total \
+         FROM artifact_commit_records r \
+         JOIN file_locations fl ON fl.id = r.result_file_location_id \
+         WHERE r.state = 'committed' AND r.placement_state IN ('staged', 'retained') \
+           AND fl.retired_at IS NULL AND fl.storage_root_id = ? \
+         ORDER BY r.id LIMIT ?",
+    )
+    .bind(root_i64(id)?)
+    .bind(RETIRE_BLOCKER_LIST_LIMIT)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("library_roots committed results", error))?;
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    let total: i64 = first
+        .try_get("total")
+        .map_err(|error| map_row_err("library_roots", error))?;
+    let mut blockers = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let record: i64 = row
+            .try_get("record_id")
+            .map_err(|error| map_row_err("library_roots", error))?;
+        let state: String = row
+            .try_get("placement_state")
+            .map_err(|error| map_row_err("library_roots", error))?;
+        blockers.push(format!("commit record {record} ({state})"));
+    }
+    let shown = i64::try_from(blockers.len()).unwrap_or(total);
+    let more = if total > shown {
+        format!(" and {} more", total - shown)
+    } else {
+        String::new()
+    };
+    Err(VoomError::Conflict(format!(
+        "storage root {id} cannot retire while {total} committed result(s) still have their \
+         live location on it: {}{more}; promote or relocate those results, or keep the root",
+        blockers.join(", ")
     )))
 }
 

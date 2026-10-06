@@ -347,8 +347,9 @@ non-retired root names the target in `default_output_root_id`,
 and references held by retired roots do not block.
 
 The residual is narrowed, not closed. An operator who repoints the staging default and
-then retires the old root can still strand a committed-but-unpromoted artifact; that
-case remains accepted and unowned. The `active -> unavailable` transition is
+then retires the old root could still strand a committed-but-unpromoted artifact. #678
+owns that case; see "Later decision: committed results carry a placement state" below.
+The `active -> unavailable` transition is
 deliberately left unguarded: under ADR 0055 it records an observed validation loss and
 is reversible by reactivation, so refusing it would only keep a lost root persisted as
 `active`. The rest of this record stands. The design is
@@ -382,4 +383,9 @@ above, is recorded `retained`. The residual "accepted and unowned" in "Later dec
 retirement refuses a referenced default" now has an owner, #678. ADR 0103 settles that
 guard's contract. `staged` and `retained` results with a live location on the root block
 its retirement. `placed` results do not, even when a root is its own output default. The
-rest of this record stands.
+Issue #678 implements that contract: `retire_library_root_in_tx` refuses, in the retiring
+transaction, while such a result's live location is on the root. The refusal names the
+blocking commit records and their placement state, bounded to the first five plus a count,
+and tells the operator to promote or relocate them or keep the root. The residual named
+"accepted and unowned" above is closed for staging roots; guards for output roots remain
+a later decision. The rest of this record stands.
