@@ -725,13 +725,10 @@ async fn promotion_refuses_a_retained_result_before_moving_bytes() {
     );
 }
 
-#[tokio::test]
-async fn promotion_of_a_result_without_a_commit_record_writes_no_placement() {
+/// A discovered file at `path` that is no commit record's result.
+async fn recordless_result(cp: &ControlPlane, path: &Path) -> WorkingDirArtifact {
     use voom_store::repo::media::identity::{DiscoveredFile, FileLocationRepo, IngestOutcome};
-    let (cp, _db, tmp) = placement_fixture().await;
-    let path = tmp.path().join("working/out.mkv");
-    let dest_dir = tmp.path().join("output");
-    write(&path, b"no commit record").await;
+    write(path, b"no commit record").await;
     let locator = voom_store::test_support::test_relative_locator(&path.display().to_string());
     let IngestOutcome::NewFileAsset {
         file_asset_id,
@@ -761,13 +758,21 @@ async fn promotion_of_a_result_without_a_commit_record_writes_no_placement() {
         .unwrap()
         .unwrap()
         .epoch;
-    let artifact = WorkingDirArtifact {
+    WorkingDirArtifact {
         location_id: file_location_id,
         asset_id: file_asset_id,
         storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
         provider_relative_locator: locator,
         epoch,
-    };
+    }
+}
+
+#[tokio::test]
+async fn promotion_of_a_result_without_a_commit_record_writes_no_placement() {
+    let (cp, _db, tmp) = placement_fixture().await;
+    let path = tmp.path().join("working/out.mkv");
+    let dest_dir = tmp.path().join("output");
+    let artifact = recordless_result(&cp, &path).await;
 
     cp.promote_artifact(&artifact, &path, &dest_dir)
         .await
@@ -776,7 +781,7 @@ async fn promotion_of_a_result_without_a_commit_record_writes_no_placement() {
     assert!(dest_dir.join("out.mkv").exists());
     assert!(
         cp.artifacts()
-            .get_commit_record_by_result_location(file_location_id)
+            .get_commit_record_by_result_location(artifact.location_id)
             .await
             .unwrap()
             .is_none()
@@ -812,4 +817,170 @@ async fn placement_failure_rolls_back_the_address_repoint() {
         placement_of(&cp, artifact.location_id).await,
         Some(CommitPlacementState::Staged)
     );
+}
+
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct LogWriter(LogBuffer);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        (self.0.0)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogBuffer {
+    type Writer = LogWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        LogWriter(self.clone())
+    }
+}
+
+impl LogBuffer {
+    /// Installs this buffer as the current thread's subscriber.
+    ///
+    /// tracing-core caches each callsite's interest process-wide. While exactly one dispatcher
+    /// is registered, it computes that interest from the default subscriber of whichever thread
+    /// first reaches the callsite, so a parallel test without a subscriber can cache the warning
+    /// as never-enabled and starve this capture (#609). The returned peer dispatcher keeps a
+    /// second dispatcher live so registration consults every dispatcher, this capture included.
+    fn capture(&self) -> (tracing::subscriber::DefaultGuard, tracing::Dispatch) {
+        let interest_peer = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(self.clone())
+            .finish();
+        (tracing::subscriber::set_default(subscriber), interest_peer)
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap()
+    }
+}
+
+/// Run `promote_terminal_artifacts` over `artifact` with one working dir
+/// (`<tmp>/working`) paired to `<tmp>/output`, returning the warnings logged.
+async fn promote_scoped(
+    cp: &ControlPlane,
+    tmp: &Path,
+    artifact: &WorkingDirArtifact,
+) -> (Result<(), VoomError>, String) {
+    use crate::cases::policy::compliance::PromotionPair;
+    let plan = PromotionPlan {
+        pairs: vec![PromotionPair {
+            working_dir: tmp.join("working"),
+            output_dir: tmp.join("output"),
+        }],
+    };
+    let logs = LogBuffer::default();
+    let _capture = logs.capture();
+    let result = cp
+        .promote_terminal_artifacts(&plan, &[artifact.location_id], tmp, None)
+        .await;
+    (result, logs.text())
+}
+
+async fn unmatched_tip(
+    intent: voom_store::repo::media::artifacts::CommitPlacementIntent,
+) -> (
+    ControlPlane,
+    voom_test_support::TempDatabase,
+    tempfile::TempDir,
+    WorkingDirArtifact,
+    PathBuf,
+) {
+    let (cp, db, tmp) = placement_fixture().await;
+    tokio::fs::create_dir_all(tmp.path().join("elsewhere"))
+        .await
+        .unwrap();
+    let path = tmp.path().join("elsewhere/out.mkv");
+    let artifact = committed_result(&cp, &path, intent).await;
+    (cp, db, tmp, artifact, path)
+}
+
+#[tokio::test]
+async fn unmatched_staged_tip_warns_once_naming_record_and_location() {
+    use voom_store::repo::media::artifacts::CommitPlacementIntent;
+    let (cp, _db, tmp, artifact, path) = unmatched_tip(CommitPlacementIntent::Staged).await;
+    let record = cp
+        .artifacts()
+        .get_commit_record_by_result_location(artifact.location_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let (result, logs) = promote_scoped(&cp, tmp.path(), &artifact).await;
+
+    result.unwrap();
+    assert_eq!(logs.matches("WARN").count(), 1, "{logs}");
+    assert!(
+        logs.contains(&format!("commit_record={}", record.id)),
+        "{logs}"
+    );
+    assert!(logs.contains(&path.display().to_string()), "{logs}");
+    assert!(path.exists(), "the skipped tip stays where it was");
+}
+
+#[tokio::test]
+async fn unmatched_retained_tip_is_silent() {
+    use voom_store::repo::media::artifacts::CommitPlacementIntent;
+    let (cp, _db, tmp, artifact, _path) = unmatched_tip(CommitPlacementIntent::Retained).await;
+
+    let (result, logs) = promote_scoped(&cp, tmp.path(), &artifact).await;
+
+    result.unwrap();
+    assert!(!logs.contains("WARN"), "{logs}");
+}
+
+#[tokio::test]
+async fn unmatched_tip_without_a_commit_record_is_silent() {
+    let (cp, _db, tmp) = placement_fixture().await;
+    let path = tmp.path().join("elsewhere/out.mkv");
+    tokio::fs::create_dir_all(tmp.path().join("elsewhere"))
+        .await
+        .unwrap();
+    let artifact = recordless_result(&cp, &path).await;
+
+    let (result, logs) = promote_scoped(&cp, tmp.path(), &artifact).await;
+
+    result.unwrap();
+    assert!(!logs.contains("WARN"), "{logs}");
+}
+
+#[tokio::test]
+async fn resumed_promotion_of_a_placed_tip_is_silent() {
+    use voom_store::repo::media::artifacts::{CommitPlacementIntent, CommitPlacementState};
+    let (cp, _db, tmp) = placement_fixture().await;
+    let path = tmp.path().join("working/out.mkv");
+    let artifact = committed_result(&cp, &path, CommitPlacementIntent::Staged).await;
+
+    let (first, first_logs) = promote_scoped(&cp, tmp.path(), &artifact).await;
+    let (resume, resume_logs) = promote_scoped(&cp, tmp.path(), &artifact).await;
+
+    first.unwrap();
+    resume.unwrap();
+    assert!(!first_logs.contains("WARN"), "{first_logs}");
+    assert!(!resume_logs.contains("WARN"), "{resume_logs}");
+    assert_eq!(
+        placement_of(&cp, artifact.location_id).await,
+        Some(CommitPlacementState::Placed)
+    );
+    assert!(tmp.path().join("output/out.mkv").exists());
 }
