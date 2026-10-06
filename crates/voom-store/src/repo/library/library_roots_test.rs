@@ -911,3 +911,125 @@ async fn corrupt_persisted_root_lifecycle_is_a_database_error_before_classificat
     assert_eq!(error.code(), "DB_UNREACHABLE");
     assert!(error.to_string().contains("lifecycle columns invalid"));
 }
+
+/// Insert one committed record whose result location is on `root`. Foreign keys are off
+/// on the throwaway connection: only the columns the retire guard reads are meaningful.
+async fn seed_committed_result(
+    repo: &SqliteLibraryRepo,
+    record: i64,
+    root: StorageRootId,
+    placement: &str,
+    location_retired: bool,
+) {
+    let mut connection = repo.pool.acquire().await.unwrap();
+    connection.close_on_drop();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO file_locations (id, file_version_id, address_state, storage_root_id, \
+         provider_relative_locator, observed_at, retired_at, epoch) \
+         VALUES (?1, ?1, 'rooted', ?2, 'results/' || ?1 || '.mkv', '1970-01-01T00:00:00Z', \
+                 CASE WHEN ?3 THEN '1970-01-01T00:00:01Z' END, 0)",
+    )
+    .bind(record)
+    .bind(root_i64(root).unwrap())
+    .bind(location_retired)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    let intent = if placement == "retained" {
+        "retained"
+    } else {
+        "staged"
+    };
+    sqlx::query(
+        "INSERT INTO artifact_commit_records (id, artifact_handle_id, source_file_version_id, \
+         verification_id, target_path, result_file_version_id, result_file_location_id, state, \
+         report, started_at, finished_at, placement_intent, placement_state) \
+         VALUES (?1, ?1, ?1, ?1, 'target/' || ?1, ?1, ?1, 'committed', '{}', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:01Z', ?2, ?3)",
+    )
+    .bind(record)
+    .bind(intent)
+    .bind(placement)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+}
+
+async fn two_roots(repo: &SqliteLibraryRepo) -> (LibraryRoot, LibraryRoot) {
+    let library_id = library(repo, "films", true).await;
+    let owner = node(repo, "node-a", NodeStatus::Active).await;
+    let old = repo
+        .create_library_root(new_root(library_id, owner, "/old-staging"), at(1))
+        .await
+        .unwrap();
+    let new = repo
+        .create_library_root(new_root(library_id, owner, "/new-staging"), at(2))
+        .await
+        .unwrap();
+    (old, new)
+}
+
+// ADR 0103 section 6: an operator who repointed the staging default away from a root can
+// no longer retire it while a staged or retained result still lives there (#678).
+#[tokio::test]
+async fn retire_refuses_a_root_holding_staged_or_retained_results() {
+    let (repo, _tmp) = repo().await;
+    let (old, new) = two_roots(&repo).await;
+    set_defaults(&repo, new.id, [Some(new.id), None, None], at(3)).await;
+    seed_committed_result(&repo, 1, old.id, "staged", false).await;
+    seed_committed_result(&repo, 2, old.id, "retained", false).await;
+    seed_committed_result(&repo, 3, new.id, "staged", false).await;
+
+    let error = retire(&repo, old.id, at(4)).await.unwrap_err();
+    let expected = format!(
+        "storage root {} cannot retire while 2 committed result(s) still have their live \
+         location on it: commit record 1 (staged), commit record 2 (retained); \
+         promote or relocate those results, or keep the root",
+        old.id
+    );
+    assert!(
+        matches!(&error, VoomError::Conflict(message) if *message == expected),
+        "{error:?}"
+    );
+    let unchanged = repo.get_library_root(old.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.state, StorageRootState::Configured);
+}
+
+#[tokio::test]
+async fn retire_ignores_placed_withdrawn_and_other_root_results() {
+    let (repo, _tmp) = repo().await;
+    let (old, new) = two_roots(&repo).await;
+    // `old` is its own output default and holds a placed result.
+    set_defaults(&repo, old.id, [None, Some(old.id), None], at(3)).await;
+    seed_committed_result(&repo, 1, old.id, "placed", false).await;
+    seed_committed_result(&repo, 2, old.id, "staged", true).await;
+    seed_committed_result(&repo, 3, new.id, "retained", false).await;
+
+    let retired = retire(&repo, old.id, at(4)).await.unwrap();
+    assert_eq!(retired.state, StorageRootState::Retired);
+}
+
+#[tokio::test]
+async fn retire_refusal_lists_a_bounded_number_of_blocking_records() {
+    let (repo, _tmp) = repo().await;
+    let (old, _new) = two_roots(&repo).await;
+    for record in 1..=7 {
+        seed_committed_result(&repo, record, old.id, "staged", false).await;
+    }
+
+    let error = retire(&repo, old.id, at(4)).await.unwrap_err();
+    let VoomError::Conflict(message) = error else {
+        panic!("expected conflict: {error:?}");
+    };
+    assert!(message.contains("7 committed result(s)"), "{message}");
+    assert!(
+        message.contains("commit record 5 (staged) and 2 more;"),
+        "{message}"
+    );
+    assert!(!message.contains("commit record 6"), "{message}");
+}
