@@ -487,15 +487,22 @@ impl ControlPlane {
     /// working dir, so it never reaches an output root (ADR 0103 section 5).
     /// `placed`, `retained` and record-less tips are expected skips and stay
     /// silent. Log only: the run's outcome and events do not change.
-    async fn warn_if_staged_tip_is_skipped(
-        &self,
-        artifact: &WorkingDirArtifact,
-        current: &Path,
-    ) -> Result<(), VoomError> {
-        let record = self
+    async fn warn_if_staged_tip_is_skipped(&self, artifact: &WorkingDirArtifact, current: &Path) {
+        let record = match self
             .artifacts
             .get_commit_record_by_result_location(artifact.location_id)
-            .await?;
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(
+                    location = %current.display(),
+                    %error,
+                    "could not read the commit record of a tip skipped by promotion"
+                );
+                return;
+            }
+        };
         if let Some(record) = record
             && record.placement_state == Some(CommitPlacementState::Staged)
         {
@@ -506,7 +513,6 @@ impl ControlPlane {
                  it was never promoted to an output root"
             );
         }
-        Ok(())
     }
 
     /// Promote scoped terminal (chain-tip) artifacts out of their working dirs
@@ -554,7 +560,7 @@ impl ControlPlane {
             .await?;
             let Some((working_dir, output_dir)) = dirs.pair_for(&current) else {
                 self.warn_if_staged_tip_is_skipped(&artifact, &current)
-                    .await?;
+                    .await;
                 continue;
             };
             let source_dir = self
