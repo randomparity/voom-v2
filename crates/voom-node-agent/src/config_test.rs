@@ -462,7 +462,11 @@ impl ConfigFixture {
         use std::os::unix::fs::PermissionsExt as _;
 
         let path = self.path(name);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        if executable {
+            voom_test_support::executable::write_executable(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        } else {
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        }
         let mode = if executable { 0o700 } else { 0o600 };
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
         path

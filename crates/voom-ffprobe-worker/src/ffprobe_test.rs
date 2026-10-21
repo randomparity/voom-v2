@@ -3,7 +3,6 @@
     reason = "unit tests use expect for direct thread and process assertions"
 )]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -390,17 +389,8 @@ const fn config_error_kind(error: &FfprobeConfigError) -> ConfigErrorKind {
 
 fn write_executable(dir: &Path, script: &str) -> PathBuf {
     let path = dir.join("ffprobe");
-    let write_result = std::fs::write(&path, script);
-    assert!(write_result.is_ok());
-    let metadata_result = std::fs::metadata(&path);
-    assert!(metadata_result.is_ok());
-    let Ok(metadata) = metadata_result else {
-        return path;
-    };
-    let mut permissions = metadata.permissions();
-    permissions.set_mode(0o755);
-    let chmod_result = std::fs::set_permissions(&path, permissions);
-    assert!(chmod_result.is_ok());
+    let write_result = voom_test_support::executable::write_executable(&path, script);
+    assert!(write_result.is_ok(), "{write_result:?}");
     path
 }
 

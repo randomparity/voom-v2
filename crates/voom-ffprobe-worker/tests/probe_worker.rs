@@ -3,7 +3,6 @@
     reason = "integration tests use expect for direct setup and process assertions"
 )]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -559,17 +558,8 @@ fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
          if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
          {body}"
     );
-    let write_result = std::fs::write(&path, script);
-    assert!(write_result.is_ok());
-    let metadata_result = std::fs::metadata(&path);
-    assert!(metadata_result.is_ok());
-    let Ok(metadata) = metadata_result else {
-        return path;
-    };
-    let mut permissions = metadata.permissions();
-    permissions.set_mode(0o755);
-    let chmod_result = std::fs::set_permissions(&path, permissions);
-    assert!(chmod_result.is_ok());
+    let write_result = voom_test_support::executable::write_executable(&path, script);
+    assert!(write_result.is_ok(), "{write_result:?}");
     path
 }
 
@@ -582,12 +572,7 @@ fn write_hung_version_ffprobe(dir: &Path, pid_file: &Path) -> PathBuf {
          exit 1\n",
         pid_file.display()
     );
-    std::fs::write(&path, script).expect("hung ffprobe fixture should be written");
-    let mut permissions = std::fs::metadata(&path)
-        .expect("hung ffprobe fixture metadata should be readable")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&path, permissions)
+    voom_test_support::executable::write_executable(&path, script)
         .expect("hung ffprobe fixture should be executable");
     path
 }

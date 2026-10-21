@@ -251,18 +251,8 @@ fn capacity_ffmpeg_stub(dir: &Path, log: &Path) -> PathBuf {
         log = log.display(),
     );
     let path = dir.join("ffmpeg");
-    std::fs::write(&path, body).unwrap();
-    make_executable(&path);
+    voom_test_support::executable::write_executable(&path, body).unwrap();
     path
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = std::fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).unwrap();
 }
 
 #[cfg(unix)]

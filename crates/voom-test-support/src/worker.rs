@@ -263,8 +263,7 @@ pub fn install_fake_ffprobe_sibling(source: &Path, label: &str) -> io::Result<Ff
 }
 
 fn copy_executable(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::copy(source, destination)?;
-    make_executable(destination)
+    crate::executable::write_executable(destination, fs::read(source)?)
 }
 
 fn ffprobe_sibling_is_test_helper(path: &Path) -> bool {
@@ -293,22 +292,6 @@ fn restore_hidden_ffprobe(path: &Path, hidden: Option<&PathBuf>) {
     {
         let _ = fs::rename(hidden, path);
     }
-}
-
-fn make_executable(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

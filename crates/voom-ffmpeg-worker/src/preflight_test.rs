@@ -270,8 +270,7 @@ fn ffmpeg_stub(dir: &Path, name: &str, version: &str, encoders: &str, muxers: &s
 /// little as 8 KiB under pipe-page pressure), so overshoot any plausible value.
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    make_executable(&path);
+    voom_test_support::executable::write_executable(&path, body).unwrap();
     path
 }
 
@@ -281,15 +280,3 @@ fn non_executable_file(dir: &Path, name: &str) -> PathBuf {
     std::fs::write(&path, "not executable").unwrap();
     path
 }
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = std::fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).unwrap();
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
