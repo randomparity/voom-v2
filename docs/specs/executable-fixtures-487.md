@@ -22,7 +22,8 @@ No deferrals. ADR 0105 governs the fixture writer's process boundary.
 Expose `voom_test_support::executable::write_executable(path: &Path,
 contents: impl AsRef<[u8]>) -> io::Result<()>`.
 On Unix run `/bin/sh -c 'cat > "$1" && chmod 755 "$1"' fixture-writer PATH`;
-send bytes over piped stdin, close stdin, and wait/reap before returning. Pass the
+send bytes over piped stdin, inherit stderr, close stdin, and wait/reap before
+returning. Inheriting stderr prevents diagnostics from blocking input transmission. Pass the
 path as an argument and bytes as data. The test process never opens the destination
 for writing, so concurrent sibling forks cannot inherit its writable descriptor.
 The writer shell waits for its writing child before exiting. Propagate spawn,
@@ -62,7 +63,8 @@ Required hooks and final `just ci` pass on the complete branch.
 
 ## Validation
 - Focused tests: shared helper executes exact content with quoted paths, binary/
-  large content preserved, invalid destination surfaces error. Existing full FFmpeg
+  large content preserved, invalid destination surfaces error (including large
+  diagnostics plus large input, checked by a bounded subprocess regression). Existing full FFmpeg
   parallel failure is the red baseline; the controlled inheritance harness confirms
   cause. Exercise parallel helper creation and execution without retries.
 - Migration: inspect every executable permission writer and copied test binary in
