@@ -49,8 +49,8 @@ are outside this prerequisite; do not claim those failures are solved.
 Parser regression proves the new flag is accepted and retained; it fails red
 before implementation. Compliance tests prove resume preserves verification/ticket
 identities and does not dispatch completed phases, including repeated partial
-resume; missing prior and mismatched-window/safety paths leave jobs/issues
-unchanged. CLI integration exercises flag-to-facade-to-coordinator wiring and
+resume; invalid prior state/window leaves jobs/issues unchanged. Safety refusal
+opens its existing blocked issue without opening a job. CLI integration exercises flag-to-facade-to-coordinator wiring and
 single-envelope error/success or partial output. Existing fresh-run coverage
 continues to run. Docs are checked against actual CLI help and test evidence,
 not prose assertions. Run relevant focused tests, format/lint/source checks,
