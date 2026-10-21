@@ -68,7 +68,7 @@ clap = { version = "=4.6.7", features = ["derive", "env"] }
 hex = "0.4.3"
 rand = { version = "0.9.4", default-features = false, features = ["os_rng", "std", "std_rng"] }
 rcgen = { version = "0.14.8", default-features = false, features = ["pem", "ring"] }
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 same-file = "=1.0.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
