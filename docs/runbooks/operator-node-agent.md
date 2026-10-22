@@ -88,6 +88,28 @@ worker also requires `nvidia_smi_bin = "/usr/bin/nvidia-smi"`. The agent clears 
 environment, does not supply `PATH`, and injects only the absolute dependency paths needed
 by that worker as `VOOM_FFMPEG_BIN`, `VOOM_FFPROBE_BIN`, and `VOOM_NVIDIA_SMI_BIN`.
 
+A worker declaring `remux` requires `mkvmerge_bin`; the agent injects its absolute
+path as `VOOM_MKVMERGE_BIN`. Existing remux configurations must add this dependency
+before upgrading. Install MKVToolNix on the agent host and configure its actual
+executable location, for example:
+
+```toml
+[[workers]]
+name = "remux"
+program = "/usr/local/libexec/voom/voom-mkvtoolnix-worker"
+args = []
+operations = ["remux"]
+artifact_access = ["shared_mount"]
+max_parallel = 2
+
+[workers.dependencies]
+mkvmerge_bin = "/usr/bin/mkvmerge"
+```
+
+Dependency settings are operation-specific: `mkvmerge_bin` is rejected on workers
+that do not declare `remux`. A worker declaring additional operations must also
+provide those operations' required dependencies. No ambient `PATH` is forwarded.
+
 The agent passes only stable accelerator identity and `max_sessions` selection values to
 the child. The child probes that device and returns structured readiness metadata; every
 descriptor field must match the configuration before the agent reports ready. Descriptor

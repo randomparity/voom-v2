@@ -61,6 +61,8 @@ pub struct WorkerConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorkerDependencyPaths {
     #[serde(default)]
+    pub mkvmerge_bin: Option<PathBuf>,
+    #[serde(default)]
     pub ffmpeg_bin: Option<PathBuf>,
     #[serde(default)]
     pub ffprobe_bin: Option<PathBuf>,
@@ -72,6 +74,10 @@ impl std::fmt::Debug for WorkerDependencyPaths {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WorkerDependencyPaths")
+            .field(
+                "mkvmerge_bin",
+                &self.mkvmerge_bin.as_ref().map(|_| "[CONFIGURED]"),
+            )
             .field(
                 "ffmpeg_bin",
                 &self.ffmpeg_bin.as_ref().map(|_| "[CONFIGURED]"),
@@ -258,6 +264,13 @@ impl WorkerConfig {
     }
 
     fn validate_dependencies(&self) -> Result<(), VoomError> {
+        validate_dependency_path(
+            &self.name,
+            "mkvmerge_bin",
+            self.dependencies.mkvmerge_bin.as_deref(),
+            self.operations.contains(&OperationKind::Remux),
+            "remux",
+        )?;
         let uses_ffmpeg = self.operations.contains(&OperationKind::TranscodeVideo)
             || self.operations.contains(&OperationKind::TranscodeAudio)
             || self.operations.contains(&OperationKind::ExtractAudio);

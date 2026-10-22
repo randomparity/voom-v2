@@ -8,6 +8,68 @@ use voom_core::VoomError;
 use super::AgentConfig;
 
 #[test]
+fn config_remux_requires_explicit_mkvmerge_dependency() {
+    let fixture = ConfigFixture::new("token");
+    let remux = fixture
+        .document
+        .replace("operations = [\"hash_file\"]", "operations = [\"remux\"]");
+    fixture.rewrite(&remux);
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("dependencies.mkvmerge_bin is required")
+    );
+
+    let mkvmerge = fixture.write_dependency("mkvmerge", true);
+    let document = format!(
+        "{remux}\n[workers.dependencies]\nmkvmerge_bin = {:?}\n",
+        mkvmerge.display().to_string()
+    );
+    fixture.rewrite(&document);
+    let loaded = AgentConfig::load(&fixture.config_path).unwrap();
+    assert_eq!(
+        loaded.config.workers[0]
+            .dependencies
+            .mkvmerge_bin
+            .as_deref(),
+        Some(mkvmerge.as_path())
+    );
+    let debug = format!("{:?}", loaded.config.workers[0].dependencies);
+    assert!(!debug.contains(&mkvmerge.display().to_string()));
+    assert!(debug.contains("[CONFIGURED]"));
+
+    let missing = fixture.path("missing-mkvmerge");
+    let non_executable = fixture.write_dependency("non-executable-mkvmerge", false);
+    for (path, diagnostic) in [
+        (Path::new("mkvmerge"), "absolute path"),
+        (missing.as_path(), "existing regular file"),
+        (fixture.temp_path(), "regular file"),
+        (non_executable.as_path(), "executable"),
+    ] {
+        fixture.rewrite(&format!(
+            "{remux}\n[workers.dependencies]\nmkvmerge_bin = {:?}\n",
+            path.display().to_string()
+        ));
+        let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+        assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+        assert!(
+            error.to_string().contains("dependencies.mkvmerge_bin")
+                && error.to_string().contains(diagnostic),
+            "{error}"
+        );
+    }
+
+    fixture.rewrite(&document.replace("operations = [\"remux\"]", "operations = [\"hash_file\"]"));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("mkvmerge_bin is only valid for remux")
+    );
+}
+
+#[test]
 fn valid_file_token_config_loads_without_exposing_the_secret() {
     let fixture = ConfigFixture::new("voom-node-v1.top-secret\n");
     let loaded = AgentConfig::load(&fixture.config_path).unwrap();
