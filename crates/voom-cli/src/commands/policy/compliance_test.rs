@@ -100,6 +100,31 @@ fn compliance_execute_accepts_explicit_file_window() {
 }
 
 #[test]
+fn compliance_execute_accepts_resume_job_id() {
+    use clap::Parser;
+
+    let cli = crate::cli::Cli::try_parse_from([
+        "voom",
+        "compliance",
+        "execute",
+        "--policy-version-id",
+        "1",
+        "--input-set-id",
+        "2",
+        "--resume-job-id",
+        "7",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Compliance(ComplianceCommand::Execute {
+            resume_job_id: Some(7),
+            ..
+        })
+    ));
+}
+
+#[test]
 fn compliance_execute_defaults_accelerator_recovery_to_fifteen_minutes() {
     use clap::Parser;
 

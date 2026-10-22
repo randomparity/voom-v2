@@ -148,6 +148,7 @@ pub async fn apply(
 pub struct ExecuteArgs {
     pub policy_version_id: u64,
     pub input_set_id: u64,
+    pub resume_job_id: Option<u64>,
     pub max_in_flight_files: usize,
     pub accelerator_unavailable_timeout_seconds: u64,
     pub staging_root: Option<std::path::PathBuf>,
@@ -162,6 +163,7 @@ pub async fn execute(database_url: &str, local: Local, args: ExecuteArgs) -> io:
         Err(code) => return Ok(code),
     };
     let mut options = ComplianceExecutionOptions {
+        prior_job_id: args.resume_job_id.map(JobId),
         max_in_flight_files: args.max_in_flight_files,
         accelerator_unavailable_timeout: Duration::from_secs(
             args.accelerator_unavailable_timeout_seconds,

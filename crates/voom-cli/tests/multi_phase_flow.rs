@@ -144,8 +144,6 @@ async fn multi_phase_execute_then_report_by_job_id() {
             &out_dir.display().to_string(),
         ],
     );
-    worker.shutdown().unwrap();
-
     let execute_json = assert_execute_committed_two_phases(&url, &execute).await;
     let job_id = execute_json["data"]["summary"]["job_id"].as_u64().unwrap();
     let run_phases = execute_json["data"]["phases"].as_array().unwrap();
@@ -165,6 +163,89 @@ async fn multi_phase_execute_then_report_by_job_id() {
     );
 
     assert_report_reads_back_chain(&url, job_id, run_phases);
+    assert_resume_preserves_completed_chain(
+        &url,
+        version_id,
+        input_id,
+        &root,
+        &out_dir,
+        &execute_json,
+    );
+    worker.shutdown().unwrap();
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        b"multi-phase e2e source bytes"
+    );
+}
+
+fn assert_resume_preserves_completed_chain(
+    url: &str,
+    version_id: u64,
+    input_id: u64,
+    staging_root: &Path,
+    out_dir: &Path,
+    executed: &Value,
+) {
+    let outputs = std::fs::read_dir(out_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 1);
+    let output = &outputs[0];
+    let bytes = std::fs::read(output).unwrap();
+    let modified = std::fs::metadata(output).unwrap().modified().unwrap();
+    let mut prior_job_id = executed["data"]["summary"]["job_id"].as_u64().unwrap();
+    for _attempt in 0..2 {
+        let resumed = run_voom(
+            url,
+            &[
+                "compliance",
+                "execute",
+                "--policy-version-id",
+                &version_id.to_string(),
+                "--input-set-id",
+                &input_id.to_string(),
+                "--resume-job-id",
+                &prior_job_id.to_string(),
+                "--staging-root",
+                &staging_root.display().to_string(),
+                "--output-dir",
+                &out_dir.display().to_string(),
+            ],
+        );
+        assert_eq!(
+            resumed.status.code(),
+            Some(0),
+            "resume must preserve completed work; stdout={} stderr={}",
+            String::from_utf8_lossy(&resumed.stdout),
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let resumed = envelope(&resumed.stdout);
+        assert_eq!(resumed["command"], "compliance");
+        assert_eq!(resumed["status"], "ok");
+        let job_id = resumed["data"]["summary"]["job_id"].as_u64().unwrap();
+        assert_ne!(job_id, prior_job_id, "resume opens a new job");
+        assert_eq!(resumed["data"]["summary"]["dispatch_count"], 0);
+        assert_eq!(
+            resumed["data"]["file_phases"],
+            executed["data"]["file_phases"]
+        );
+        assert_eq!(std::fs::read(output).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(output).unwrap().modified().unwrap(),
+            modified
+        );
+        let report = run_voom(
+            url,
+            &["compliance", "report", "--job-id", &job_id.to_string()],
+        );
+        assert_eq!(report.status.code(), Some(0));
+        assert_eq!(
+            envelope(&report.stdout)["data"]["file_phases"],
+            resumed["data"]["file_phases"]
+        );
+        prior_job_id = job_id;
+    }
 }
 
 /// `execute` exits 0 with two `completed` phases, two `committed` per-file rows,
