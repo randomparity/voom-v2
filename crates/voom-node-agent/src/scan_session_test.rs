@@ -487,6 +487,7 @@ enum SingleFileBehavior {
 struct ScriptedSingleFileWorker {
     operation: OperationKind,
     behavior: SingleFileBehavior,
+    dispatches: tokio::sync::Mutex<Vec<(String, OperationRequest)>>,
 }
 
 impl ScriptedSingleFileWorker {
@@ -494,6 +495,7 @@ impl ScriptedSingleFileWorker {
         Arc::new(Self {
             operation,
             behavior,
+            dispatches: tokio::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -523,9 +525,13 @@ impl ClientHandle for ScriptedSingleFileWorker {
     async fn dispatch(
         &self,
         _credentials: &WorkerCredentials,
-        _idempotency_key: &str,
+        idempotency_key: &str,
         request: OperationRequest,
     ) -> Result<DispatchStream, voom_worker_protocol::ProtocolError> {
+        self.dispatches
+            .lock()
+            .await
+            .push((idempotency_key.to_owned(), request.clone()));
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
         let operation = self.operation;
         let behavior = self.behavior;
@@ -644,6 +650,59 @@ fn registry_with(
 }
 
 // -------------------------------------------------------------- the tests --
+
+#[tokio::test]
+async fn candidate_dispatch_keys_isolate_scan_executions_and_preserve_retries() {
+    let incarnation = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let hash = ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree);
+    let probe = ScriptedSingleFileWorker::new(OperationKind::ProbeFile, SingleFileBehavior::Agree);
+    let registry = registry_with(
+        ScriptedScanWorker::new(Vec::new()),
+        hash.clone(),
+        probe.clone(),
+    );
+    for (root, lease) in [
+        ("/media/a", 77),
+        ("/media/a", 78),
+        ("/media/b", 79),
+        ("/media/a", 77),
+    ] {
+        let mut context = pump_context(NodeId(9_000_001), incarnation);
+        context.lease_id = LeaseId(lease);
+        let contribution = super::process_candidate(
+            registry.clone(),
+            root.into(),
+            sidecar_candidate("source.mkv", "source.srt"),
+            context,
+        )
+        .await
+        .unwrap_or_else(|failure| unreachable!("candidate failed: {}", failure.reason));
+        assert!(contribution.observation.unwrap().evidence.is_some());
+    }
+    let hashes = hash.dispatches.lock().await;
+    let probes = probe.dispatches.lock().await;
+    for (dispatches, width) in [(&hashes[..], 2), (&probes[..], 1)] {
+        assert_eq!(dispatches.len(), 4 * width);
+        let mut bodies = std::collections::BTreeMap::new();
+        for (key, request) in dispatches {
+            let body = serde_json::to_vec(request).unwrap();
+            if let Some(previous) = bodies.insert(key, body.clone()) {
+                assert_eq!(
+                    previous, body,
+                    "reused child key must not refer to another scan"
+                );
+            }
+        }
+        assert_eq!(
+            bodies.len(),
+            3 * width,
+            "fresh scan executions require fresh child keys"
+        );
+        for offset in 0..width {
+            assert_eq!(dispatches[offset], dispatches[3 * width + offset]);
+        }
+    }
+}
 
 #[tokio::test]
 async fn ordered_batches_reach_the_control_plane_and_complete() {
