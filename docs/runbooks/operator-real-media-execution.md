@@ -1,18 +1,18 @@
 # Runbook: Operator Real-Media Execution
 
-Run the real-media pipeline end-to-end from the `voom` CLI: scan a library, author
-a policy, stand up real workers, and execute remux-to-MKV + transcode-to-HEVC.
+Run the real-media pipeline through an authenticated storage-owner node agent:
+scan a library, author a policy, and execute remux-to-MKV + transcode-to-HEVC.
 This is the operator procedure behind the Sprint 17 slice
 (`docs/superpowers/specs/2026-06-05-voom-sprint-17-slice-operator-execution-design.md`).
 
 ## Prerequisites
 
-- `ffmpeg`, `ffprobe`, and `mkvtoolnix` (`mkvmerge`) on `PATH`. `voom worker
-  run-local` fails fast with a dependency error if its tool is missing.
-- One database, shared by every command below via `VOOM_DATABASE_URL`
-  (e.g. `export VOOM_DATABASE_URL=sqlite:///var/lib/voom/voom.db`). Use a database
-  dedicated to this library — the whole-library input builder (`--all`) selects
-  every scanned video file in the DB.
+Use an initialized production node configuration from
+[operator-node-agent.md](operator-node-agent.md), or the dedicated local acceptance
+stack below. The local helper requires Python 3.13 or newer, `jq`, `ffmpeg`,
+`ffprobe`, `mkvmerge`, and the repository's pinned Rust toolchain. Input, staging,
+and output directories must be separate and must not contain one another.
+Choose input media and output retention before starting; promotion is add-only.
 
 ## Procedure
 
@@ -21,53 +21,59 @@ All commands emit a single JSON envelope on stdout; logs go to stderr.
 (readiness line, then the retirement envelope on shutdown). See the
 [run-local stdout contract](#run-local-stdout-contract) note below.
 
-### 1. Initialize the database (once)
+### 1. Build the local acceptance binaries
 
-```
-voom init
-```
+From the repository root:
 
-`run-local` and every command below open an *existing* database via `connect`,
-which never creates or migrates it (ADR-0003). Running them before `voom init`
-yields a `DB_UNREACHABLE`/schema error envelope, not a crash.
-
-### 2. Start the workers (foreground, stdin kept open)
-
-```
-# terminal A
-voom worker run-local --kind ffmpeg
-# terminal B
-voom worker run-local --kind mkvtoolnix
+```sh
+cargo build -p voom-cli -p voom-api -p voom-node-agent -p voom-scan-worker -p voom-hash-worker \
+  -p voom-ffmpeg-worker -p voom-ffprobe-worker \
+  -p voom-mkvtoolnix-worker -p voom-verify-artifact-worker
+export PATH="${CARGO_TARGET_DIR:-$PWD/target}/debug:$PATH"
 ```
 
-Each registers a worker, spawns the bundled binary, records its live endpoint, and
-supervises it. **Wait for each to print its readiness line** before step 4:
+`voom init` is the sole
+schema-creation/migration entrypoint; the helper invokes it for a new database.
+Other commands only connect to an existing database.
 
+### 2. Start the authenticated local stack
+
+In terminal A, choose a fresh acceptance work directory and existing input directory:
+
+```sh
+python3 scripts/acceptance-bootstrap.py serve \
+  --workdir /var/tmp/voom-acceptance \
+  --input /path/to/input \
+  --staging /path/to/staging \
+  --output /path/to/output
 ```
-{"status":"ready","worker_id":12,"kind":"ffmpeg","endpoint":"127.0.0.1:53017"}
+
+Keep stdin open. Wait for the single `status: "ready"` JSON record, which gives
+`node_id`, `library_id`, worker IDs and the input/staging/output root IDs. The helper
+registers the node and roots, sets staging/output defaults, starts the real API on
+an allocated loopback port and starts the owner agent with six real workers. Readiness
+requires authenticated activation of every configured root and all six active workers.
+It stops before scanning if activation fails. This cleartext loopback stack is for
+local acceptance; use the node-agent runbook's authenticated deployment for remote hosts.
+
+In terminal B, use the same work directory and the node/root IDs from readiness:
+
+```sh
+export VOOM_DATABASE_URL=sqlite:///var/tmp/voom-acceptance/voom.db
+export VOOM_LOCAL_NODE_ID=<node_id>
 ```
 
-Repeat either command in another foreground session to add capacity for that
-operation kind. Reachable same-kind workers remain registered, and dispatch
-selects the eligible worker with the lowest capacity utilization (worker id
-breaks ties deterministically).
+Exact local node identity is required for the current promotion path. Registration
+stdout is captured in memory; the bearer goes into a private temporary credential
+outside `bootstrap-evidence`, and is removed when the stack stops. Nonsecret evidence,
+databases and media outputs remain for inspection. A fresh helper invocation requires
+a fresh work directory; it does not resume an earlier registration.
 
-For NVIDIA HEVC encoding, keep the software worker above and start one additional
-FFmpeg worker per physical GPU, using the full UUID reported by `nvidia-smi`:
-
-```
-# terminal C
-voom worker run-local \
-  --kind ffmpeg \
-  --nvidia-device GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
-  --nvidia-max-sessions 2
-
-# terminal D
-voom worker run-local \
-  --kind ffmpeg \
-  --nvidia-device GPU-ffffffff-1111-2222-3333-444444444444 \
-  --nvidia-max-sessions 2
-```
+For accelerated media execution, configure the authenticated owner agent's accelerator
+manifest using [operator-node-agent.md](operator-node-agent.md). The local helper
+accepts `--accelerator-json` from a successful bundled-worker readiness probe; the
+VAAPI and VideoToolbox acceptance scripts demonstrate that setup. Separate standalone
+`worker run-local` supervisors are used only for their dedicated supervisor checks.
 
 An NVIDIA-bound worker advertises only GPU video work; it does not replace the
 unbound worker needed by software profiles, audio transcoding, and extraction.
@@ -100,16 +106,8 @@ device passes its startup probe.
 
 #### AMD VAAPI HEVC encoding
 
-Keep the software worker above and start one additional FFmpeg worker per render
-node, naming the device by its **PCI address**:
-
-```
-# terminal E
-voom worker run-local \
-  --kind ffmpeg \
-  --vaapi-device 0000:f4:00.0 \
-  --vaapi-max-sessions 1
-```
+Declare each VAAPI worker on the owner agent using its probed accelerator descriptor.
+The configured identity is its **PCI address**.
 
 Read the address off `lspci -D` (`0000:f4:00.0` is domain:bus:device.function,
 lowercase hex). Configuration accepts that and nothing else — **not**
@@ -290,14 +288,8 @@ on any failure, and leaves its evidence directory in place. It is not part of
 
 #### Apple VideoToolbox encoding
 
-On Apple silicon macOS, start a host-scoped VideoToolbox worker explicitly:
-
-```
-voom worker run-local \
-  --kind ffmpeg \
-  --videotoolbox \
-  --videotoolbox-max-sessions 4
-```
+On Apple silicon macOS, declare a host-scoped VideoToolbox worker on the owner
+agent using its probed descriptor and an explicit session capacity.
 
 The session declaration must be in `1..=16` and defaults to one. Startup
 requires FFmpeg's `videotoolbox` accelerator, `h264_videotoolbox` and
@@ -338,19 +330,17 @@ an unprovable declared capacity, a supervisor/worker resource mismatch, or an
 existing claim whose prior owner cannot be proven absent. Each fails before
 readiness.
 
-Running `compliance execute` before both workers are ready races the registration
-and hits the missing-worker path. `run-local` is a foreground supervisor: it
-retires the worker on Ctrl-C (SIGINT), SIGTERM, or stdin EOF. Start it in a
-terminal, PTY session, or service wrapper that keeps stdin open for as long as
-the worker should be live; a non-interactive launcher that closes stdin after
-startup will print `ready` and then immediately retire the worker. A hard
-`kill -9` skips the retire; the next `run-local --kind <same>` probes same-kind
-siblings and retires only unreachable stale rows. `execute` also liveness-checks
-each endpoint before dispatch and refuses to use a dead one (with an actionable
-error naming the `run-local` command to start).
+The owner agent starts scan, hash, probe, transform and verification workers as
+out-of-process children. Wait for its ready workers and effectively available roots
+before scanning or executing. For a one-second software-only proof:
 
-`ffprobe` and the artifact-verify worker are *not* started this way — the control
-plane spawns them as managed subprocesses as needed.
+```sh
+python3 scripts/acceptance-bootstrap.py smoke --workdir /var/tmp/voom-smoke
+```
+
+It must publish one observation and one policy member, then stop the API and agent
+and remove the temporary credential. Hardware scripts use the same owner bootstrap;
+VideoToolbox keeps claim/crash/retirement checks in a separate database.
 
 ### 3. Scan the library
 
@@ -430,13 +420,13 @@ library (ADR 0021):
   filters`) — surfaced as a `terminal_failure` issue for that file while the rest
   of the library proceeds. voom never emits an audio-less artifact.
 
-### 5. Build a whole-library input set
+### 5. Build an input set for the activated root
 
 ```
-voom policy input create-from-scan --all --slug lib1
+voom policy input create-from-scan --root <storage-root-id> --slug lib1
 ```
 
-Builds one input set covering every live **video** file-version; non-video /
+Builds one input set covering live **video** file-versions under this root; non-video /
 unprobeable files are skipped (the envelope reports `included_count` /
 `skipped_count`). Capture `input_set_id`.
 
@@ -457,8 +447,8 @@ voom compliance execute \
   --policy-version-id <version_id> \
   --input-set-id <input_set_id> \
   --max-in-flight-files 4 \
-  --staging-root /var/lib/voom/staging \
-  --output-dir   /mnt/pool0/test-video-out
+  --staging-root /path/to/staging \
+  --output-dir /path/to/output
 ```
 
 ## Output, re-runs, and partial failure
@@ -574,8 +564,7 @@ lease. Inspect them with `voom ticket list` and inspect existing leases with
 
 Cancellation does not preempt work that already has a held lease, and there is
 no scheduler-lease force-release or worker-abort CLI. A held operation may
-finish after the parent job is cancelled. Stop the relevant `worker run-local`
-supervisor separately when the worker process itself must stop; do not treat
+finish after the parent job is cancelled. Stop the owning node agent separately when the worker process itself must stop; do not treat
 the cancellation envelope as proof that it stopped.
 
 ## Output layout
@@ -599,8 +588,10 @@ single-directory run (no shared subtree) promotes flat, as before.
 
 ## Teardown
 
-Ctrl-C each `run-local` (it retires its worker and prints a final envelope).
-`voom worker list` should then show no live local workers.
+Close terminal A's stdin or send SIGINT/SIGTERM to the bootstrap helper. It stops
+and reaps its agent and API, removes its temporary credential, and records shutdown
+results under `bootstrap-evidence`. Keep the database, logs, staging and outputs until
+the operator decides retention. A shutdown error is a failed acceptance run.
 
 ## run-local stdout contract
 

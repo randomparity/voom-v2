@@ -395,6 +395,7 @@ async fn node_incarnations_may_reuse_external_idempotency_keys() {
     fixture
         .cp
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: fixture.node_id,
             token: fixture.token.clone(),
             idempotency_key: "activate-next-incarnation".to_owned(),

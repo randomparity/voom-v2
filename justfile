@@ -34,7 +34,11 @@ source-checks: check-workflows check-workflows-selftest check-test-layout \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
     check-transaction-openers check-transaction-openers-selftest \
-    check-adr-index check-adr-index-selftest
+    check-adr-index check-adr-index-selftest acceptance-bootstrap-selftest
+
+# Acceptance setup must fail closed and retain no registration bearer.
+acceptance-bootstrap-selftest:
+    python3 scripts/acceptance-bootstrap-selftest.py
 
 # Keep platform verification on both supported CI runners
 platform-checks: fmt-check lint select-ffmpeg-asset-selftest \

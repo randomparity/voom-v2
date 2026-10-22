@@ -295,6 +295,7 @@ struct LiveFixture {
     /// Storage root the probe-ticket fixture resolves against; bound into
     /// every agent config this fixture spawns.
     media_root: PathBuf,
+    media_root_id: voom_core::StorageRootId,
     _media_root_guard: tempfile::TempDir,
 }
 
@@ -342,6 +343,7 @@ impl LiveFixture {
         });
         let media_root_guard = tempfile::tempdir().unwrap();
         let media_root = media_root_guard.path().to_path_buf();
+        let media_root_id = configure_media_root(&cp, registered.node.id, &media_root).await;
         Self {
             _database: database,
             cp,
@@ -352,6 +354,7 @@ impl LiveFixture {
             server,
             requests,
             media_root,
+            media_root_id,
             _media_root_guard: media_root_guard,
         }
     }
@@ -363,7 +366,7 @@ impl LiveFixture {
                 node_id: self.node_id,
                 ca_cert: None,
                 storage_roots: vec![voom_node_agent::config::StorageRootBinding {
-                    storage_root_id: 1,
+                    storage_root_id: self.media_root_id.0,
                     provider_locator: self.media_root.clone(),
                 }],
                 poll_interval_ms: 50,
@@ -406,7 +409,7 @@ impl LiveFixture {
                         "operation": "probe",
                         "schema": voom_core::PROTOCOL_VERSION,
                         "source": {
-                            "storage_root_id": 1,
+                            "storage_root_id": self.media_root_id,
                             "provider_relative_locator": "lifecycle.mkv",
                         },
                         "expected": {
@@ -633,4 +636,50 @@ async fn wait_for_acquire_transition<T: Debug>(
             Err(format!("live agent never reached {transition}"))
         }
     }
+}
+
+async fn configure_media_root(
+    cp: &ControlPlane,
+    owner_node_id: NodeId,
+    path: &std::path::Path,
+) -> voom_core::StorageRootId {
+    use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+    use voom_store::repo::library::library_roots::{
+        HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    };
+    let library = cp
+        .create_library(NewLibrary {
+            slug: "lifecycle-media".to_owned(),
+            display_name: "Lifecycle media".to_owned(),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    // Configure only: the real authenticated agent must activate its bound root.
+    cp.create_library_root(NewLibraryRoot {
+        library_id: library.id,
+        owner_node_id,
+        provider_kind: voom_core::StorageProviderKind::LocalFilesystem,
+        provider_locator: voom_core::ProviderLocator::new(path.to_str().unwrap().to_owned())
+            .unwrap(),
+        display_locator: "Lifecycle media".to_owned(),
+        include_globs: Vec::new(),
+        exclude_globs: Vec::new(),
+        extension_allowlist: Vec::new(),
+        scan_mode: LibraryScanMode::ManualRecursive,
+        symlink_policy: SymlinkPolicy::Reject,
+        hidden_file_policy: HiddenFilePolicy::Ignore,
+        max_depth: None,
+        stability_seconds: 0,
+        debounce_seconds: 0,
+        default_output_root_id: None,
+        default_staging_root_id: None,
+        default_backup_root_id: None,
+        enabled: true,
+    })
+    .await
+    .unwrap()
+    .id
 }

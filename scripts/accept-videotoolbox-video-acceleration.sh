@@ -23,12 +23,17 @@ if [[ $(uname -s) != "Darwin" || $(uname -m) != "arm64" ]]; then
   exit 2
 fi
 
-for command_name in cargo ffmpeg ffprobe jq mkfifo rg sqlite3 trash; do
+for command_name in cargo ffmpeg ffprobe jq mkfifo rg sqlite3 python3 mkvmerge; do
   if ! command -v "$command_name" >/dev/null; then
     echo "required command is missing: $command_name" >&2
     exit 2
   fi
 done
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+source "$repo_root/scripts/acceptance-bootstrap.sh"
+voom_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/voom"
 
 task_tmp=$(mktemp -d /tmp/voom-videotoolbox-acceptance.XXXXXX)
 task_tmp=$(cd "$task_tmp" && pwd -P)
@@ -54,14 +59,17 @@ cleanup() {
     kill -TERM "$worker_pid" 2>/dev/null || true
     wait "$worker_pid" 2>/dev/null || true
   fi
-  trash "$task_tmp"
+  acceptance_stop || echo "acceptance shutdown failed" >&2
+  echo "VideoToolbox acceptance evidence kept in: $task_tmp" >&2
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 trap 'echo "VideoToolbox acceptance failed: $BASH_COMMAND" >&2' ERR
 
 voom() {
   local exit_code
-  if target/debug/voom --database-url "$database_url" "$@"; then
+  if "$voom_bin" --database-url "$database_url" "$@"; then
     return 0
   else
     exit_code=$?
@@ -156,17 +164,16 @@ assert_production_execution() {
 
 execute_case() {
   local spec=$1
-  local case_name profile_name source_name source_codec source_container
+  local case_name profile_name source_name _source_codec _source_container
   local expected_codec expected_profile expected_pixel_format expected_width expected_height
-  IFS='|' read -r case_name profile_name source_name source_codec source_container \
+  IFS='|' read -r case_name profile_name source_name _source_codec _source_container \
     expected_codec expected_profile expected_pixel_format expected_width \
     expected_height <<<"$spec"
 
   local scan_json="$task_tmp/scan-$case_name.json"
-  run_voom_json "$scan_json" scan --path "$task_tmp/$source_name"
-  local file_version_id media_snapshot_id
-  file_version_id=$(jq -er '.data.files[0].file_version_id' "$scan_json")
-  media_snapshot_id=$(jq -er '.data.files[0].media_snapshot_id' "$scan_json")
+  local input_root
+  input_root=$(acceptance_root input "$task_tmp/inputs/$case_name")
+  run_voom_json "$scan_json" scan --root "$input_root"
 
   local policy_file="$task_tmp/policy-$case_name.voom"
   printf 'policy "%s" { phase encode { transcode video to %s using profile "%s" } }\n' \
@@ -181,29 +188,27 @@ execute_case() {
   local input_json="$task_tmp/input-$case_name.json"
   run_voom_json "$input_json" policy input create-from-scan \
     --slug "$case_name" \
-    --file-version-id "$file_version_id" \
-    --media-snapshot-id "$media_snapshot_id" \
-    --container "$source_container" \
-    --video-codec "$source_codec"
+    --root "$input_root"
   local input_set_id
   input_set_id=$(jq -er '.data.input_set.input_set_id' "$input_json")
 
-  mkdir -p "$task_tmp/staging-$case_name" "$task_tmp/output-$case_name"
   local execute_json="$task_tmp/execute-$case_name.json"
   run_voom_json "$execute_json" compliance execute \
     --policy-version-id "$policy_version_id" \
     --input-set-id "$input_set_id" \
     --max-in-flight-files 1 \
-    --staging-root "$task_tmp/staging-$case_name" \
-    --output-dir "$task_tmp/output-$case_name"
+    --staging-root "$task_tmp/media/staging" \
+    --output-dir "$task_tmp/media/output"
   assert_production_execution "$case_name" "$execute_json"
 
   local job_id location_id output_path
   job_id=$(jq -er '.data.summary.job_id' "$execute_json")
   location_id=$(jq -er '.data.file_phases[0].produced_file_location_id' "$execute_json")
   output_path=$(
-    sqlite3 "$task_tmp/voom.db" \
-      "SELECT value FROM file_locations WHERE id = $location_id"
+    sqlite3 "$task_tmp/media/voom.db" \
+      "SELECT r.provider_locator || '/' || f.provider_relative_locator
+       FROM file_locations f JOIN library_roots r ON r.id = f.storage_root_id
+       WHERE f.id = $location_id AND f.address_state = 'rooted'"
   )
 
   local report_json="$task_tmp/report-$case_name.json"
@@ -217,7 +222,7 @@ execute_case() {
 
   local event
   event=$(
-    sqlite3 "$task_tmp/voom.db" \
+    sqlite3 "$task_tmp/media/voom.db" \
       "SELECT payload FROM events
        WHERE kind = 'artifact.transcode_succeeded'
          AND json_extract(payload, '$.job_id') = $job_id
@@ -261,6 +266,11 @@ cargo test -p voom-control-plane videotoolbox_evidence_
 cargo test -p voom-ffmpeg-worker videotoolbox_
 cargo build \
   -p voom-cli \
+  -p voom-api \
+  -p voom-node-agent \
+  -p voom-scan-worker \
+  -p voom-hash-worker \
+  -p voom-mkvtoolnix-worker \
   -p voom-ffmpeg-worker \
   -p voom-ffprobe-worker \
   -p voom-verify-artifact-worker
@@ -284,17 +294,7 @@ ffmpeg -hide_banner -loglevel error -nostdin \
   -i "$task_tmp/base-hevc10.mkv" \
   -map 0 -c copy -y "$task_tmp/base-hevc10.mp4"
 
-for profile in \
-  "accept-sw-h264|h264_videotoolbox|high|4.1|yuv420p|software|-|-" \
-  "accept-sw-hevc|hevc_videotoolbox|main|-|yuv420p|software|-|-" \
-  "accept-hw-h264|h264_videotoolbox|high|4.1|yuv420p|video-toolbox|-|-" \
-  "accept-hw-hevc|hevc_videotoolbox|main|-|yuv420p|video-toolbox|-|-" \
-  "accept-hw-hevc10|hevc_videotoolbox|main10|-|yuv420p10le|video-toolbox|-|-" \
-  "accept-hw-scale|hevc_videotoolbox|main|-|yuv420p|video-toolbox|128|128"; do
-  create_profile "$profile"
-done
-
-target/debug/voom \
+"$voom_bin" \
   --database-url "$database_url" \
   worker run-local \
   --kind ffmpeg \
@@ -358,18 +358,6 @@ jq -e \
 ffmpeg -hide_banner -buildconf >"$task_tmp/ffmpeg-build.txt" 2>&1
 require_text "FFmpeg VideoToolbox build flag" \
   '--enable-videotoolbox' "$(cat "$task_tmp/ffmpeg-build.txt")"
-
-for acceptance_case in \
-  "sw-h264|accept-sw-h264|source-sw-h264.mkv|h264|mkv|h264|High|yuv420p|256|256" \
-  "sw-hevc|accept-sw-hevc|source-sw-hevc.mkv|h264|mkv|hevc|Main|yuv420p|256|256" \
-  "hw-h264|accept-hw-h264|source-hw-h264.mkv|h264|mkv|h264|High|yuv420p|256|256" \
-  "hw-hevc8|accept-hw-h264|base-hevc8.mkv|hevc|mkv|h264|High|yuv420p|256|256" \
-  "hw-hevc10|accept-hw-hevc10|base-hevc10.mp4|hevc|mp4|hevc|Main 10|yuv420p10le|256|256" \
-  "hw-av18|accept-hw-hevc|base-av18.mkv|av1|mkv|hevc|Main|yuv420p|256|256" \
-  "hw-av110|accept-hw-hevc10|base-av110.mkv|av1|mkv|hevc|Main 10|yuv420p10le|256|256" \
-  "hw-scale|accept-hw-scale|source-hw-scale.mkv|h264|mkv|hevc|Main|yuv420p|128|128"; do
-  execute_case "$acceptance_case"
-done
 
 ffmpeg \
   -hide_banner \
@@ -436,7 +424,7 @@ if [[ "$owner_gone" != "true" ]]; then
   exit 1
 fi
 
-if ! target/debug/voom \
+if ! "$voom_bin" \
   --database-url "$database_url" \
   worker run-local \
   --kind ffmpeg \
@@ -465,5 +453,44 @@ if [[ "$claims_after_shutdown" != "0" ]]; then
   echo "VideoToolbox claim remained after clean retirement" >&2
   exit 1
 fi
+
+# Claim/crash/retirement checks above use their own database and have finished.
+# Media execution uses a separate authenticated owner stack and complete root manifest.
+acceptance_cases=(
+  "sw-h264|accept-sw-h264|source-sw-h264.mkv|h264|mkv|h264|High|yuv420p|256|256"
+  "sw-hevc|accept-sw-hevc|source-sw-hevc.mkv|h264|mkv|hevc|Main|yuv420p|256|256"
+  "hw-h264|accept-hw-h264|source-hw-h264.mkv|h264|mkv|h264|High|yuv420p|256|256"
+  "hw-hevc8|accept-hw-h264|base-hevc8.mkv|hevc|mkv|h264|High|yuv420p|256|256"
+  "hw-hevc10|accept-hw-hevc10|base-hevc10.mp4|hevc|mp4|hevc|Main 10|yuv420p10le|256|256"
+  "hw-av18|accept-hw-hevc|base-av18.mkv|av1|mkv|hevc|Main|yuv420p|256|256"
+  "hw-av110|accept-hw-hevc10|base-av110.mkv|av1|mkv|hevc|Main 10|yuv420p10le|256|256"
+  "hw-scale|accept-hw-scale|source-hw-scale.mkv|h264|mkv|hevc|Main|yuv420p|128|128"
+)
+bootstrap_inputs=()
+for acceptance_case in "${acceptance_cases[@]}"; do
+  IFS='|' read -r case_name _profile source_name _rest <<<"$acceptance_case"
+  input_dir="$task_tmp/inputs/$case_name"
+  mkdir -p "$input_dir"
+  cp "$task_tmp/$source_name" "$input_dir/$source_name"
+  bootstrap_inputs+=(--input "$input_dir")
+done
+jq '.accelerator' <<<"$capability_extra" >"$task_tmp/accelerator.json"
+acceptance_start "$task_tmp/media" "${bootstrap_inputs[@]}" \
+  --bin-dir "$(dirname "$voom_bin")" --accelerator-json "$task_tmp/accelerator.json"
+database_url="sqlite://$task_tmp/media/voom.db"
+for profile in \
+  "accept-sw-h264|h264_videotoolbox|high|4.1|yuv420p|software|-|-" \
+  "accept-sw-hevc|hevc_videotoolbox|main|-|yuv420p|software|-|-" \
+  "accept-hw-h264|h264_videotoolbox|high|4.1|yuv420p|video-toolbox|-|-" \
+  "accept-hw-hevc|hevc_videotoolbox|main|-|yuv420p|video-toolbox|-|-" \
+  "accept-hw-hevc10|hevc_videotoolbox|main10|-|yuv420p10le|video-toolbox|-|-" \
+  "accept-hw-scale|hevc_videotoolbox|main|-|yuv420p|video-toolbox|128|128"; do
+  create_profile "$profile"
+done
+
+for acceptance_case in "${acceptance_cases[@]}"; do
+  execute_case "$acceptance_case"
+done
+acceptance_stop
 
 echo "VideoToolbox video acceleration acceptance passed at capacity $max_sessions"

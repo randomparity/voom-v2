@@ -94,6 +94,7 @@ async fn scan_wait_reports_terminal_outcome() {
         .unwrap();
     let incarnation: NodeIncarnationId = DRIVER_INCARNATION.parse().unwrap();
     cp.remote_activate(RemoteActivateInput {
+        storage_roots: Vec::new(),
         node_id: registered.node.id,
         token: registered.token.clone(),
         idempotency_key: "scan-envelope-driver-activate".to_owned(),

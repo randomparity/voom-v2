@@ -112,6 +112,7 @@ async fn activate(
         .unwrap();
     let incarnation_id = "0123456789abcdef0123456789abcdef".parse().unwrap();
     cp.remote_activate(RemoteActivateInput {
+        storage_roots: Vec::new(),
         node_id: registered.node.id,
         token: registered.token.clone(),
         idempotency_key: "activate".to_owned(),

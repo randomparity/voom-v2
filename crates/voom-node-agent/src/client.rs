@@ -626,7 +626,16 @@ pub struct WorkerDeclaration {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct StorageRootProof {
+    pub storage_root_id: voom_core::StorageRootId,
+    pub provider_locator: voom_core::ProviderLocator,
+    pub activation_identity: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivateRequest {
+    pub storage_roots: Vec<StorageRootProof>,
     pub incarnation_id: NodeIncarnationId,
     pub workers: Vec<WorkerDeclaration>,
 }

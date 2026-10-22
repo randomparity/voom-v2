@@ -128,6 +128,7 @@ async fn a_declared_remote_worker_is_not_ready_until_child_startup_is_persisted(
     let incarnation_id = "00000000000000000000000000000424".parse().unwrap();
     let activation = cp
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: registered.node.id,
             token: registered.token.clone(),
             idempotency_key: "activate-starting-media-node".to_owned(),
@@ -1544,6 +1545,7 @@ async fn activate_owner_node(
     let token = registered.token;
     let outcome = cp
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: registered.node.id,
             token: token.clone(),
             idempotency_key: format!("activate-{slug}-{call}"),
@@ -1590,6 +1592,7 @@ async fn activate_accelerated_owner_with_file(
     let token = registered.token;
     let activation = cp
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: registered.node.id,
             token: token.clone(),
             idempotency_key: format!("activate-{slug}-{call}"),

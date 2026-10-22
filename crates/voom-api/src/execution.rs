@@ -13,8 +13,8 @@ use serde_json::Value as JsonValue;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::execution::{
     RemoteAcquireInput, RemoteActivateInput, RemoteCompleteInput, RemoteDeactivateInput,
-    RemoteFailInput, RemoteLeaseHeartbeatInput, RemoteNodeHeartbeatInput, RemoteWorkerDeclaration,
-    RemoteWorkerReadinessInput,
+    RemoteFailInput, RemoteLeaseHeartbeatInput, RemoteNodeHeartbeatInput, RemoteStorageRootProof,
+    RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
 };
 use voom_core::{
     ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason, NodeIncarnationId,
@@ -53,6 +53,8 @@ struct NodeHeartbeatRequest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ActivateRequest {
+    #[serde(default)]
+    storage_roots: Vec<RemoteStorageRootProof>,
     incarnation_id: NodeIncarnationId,
     workers: Vec<RemoteWorkerDeclaration>,
 }
@@ -156,6 +158,7 @@ async fn activate(
 
     match control_plane
         .remote_activate(RemoteActivateInput {
+            storage_roots: request.storage_roots,
             node_id: NodeId(node_id),
             token,
             idempotency_key,

@@ -58,10 +58,12 @@ if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "run" ]]; then
     echo "missing --out" >&2
     exit 1
   fi
+  mkdir -p "$out"
+  printf '%s\n' "$$" >"$out/producer-pid"
   sleep 0.25
   mkdir -p "$out/library/movies-hd"
   printf 'media' >"$out/library/movies-hd/movie.mkv"
-  sleep 0.25
+  sleep 1
   echo '{"ok":true}'
   exit 0
 fi
@@ -81,19 +83,12 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 args=("${args[@]}")
 case "${args[*]}" in
-  scan\ --path\ *)
-    library="${args[$((${#args[@]} - 1))]}"
-    if [[ "${library##*/}" != "library" ]]; then
-      echo '{"status":"error","error":{"code":"WRONG_SCAN_ROOT"}}'
-      exit 2
-    fi
-    if ! find "$library" -type f -name '*.mkv' -print -quit | grep -q .; then
-      echo '{"status":"error","error":{"code":"MISSING_LIBRARY"}}'
-      exit 2
-    fi
-    echo '{"status":"ok","data":{"files":[{"status":"scanned","file_version_id":11,"media_snapshot_id":22}]}}'
+  scan\ --root\ 3)
+    test "$VOOM_LOCAL_NODE_ID" = 7
+    echo '{"status":"ok","data":{"status":"succeeded","observation_count":1}}'
     ;;
   policy\ input\ create-from-scan\ *)
+    [[ " ${args[*]} " == *" --root 3 "* ]]
     echo '{"status":"ok","data":{"input_set":{"input_set_id":101}}}'
     ;;
   compliance\ report\ *)
@@ -106,11 +101,29 @@ case "${args[*]}" in
 esac
 SH
 
-chmod +x "$fake_bin/git" "$fake_bin/cargo" "$fake_bin/uv" "$fake_voom"
+# Fake only the external bootstrap process; run the real Bash lifecycle adapter.
+cat >"$fake_bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == */scripts/acceptance-bootstrap.py && "$2" == serve ]]
+if [[ "${FAKE_BOOTSTRAP_WAIT_FOR_PRODUCER_EXIT:-0}" == 1 ]]; then
+  while kill -0 "$(cat "$CHAOS_WORKDIR/run/producer-pid")" 2>/dev/null; do
+    sleep 0.01
+  done
+fi
+jq -nc --arg path "$CHAOS_WORKDIR/run/library" \
+  '{status:"ready",node_id:7,roots:[{role:"input",provider_locator:$path,root_id:3}]}'
+cat >/dev/null
+printf 'stopped\n' >"$CHAOS_WORKDIR/bootstrap-stopped"
+exit "${FAKE_BOOTSTRAP_EXIT_CODE:-0}"
+SH
 
+chmod +x "$fake_bin/git" "$fake_bin/cargo" "$fake_bin/uv" "$fake_bin/python3" "$fake_voom"
+
+run_case() {
 PATH="$fake_bin:$PATH" \
-VOOM_BIN="$fake_voom" \
-CHAOS_WORKDIR="$chaos_workdir" \
+VOOM_BIN="${FAKE_VOOM_OVERRIDE-$fake_voom}" \
+CHAOS_WORKDIR="$1" \
 CHAOS_DURATION="1s" \
 CHAOS_SPEED="1x" \
 CHAOS_CHECKPOINT_INTERVAL="0.1s" \
@@ -119,6 +132,9 @@ CHAOS_POLICY_VERSION_ID=7 \
 CHAOS_PRESERVE_OUTPUT=0 \
 CHAOS_CLEANUP=0 \
   "$repo_root/scripts/chaos-e2e-local.sh"
+
+}
+run_case "$chaos_workdir"
 
 test -s "$chaos_workdir/summary.jsonl" || {
   echo "expected local chaos script to record at least one checkpoint" >&2
@@ -131,3 +147,22 @@ jq -e '
   | select(.policy_report_summary_status == "compliant")
   | select(.policy_ticket_count == 0)
 ' "$chaos_workdir/summary.jsonl" >/dev/null
+
+test -s "$chaos_workdir/bootstrap-stopped"
+
+if FAKE_BOOTSTRAP_EXIT_CODE=2 run_case "$workdir/failed-shutdown"; then
+  echo "Chaos falsely succeeded after bootstrap shutdown failed" >&2
+  exit 1
+fi
+
+if FAKE_BOOTSTRAP_WAIT_FOR_PRODUCER_EXIT=1 run_case "$workdir/no-checkpoint"; then
+  echo "Chaos falsely succeeded without a scan checkpoint" >&2
+  exit 1
+fi
+
+mkdir -p "$workdir/target/debug"
+cp "$fake_voom" "$workdir/target/debug/voom"
+relative_target=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+  "$workdir/target" "$repo_root")
+FAKE_VOOM_OVERRIDE='' CARGO_TARGET_DIR="$relative_target" run_case "$workdir/relative-target"
+test -s "$workdir/relative-target/summary.jsonl"

@@ -49,6 +49,7 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
     let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse()?;
     control_plane
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: registered.node.id,
             token: registered.token.clone(),
             idempotency_key: "cutoff-activation".to_owned(),

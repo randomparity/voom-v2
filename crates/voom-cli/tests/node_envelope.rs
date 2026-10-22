@@ -325,6 +325,7 @@ mod node_envelope {
     ) {
         let incarnation_id: NodeIncarnationId = incarnation_id.parse().unwrap();
         cp.remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: NodeId(registered.node_id),
             token: registered.token.clone().into(),
             idempotency_key: key.to_owned(),

@@ -91,6 +91,7 @@ pub async fn seed_scanned_files(
     let node_id = registered.node.id;
     let activation = cp
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id,
             token: registered.token.clone(),
             idempotency_key: format!("activate-flow-seeder-{root}-{call}"),
