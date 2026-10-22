@@ -101,3 +101,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0101](0101-independent-required-source-checks.md) | Schedule source checks independently and require their results |
 | [0102](0102-self-heal-retires-only-on-a-refused-endpoint.md) | Local-worker self-heal retires only on a refused endpoint |
 | [0103](0103-durable-placement-state-for-committed-results.md) | Committed results carry a durable placement state |
+| [0105](0105-child-written-executable-fixtures.md) | Write executable fixtures in child processes |

@@ -1497,19 +1497,6 @@ fn assert_terminal_error(frame: &ProgressFrame, class: FailureClass, code: Error
 
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    make_executable(&path);
+    voom_test_support::executable::write_executable(&path, body).unwrap();
     path
 }
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = std::fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).unwrap();
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}

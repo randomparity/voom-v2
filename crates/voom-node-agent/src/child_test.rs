@@ -613,7 +613,7 @@ fn main() {
 
     fn write_dependency(&self, name: &str) -> PathBuf {
         let path = self.temp.path().join(name);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        voom_test_support::executable::write_executable(&path, "#!/bin/sh\nexit 0\n").unwrap();
         make_executable(&path);
         path
     }
@@ -678,7 +678,7 @@ sys.stdout.flush()
 {wait}"#,
             if newline { "True" } else { "False" },
         );
-        std::fs::write(&self.script, script).unwrap();
+        voom_test_support::executable::write_executable(&self.script, script).unwrap();
         make_executable(&self.script);
         let _ = std::fs::remove_file(&self.record_path);
         let _ = std::fs::remove_file(&self.exited);
@@ -735,7 +735,7 @@ sys.stdout.flush()
 
     fn write_dependency(&self, name: &str) -> PathBuf {
         let path = self.temp.path().join(name);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        voom_test_support::executable::write_executable(&path, "#!/bin/sh\nexit 0\n").unwrap();
         make_executable(&path);
         path
     }

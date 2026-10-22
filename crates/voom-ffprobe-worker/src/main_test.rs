@@ -1,5 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
-
 use voom_core::WorkerId;
 use voom_ffprobe_worker::FFPROBE_BIN_ENV;
 use voom_worker_protocol::WorkerCredentials;
@@ -30,18 +28,12 @@ fn test_config() -> Option<FfprobeConfig> {
     };
     let path = dir.path().join("ffprobe");
     assert!(
-        std::fs::write(
+        voom_test_support::executable::write_executable(
             &path,
             "#!/bin/sh\nprintf 'ffprobe version test-helper Copyright\\n'\n"
         )
         .is_ok()
     );
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        return None;
-    };
-    let mut permissions = metadata.permissions();
-    permissions.set_mode(0o755);
-    assert!(std::fs::set_permissions(&path, permissions).is_ok());
     let result = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, path.as_os_str())]);
     assert!(result.is_ok());
     result.ok()

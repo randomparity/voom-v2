@@ -434,7 +434,8 @@ fn prebuilt_verify_worker_does_not_invoke_cargo() {
     std::fs::create_dir_all(&deps).unwrap();
     let source = std::env::current_exe().unwrap();
     let executable = deps.join(source.file_name().unwrap());
-    std::fs::copy(&source, &executable).unwrap();
+    voom_test_support::executable::write_executable(&executable, std::fs::read(&source).unwrap())
+        .unwrap();
     let worker = debug.join(format!("{BINARY}{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(&source, &worker).unwrap();
     for mode in ["present", "missing", "missing-override", "fallback"] {
