@@ -206,5 +206,52 @@ class BootstrapTests(unittest.TestCase):
                     self.assertIs(bootstrap.signal.getsignal(kind), handler)
 
 
+class BashAdapterTests(unittest.TestCase):
+    def test_adapter_waits_for_readiness_and_closes_stdin_on_stop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "scripts").mkdir()
+            helper = root / "scripts/acceptance-bootstrap.py"
+            helper.write_text(
+                "import json, pathlib, sys\n"
+                "print(json.dumps({'status':'ready','node_id':7,'roots':"
+                "[{'role':'input','provider_locator':'/fixture','root_id':11}]}), flush=True)\n"
+                "sys.stdin.read()\n"
+                f"pathlib.Path({str(root / 'stopped')!r}).write_text('stopped')\n"
+            )
+            adapter = Path(__file__).with_name("acceptance-bootstrap.sh")
+            command = (
+                'set -eu; repo_root=$1; source "$2"; '
+                'acceptance_start "$1/run"; '
+                'test "$VOOM_LOCAL_NODE_ID" = 7; '
+                'test "$(acceptance_root input /fixture)" = 11; '
+                'acceptance_stop; test -f "$1/stopped"'
+            )
+            completed = subprocess.run(
+                ["bash", "-c", command, "adapter-test", str(root), str(adapter)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            helper.write_text("raise SystemExit(2)\n")
+            failed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'repo_root=$1; source "$2"; acceptance_start "$1/failed"',
+                    "adapter-test",
+                    str(root),
+                    str(adapter),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

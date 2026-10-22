@@ -466,7 +466,12 @@ def smoke(args):
     args.input = [source]
     with Bootstrap(args) as stack:
         root = next(root for root in stack.roots if root["role"] == "input")
-        stack.voom("scan", "--root", root["root_id"])
+        scanned = stack.voom("scan", "--root", root["root_id"])
+        if (
+            scanned["data"].get("status") != "succeeded"
+            or scanned["data"].get("observation_count") != 1
+        ):
+            raise RuntimeError("software smoke did not publish exactly one scanned file")
         result = stack.voom(
             "policy",
             "input",
@@ -476,6 +481,8 @@ def smoke(args):
             "--slug",
             "acceptance-smoke",
         )
+        if result["data"]["input_set"].get("included_count") != 1:
+            raise RuntimeError("software smoke did not include exactly one policy input")
         print(
             json.dumps(
                 {

@@ -1,22 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Known limitation (#623): this script is not exercised by default or in CI
-# (`just chaos-e2e-ci` runs the Rust harness only), and it is stale against the
-# current CLI. `voom scan` takes `--root <id>` for a node-owned storage root, so
-# the `scan --path` calls below fail with BAD_ARGS, and nothing here registers a
-# node, library, or root. Neither CHAOS_EXECUTE_POLICY=report nor =execute reaches
-# a policy step until that is repaired.
-#
-# Staging layout for the execute path (ADR 0097): `--staging-root` must be a
-# registered root that some root names as `default_staging_root_id`, with an
-# output default registered, as crates/voom-cli/tests/chaos_librarian_e2e.rs does
-# for the scan root. A sibling directory no `library_roots` row describes is not
-# a staging root. Registering that configuration here, and reconciling the
-# `--staging-root` flag with `default_staging_root_id`, is owned by #618.
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 chaos_dir="$repo_root/third_party/chaos-librarian"
+source "$repo_root/scripts/acceptance-bootstrap.sh"
 
 scenario="${CHAOS_SCENARIO:-active-library-churn.yaml}"
 duration="${CHAOS_DURATION:-10m}"
@@ -24,12 +11,8 @@ speed="${CHAOS_SPEED:-5x}"
 checkpoint_interval="${CHAOS_CHECKPOINT_INTERVAL:-30s}"
 execute_policy="${CHAOS_EXECUTE_POLICY:-0}"
 policy_version_id="${CHAOS_POLICY_VERSION_ID:-}"
-policy_container="${CHAOS_POLICY_CONTAINER:-mp4}"
-policy_video_codec="${CHAOS_POLICY_VIDEO_CODEC:-h264}"
-preserve="${CHAOS_PRESERVE_OUTPUT:-1}"
-cleanup="${CHAOS_CLEANUP:-0}"
 
-for tool in git uv jq cargo; do
+for tool in git uv jq cargo python3 ffmpeg ffprobe mkvmerge; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "required tool not found: $tool" >&2
     exit 1
@@ -59,29 +42,27 @@ if [[ ! -f "$scenario_path" ]]; then
 fi
 
 workdir="${CHAOS_WORKDIR:-$(mktemp -d -t voom-chaos-local.XXXXXX)}"
+mkdir -p "$workdir"
+workdir=$(cd "$workdir" && pwd -P)
 run_dir="$workdir/run"
 library_dir="$run_dir/library"
 db="$workdir/voom.db"
 url="sqlite://$db"
 summary="$workdir/summary.jsonl"
-voom_bin="${VOOM_BIN:-$repo_root/target/debug/voom}"
+voom_bin="${VOOM_BIN:-${CARGO_TARGET_DIR:-$repo_root/target}/debug/voom}"
 
 chaos_pid=""
 cleanup_run() {
+  acceptance_stop || echo "acceptance shutdown failed" >&2
   if [[ -n "$chaos_pid" ]] && kill -0 "$chaos_pid" 2>/dev/null; then
     kill "$chaos_pid" 2>/dev/null || true
     wait "$chaos_pid" 2>/dev/null || true
   fi
-  if [[ "$preserve" = "1" ]]; then
-    echo "preserved chaos E2E workdir: $workdir" >&2
-  elif [[ "$cleanup" = "1" ]]; then
-    rm -rf "$workdir"
-  else
-    echo "workdir left in place: $workdir" >&2
-  fi
+  echo "preserved chaos E2E workdir: $workdir" >&2
 }
-trap cleanup_run EXIT INT TERM
-mkdir -p "$workdir"
+trap cleanup_run EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 git -C "$repo_root" submodule status third_party/chaos-librarian | grep -E '^ 9f4c3bf7b7908484ad179d288dd59f3f85185053 ' >/dev/null
 if [[ -n "$(git -C "$chaos_dir" status --short --untracked-files=no)" ]]; then
@@ -97,8 +78,8 @@ uv run chaos-librarian capabilities --json | jq -e '
 ' >/dev/null
 
 cd "$repo_root"
-cargo build -p voom-cli -p voom-ffprobe-worker -p voom-verify-artifact-worker -p voom-ffmpeg-worker
-cargo run -q -p voom-cli -- --database-url "$url" init >/dev/null
+cargo build -p voom-cli -p voom-api -p voom-node-agent -p voom-scan-worker -p voom-hash-worker -p voom-ffprobe-worker \
+  -p voom-verify-artifact-worker -p voom-ffmpeg-worker -p voom-mkvtoolnix-worker
 
 cd "$chaos_dir"
 uv run chaos-librarian run "$scenario_path" --out "$run_dir" --duration "$duration" --speed "$speed" --json > "$workdir/chaos-run.json" &
@@ -119,12 +100,16 @@ while [[ ! -d "$library_dir" ]] || ! find "$library_dir" -type f \( -name '*.mkv
   sleep 0.1
 done
 
+acceptance_start "$workdir" --input "$library_dir" \
+  --staging "$workdir/staging" --output "$workdir/output" --bin-dir "$(dirname "$voom_bin")"
+input_root=$(acceptance_root input "$library_dir")
+
 checkpoint=0
 while kill -0 "$chaos_pid" 2>/dev/null; do
   checkpoint=$((checkpoint + 1))
   scan_out="$workdir/scan-$checkpoint.json"
   set +e
-  "$voom_bin" --database-url "$url" scan --path "$library_dir" > "$scan_out"
+  "$voom_bin" --database-url "$url" scan --root "$input_root" > "$scan_out"
   scan_rc=$?
   set -e
   error_code="$(jq -r '.error.code // empty' "$scan_out")"
@@ -148,19 +133,13 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
   policy_execution_failure_count=""
   policy_ticket_count=""
   if [[ "$execute_policy" != "0" && "$status" = "ok" ]]; then
-    scanned_row="$(jq -c '.data.files[]? | select(.status == "scanned" and .file_version_id and .media_snapshot_id) | {file_version_id, media_snapshot_id}' "$scan_out" | head -n 1)"
-    if [[ -n "$scanned_row" ]]; then
-      file_version_id="$(jq -r '.file_version_id' <<<"$scanned_row")"
-      media_snapshot_id="$(jq -r '.media_snapshot_id' <<<"$scanned_row")"
+    if [[ "$(jq -r '.data.status // empty' "$scan_out")" == "succeeded" ]]; then
       input_slug="chaos-local-$checkpoint"
       policy_input_out="$workdir/policy-input-$checkpoint.json"
       set +e
       "$voom_bin" --database-url "$url" policy input create-from-scan \
         --slug "$input_slug" \
-        --file-version-id "$file_version_id" \
-        --media-snapshot-id "$media_snapshot_id" \
-        --container "$policy_container" \
-        --video-codec "$policy_video_codec" > "$policy_input_out"
+        --root "$input_root" > "$policy_input_out"
       policy_input_rc=$?
       set -e
       policy_error_code="$(jq -r '.error.code // empty' "$policy_input_out")"
@@ -172,13 +151,12 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
         policy_input_set_id="$(jq -r '.data.input_set.input_set_id // empty' "$policy_input_out")"
         policy_report_out="$workdir/policy-report-$checkpoint.json"
         if [[ "$execute_policy" = "execute" ]]; then
-          mkdir -p "$library_dir/voom-output"
           set +e
           "$voom_bin" --database-url "$url" compliance execute \
             --policy-version-id "$policy_version_id" \
             --input-set-id "$policy_input_set_id" \
-            --staging-root "$library_dir" \
-            --output-dir "$library_dir/voom-output" > "$policy_report_out"
+            --staging-root "$workdir/staging" \
+            --output-dir "$workdir/output" > "$policy_report_out"
           policy_report_rc=$?
           set -e
           policy_status="executed"
@@ -194,10 +172,10 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
         policy_report_status="$(jq -r '.status // empty' "$policy_report_out")"
         policy_report_summary_status="$(jq -r '.data.report.summary.status // empty' "$policy_report_out")"
         policy_error_code="$(jq -r '.error.code // empty' "$policy_report_out")"
-        policy_execution_job_id="$(jq -r '.data.execution.job_id // empty' "$policy_report_out")"
-        policy_execution_submitted_node_count="$(jq -r '.data.execution.submitted_node_count // empty' "$policy_report_out")"
-        policy_execution_dispatch_count="$(jq -r '.data.execution.dispatch_count // empty' "$policy_report_out")"
-        policy_execution_failure_count="$(jq -r '.data.execution.failure_count // empty' "$policy_report_out")"
+        policy_execution_job_id="$(jq -r '.data.summary.job_id // empty' "$policy_report_out")"
+        policy_execution_submitted_node_count="$(jq -r '.data.summary.submitted_node_count // empty' "$policy_report_out")"
+        policy_execution_dispatch_count="$(jq -r '.data.summary.dispatch_count // empty' "$policy_report_out")"
+        policy_execution_failure_count="$(jq -r '.data.summary.failure_count // empty' "$policy_report_out")"
         policy_ticket_count="$(jq -r '(.data.tickets // []) | length' "$policy_report_out")"
         if [[ "$policy_report_rc" -ne 0 ]]; then
           policy_reason="policy $policy_status failed"
@@ -206,7 +184,7 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
       fi
     else
       policy_status="skipped"
-      policy_reason="scan had no scanned file with file_version_id and media_snapshot_id"
+      policy_reason="scan session did not complete"
     fi
   elif [[ "$execute_policy" = "0" ]]; then
     policy_reason="CHAOS_EXECUTE_POLICY is unset or zero"

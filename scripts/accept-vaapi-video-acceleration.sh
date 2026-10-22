@@ -31,7 +31,7 @@ for pci_address in "$@"; do
   fi
 done
 
-for command_name in cargo ffmpeg ffprobe jq; do
+for command_name in cargo ffmpeg ffprobe mkvmerge jq python3; do
   if ! command -v "$command_name" >/dev/null; then
     echo "required command is missing: $command_name" >&2
     exit 2
@@ -40,41 +40,34 @@ done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+source "$repo_root/scripts/acceptance-bootstrap.sh"
 cargo build \
   -p voom-cli \
+  -p voom-api \
+  -p voom-node-agent \
+  -p voom-scan-worker \
+  -p voom-hash-worker \
+  -p voom-mkvtoolnix-worker \
   -p voom-ffmpeg-worker \
   -p voom-ffprobe-worker \
   -p voom-verify-artifact-worker
 
-voom_bin="$repo_root/target/debug/voom"
-worker_bin="$repo_root/target/debug/voom-ffmpeg-worker"
-# Resolved once, before VOOM_FFMPEG_BIN is ever exported: source fixtures are
+voom_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/voom"
+worker_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/voom-ffmpeg-worker"
+# Resolve the real binary separately: source fixtures are
 # encoded with libx264, and routing them through the argv-recording wrapper
 # would plant a software encoder in the very log this script checks.
 real_ffmpeg="$(command -v ffmpeg)"
 
 task_tmp=$(mktemp -d /tmp/voom-vaapi-acceptance.XXXXXX)
-worker_pid=""
-worker_stdin_pid=""
-
-# `worker run-local` is a foreground supervisor that retires on stdin EOF, so the
-# FIFO writer is what holds it open and killing that writer is what shuts it down.
-stop_worker() {
-  if [[ -n "$worker_stdin_pid" ]]; then
-    kill "$worker_stdin_pid" 2>/dev/null || true
-    worker_stdin_pid=""
-  fi
-  if [[ -n "$worker_pid" ]]; then
-    wait "$worker_pid" 2>/dev/null || true
-    worker_pid=""
-  fi
-}
-
+task_tmp=$(cd "$task_tmp" && pwd -P)
 cleanup() {
-  stop_worker
+  acceptance_stop || echo "acceptance shutdown failed" >&2
   echo "VAAPI acceptance evidence kept in: $task_tmp" >&2
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 acceptance_failed=0
 
@@ -118,35 +111,11 @@ EOF
   chmod +x "$bin_dir/ffmpeg"
 }
 
-start_worker() {
-  local run_dir=$1 database_url=$2 pci_address=$3
-  mkfifo "$run_dir/worker.stdin"
-  sleep 900 >"$run_dir/worker.stdin" &
-  worker_stdin_pid=$!
-  "$voom_bin" --database-url "$database_url" worker run-local \
-    --kind ffmpeg \
-    --vaapi-device "$pci_address" \
-    --vaapi-max-sessions 1 \
-    <"$run_dir/worker.stdin" \
-    >"$run_dir/worker.stdout" \
-    2>"$run_dir/worker.stderr" &
-  worker_pid=$!
-  local waited=0
-  while [[ ! -s "$run_dir/worker.stdout" ]]; do
-    if ((waited >= 300)); then
-      echo "worker did not report readiness within 300s: $run_dir/worker.stderr" >&2
-      return 1
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-}
-
 # One hermetic pipeline: its own database, library copy, worker, and output
 # directory, so a run can never inherit another run's committed artifacts or
 # resume state. Writes the promoted artifact path to "$run_dir/artifact.path".
 run_pipeline() {
-  local run_dir=$1 pci_address=$2 argv_log=$3 profile_name=$4
+  local run_dir=$1 argv_log=$3 profile_name=$4
   shift 4
   local profile_args=("$@")
   local database_url="sqlite://$run_dir/voom.db"
@@ -154,9 +123,12 @@ run_pipeline() {
   mkdir -p "$run_dir/library" "$run_dir/staging" "$run_dir/output"
   make_source_fixture "$run_dir/library/source.mkv"
   install_ffmpeg_recorder "$run_dir/bin" "$argv_log"
-  export VOOM_FFMPEG_BIN="$run_dir/bin/ffmpeg"
-
-  "$voom_bin" --database-url "$database_url" init >"$run_dir/init.json"
+  acceptance_start "$run_dir" --input "$run_dir/library" \
+    --staging "$run_dir/staging" --output "$run_dir/output" \
+    --bin-dir "$(dirname "$voom_bin")" --accelerator-json "$bound_json" \
+    --ffmpeg-bin "$run_dir/bin/ffmpeg"
+  local input_root
+  input_root=$(acceptance_root input "$run_dir/library")
   "$voom_bin" --database-url "$database_url" profile create \
     --name "$profile_name" \
     --encoder hevc_vaapi \
@@ -172,21 +144,19 @@ run_pipeline() {
   policy_version_id=$(jq -r '.data.version.version_id' "$run_dir/policy.json")
 
   "$voom_bin" --database-url "$database_url" scan \
-    --path "$run_dir/library" >"$run_dir/scan.json"
+    --root "$input_root" >"$run_dir/scan.json"
   "$voom_bin" --database-url "$database_url" policy input create-from-scan \
-    --all --slug "$profile_name" >"$run_dir/input.json"
+    --root "$input_root" --slug "$profile_name" >"$run_dir/input.json"
   local input_set_id
   input_set_id=$(jq -r '.data.input_set.input_set_id' "$run_dir/input.json")
 
-  start_worker "$run_dir" "$database_url" "$pci_address"
   local execute_status=0
   "$voom_bin" --database-url "$database_url" compliance execute \
     --policy-version-id "$policy_version_id" \
     --input-set-id "$input_set_id" \
     --staging-root "$run_dir/staging" \
     --output-dir "$run_dir/output" >"$run_dir/execute.json" || execute_status=$?
-  stop_worker
-  unset VOOM_FFMPEG_BIN
+  acceptance_stop
   if ((execute_status != 0)); then
     jq -r '.error | "compliance execute failed: \(.code) \(.message)"' \
       "$run_dir/execute.json" >&2
@@ -232,7 +202,10 @@ expect_convergence() {
   artifact_dir=$(dirname "$(head -n 1 "$source_run_dir/artifact.path")")
 
   mkdir -p "$converge_dir"
-  "$voom_bin" --database-url "$database_url" init >"$converge_dir/init.json"
+  acceptance_start "$converge_dir" --input "$artifact_dir" \
+    --bin-dir "$(dirname "$voom_bin")"
+  local input_root
+  input_root=$(acceptance_root input "$artifact_dir")
   "$voom_bin" --database-url "$database_url" profile create \
     --name "$profile_name" \
     --encoder hevc_vaapi \
@@ -247,9 +220,9 @@ expect_convergence() {
   policy_version_id=$(jq -r '.data.version.version_id' "$converge_dir/policy.json")
 
   "$voom_bin" --database-url "$database_url" scan \
-    --path "$artifact_dir" >"$converge_dir/scan.json"
+    --root "$input_root" >"$converge_dir/scan.json"
   "$voom_bin" --database-url "$database_url" policy input create-from-scan \
-    --all --slug "$profile_name" >"$converge_dir/input.json"
+    --root "$input_root" --slug "$profile_name" >"$converge_dir/input.json"
   local input_set_id
   input_set_id=$(jq -r '.data.input_set.input_set_id' "$converge_dir/input.json")
 
@@ -257,6 +230,7 @@ expect_convergence() {
     --policy-version-id "$policy_version_id" \
     --input-set-id "$input_set_id" >"$converge_dir/report.json"
 
+  acceptance_stop
   local executable_checks planned_nodes
   executable_checks=$(jq -r '.data.report.summary.executable_check_count' "$converge_dir/report.json")
   planned_nodes=$(jq -r '[.data.plan.nodes[] | select(.status != "no_op")] | length' \
@@ -308,7 +282,8 @@ accept_device() {
       VOOM_VAAPI_MAX_SESSIONS=1 \
       "$worker_bin" </dev/null
   )
-  printf '%s\n' "$bound" >"$device_dir/bound.txt"
+  bound_json="$device_dir/bound.txt"
+  printf '%s\n' "$bound" >"$bound_json"
   if [[ "$bound" == *"\"pci_address\":\"$pci_address\""* ]]; then
     record_check "$pci_address" pass "worker bound the configured PCI address"
   else
