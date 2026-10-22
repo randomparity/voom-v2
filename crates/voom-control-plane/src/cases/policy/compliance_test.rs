@@ -134,6 +134,7 @@ fn compliance_execution_defaults_use_production_audio_paths() {
 #[test]
 fn compliance_options_convert_leaves_paths_to_the_facade_and_rest_default() {
     let options = super::ComplianceExecutionOptions {
+        prior_job_id: None,
         max_in_flight_files: 7,
         accelerator_unavailable_timeout: Duration::from_secs(700),
         transcode_staging_root: PathBuf::from("/srv/transcode/staging"),
@@ -1312,26 +1313,27 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
             .all(|phase| phase.outcome == "verified")
     );
     let mut prior_job_id = voom_core::JobId(first.summary.job_id);
+    assert_bad_resume_window_is_read_only(&cp, policy.version.id, input.input_set_id, prior_job_id)
+        .await;
     for _attempt in 0..2 {
         let resumed = cp
-            .resume_phase_barrier_with_runtimes(
-                prior_job_id,
+            .execute_compliance_policy_with_runtime_registry_and_options_for_test(
                 policy.version.id,
                 input.input_set_id,
-                super::ComplianceExecutionOptions::default(),
                 WorkerRuntimeRegistry::new(),
+                super::ComplianceExecutionOptions {
+                    prior_job_id: Some(prior_job_id),
+                    ..super::ComplianceExecutionOptions::default()
+                },
             )
             .await
             .unwrap_err();
         let resumed = resumed
             .partial
             .unwrap_or_else(|| panic!("resumed third phase must be partial: {}", resumed.source));
-        assert_eq!(resumed.file_phases.len(), 2);
-        assert!(
-            resumed
-                .file_phases
-                .iter()
-                .all(|phase| phase.outcome.as_str() == "verified")
+        assert_eq!(
+            serde_json::to_value(&resumed.file_phases).unwrap(),
+            serde_json::to_value(&first.file_phases).unwrap()
         );
         assert!(
             resumed
@@ -1339,7 +1341,7 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
                 .iter()
                 .all(|phase| !phase.ticket_ids.is_empty())
         );
-        prior_job_id = resumed.summary.job_id;
+        prior_job_id = voom_core::JobId(resumed.summary.job_id);
     }
     let evidence_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_verifications")
         .fetch_one(cp.pool_for_test())
@@ -1347,6 +1349,141 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
         .unwrap();
     assert_eq!(evidence_count, 2);
     assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 2);
+}
+
+async fn assert_bad_resume_window_is_read_only(
+    cp: &crate::ControlPlane,
+    policy_version_id: voom_core::PolicyVersionId,
+    input_set_id: voom_core::PolicyInputSetId,
+    prior_job_id: voom_core::JobId,
+) {
+    assert!(count_rows(cp, "issues").await > 0);
+    sqlx::query("UPDATE issues SET status = 'resolved', resolved_at = updated_at")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let before = durable_policy_execution_rows(cp).await;
+    let jobs = count_rows(cp, "jobs").await;
+    let error = cp
+        .execute_compliance_policy_with_options(
+            policy_version_id,
+            input_set_id,
+            super::ComplianceExecutionOptions {
+                prior_job_id: Some(prior_job_id),
+                max_in_flight_files: 5,
+                ..super::ComplianceExecutionOptions::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.source.code(), "CONFLICT");
+    assert!(error.partial.is_none());
+    assert_eq!(count_rows(cp, "jobs").await, jobs);
+    assert_eq!(durable_policy_execution_rows(cp).await, before);
+}
+
+#[tokio::test]
+async fn compliance_resume_rejects_invalid_prior_before_mutation() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "resume-empty",
+            "policy \"resume empty\" { phase normalize { container mkv } }",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "resume-empty".to_owned(),
+        })
+        .await
+        .unwrap();
+    let completed = cp
+        .execute_compliance_policy(policy.version.id, input.input_set_id)
+        .await
+        .unwrap();
+    let prior = voom_core::JobId(completed.summary.job_id);
+    for (prior_job_id, max_in_flight_files, code) in [
+        (voom_core::JobId(u64::MAX / 2), 4, "NOT_FOUND"),
+        (prior, 5, "CONFLICT"),
+    ] {
+        let before = table_counts(&cp).await;
+        let error = cp
+            .execute_compliance_policy_with_options(
+                policy.version.id,
+                input.input_set_id,
+                super::ComplianceExecutionOptions {
+                    prior_job_id: Some(prior_job_id),
+                    max_in_flight_files,
+                    ..super::ComplianceExecutionOptions::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.source.code(), code);
+        assert!(error.partial.is_none());
+        assert_eq!(table_counts(&cp).await, before);
+    }
+    sqlx::query("DELETE FROM workflow_file_windows WHERE job_id = ?")
+        .bind(i64::try_from(prior.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let before = table_counts(&cp).await;
+    let error = cp
+        .execute_compliance_policy_with_options(
+            policy.version.id,
+            input.input_set_id,
+            super::ComplianceExecutionOptions {
+                prior_job_id: Some(prior),
+                ..super::ComplianceExecutionOptions::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.source.code(), "POLICY_EXECUTION_ERROR");
+    assert!(error.source.to_string().contains("missing file window"));
+    assert_eq!(table_counts(&cp).await, before);
+}
+
+#[tokio::test]
+async fn compliance_resume_preserves_safety_refusal() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "resume-safe",
+            "policy \"resume safe\" { phase normalize { container mkv } }",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "resume-safe".to_owned(),
+        })
+        .await
+        .unwrap();
+    let completed = cp
+        .execute_compliance_policy(policy.version.id, input.input_set_id)
+        .await
+        .unwrap();
+    let jobs = count_rows(&cp, "jobs").await;
+    let issues = count_rows(&cp, "issues").await;
+    let error = cp
+        .execute_compliance_policy_with_options(
+            policy.version.id,
+            input.input_set_id,
+            super::ComplianceExecutionOptions {
+                prior_job_id: Some(voom_core::JobId(completed.summary.job_id)),
+                safety_policy_slug: Some("not-installed".to_owned()),
+                ..super::ComplianceExecutionOptions::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.source.code(), "POLICY_VALIDATION_ERROR");
+    assert!(error.partial.is_none());
+    assert_eq!(count_rows(&cp, "jobs").await, jobs);
+    assert_eq!(count_rows(&cp, "issues").await, issues + 1);
 }
 
 #[tokio::test]

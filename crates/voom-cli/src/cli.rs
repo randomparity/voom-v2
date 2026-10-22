@@ -950,6 +950,9 @@ pub enum ComplianceCommand {
         policy_version_id: u64,
         #[arg(long)]
         input_set_id: u64,
+        /// Reconcile against this prior job; stop its executor before resuming.
+        #[arg(long)]
+        resume_job_id: Option<u64>,
         /// Maximum number of files allowed to retain in-progress artifacts.
         #[arg(long, default_value_t = DEFAULT_MAX_IN_FLIGHT_FILES)]
         max_in_flight_files: usize,

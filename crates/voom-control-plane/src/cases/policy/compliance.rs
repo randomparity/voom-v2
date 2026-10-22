@@ -7,8 +7,8 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde_json::json;
 use voom_core::{
-    ErrorCode, FailureClass, FileVersionId, OperationKind, PolicyInputSetId, PolicyVersionId,
-    TicketId, TicketOperation, VoomError, WorkerId,
+    ErrorCode, FailureClass, FileVersionId, JobId, OperationKind, PolicyInputSetId,
+    PolicyVersionId, TicketId, TicketOperation, VoomError, WorkerId,
 };
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::PlanOperationKind;
@@ -21,6 +21,7 @@ use crate::ControlPlane;
 use crate::cases::{append_event, commit_tx};
 use crate::local_worker::NVIDIA_STARTUP_TIMEOUT;
 use crate::workflow::WorkerRuntimeRegistry;
+use crate::workflow::coordinator::{PhaseBarrierRunInputs, PreparedResumeRunInputs};
 use crate::workflow::execution::executor::{WorkflowExecutorOptions, WorkflowQueueOptions};
 use crate::workflow::ticket_results::{OrderedTicketResult, ordered_ticket_result};
 use voom_store::tx::begin_write_first;
@@ -579,6 +580,9 @@ pub const DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS: u64 = 15 * 60;
 
 #[derive(Debug, Clone)]
 pub struct ComplianceExecutionOptions {
+    /// Prior job to reconcile when executing through the compliance facade.
+    /// The caller must stop its executor and retain the original policy/input.
+    pub prior_job_id: Option<JobId>,
     /// Maximum number of file pipelines admitted into the coordinator's
     /// staging-residency window at once.
     pub max_in_flight_files: usize,
@@ -605,6 +609,7 @@ pub struct ComplianceExecutionOptions {
 impl Default for ComplianceExecutionOptions {
     fn default() -> Self {
         Self {
+            prior_job_id: None,
             max_in_flight_files: DEFAULT_MAX_IN_FLIGHT_FILES,
             accelerator_unavailable_timeout: WorkflowQueueOptions::default()
                 .accelerator_unavailable_timeout,
@@ -715,6 +720,7 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
         // Destructure exhaustively so a new facade path field is a compile
         // error here rather than being silently dropped by `..default()`.
         let ComplianceExecutionOptions {
+            prior_job_id: _,
             max_in_flight_files,
             accelerator_unavailable_timeout,
             transcode_staging_root,
@@ -782,6 +788,11 @@ pub struct ComplianceExecuteError {
 pub(crate) struct DurableComplianceInputs {
     pub(crate) version: voom_store::repo::policy::policies::PolicyVersion,
     pub(crate) input: voom_store::repo::policy::policy_inputs::PolicyInputSet,
+}
+
+enum PreparedComplianceRun {
+    Fresh(PhaseBarrierRunInputs),
+    Resume(PreparedResumeRunInputs),
 }
 
 impl ControlPlane {
@@ -1007,7 +1018,7 @@ impl ControlPlane {
         let registered = self.policy_runtime_registry().await.map_err(no_partial)?;
         let live = self.probe_live_runtimes(registered.clone()).await;
         let (initial_plan, prepared) = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id)
+            .prepare_compliance_execution(policy_version_id, input_set_id, &options)
             .await
             .map_err(no_partial)?;
         let report_data = self
@@ -1051,7 +1062,7 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let (initial_plan, prepared) = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id)
+            .prepare_compliance_execution(policy_version_id, input_set_id, &options)
             .await
             .map_err(no_partial)?;
         let report_data = self
@@ -1066,6 +1077,47 @@ impl ControlPlane {
             prepared,
         )
         .await
+    }
+
+    async fn prepare_compliance_execution(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: &ComplianceExecutionOptions,
+    ) -> Result<(voom_plan::ExecutionPlan, PreparedComplianceRun), VoomError> {
+        if let Some(prior_job_id) = options.prior_job_id
+            && self.jobs.get(prior_job_id).await?.is_none()
+        {
+            return Err(VoomError::NotFound(format!(
+                "resume: prior job {prior_job_id} does not exist"
+            )));
+        }
+        let (plan, inputs) = self
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id)
+            .await?;
+        let Some(prior_job_id) = options.prior_job_id else {
+            return Ok((plan, PreparedComplianceRun::Fresh(inputs)));
+        };
+        let prepared = self
+            .prepare_resume_phase_barrier_run_inputs(prior_job_id, inputs)
+            .await?;
+        let window = self
+            .workflow_progress
+            .file_window(prior_job_id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::PolicyExecution(format!(
+                    "resume state is incomplete: missing file window for job {prior_job_id}"
+                ))
+            })?;
+        let requested = options.file_window_limit()?;
+        if requested != window.max_in_flight_files {
+            return Err(VoomError::Conflict(format!(
+                "resume file window {requested} does not match prior durable window {}",
+                window.max_in_flight_files
+            )));
+        }
+        Ok((plan, PreparedComplianceRun::Resume(prepared)))
     }
 
     async fn compliance_report_for_plan(
@@ -1088,14 +1140,22 @@ impl ControlPlane {
         policy_version_id: PolicyVersionId,
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
-        prepared: crate::workflow::coordinator::PhaseBarrierRunInputs,
+        prepared: PreparedComplianceRun,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let apply_data = self
             .apply_generated_compliance_report(&report_data, policy_version_id)
             .await
             .map_err(no_partial)?;
         let issues = apply_data.issues;
-        match Box::pin(self.run_prepared_phase_barrier(prepared, options, runtimes)).await {
+        let result = match prepared {
+            PreparedComplianceRun::Fresh(inputs) => {
+                Box::pin(self.run_prepared_phase_barrier(inputs, options, runtimes)).await
+            }
+            PreparedComplianceRun::Resume(inputs) => {
+                Box::pin(self.run_prepared_resume_phase_barrier(inputs, options, runtimes)).await
+            }
+        };
+        match result {
             Ok(outcome) => {
                 let outputs = self
                     .audio_extract_outputs_for_job(outcome.job_id)

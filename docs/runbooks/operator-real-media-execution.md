@@ -474,9 +474,15 @@ voom compliance execute \
   destination in `--output-dir` already exists, the run fails rather than
   overwrite.
 - **A real-library run can partially succeed** (some files committed, some
-  failed). Re-running `compliance execute` resumes via the Sprint 16
-  per-file-phase resume path (issue-165) — already-completed files are not
-  redone. Read partial state with `voom compliance report --job-id <job_id>`.
+  failed). Read partial state with `voom compliance report --job-id <job_id>`.
+  To resume, stop the prior executor and run the original `compliance execute`
+  command with `--resume-job-id <prior_job_id>`. Keep the same accepted policy
+  version, input set, file window, staging/output roots, and safety/backup options.
+  Use the latest attempt's job ID from its success or partial-error data.
+  Resume opens a new job and reconciles the recorded per-file phases: completed
+  work and verification evidence are carried forward rather than repeated.
+  The caller must ensure the prior executor is stopped; the flag does not fence
+  a concurrent executor. Omitting the flag starts fresh execution.
 - **`verify artifact` is a durable read-only phase.** A successful phase reports
   `outcome: "verified"` without advancing the file version. Both
   `compliance execute` and `compliance report --job-id` include the persisted
@@ -494,6 +500,22 @@ voom compliance execute \
 - **Scale:** size staging for intermediate and terminal artifacts across at most
   `--max-in-flight-files` active pipelines, plus temporary worker output.
   Transcodes are long-running.
+
+For example, resume the latest stopped attempt with its original settings:
+
+```sh
+voom compliance execute \
+  --policy-version-id <version_id> \
+  --input-set-id <input_set_id> \
+  --resume-job-id <prior_job_id> \
+  --max-in-flight-files 4 \
+  --staging-root <original_staging_root> \
+  --output-dir <original_output_root>
+```
+
+Phase/ticket references and verification evidence survive resume. The
+`audio_extract_outputs` and `audio_synthesis_companions` arrays keep their
+current-job meaning; they do not aggregate outputs from earlier jobs.
 
 ## Mid-run monitoring
 

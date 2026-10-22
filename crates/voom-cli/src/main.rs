@@ -647,6 +647,7 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
         ComplianceCommand::Execute {
             policy_version_id,
             input_set_id,
+            resume_job_id,
             max_in_flight_files,
             accelerator_unavailable_timeout_seconds,
             staging_root,
@@ -660,6 +661,7 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
                 compliance::ExecuteArgs {
                     policy_version_id,
                     input_set_id,
+                    resume_job_id,
                     max_in_flight_files,
                     accelerator_unavailable_timeout_seconds,
                     staging_root,
