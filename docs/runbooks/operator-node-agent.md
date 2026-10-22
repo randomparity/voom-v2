@@ -134,6 +134,36 @@ Remote control-plane URLs must use HTTPS. `ca_cert` adds a private/custom CA whi
 certificate and hostname verification. Cleartext HTTP is accepted only for an explicit
 loopback host, for local testing; there is no insecure remote override.
 
+### Bind and activate owned storage roots
+
+Register roots for this logical node before starting its agent. Add each root's exact
+registered provider locator to the configuration; replace the example values with the
+registration results:
+
+```toml
+[[storage_roots]]
+storage_root_id = 12
+provider_locator = "/srv/media/input"
+```
+
+Startup canonicalizes and opens these directories on the owner host and submits their
+filesystem identities through authenticated node activation. The control plane checks
+ownership and the registered locator, then activates the roots, incarnation and workers
+in one transaction. A missing directory, mismatched owner/locator or retired root rejects
+activation. Storage-root bindings require nonzero unique IDs and are limited to 64.
+
+The list is the complete root manifest for the new incarnation. Previously active owned
+roots omitted from it become unavailable. Before upgrading an existing agent, include
+the input, staging, output and backup roots it must continue serving. Worker-only nodes
+may use an empty list. Restart the agent after changing bindings; startup validation
+does not implement continuous filesystem monitoring.
+
+The repository's local acceptance bootstrap also requires Python 3 (`just setup`
+already provisions Python 3.13), FFmpeg/FFprobe and MKVToolNix on the
+owner host. Build the API, node agent and bundled workers as well as the CLI. Its
+registration token lives only in a private temporary credential outside retained
+evidence and is removed when that bootstrap stops.
+
 ## Start and supervise
 
 Validate the installed binary version and start the foreground process under a supervisor:
