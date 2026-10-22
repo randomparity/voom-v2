@@ -161,7 +161,12 @@ async fn ffprobe_success_returns_progress_and_probe_result() {
         first,
         NdjsonOutcome::Frame(ProgressFrame::Progress { .. })
     ));
-    let terminal_result = dispatch.frames.next_frame().await;
+    let terminal_result = loop {
+        match dispatch.frames.next_frame().await {
+            Ok(NdjsonOutcome::Frame(_)) => {}
+            terminal => break terminal,
+        }
+    };
     assert!(terminal_result.is_ok());
     let Ok(terminal) = terminal_result else {
         stop_server(running).await;
@@ -416,7 +421,12 @@ async fn dispatch_terminal_frame(
         stop_server(running).await;
         return fallback_error_frame();
     };
-    let terminal_result = dispatch.frames.next_frame().await;
+    let terminal_result = loop {
+        match dispatch.frames.next_frame().await {
+            Ok(NdjsonOutcome::Frame(_)) => {}
+            terminal => break terminal,
+        }
+    };
     assert!(terminal_result.is_ok());
     stop_server(running).await;
     let Ok(terminal) = terminal_result else {
