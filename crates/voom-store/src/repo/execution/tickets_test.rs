@@ -1146,3 +1146,65 @@ async fn succeeded_workflow_phase_file_operation_projection_filters_state_and_ki
         vec![succeeded.id]
     );
 }
+
+#[tokio::test]
+async fn ready_matching_aliases_keep_order_and_exclude_unsupported_tokens() {
+    let fixture = ticket_fixture().await;
+    let low = fixture.ready_ticket("probe_file", 1, 0).await;
+    let first = fixture
+        .ready_ticket("synthetic.workflow.operation.probe_file", 10, 0)
+        .await;
+    let second = fixture.ready_ticket("probe_file", 10, 0).await;
+    fixture
+        .ready_ticket("synthetic.workflow.operation.bogus", 100, 0)
+        .await;
+    let exhausted = fixture.ready_ticket("probe_file", 100, 0).await;
+    let future = fixture.ready_ticket("probe_file", 100, 0).await;
+    let closed = fixture.ready_ticket("probe_file", 100, 0).await;
+    let jobs = SqliteJobRepo::new(fixture.repo.pool.clone());
+    let job = jobs.create(sample_job()).await.unwrap();
+    jobs.cancel(job.id, fixture.now).await.unwrap();
+    for (sql, id, value) in [
+        (
+            "UPDATE tickets SET attempt = max_attempts WHERE id = ?",
+            exhausted.id,
+            None,
+        ),
+        (
+            "UPDATE tickets SET next_eligible_at = '2099-01-01T00:00:00Z' WHERE id = ?",
+            future.id,
+            None,
+        ),
+        (
+            "UPDATE tickets SET job_id = ?2 WHERE id = ?1",
+            closed.id,
+            Some(i64::try_from(job.id.0).unwrap()),
+        ),
+    ] {
+        let mut query = sqlx::query(sql).bind(i64::try_from(id.0).unwrap());
+        if let Some(value) = value {
+            query = query.bind(value);
+        }
+        query.execute(&fixture.repo.pool).await.unwrap();
+    }
+
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let tickets = fixture
+        .repo
+        .ready_for_operations_in_tx(
+            &mut tx,
+            &[
+                ticket_op("probe_file"),
+                ticket_op("synthetic.workflow.operation.probe_file"),
+                ticket_op("synthetic.workflow.operation.bogus"),
+            ],
+            fixture.now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tickets.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![first.id, second.id, low.id]
+    );
+    tx.rollback().await.unwrap();
+}

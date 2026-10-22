@@ -1027,41 +1027,43 @@ async fn assert_unauthorized_envelope(res: Response<Body>, command: &str) {
     clippy::too_many_lines,
     reason = "the owner-local fixture seeding and the binding assertions read best inline"
 )]
-async fn acquire_leased_owner_local_byte_work_dispatches_normalized_operation() {
+async fn canonical_worker_acquires_namespaced_workflow() {
     use voom_core::StorageProviderKind;
     use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
     use voom_store::repo::library::library_roots::{
         HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
     };
-    let fixture = api_fixture_with_capabilities(
-        vec![
-            NewWorkerCapabilityDraft {
-                operation: ticket_op("synthetic.workflow.operation.transcode_video"),
-                codecs: vec!["json".to_owned()],
-                hardware: Vec::new(),
-                artifact_access: vec!["shared_mount".to_owned()],
-                extra: json!({}),
-            },
-            NewWorkerCapabilityDraft {
-                operation: ticket_op("transcode_video"),
-                codecs: vec!["json".to_owned()],
-                hardware: Vec::new(),
-                artifact_access: vec!["shared_mount".to_owned()],
-                extra: json!({}),
-            },
-        ],
-        vec![NewWorkerGrantDraft {
-            can_execute: vec![
-                ticket_op("synthetic.workflow.operation.transcode_video"),
-                ticket_op("transcode_video"),
-            ],
-            can_access_read: Vec::new(),
-            can_access_write: Vec::new(),
-            denies: Vec::new(),
-            max_parallel: json!({"*": 1}),
-        }],
-    )
-    .await;
+    let mut fixture = api_fixture().await;
+    let incarnation_id: NodeIncarnationId = "fedcba9876543210fedcba9876543210".parse().unwrap();
+    let activated = fixture
+        .post_json(
+            &format!("/v1/execution/node/{}/activate", fixture.node_id.0),
+            "canonical-activate",
+            json!({"incarnation_id": incarnation_id, "workers": [{
+                "logical_name": "canonical-transcode", "operations": ["transcode_video"],
+                "artifact_access": ["shared_mount"], "max_parallel": 2
+            }]}),
+        )
+        .await;
+    assert_eq!(activated.status(), StatusCode::OK);
+    let activated = response_json(activated).await;
+    fixture.incarnation_id = incarnation_id;
+    fixture.worker_id = WorkerId(
+        activated["data"]["workers"][0]["worker_id"]
+            .as_u64()
+            .unwrap(),
+    );
+    let ready = fixture
+        .post_json(
+            &format!(
+                "/v1/execution/node/{}/worker/{}/readiness",
+                fixture.node_id.0, fixture.worker_id.0
+            ),
+            "canonical-ready",
+            json!({"readiness": "ready"}),
+        )
+        .await;
+    assert_eq!(ready.status(), StatusCode::OK);
     // A live root owned by the acquiring node plus one rooted location, so the
     // declaration resolves owner-local.
     let library = fixture
@@ -1184,6 +1186,14 @@ async fn acquire_leased_owner_local_byte_work_dispatches_normalized_operation() 
     let json = response_json(res).await;
     assert_eq!(status, StatusCode::OK, "body: {json}");
     assert_eq!(json["data"]["outcome"], "leased");
+    let replay = fixture
+        .post_json(
+            "/v1/execution/lease/acquire",
+            "owner-local-acquire",
+            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
+        )
+        .await;
+    assert_eq!(response_json(replay).await, json);
     // Criterion 4: normalized before dispatch — never the namespaced token.
     assert_eq!(json["data"]["operation"], "transcode_video");
     let plan = &json["data"]["artifact_access_plan"];

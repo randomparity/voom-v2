@@ -1096,6 +1096,10 @@ impl SqliteTicketRepo {
         operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Vec<Ticket>, VoomError> {
+        let operations: std::collections::BTreeSet<_> = operations
+            .iter()
+            .flat_map(|operation| operation.normalize().matching_tokens())
+            .collect();
         if operations.is_empty() {
             return Ok(Vec::new());
         }
@@ -1118,7 +1122,7 @@ impl SqliteTicketRepo {
                AND kind IN (",
         );
         let mut separated = query.separated(", ");
-        for operation in operations {
+        for operation in &operations {
             separated.push_bind(operation.as_str());
         }
         separated.push_unseparated(") ");
