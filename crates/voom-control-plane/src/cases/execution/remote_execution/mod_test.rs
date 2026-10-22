@@ -2471,13 +2471,9 @@ async fn remote_acquire_leased_binds_one_lease_plan_and_decision_atomically() {
 }
 
 #[tokio::test]
-async fn remote_acquire_changed_gate_missing_capability_decides_without_leasing() {
-    // The worker advertises and is granted only the namespaced encoding, so
-    // candidate scoring (raw-token lookup) selects the ticket while the lease
-    // write path rechecks under the bare matching token. The changed gate must
-    // decide — one durable no-candidate row — instead of raising, and must
-    // leave zero leases and zero bound access plans.
-    let fixture = remote_fixture(&[(WF_OP, vec!["shared_mount"])], &[WF_OP], &[]).await;
+async fn remote_acquire_missing_capability_decides_without_leasing() {
+    // A grant discovers the operation, but cannot replace its missing capability.
+    let fixture = remote_fixture(&[], &[WF_OP], &[]).await;
     let root = create_remote_scan_root(&fixture, "changed-gate").await;
     let location = seed_scan_location(&fixture.cp, root, "changed-gate.mkv").await;
     let ticket = ready_workflow_ticket(&fixture, 0, root.0, location).await;
@@ -2492,7 +2488,7 @@ async fn remote_acquire_changed_gate_missing_capability_decides_without_leasing(
         scheduler_decision_id,
     } = outcome
     else {
-        panic!("expected the changed gate to reject without leasing: {outcome:?}");
+        panic!("expected the missing capability to reject without leasing: {outcome:?}");
     };
 
     let decision = fixture
@@ -2506,39 +2502,50 @@ async fn remote_acquire_changed_gate_missing_capability_decides_without_leasing(
         SchedulerDecisionOutcome::NoEligibleCandidate
     );
     assert_eq!(decision.reason_code, SchedulerReasonCode::MissingCapability);
-    assert_eq!(decision.ticket_id, Some(ticket));
+    assert_eq!(decision.ticket_id, None);
     assert_eq!(decision.candidate_count, 1);
     let key = decision.suppression_key.unwrap();
-    assert!(!key.is_empty(), "changed-gate decisions are suppressed");
     assert!(
-        key.contains(&format!(":ticket:{}:", ticket.0)),
-        "suppression key names the ticket: {key}"
+        !key.is_empty(),
+        "missing-capability decisions are suppressed"
     );
     assert!(
         key.contains("reason:missing_capability"),
         "suppression key carries the documented stable reason: {key}"
     );
     let explanation = decision.explanation;
-    assert_eq!(explanation["reason"], "missing_capability");
-    assert_eq!(explanation["operation"], "transcode_video");
+    assert_eq!(explanation["candidates"][0]["ticket_id"], ticket.0);
+    assert!(
+        explanation["candidates"][0]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("missing_capability"))
+    );
+    assert_eq!(explanation["operation"], WF_OP);
 
     let pool = fixture.cp.pool_for_test();
     let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
         .fetch_one(pool)
         .await
         .unwrap();
-    assert_eq!(lease_count, 0, "a changed gate never leases");
+    assert_eq!(lease_count, 0, "a missing capability never leases");
     let plan_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_access_plans")
         .fetch_one(pool)
         .await
         .unwrap();
-    assert_eq!(plan_count, 0, "a changed gate never binds an access plan");
+    assert_eq!(
+        plan_count, 0,
+        "a missing capability never binds an access plan"
+    );
     let selected_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_decisions WHERE outcome = 'selected'")
             .fetch_one(pool)
             .await
             .unwrap();
-    assert_eq!(selected_count, 0, "a changed gate never leaves a selection");
+    assert_eq!(
+        selected_count, 0,
+        "a missing capability never leaves a selection"
+    );
     // The rejected ticket stays ready for a correctly-configured worker.
     let state: String = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
         .bind(i64::try_from(ticket.0).unwrap())
@@ -2549,23 +2556,12 @@ async fn remote_acquire_changed_gate_missing_capability_decides_without_leasing(
 }
 
 #[tokio::test]
-async fn remote_acquire_changed_gate_missing_grant_and_denied_decide_with_documented_reasons() {
-    // Capability rows exist for both encodings but the grant only covers the
-    // namespaced one, so candidate scoring (raw-token lookup) selects the
-    // namespaced byte-work ticket while the lease path rechecks the bare
-    // matching token and finds no grant.
-    let fixture = remote_fixture(
-        &[
-            (WF_OP, vec!["shared_mount"]),
-            ("transcode_video", vec!["shared_mount"]),
-        ],
-        &[WF_OP],
-        &[],
-    )
-    .await;
+async fn remote_acquire_missing_grant_decides_without_leasing() {
+    // A capability discovers the operation, but cannot replace its missing grant.
+    let fixture = remote_fixture(&[(WF_OP, vec!["shared_mount"])], &[], &[]).await;
     let root = create_remote_scan_root(&fixture, "changed-grant").await;
     let location = seed_scan_location(&fixture.cp, root, "changed-grant.mkv").await;
-    let ticket = ready_workflow_ticket(&fixture, 0, root.0, location).await;
+    let _ticket = ready_workflow_ticket(&fixture, 0, root.0, location).await;
 
     let outcome = fixture
         .cp
@@ -2586,7 +2582,7 @@ async fn remote_acquire_changed_gate_missing_grant_and_denied_decide_with_docume
         .unwrap()
         .unwrap();
     assert_eq!(decision.reason_code, SchedulerReasonCode::MissingGrant);
-    assert_eq!(decision.ticket_id, Some(ticket));
+    assert_eq!(decision.ticket_id, None);
     let pool = fixture.cp.pool_for_test();
     let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
         .fetch_one(pool)

@@ -103,6 +103,19 @@ pub enum NormalizedTicketOperation {
 }
 
 impl NormalizedTicketOperation {
+    /// Supported scheduling encodings; unknown reserved tokens match nothing.
+    #[must_use]
+    pub fn matching_tokens(&self) -> Vec<TicketOperation> {
+        match self {
+            Self::Known { kind, .. } => vec![
+                TicketOperation::from(*kind),
+                TicketOperation(format!("{WORKFLOW_OPERATION_NAMESPACE}{}", kind.as_str())),
+            ],
+            Self::CustomLocal(token) => vec![token.clone()],
+            Self::UnknownNamespaced(_) => Vec::new(),
+        }
+    }
+
     #[must_use]
     pub const fn operation_kind(&self) -> Option<OperationKind> {
         match self {

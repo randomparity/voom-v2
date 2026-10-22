@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Superseded by [0107](0107-normalize-known-operations-during-scheduling.md)**
+> (2026-10-22), only for the candidate-matching restriction/deferral.
+
 ## Context
 
 ADR 0050 makes the storage-owner node the only actor that touches bytes, and ADR 0055

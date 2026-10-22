@@ -105,3 +105,33 @@ fn matching_token_never_fabricates_a_bare_token_for_an_unrecognized_operation() 
         );
     }
 }
+
+#[test]
+fn supported_matching_tokens() {
+    for kind in OperationKind::ALL {
+        let bare = TicketOperation::from(*kind);
+        let namespaced =
+            TicketOperation::new(format!("{WORKFLOW_OPERATION_NAMESPACE}{}", kind.as_str()))
+                .unwrap();
+        for token in [&bare, &namespaced] {
+            assert_eq!(
+                token.normalize().matching_tokens(),
+                vec![bare.clone(), namespaced.clone()]
+            );
+        }
+    }
+    let custom = TicketOperation::new("plugin.custom").unwrap();
+    assert_eq!(custom.normalize().matching_tokens(), vec![custom]);
+    for token in [
+        "synthetic.workflow.operation.bogus",
+        "synthetic.workflow.operation.",
+    ] {
+        assert!(
+            TicketOperation::new(token)
+                .unwrap()
+                .normalize()
+                .matching_tokens()
+                .is_empty()
+        );
+    }
+}

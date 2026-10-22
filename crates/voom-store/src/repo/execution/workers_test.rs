@@ -1601,3 +1601,178 @@ fn accelerator_sql_matches_the_namespace_constant() {
          {ACCELERATOR_ACTIVE_LEASES_SQL}"
     );
 }
+
+#[tokio::test]
+async fn matching_aliases_apply_capability_grant_and_deny_equivalence() {
+    let aliases = ["probe_file", "synthetic.workflow.operation.probe_file"];
+    for capability in aliases {
+        for grant in aliases {
+            let fixture = worker_fixture().await;
+            fixture
+                .insert_capability(capability, &["shared_mount"])
+                .await;
+            fixture.insert_grant(&[grant], &[]).await;
+            for token in aliases {
+                let eligibility = fixture
+                    .repo
+                    .operation_eligibility(fixture.worker_id, &worker_op(token))
+                    .await
+                    .unwrap();
+                assert!(eligibility.is_eligible(), "{capability}, {grant}, {token}");
+                assert_eq!(eligibility.artifact_access, ["shared_mount"]);
+                assert_eq!(
+                    fixture
+                        .repo
+                        .operation_capability_history(&worker_op(token))
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            fixture.insert_grant(&[], &[aliases[1]]).await;
+            for token in aliases {
+                assert!(
+                    !fixture
+                        .repo
+                        .operation_eligibility(fixture.worker_id, &worker_op(token))
+                        .await
+                        .unwrap()
+                        .is_eligible()
+                );
+            }
+            let mut tx = fixture.repo.pool.begin().await.unwrap();
+            assert!(
+                fixture
+                    .repo
+                    .candidate_operations_in_tx(&mut tx, fixture.worker_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            tx.rollback().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn matching_aliases_preserve_custom_and_reject_reserved_even_when_declared() {
+    let fixture = worker_fixture().await;
+    for token in ["plugin.custom", "synthetic.workflow.operation.bogus"] {
+        fixture.insert_capability(token, &[]).await;
+        fixture.insert_grant(&[token], &[]).await;
+    }
+    assert!(
+        fixture
+            .repo
+            .operation_eligibility(fixture.worker_id, &worker_op("plugin.custom"))
+            .await
+            .unwrap()
+            .is_eligible()
+    );
+    assert!(
+        !fixture
+            .repo
+            .operation_eligibility(fixture.worker_id, &worker_op("custom"))
+            .await
+            .unwrap()
+            .is_eligible()
+    );
+    assert!(
+        !fixture
+            .repo
+            .operation_eligibility(
+                fixture.worker_id,
+                &worker_op("synthetic.workflow.operation.bogus")
+            )
+            .await
+            .unwrap()
+            .is_eligible()
+    );
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    assert_eq!(
+        fixture
+            .repo
+            .candidate_operations_in_tx(&mut tx, fixture.worker_id)
+            .await
+            .unwrap(),
+        vec![worker_op("plugin.custom")]
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn matching_aliases_decode_corruption_before_denial() {
+    let fixture = worker_fixture().await;
+    fixture.insert_capability("probe_file", &[]).await;
+    fixture.insert_grant(&["probe_file"], &["probe_file"]).await;
+    sqlx::query("UPDATE worker_grants SET can_execute = '[42]' WHERE worker_id = ?")
+        .bind(i64::try_from(fixture.worker_id.0).unwrap())
+        .execute(&fixture.repo.pool)
+        .await
+        .unwrap();
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    assert!(matches!(
+        fixture
+            .repo
+            .candidate_operations_in_tx(&mut tx, fixture.worker_id)
+            .await,
+        Err(VoomError::Database { .. })
+    ));
+    tx.rollback().await.unwrap();
+    assert!(matches!(
+        fixture
+            .repo
+            .operation_eligibility(fixture.worker_id, &worker_op("probe_file"))
+            .await,
+        Err(VoomError::Database { .. })
+    ));
+}
+
+#[tokio::test]
+async fn capacity_matching_aliases_preserve_operation_limit_precedence() {
+    let fixture = worker_fixture().await;
+    fixture.insert_grant_with_limit(&["probe_file"], &[], serde_json::json!({"probe_file": 2, "synthetic.workflow.operation.probe_file": 5, "*": 9})).await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    for token in ["probe_file", "synthetic.workflow.operation.probe_file"] {
+        let capacity = fixture
+            .repo
+            .operation_capacity_in_tx(&mut tx, fixture.worker_id, &worker_op(token))
+            .await
+            .unwrap();
+        assert_eq!(capacity.max_parallel, 5);
+        assert_eq!(capacity.active_leases, 0);
+    }
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn matching_aliases_denies_override_other_encoding_across_rows() {
+    for (allowed, denied) in [
+        ("probe_file", "synthetic.workflow.operation.probe_file"),
+        ("synthetic.workflow.operation.probe_file", "probe_file"),
+    ] {
+        let fixture = worker_fixture().await;
+        fixture.insert_capability(allowed, &[]).await;
+        fixture.insert_grant(&[allowed], &[]).await;
+        fixture.insert_grant(&[], &[denied]).await;
+        assert!(
+            fixture
+                .repo
+                .operation_eligibility(fixture.worker_id, &worker_op(allowed))
+                .await
+                .unwrap()
+                .is_denied
+        );
+        let mut tx = fixture.repo.pool.begin().await.unwrap();
+        assert!(
+            fixture
+                .repo
+                .candidate_operations_in_tx(&mut tx, fixture.worker_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        tx.rollback().await.unwrap();
+    }
+}

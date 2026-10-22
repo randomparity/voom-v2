@@ -1187,7 +1187,8 @@ async fn accelerator_capacity_is_aggregated_by_hardware_token() {
     }
     let token = "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
     let first = nvidia_worker(&cp, "gpu-a-1", &operation, token, 2).await;
-    let second = nvidia_worker(&cp, "gpu-a-2", &operation, token, 2).await;
+    let alias = TicketOperation::new("synthetic.workflow.operation.transcode_video").unwrap();
+    let second = nvidia_worker(&cp, "gpu-a-2", &alias, token, 2).await;
 
     for (ticket, worker) in [(&tickets[0], &first), (&tickets[1], &second)] {
         cp.acquire_lease(NewLease {

@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Superseded by [0107](0107-normalize-known-operations-during-scheduling.md)**
+> (2026-10-22), only for the candidate-matching restriction/deferral.
+
 ## Context
 
 Issue #478 closes the acquisition gap in the owner-local byte-work chain.

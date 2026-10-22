@@ -1,5 +1,7 @@
 //! `SqliteWorkerRepo` — owns workers + `worker_capabilities` + `worker_grants`.
 
+use std::collections::BTreeSet;
+
 use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool, error::ErrorKind};
 use time::OffsetDateTime;
@@ -1094,18 +1096,20 @@ impl SqliteWorkerRepo {
         worker_id: WorkerId,
         operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError> {
+        let operations = operation.normalize().matching_tokens();
         let worker = get_in_tx(tx, worker_id).await?;
         let worker_status = worker.as_ref().map(|worker| worker.status);
         let worker_kind = worker.as_ref().map(|worker| worker.kind);
         let capability_rows = sqlx::query(
             "SELECT artifact_access FROM worker_capabilities \
-             WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
+             WHERE worker_id = ? AND operation IN (?, ?) ORDER BY id ASC",
         )
         .bind(i64_from_u64(
             worker_id.0,
             concat!(module_path!(), ": ", stringify!(worker_id.0)),
         )?)
-        .bind(operation.as_str())
+        .bind(operations.first().map(TicketOperation::as_str))
+        .bind(operations.get(1).map(TicketOperation::as_str))
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("worker_capabilities eligibility", e))?;
@@ -1140,10 +1144,10 @@ impl SqliteWorkerRepo {
                 .map_err(|e| map_row_err("worker_grants eligibility", e))?;
             has_grant |= parse_operation_array_json(&can_execute, "can_execute")?
                 .iter()
-                .any(|item| item == operation);
+                .any(|item| operations.contains(item));
             is_denied |= parse_operation_array_json(&denies, "denies")?
                 .iter()
-                .any(|item| item == operation);
+                .any(|item| operations.contains(item));
         }
 
         Ok(WorkerOperationEligibility {
@@ -1190,41 +1194,45 @@ impl SqliteWorkerRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         worker_id: WorkerId,
     ) -> Result<Vec<TicketOperation>, VoomError> {
-        let rows = sqlx::query_scalar::<_, String>(
-            "SELECT operation FROM worker_capabilities WHERE worker_id = ? \
-             UNION \
-             SELECT grants.value AS operation \
-             FROM worker_grants, json_each(worker_grants.can_execute) AS grants \
-             WHERE worker_grants.worker_id = ? \
-             EXCEPT \
-             SELECT denied.value AS operation \
-             FROM worker_grants, json_each(worker_grants.denies) AS denied \
-             WHERE worker_grants.worker_id = ?",
+        let worker_id = i64_from_u64(worker_id.0, "worker candidate operations.worker_id")?;
+        let capabilities = sqlx::query_scalar::<_, String>(
+            "SELECT operation FROM worker_capabilities WHERE worker_id = ? ORDER BY id",
         )
-        .bind(i64_from_u64(
-            worker_id.0,
-            concat!(module_path!(), ": ", stringify!(worker_id.0)),
-        )?)
-        .bind(i64_from_u64(
-            worker_id.0,
-            concat!(module_path!(), ": ", stringify!(worker_id.0)),
-        )?)
-        .bind(i64_from_u64(
-            worker_id.0,
-            concat!(module_path!(), ": ", stringify!(worker_id.0)),
-        )?)
+        .bind(worker_id)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("worker candidate operations", e))?;
-        let mut operations = rows
-            .into_iter()
-            .map(|operation| {
-                TicketOperation::from_stored(operation, "worker candidate operations.operation")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        operations.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        operations.dedup();
-        Ok(operations)
+        let mut operations = BTreeSet::new();
+        for raw in capabilities {
+            let operation =
+                TicketOperation::from_stored(raw, "worker candidate operations.operation")?;
+            operations.extend(operation.normalize().matching_tokens().into_iter().take(1));
+        }
+        let grants = sqlx::query(
+            "SELECT can_execute, denies FROM worker_grants WHERE worker_id = ? ORDER BY id",
+        )
+        .bind(worker_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("worker candidate grants", e))?;
+        let mut denied = BTreeSet::new();
+        for row in grants {
+            let raw: String = row
+                .try_get("can_execute")
+                .map_err(|e| map_row_err("candidate grants", e))?;
+            let can_execute = parse_operation_array_json(&raw, "can_execute")?;
+            let raw: String = row
+                .try_get("denies")
+                .map_err(|e| map_row_err("candidate denies", e))?;
+            let denies = parse_operation_array_json(&raw, "denies")?;
+            for operation in can_execute {
+                operations.extend(operation.normalize().matching_tokens().into_iter().take(1));
+            }
+            for operation in denies {
+                denied.extend(operation.normalize().matching_tokens().into_iter().take(1));
+            }
+        }
+        Ok(operations.difference(&denied).cloned().collect())
     }
 
     /// Return a worker only if its kind-specific lifecycle state permits new work.
@@ -1337,12 +1345,13 @@ impl SqliteWorkerRepo {
         &self,
         operation: &TicketOperation,
     ) -> Result<Vec<WorkerOperationCapability>, VoomError> {
-        let operation = operation.normalize().matching_token();
+        let operations = operation.normalize().matching_tokens();
         let rows = sqlx::query(
             "SELECT worker_id, hardware, extra FROM worker_capabilities \
-             WHERE operation = ? ORDER BY id ASC",
+             WHERE operation IN (?, ?) ORDER BY id ASC",
         )
-        .bind(operation.as_str())
+        .bind(operations.first().map(TicketOperation::as_str))
+        .bind(operations.get(1).map(TicketOperation::as_str))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("worker capability history", error))?;
@@ -1472,7 +1481,8 @@ const ACCELERATOR_ACTIVE_LEASES_SQL: &str = "SELECT COUNT(DISTINCT leases.id) FR
      WHERE leases.state = 'held' \
        AND (tickets.kind = 'transcode_video' \
             OR tickets.kind = 'synthetic.workflow.operation.transcode_video') \
-       AND worker_capabilities.operation = 'transcode_video' \
+       AND worker_capabilities.operation IN ('transcode_video', \
+            'synthetic.workflow.operation.transcode_video') \
        AND json_extract(worker_capabilities.hardware, '$[0]') = ?";
 
 /// Per-device `transcode_video` capacity for an accelerator-bound worker.
@@ -1491,7 +1501,8 @@ async fn accelerator_operation_capacity(
     let row = sqlx::query(
         "SELECT json_extract(hardware, '$[0]') AS hardware_token \
          FROM worker_capabilities \
-         WHERE worker_id = ? AND operation = 'transcode_video' \
+         WHERE worker_id = ? AND operation IN ('transcode_video', \
+            'synthetic.workflow.operation.transcode_video') \
            AND json_type(extra, '$.accelerator') = 'object' \
          ORDER BY id ASC LIMIT 1",
     )
@@ -1519,7 +1530,8 @@ async fn accelerator_operation_capacity(
         "SELECT MIN(CAST(json_extract(extra, '$.accelerator.max_sessions') AS INTEGER)) \
          FROM worker_capabilities \
          JOIN workers ON workers.id = worker_capabilities.worker_id \
-         WHERE operation = 'transcode_video' AND workers.status != 'retired' \
+         WHERE operation IN ('transcode_video', \
+            'synthetic.workflow.operation.transcode_video') AND workers.status != 'retired' \
            AND json_extract(hardware, '$[0]') = ?",
     )
     .bind(&hardware_token)
@@ -1542,16 +1554,17 @@ async fn operation_capability_details_in_tx(
     worker_id: WorkerId,
     operation: &TicketOperation,
 ) -> Result<(Vec<String>, Vec<JsonValue>), VoomError> {
-    let operation = operation.normalize().matching_token();
+    let operations = operation.normalize().matching_tokens();
     let rows = sqlx::query(
         "SELECT hardware, extra FROM worker_capabilities \
-         WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
+         WHERE worker_id = ? AND operation IN (?, ?) ORDER BY id ASC",
     )
     .bind(i64_from_u64(
         worker_id.0,
         concat!(module_path!(), ": ", stringify!(worker_id.0)),
     )?)
-    .bind(operation.as_str())
+    .bind(operations.first().map(TicketOperation::as_str))
+    .bind(operations.get(1).map(TicketOperation::as_str))
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("worker capability details", error))?;
@@ -1604,10 +1617,12 @@ async fn max_parallel_in_tx(
             .map_err(|e| map_row_err("worker max_parallel", e))?;
         let value: JsonValue = serde_json::from_str(&raw)
             .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
-        operation_limit = max_limit(
-            operation_limit,
-            positive_u32(value.get(operation.as_str()), "max_parallel operation")?,
-        );
+        for alias in operation.normalize().matching_tokens() {
+            operation_limit = max_limit(
+                operation_limit,
+                positive_u32(value.get(alias.as_str()), "max_parallel operation")?,
+            );
+        }
         wildcard_limit = max_limit(
             wildcard_limit,
             positive_u32(value.get("*"), "max_parallel wildcard")?,
