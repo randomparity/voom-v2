@@ -183,7 +183,7 @@ class Bootstrap:
             ("output", output),
             *[("input", path) for path in inputs],
         ]:
-            mode = "manual-recursive" if role == "input" else "explicit-only"
+            mode = "manual_recursive" if role == "input" else "explicit_only"
             data = self.voom(
                 "library",
                 "root",
@@ -193,7 +193,7 @@ class Bootstrap:
                 "--owner-node-id",
                 self.node_id,
                 "--provider",
-                "local-filesystem",
+                "local_filesystem",
                 "--provider-locator",
                 path,
                 "--scan-mode",
