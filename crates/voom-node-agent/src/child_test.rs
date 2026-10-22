@@ -120,6 +120,44 @@ async fn child_receives_direct_argv_and_exact_environment_then_exits_on_eof() {
 }
 
 #[tokio::test]
+async fn remux_child_receives_only_its_explicit_mkvmerge_dependency() {
+    let credentials = credentials(19, 4, "remux-secret");
+    let server = identity_server(credentials.clone()).await;
+    let fixture = NativeChildFixture::new(server.bound());
+    let mkvmerge = fixture.write_dependency("mkvmerge");
+    let spec = fixture.spec_for(
+        "remux",
+        credentials,
+        &[],
+        vec![OperationKind::Remux],
+        WorkerDependencyPaths {
+            mkvmerge_bin: Some(mkvmerge.clone()),
+            ..WorkerDependencyPaths::default()
+        },
+    );
+    let supervisor = ChildSupervisor::with_timeouts(
+        Duration::from_secs(1),
+        Duration::from_millis(200),
+        Duration::from_secs(1),
+    );
+
+    let children = supervisor.start_all(vec![spec]).await.unwrap();
+    let record = fixture.record();
+    supervisor.shutdown_all(children).await.unwrap();
+    server.stop().await;
+    assert_reaped(record.pid);
+    assert_eq!(
+        record.env.get("VOOM_MKVMERGE_BIN").map(String::as_str),
+        mkvmerge.to_str()
+    );
+    assert!(!record.env.contains_key("PATH"));
+    assert!(!record.env.contains_key("VOOM_FFMPEG_BIN"));
+    assert!(!record.env.contains_key("VOOM_FFPROBE_BIN"));
+    assert!(!record.env.contains_key("VOOM_NVIDIA_SMI_BIN"));
+    assert_eq!(record.env.len(), 5, "unexpected child environment size");
+}
+
+#[tokio::test]
 async fn probe_child_receives_only_its_explicit_ffprobe_dependency() {
     let credentials = credentials(9, 4, "probe-secret");
     let server = identity_server(credentials.clone()).await;
@@ -173,6 +211,7 @@ async fn accelerator_child_reaches_ready_with_explicit_dependencies_and_cleared_
         false,
     );
     let dependencies = WorkerDependencyPaths {
+        mkvmerge_bin: None,
         ffmpeg_bin: Some(fixture.write_dependency("ffmpeg")),
         ffprobe_bin: Some(fixture.write_dependency("ffprobe")),
         nvidia_smi_bin: Some(fixture.write_dependency("nvidia-smi")),

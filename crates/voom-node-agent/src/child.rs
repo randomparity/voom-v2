@@ -532,6 +532,7 @@ async fn read_verified_endpoint(
 
 fn apply_dependency_environment(command: &mut Command, dependencies: &WorkerDependencyPaths) {
     for (name, path) in [
+        ("VOOM_MKVMERGE_BIN", dependencies.mkvmerge_bin.as_ref()),
         ("VOOM_FFMPEG_BIN", dependencies.ffmpeg_bin.as_ref()),
         ("VOOM_FFPROBE_BIN", dependencies.ffprobe_bin.as_ref()),
         ("VOOM_NVIDIA_SMI_BIN", dependencies.nvidia_smi_bin.as_ref()),
