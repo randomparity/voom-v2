@@ -1315,6 +1315,7 @@ async fn scan_library_outcome(
             lease_id: dispatch.lease_id,
             lease_ttl_ms: duration_millis_u32(context.lease_ttl),
             progress_timeout: context.progress_timeout,
+            storage_roots: context.storage_roots.clone(),
         },
     )
     .await
