@@ -278,7 +278,6 @@ fn tiny_media_fixture() -> PathBuf {
 fn success_ffprobe_binary() -> &'static PathBuf {
     static BIN: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
     &BIN.get_or_init(|| {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = TempDir::new().unwrap();
         let script = format!(
             "#!/usr/bin/env sh\n\
@@ -290,10 +289,7 @@ fn success_ffprobe_binary() -> &'static PathBuf {
         );
 
         let path = dir.path().join("ffprobe");
-        std::fs::write(&path, script).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
+        voom_test_support::executable::write_executable(&path, script).unwrap();
         (dir, path)
     })
     .1

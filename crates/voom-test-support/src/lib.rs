@@ -11,3 +11,5 @@ pub use temp_database::TempDatabase;
 pub mod scan_seed;
 pub mod staging_seed;
 pub mod worker;
+
+pub mod executable;

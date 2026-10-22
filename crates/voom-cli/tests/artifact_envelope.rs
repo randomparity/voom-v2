@@ -660,13 +660,8 @@ fn write_success_ffprobe(dir: &Path) -> PathBuf {
 }
 
 fn write_executable(dir: &Path, name: &str, contents: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let path = dir.join(name);
-    std::fs::write(&path, contents).unwrap();
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&path, permissions).unwrap();
+    voom_test_support::executable::write_executable(&path, contents).unwrap();
     path
 }
 
