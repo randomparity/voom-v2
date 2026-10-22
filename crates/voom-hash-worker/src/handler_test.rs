@@ -1,8 +1,11 @@
 use std::io::BufRead;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::Notify;
 use voom_core::{FailureClass, LeaseId};
 use voom_worker_protocol::{
-    HashFileResult, OperationKind, OperationRequest, ProgressFrame, http::OperationBody,
+    ClientHandle, HttpClient, HttpServer, NdjsonOutcome, ServerHandle, WorkerCredentials,
 };
+use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, http::OperationBody};
 
 use super::*;
 
@@ -94,24 +97,170 @@ async fn happy_path_dispatch_carries_progress_then_result_frame() {
         "provider_relative_locator": "f.bin",
     });
 
-    let dispatch = run(request(OperationKind::HashFile, payload))
+    let dispatch = run(request(OperationKind::HashFile, payload.clone()))
         .await
         .unwrap();
 
-    let OperationBody::Buffered(body) = &dispatch.body else {
-        panic!("hash worker emits buffered dispatches");
+    assert!(
+        matches!(&dispatch.body, OperationBody::Streaming(_)),
+        "valid file work must use a live response, not wait for a buffered completion"
+    );
+    let credentials = WorkerCredentials {
+        worker_id: voom_core::WorkerId(7),
+        worker_epoch: 3,
+        secret: secrecy::SecretString::from("test-secret"),
     };
-    let frames = decode_frames(body);
-    assert_eq!(frames.len(), 2);
-    assert!(matches!(
-        frames.first(),
-        Some(ProgressFrame::Progress { .. })
-    ));
-    let ProgressFrame::Result { payload, .. } = frames.last().unwrap() else {
-        panic!("terminal frame must be Result");
+    let server = HttpServer::new(credentials.clone(), operation_handler())
+        .serve(([127, 0, 0, 1], 0).into())
+        .await
+        .unwrap();
+    let mut dispatch = HttpClient::new(server.bound)
+        .dispatch(
+            &credentials,
+            "real-hash",
+            request(OperationKind::HashFile, payload),
+        )
+        .await
+        .unwrap();
+    let result = loop {
+        match dispatch.frames.next_frame().await.unwrap() {
+            NdjsonOutcome::Frame(_) => {}
+            NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => break payload,
+            other => panic!("expected hash result, got {other:?}"),
+        }
     };
-    let decoded: HashFileResult = serde_json::from_value(payload.clone()).unwrap();
-    let expected_hash = blake3::hash(bytes).to_hex().to_string();
-    assert_eq!(decoded.content_hash, format!("blake3:{expected_hash}"));
-    assert_eq!(decoded.size_bytes, bytes.len() as u64);
+    let decoded: HashFileResult = serde_json::from_value(result).unwrap();
+    assert_eq!(
+        decoded.content_hash,
+        format!("blake3:{}", blake3::hash(bytes).to_hex())
+    );
+    assert_eq!(decoded.size_bytes, u64::try_from(bytes.len()).unwrap());
+    server.shutdown.send(()).unwrap();
+    server.joined.await.unwrap();
+}
+
+// The pending future is injected at the file-work boundary: this verifies real HTTP
+// streaming and replay, while real-file integrity is covered by the worker tests.
+#[tokio::test]
+async fn pending_work_acknowledges_and_progresses_then_replays_terminal() {
+    for fail in [false, true] {
+        let release = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = held_operation_handler(release.clone(), calls.clone(), fail);
+        let credentials = WorkerCredentials {
+            worker_id: voom_core::WorkerId(7),
+            worker_epoch: 3,
+            secret: secrecy::SecretString::from("test-secret"),
+        };
+        let server = HttpServer::new(credentials.clone(), handler)
+            .serve(([127, 0, 0, 1], 0).into())
+            .await
+            .unwrap();
+        let client =
+            HttpClient::with_timeouts(server.bound, Duration::from_secs(5), Duration::from_secs(5));
+        let req = OperationRequest {
+            operation: OperationKind::HashFile,
+            lease_id: voom_core::LeaseId(42),
+            payload: serde_json::json!({}),
+            heartbeat_deadline_ms: 2_000,
+            progress_idle_deadline_ms: 2_000,
+        };
+        let mut dispatch = client
+            .dispatch(&credentials, "held-work", req.clone())
+            .await
+            .unwrap();
+        let mut observed = Vec::new();
+        for seq in 0..3 {
+            let outcome =
+                tokio::time::timeout(Duration::from_secs(2), dispatch.frames.next_frame())
+                    .await
+                    .expect("progress must arrive while work remains pending")
+                    .unwrap();
+            let NdjsonOutcome::Frame(frame) = outcome else {
+                panic!("premature terminal")
+            };
+            assert_eq!(frame.seq(), seq);
+            observed.push(frame);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release.notify_one();
+        loop {
+            let outcome =
+                tokio::time::timeout(Duration::from_secs(2), dispatch.frames.next_frame())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            match outcome {
+                NdjsonOutcome::Frame(frame) => observed.push(frame),
+                NdjsonOutcome::Terminated(frame) => {
+                    assert_eq!(matches!(&frame, ProgressFrame::Error { .. }), fail);
+                    assert_eq!(frame.seq(), u64::try_from(observed.len()).unwrap());
+                    observed.push(frame);
+                    break;
+                }
+                NdjsonOutcome::StreamEnd => panic!("missing terminal"),
+            }
+        }
+        let mut replay = client
+            .dispatch(&credentials, "held-work", req)
+            .await
+            .unwrap();
+        for expected in observed {
+            let outcome = replay.frames.next_frame().await.unwrap();
+            let frame = match outcome {
+                NdjsonOutcome::Frame(frame) | NdjsonOutcome::Terminated(frame) => frame,
+                NdjsonOutcome::StreamEnd => panic!("truncated replay"),
+            };
+            assert_eq!(frame, expected);
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "completed replay must not repeat work"
+        );
+        server.shutdown.send(()).unwrap();
+        server.joined.await.unwrap();
+    }
+}
+
+fn sample_result() -> HashFileResult {
+    HashFileResult {
+        content_hash: format!("blake3:{}", blake3::hash(b"fixture").to_hex()),
+        size_bytes: 7,
+        modified_at: "2026-10-22T00:00:00Z".into(),
+        file_key: None,
+        stability_started_at: "2026-10-22T00:00:00Z".into(),
+        stability_confirmed_at: "2026-10-22T00:00:00Z".into(),
+        sidecars: vec![],
+    }
+}
+
+fn held_operation_handler(
+    release: Arc<Notify>,
+    calls: Arc<AtomicUsize>,
+    fail: bool,
+) -> OperationHandler {
+    Arc::new(move |req| {
+        let release = release.clone();
+        let calls = calls.clone();
+        Box::pin(async move {
+            stream_operation(
+                req.lease_id,
+                OffsetDateTime::now_utc(),
+                req.progress_idle_deadline_ms,
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    release.notified().await;
+                    if fail {
+                        Err(malformed_worker_result(
+                            "controlled_error",
+                            "fixture failure".into(),
+                        ))
+                    } else {
+                        Ok(sample_result())
+                    }
+                },
+            )
+        })
+    })
 }

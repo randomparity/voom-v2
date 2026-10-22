@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use time::OffsetDateTime;
 use voom_core::format_iso8601;
@@ -40,10 +42,12 @@ fn handle_operation(req: OperationRequest, config: FfprobeConfig) -> OperationFu
             }
         };
 
-        match Box::pin(probe_file(&payload, &config)).await {
-            Ok(result) => success_dispatch(lease_id, accepted_at, result),
-            Err(err) => error_dispatch(lease_id, accepted_at, &err),
-        }
+        stream_operation(
+            lease_id,
+            accepted_at,
+            req.progress_idle_deadline_ms,
+            async move { Box::pin(probe_file(&payload, &config)).await },
+        )
     })
 }
 
@@ -118,35 +122,76 @@ fn verify_pre_post_match(
     ))
 }
 
-fn success_dispatch(
+fn stream_operation<F>(
     lease_id: voom_core::LeaseId,
     accepted_at: OffsetDateTime,
-    result: ProbeFileResult,
-) -> Result<OperationDispatch, ProtocolError> {
-    let progress = ProgressFrame::Progress {
+    progress_idle_deadline_ms: u32,
+    operation: F,
+) -> Result<OperationDispatch, ProtocolError>
+where
+    F: Future<Output = Result<ProbeFileResult, FfprobeError>> + Send + 'static,
+{
+    let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
         lease_id,
-        seq: 0,
-        emitted_at: accepted_at,
-        percent: None,
-        message: Some("ffprobe completed".to_owned()),
-        payload: Some(serde_json::json!({"provider": "ffprobe"})),
-    };
-    let payload = serde_json::to_value(result).map_err(|err| ProtocolError::InvalidPayload {
-        detail: format!("probe_file result encode: {err}"),
-    })?;
-    let result = ProgressFrame::Result {
+        accepted_at,
+    });
+    writer.write_frame(&progress_frame(lease_id, 0))?;
+    tokio::spawn(async move {
+        let interval_ms = (u64::from(progress_idle_deadline_ms) / 2).clamp(1, 5_000);
+        let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+        ticker.tick().await;
+        let mut operation = Box::pin(operation);
+        let mut seq = 1;
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut operation => {
+                    let frame = terminal_frame(lease_id, seq, result);
+                    let _ = writer.write_frame(&frame);
+                    return;
+                }
+                _ = ticker.tick() => {
+                    if writer.write_frame(&progress_frame(lease_id, seq)).is_err() {
+                        return;
+                    }
+                    seq += 1;
+                }
+            }
+        }
+    });
+    Ok(dispatch)
+}
+
+fn progress_frame(lease_id: voom_core::LeaseId, seq: u64) -> ProgressFrame {
+    ProgressFrame::Progress {
         lease_id,
-        seq: 1,
+        seq,
         emitted_at: OffsetDateTime::now_utc(),
-        payload,
-    };
-    Ok(OperationDispatch::buffered(
-        OperationResponse {
+        percent: None,
+        message: Some("ffprobe active".to_owned()),
+        payload: Some(serde_json::json!({"provider": "ffprobe"})),
+    }
+}
+
+fn terminal_frame(
+    lease_id: voom_core::LeaseId,
+    seq: u64,
+    result: Result<ProbeFileResult, FfprobeError>,
+) -> ProgressFrame {
+    let result = result.and_then(|result| {
+        serde_json::to_value(result).map_err(|err| {
+            malformed_worker_result("encode_result", format!("operation result encode: {err}"))
+        })
+    });
+    match result {
+        Ok(payload) => ProgressFrame::Result {
             lease_id,
-            accepted_at,
+            seq,
+            emitted_at: OffsetDateTime::now_utc(),
+            payload,
         },
-        body_from_frames(&[progress, result])?,
-    ))
+        Err(err) => error_frame(lease_id, seq, &err),
+    }
 }
 
 fn error_dispatch(
@@ -154,15 +199,7 @@ fn error_dispatch(
     accepted_at: OffsetDateTime,
     err: &FfprobeError,
 ) -> Result<OperationDispatch, ProtocolError> {
-    let frame = ProgressFrame::Error {
-        lease_id,
-        seq: 0,
-        emitted_at: OffsetDateTime::now_utc(),
-        class: err.failure_class(),
-        code: err.error_code(),
-        message: err.to_string(),
-        payload: Some(err.payload()),
-    };
+    let frame = error_frame(lease_id, 0, err);
     Ok(OperationDispatch::buffered(
         OperationResponse {
             lease_id,
@@ -170,6 +207,18 @@ fn error_dispatch(
         },
         body_from_frames(&[frame])?,
     ))
+}
+
+fn error_frame(lease_id: voom_core::LeaseId, seq: u64, err: &FfprobeError) -> ProgressFrame {
+    ProgressFrame::Error {
+        lease_id,
+        seq,
+        emitted_at: OffsetDateTime::now_utc(),
+        class: err.failure_class(),
+        code: err.error_code(),
+        message: err.to_string(),
+        payload: Some(err.payload()),
+    }
 }
 
 fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> {
@@ -216,3 +265,7 @@ fn checksum_mismatch(stage: &str, message: &str, payload: serde_json::Value) -> 
         message: format!("{stage}: {message}"),
     }
 }
+
+#[cfg(test)]
+#[path = "handler_test.rs"]
+mod tests;
