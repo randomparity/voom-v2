@@ -24,7 +24,12 @@ validates persisted data, and requires the authenticated node to own that root,
 local_filesystem provider, matching configured locator, and activatable lifecycle state.
 It composes existing root activation through a transaction-aware control-plane helper
 so state and fact events retain one owner. A failed root rolls back incarnation,
-workers, root mutations, events and idempotency reservation. Successful activation
+workers, root mutations, events and idempotency reservation. Treat proofs as the
+complete root manifest for the new incarnation: enumerate previously active roots
+owned by this node through a typed store capability and mark omitted ones unavailable
+through shared lifecycle/event logic in this transaction. Empty manifests remain
+valid but cannot preserve prior roots as available. Included proofs alone activate
+roots; downstream scans must reject an omitted root after restart. Successful activation
 commits them together. Replays return the original result without activating roots
 again or duplicating events. Existing root identity/epoch rules remain unchanged.
 A stale replay cannot resurrect a retired root or superseded incarnation.

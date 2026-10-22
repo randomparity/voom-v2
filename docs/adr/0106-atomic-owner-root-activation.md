@@ -15,7 +15,9 @@ The control plane checks root owner, provider, immutable locator and lifecycle, 
 records root activation in the same transaction as the new incarnation and workers.
 Reuse root lifecycle/event logic through a transaction-aware helper. Filesystem
 canonicalization and identity collection remain on the owner. Preserve the existing
-activation retry contract and root identity/epoch rules. Empty root declarations
+activation retry contract and root identity/epoch rules. The proof list is complete
+for this incarnation: previously active owned roots omitted from it become unavailable
+with validation-loss facts in this transaction. Empty root declarations
 remain valid for worker-only clients. No unauthenticated operator activation exists.
 
 ## Consequences
