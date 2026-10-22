@@ -774,7 +774,10 @@ async fn process_candidate(
     let primary = &candidate.primary;
     let locator = primary.provider_relative_locator.as_str();
     let root_str = root.to_string_lossy().to_string();
-    let tag = format!("{}-{locator}", context.incarnation_id);
+    let tag = format!(
+        "{}-{}-{locator}",
+        context.incarnation_id, context.lease_id.0
+    );
 
     let hash = match hash_one(&registry, &root_str, locator, &context, &tag).await {
         Ok(Ok(hash)) => hash,
