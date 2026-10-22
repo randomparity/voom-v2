@@ -58,6 +58,8 @@ if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "run" ]]; then
     echo "missing --out" >&2
     exit 1
   fi
+  mkdir -p "$out"
+  printf '%s\n' "$$" >"$out/producer-pid"
   sleep 0.25
   mkdir -p "$out/library/movies-hd"
   printf 'media' >"$out/library/movies-hd/movie.mkv"
@@ -104,6 +106,11 @@ cat >"$fake_bin/python3" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == */scripts/acceptance-bootstrap.py && "$2" == serve ]]
+if [[ "${FAKE_BOOTSTRAP_WAIT_FOR_PRODUCER_EXIT:-0}" == 1 ]]; then
+  while kill -0 "$(cat "$CHAOS_WORKDIR/run/producer-pid")" 2>/dev/null; do
+    sleep 0.01
+  done
+fi
 jq -nc --arg path "$CHAOS_WORKDIR/run/library" \
   '{status:"ready",node_id:7,roots:[{role:"input",provider_locator:$path,root_id:3}]}'
 cat >/dev/null
@@ -115,7 +122,7 @@ chmod +x "$fake_bin/git" "$fake_bin/cargo" "$fake_bin/uv" "$fake_bin/python3" "$
 
 run_case() {
 PATH="$fake_bin:$PATH" \
-VOOM_BIN="$fake_voom" \
+VOOM_BIN="${FAKE_VOOM_OVERRIDE-$fake_voom}" \
 CHAOS_WORKDIR="$1" \
 CHAOS_DURATION="1s" \
 CHAOS_SPEED="1x" \
@@ -147,3 +154,15 @@ if FAKE_BOOTSTRAP_EXIT_CODE=2 run_case "$workdir/failed-shutdown"; then
   echo "Chaos falsely succeeded after bootstrap shutdown failed" >&2
   exit 1
 fi
+
+if FAKE_BOOTSTRAP_WAIT_FOR_PRODUCER_EXIT=1 run_case "$workdir/no-checkpoint"; then
+  echo "Chaos falsely succeeded without a scan checkpoint" >&2
+  exit 1
+fi
+
+mkdir -p "$workdir/target/debug"
+cp "$fake_voom" "$workdir/target/debug/voom"
+relative_target=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+  "$workdir/target" "$repo_root")
+FAKE_VOOM_OVERRIDE='' CARGO_TARGET_DIR="$relative_target" run_case "$workdir/relative-target"
+test -s "$workdir/relative-target/summary.jsonl"

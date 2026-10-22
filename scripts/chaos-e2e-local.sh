@@ -80,6 +80,7 @@ uv run chaos-librarian capabilities --json | jq -e '
 cd "$repo_root"
 cargo build -p voom-cli -p voom-api -p voom-node-agent -p voom-scan-worker -p voom-hash-worker -p voom-ffprobe-worker \
   -p voom-verify-artifact-worker -p voom-ffmpeg-worker -p voom-mkvtoolnix-worker
+voom_bin="$(cd "$(dirname "$voom_bin")" && pwd -P)/$(basename "$voom_bin")"
 
 cd "$chaos_dir"
 uv run chaos-librarian run "$scenario_path" --out "$run_dir" --duration "$duration" --speed "$speed" --json > "$workdir/chaos-run.json" &
@@ -238,5 +239,9 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
 done
 
 wait "$chaos_pid"
+if (( checkpoint == 0 )); then
+  echo "Chaos ended before a scan checkpoint; increase CHAOS_DURATION for owner startup" >&2
+  exit 1
+fi
 acceptance_stop
 echo "chaos local summary: $summary"
