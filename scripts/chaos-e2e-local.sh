@@ -238,4 +238,5 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
 done
 
 wait "$chaos_pid"
+acceptance_stop
 echo "chaos local summary: $summary"

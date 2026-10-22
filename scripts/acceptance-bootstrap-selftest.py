@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -92,6 +93,30 @@ class BootstrapTests(unittest.TestCase):
         self.stack.close()
         self.assertFalse(credential.exists())
         self.assert_secret_absent()
+
+    def test_accelerator_descriptors_round_trip_through_agent_toml(self):
+        descriptors = [
+            {"backend": "vaapi", "max_sessions": 1, "decoders": ["h264", "hevc"]},
+            {
+                "backend": "video_toolbox",
+                "max_sessions": 1,
+                "decoders": [{"codec": "h264", "pixel_formats": ["yuv420p", "yuv420p10le"]}],
+            },
+        ]
+        for index, descriptor in enumerate(descriptors):
+            with self.subTest(backend=descriptor["backend"]):
+                document = Path(self.temp.name) / f"accelerator-{index}.json"
+                document.write_text(json.dumps(descriptor))
+                self.args.accelerator_json = document
+                self.stack.node_id = 1
+                with patch.object(
+                    bootstrap.shutil, "which", side_effect=lambda name: f"/fixture/{name}"
+                ):
+                    config = self.stack.configuration(
+                        Path(self.temp.name) / "token", "http://127.0.0.1:1"
+                    )
+                decoded = tomllib.loads(config)
+                self.assertEqual(decoded["workers"][3]["accelerator"], descriptor)
 
     def test_cancelled_setup_does_not_start_another_cli_process(self):
         self.stack.stopping = True

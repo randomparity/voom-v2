@@ -108,13 +108,15 @@ jq -nc --arg path "$CHAOS_WORKDIR/run/library" \
   '{status:"ready",node_id:7,roots:[{role:"input",provider_locator:$path,root_id:3}]}'
 cat >/dev/null
 printf 'stopped\n' >"$CHAOS_WORKDIR/bootstrap-stopped"
+exit "${FAKE_BOOTSTRAP_EXIT_CODE:-0}"
 SH
 
 chmod +x "$fake_bin/git" "$fake_bin/cargo" "$fake_bin/uv" "$fake_bin/python3" "$fake_voom"
 
+run_case() {
 PATH="$fake_bin:$PATH" \
 VOOM_BIN="$fake_voom" \
-CHAOS_WORKDIR="$chaos_workdir" \
+CHAOS_WORKDIR="$1" \
 CHAOS_DURATION="1s" \
 CHAOS_SPEED="1x" \
 CHAOS_CHECKPOINT_INTERVAL="0.1s" \
@@ -123,6 +125,9 @@ CHAOS_POLICY_VERSION_ID=7 \
 CHAOS_PRESERVE_OUTPUT=0 \
 CHAOS_CLEANUP=0 \
   "$repo_root/scripts/chaos-e2e-local.sh"
+
+}
+run_case "$chaos_workdir"
 
 test -s "$chaos_workdir/summary.jsonl" || {
   echo "expected local chaos script to record at least one checkpoint" >&2
@@ -137,3 +142,8 @@ jq -e '
 ' "$chaos_workdir/summary.jsonl" >/dev/null
 
 test -s "$chaos_workdir/bootstrap-stopped"
+
+if FAKE_BOOTSTRAP_EXIT_CODE=2 run_case "$workdir/failed-shutdown"; then
+  echo "Chaos falsely succeeded after bootstrap shutdown failed" >&2
+  exit 1
+fi

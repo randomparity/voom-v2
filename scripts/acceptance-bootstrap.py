@@ -279,8 +279,17 @@ class Bootstrap:
                 ]
             if name == "ffmpeg" and accelerator:
                 lines.append("[workers.accelerator]")
+                decoder_tables = accelerator.get("decoders", [])
+                if not decoder_tables or not isinstance(decoder_tables[0], dict):
+                    decoder_tables = []
                 for key, value in accelerator.items():
+                    if key == "decoders" and decoder_tables:
+                        continue
                     lines.append(f"{key} = {json.dumps(value, ensure_ascii=False)}")
+                for decoder in decoder_tables:
+                    lines.append("[[workers.accelerator.decoders]]")
+                    for key, value in decoder.items():
+                        lines.append(f"{key} = {json.dumps(value, ensure_ascii=False)}")
         return "\n".join(lines) + "\n"
 
     def launch(self, name, arguments):
