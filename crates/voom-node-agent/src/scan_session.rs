@@ -9,6 +9,7 @@
 //! incarnation fails closed rather than replaying accepted locators into
 //! duplicate-locator conflicts.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +17,9 @@ use std::time::Duration;
 use serde_json::{Value as JsonValue, json};
 use tokio::time::Instant;
 use voom_core::{
-    ErrorCode, FailureClass, LeaseId, NodeIncarnationId, OperationKind, ScanObservationEvidence,
-    ScanSessionId, ScanSidecarEvidence,
+    ArtifactAccessDeclaration, ArtifactAccessRight, ArtifactAccessTarget, ErrorCode, FailureClass,
+    LeaseId, NodeIncarnationId, OperationKind, ScanObservationEvidence, ScanSessionId,
+    ScanSidecarEvidence, StorageRootId,
 };
 use voom_worker_protocol::{
     ClientHandle, HashFileRequest, HashFileResult, NdjsonOutcome, ObservedFileFacts,
@@ -55,6 +57,7 @@ pub(crate) struct ScanPumpContext {
     pub lease_id: LeaseId,
     pub lease_ttl_ms: u32,
     pub progress_timeout: Duration,
+    pub storage_roots: HashMap<u64, PathBuf>,
 }
 
 /// What one candidate contributed to the run counters.
@@ -127,6 +130,60 @@ fn parse_scan_ticket(payload: &JsonValue) -> Result<(ScanSessionId, String, Vec<
         .transpose()?
         .unwrap_or_default();
     Ok((ScanSessionId(session), provider_locator, allowlist))
+}
+
+/// Bind the selected read intent to this owner's configured directory before discovery.
+async fn validate_scan_access(
+    dispatch: &LeaseDispatch,
+    context: &ScanPumpContext,
+    provider_locator: &str,
+) -> Result<String, String> {
+    let plan = &dispatch.artifact_access_plan;
+    let payload = &dispatch.dispatch_payload;
+    if plan.id == 0
+        || context.node_id == 0
+        || plan.owner_node_id != Some(context.node_id)
+        || payload.get("node_id") != Some(&json!(context.node_id.to_string()))
+    {
+        return Err("scan access plan does not identify this owner".to_owned());
+    }
+    let evidence = plan
+        .access_evidence
+        .as_ref()
+        .ok_or("scan access plan has no owner evidence")?;
+    let root: StorageRootId =
+        serde_json::from_value(payload["rendered_payload"]["source_storage_root_id"].clone())
+            .map_err(|error| format!("scan source_storage_root_id is invalid: {error}"))?;
+    let declaration: ArtifactAccessDeclaration =
+        serde_json::from_value(payload["declared_artifact_access"].clone())
+            .map_err(|error| format!("scan access declaration is invalid: {error}"))?;
+    let entries = declaration.entries();
+    if declaration != evidence.declaration
+        || entries.len() != 1
+        || !matches!(&entries[0].target, ArtifactAccessTarget::StorageRoot(target)
+            if target.storage_root_id == root)
+        || entries[0].rights != [ArtifactAccessRight::Read]
+    {
+        return Err(
+            "scan access plan must match the source root's read-only declaration".to_owned(),
+        );
+    }
+    let configured = crate::commit::canonical_root(&context.storage_roots, root)
+        .await
+        .map_err(|error| format!("resolve scan root: {error}"))?;
+    let requested = tokio::fs::canonicalize(provider_locator)
+        .await
+        .map_err(|error| format!("resolve scan provider locator: {error}"))?;
+    let metadata = tokio::fs::metadata(&configured)
+        .await
+        .map_err(|error| format!("inspect scan root: {error}"))?;
+    if requested != configured || !metadata.is_dir() {
+        return Err("scan provider locator must identify the configured root directory".to_owned());
+    }
+    configured
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "scan root is not UTF-8".to_owned())
 }
 
 fn scan_idempotency_key(context: &ScanPumpContext, session: ScanSessionId, suffix: &str) -> String {
@@ -233,6 +290,9 @@ async fn run_pump(
     let (session, provider_locator, extension_allowlist) =
         parse_scan_ticket(&dispatch.dispatch_payload)
             .map_err(|message| PumpFailure::new(FailureClass::MalformedWorkerResult, message))?;
+    let provider_locator = validate_scan_access(dispatch, context, &provider_locator)
+        .await
+        .map_err(|message| PumpFailure::new(FailureClass::MalformedWorkerResult, message))?;
 
     start_scan_run(scan_client, context, session).await?;
 
@@ -292,35 +352,8 @@ async fn run_pump(
             failure
         })?;
     }
-    batches.flush_if_nonempty().await?;
-
-    // Complete: publication happens control-plane side inside the completion
-    // transaction; the summary carries only counts known agent-side.
-    let complete_request = RetryRequest::new(
-        scan_idempotency_key(context, session, "complete"),
-        &ScanCompleteRequest {
-            incarnation_id: context.incarnation_id,
-            last_sequence: batches.last_sequence(),
-            observation_count: batches.cumulative(),
-        },
-    )
-    .map_err(|error| {
-        PumpFailure::for_session(
-            session,
-            FailureClass::MalformedWorkerResult,
-            error.to_string(),
-        )
-    })?;
-    scan_client
-        .complete_scan_session(context.node_id, session, &complete_request)
-        .await
-        .map_err(|error| {
-            PumpFailure::for_session(
-                session,
-                FailureClass::ExternalSystemUnavailable,
-                format!("complete scan session {}: {error}", session.0),
-            )
-        })?;
+    // Publish before claiming the selected plan was consumed.
+    batches.complete_session().await?;
 
     Ok(LeaseOutcome::Complete(json!({
         "scan_session_id": session.0.to_string(),
@@ -328,6 +361,11 @@ async fn run_pump(
         "failed_content_count": failed_content_count,
         "degraded_evidence_count": degraded_evidence_count,
         "skipped_count": enumeration.result.skipped_count,
+        "artifact_access": {
+            "validated": true,
+            "owner_node_id": dispatch.artifact_access_plan.owner_node_id,
+            "access_evidence": dispatch.artifact_access_plan.access_evidence,
+        },
     })))
 }
 
@@ -994,8 +1032,35 @@ impl<'a> BatchSubmitter<'a> {
         }
     }
 
-    fn cumulative(&self) -> u64 {
-        self.cumulative
+    async fn complete_session(mut self) -> Result<(), PumpFailure> {
+        self.flush_if_nonempty().await?;
+
+        let complete_request = RetryRequest::new(
+            scan_idempotency_key(self.context, self.session, "complete"),
+            &ScanCompleteRequest {
+                incarnation_id: self.context.incarnation_id,
+                last_sequence: self.last_sequence(),
+                observation_count: self.cumulative,
+            },
+        )
+        .map_err(|error| {
+            PumpFailure::for_session(
+                self.session,
+                FailureClass::MalformedWorkerResult,
+                error.to_string(),
+            )
+        })?;
+        self.client
+            .complete_scan_session(self.context.node_id, self.session, &complete_request)
+            .await
+            .map_err(|error| {
+                PumpFailure::for_session(
+                    self.session,
+                    FailureClass::ExternalSystemUnavailable,
+                    format!("complete scan session {}: {error}", self.session.0),
+                )
+            })?;
+        Ok(())
     }
 }
 

@@ -43,6 +43,8 @@ const HASH: &str = "blake3:00000000000000000000000000000000000000000000000000000
 
 struct PumpFixture {
     _database: TempDatabase,
+    root_directory: tempfile::TempDir,
+    root_id: voom_core::StorageRootId,
     /// Keeps the control plane (and its pool) alive alongside the server.
     _cp: ControlPlane,
     node_id: NodeId,
@@ -53,6 +55,43 @@ struct PumpFixture {
     incarnation_id: NodeIncarnationId,
     dispatch: LeaseDispatch,
     _server: tokio::task::JoinHandle<()>,
+}
+
+impl PumpFixture {
+    fn context(&self) -> ScanPumpContext {
+        let mut context = pump_context(self.node_id, self.incarnation_id);
+        context
+            .storage_roots
+            .insert(self.root_id.0, self.root_directory.path().to_owned());
+        context
+    }
+
+    async fn empty_scan(&self, context: &ScanPumpContext) -> (LeaseOutcome, usize) {
+        let scan = ScriptedScanWorker::new(vec![ScanFrame::Result(0, 0)]);
+        let registry = registry_with(
+            scan.clone(),
+            ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree),
+            ScriptedSingleFileWorker::new(OperationKind::ProbeFile, SingleFileBehavior::Agree),
+        );
+        let credentials = registry
+            .resolve(OperationKind::ScanLibrary)
+            .unwrap()
+            .credentials;
+        let outcome = pump_scan_session(
+            &self.dispatch,
+            scan.clone(),
+            &credentials,
+            &registry,
+            &self.client,
+            context,
+        )
+        .await;
+        (
+            outcome,
+            scan.dispatch_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
 }
 
 /// Seed a real control plane with an activated owner node and one available
@@ -122,7 +161,11 @@ async fn seed_owner_node(cp: &ControlPlane) -> (NodeId, NodeIncarnationId, Secre
 }
 
 /// Create one enabled movie library with an active local root owned by `node`.
-async fn seeded_pump_root(cp: &ControlPlane, node_id: NodeId) -> voom_core::StorageRootId {
+async fn seeded_pump_root(
+    cp: &ControlPlane,
+    node_id: NodeId,
+    directory: &std::path::Path,
+) -> voom_core::StorageRootId {
     let library = cp
         .create_library(voom_store::repo::library::libraries::NewLibrary {
             slug: "pump".to_owned(),
@@ -138,9 +181,11 @@ async fn seeded_pump_root(cp: &ControlPlane, node_id: NodeId) -> voom_core::Stor
             library_id: library.id,
             owner_node_id: node_id,
             provider_kind: voom_core::StorageProviderKind::LocalFilesystem,
-            provider_locator: voom_core::ProviderLocator::new("/media/pump-root".to_owned())
-                .unwrap(),
-            display_locator: "/media/pump-root".to_owned(),
+            provider_locator: voom_core::ProviderLocator::new(
+                directory.to_str().unwrap().to_owned(),
+            )
+            .unwrap(),
+            display_locator: directory.display().to_string(),
             include_globs: Vec::new(),
             exclude_globs: Vec::new(),
             extension_allowlist: vec![".mkv".to_owned()],
@@ -170,7 +215,8 @@ async fn pump_fixture() -> PumpFixture {
     let cp = ControlPlane::open(&url).await.unwrap();
 
     let (node_id, incarnation_id, node_token) = seed_owner_node(&cp).await;
-    let root = seeded_pump_root(&cp, node_id).await;
+    let root_directory = tempfile::tempdir().unwrap();
+    let root = seeded_pump_root(&cp, node_id, root_directory.path()).await;
 
     let outcome = cp.request_scan_run(root, 600).await.unwrap();
     let voom_control_plane::scan::ScanRunOutcome::Requested(requested) = outcome else {
@@ -211,8 +257,23 @@ async fn pump_fixture() -> PumpFixture {
     };
 
     let assertion_pool = voom_store::connect(&url).await.unwrap();
+    let root_epoch: i64 = sqlx::query_scalar("SELECT root_epoch FROM library_roots WHERE id = ?")
+        .bind(i64::try_from(root.0).unwrap())
+        .fetch_one(&assertion_pool)
+        .await
+        .unwrap();
+    let access_evidence = voom_core::OwnerAccessEvidence::new(
+        serde_json::from_value(ticket.payload["declared_artifact_access"].clone()).unwrap(),
+        vec![voom_core::RootEpoch {
+            storage_root_id: root,
+            root_epoch: u64::try_from(root_epoch).unwrap(),
+        }],
+    )
+    .unwrap();
     PumpFixture {
         _database: database,
+        root_directory,
+        root_id: root,
         _cp: cp.clone(),
         node_id,
         db: assertion_pool,
@@ -230,7 +291,7 @@ async fn pump_fixture() -> PumpFixture {
             artifact_access_plan: ArtifactAccessPlan {
                 id: 1,
                 owner_node_id: Some(node_id.0),
-                access_evidence: None,
+                access_evidence: Some(access_evidence),
             },
         },
         _server: server,
@@ -244,6 +305,7 @@ fn pump_context(node_id: NodeId, incarnation_id: NodeIncarnationId) -> ScanPumpC
         lease_id: LeaseId(77),
         lease_ttl_ms: 30_000,
         progress_timeout: Duration::from_secs(5),
+        storage_roots: std::collections::HashMap::new(),
     }
 }
 
@@ -365,6 +427,7 @@ fn agreeing_probe_result(snapshot: JsonValue) -> ProbeFileResult {
 #[derive(Debug)]
 struct ScriptedScanWorker {
     frames: tokio::sync::Mutex<std::collections::VecDeque<ScanFrame>>,
+    dispatch_count: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +442,7 @@ impl ScriptedScanWorker {
     fn new(frames: Vec<ScanFrame>) -> Arc<Self> {
         Arc::new(Self {
             frames: tokio::sync::Mutex::new(frames.into()),
+            dispatch_count: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 }
@@ -412,6 +476,8 @@ impl ClientHandle for ScriptedScanWorker {
         request: OperationRequest,
     ) -> Result<DispatchStream, voom_worker_protocol::ProtocolError> {
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+        self.dispatch_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut frames = self.frames.lock().await.clone();
         tokio::spawn(async move {
             let mut seq = 0_u64;
@@ -652,6 +718,197 @@ fn registry_with(
 // -------------------------------------------------------------- the tests --
 
 #[tokio::test]
+async fn scan_access_mismatches_fail_before_start_or_dispatch() {
+    for defect in [
+        "owner",
+        "owner_absent",
+        "node",
+        "plan_id",
+        "unbound",
+        "file",
+        "missing_path",
+        "write_plan",
+        "missing",
+        "root",
+        "zero_root",
+        "rights",
+        "declaration",
+        "locator",
+    ] {
+        let mut fixture = pump_fixture().await;
+        assert!(fixture.root_directory.path().is_dir());
+        let other_directory = tempfile::tempdir().unwrap();
+        let mut context = fixture.context();
+        match defect {
+            "owner" => fixture.dispatch.artifact_access_plan.owner_node_id = Some(999),
+            "owner_absent" => fixture.dispatch.artifact_access_plan.owner_node_id = None,
+            "node" => fixture.dispatch.dispatch_payload["node_id"] = json!("999"),
+            "plan_id" => fixture.dispatch.artifact_access_plan.id = 0,
+            "unbound" => context.storage_roots.clear(),
+            "file" | "missing_path" => {
+                let file = other_directory.path().join("source");
+                if defect == "file" {
+                    std::fs::write(&file, b"fixture").unwrap();
+                }
+                context
+                    .storage_roots
+                    .insert(fixture.root_id.0, file.clone());
+                fixture.dispatch.dispatch_payload["rendered_payload"]["provider_locator"] =
+                    json!(file);
+            }
+            "write_plan" => {
+                fixture
+                    .dispatch
+                    .artifact_access_plan
+                    .access_evidence
+                    .as_mut()
+                    .unwrap()
+                    .declaration = serde_json::from_value(json!([{
+                    "target": {"kind": "storage_root", "storage_root_id": fixture.root_id},
+                    "rights": ["write"],
+                }]))
+                .unwrap();
+                fixture.dispatch.dispatch_payload["declared_artifact_access"] =
+                    serde_json::to_value(
+                        &fixture
+                            .dispatch
+                            .artifact_access_plan
+                            .access_evidence
+                            .as_ref()
+                            .unwrap()
+                            .declaration,
+                    )
+                    .unwrap();
+            }
+            "missing" => fixture.dispatch.artifact_access_plan.access_evidence = None,
+            "root" => {
+                fixture.dispatch.dispatch_payload["rendered_payload"]["source_storage_root_id"] =
+                    json!(999);
+            }
+            "zero_root" => {
+                fixture.dispatch.dispatch_payload["rendered_payload"]["source_storage_root_id"] =
+                    json!(0);
+            }
+            "rights" => {
+                fixture.dispatch.dispatch_payload["declared_artifact_access"][0]["rights"] =
+                    json!(["write"]);
+            }
+            "declaration" => {
+                fixture.dispatch.dispatch_payload["declared_artifact_access"] = json!([]);
+            }
+            "locator" => {
+                fixture.dispatch.dispatch_payload["rendered_payload"]["provider_locator"] =
+                    json!(other_directory.path());
+            }
+            _ => unreachable!(),
+        }
+        let (outcome, dispatch_count) = fixture.empty_scan(&context).await;
+        assert!(
+            matches!(outcome, LeaseOutcome::Failure(_, _, _)),
+            "{defect}"
+        );
+        assert_eq!(session_status(&fixture).await, "requested", "{defect}");
+        assert_eq!(dispatch_count, 0, "{defect}");
+    }
+}
+
+#[tokio::test]
+async fn rooted_scan_settles_acquired_lease_with_exact_evidence() {
+    use crate::client::{AcquireOutcome, AcquireRequest, CompleteRequest, RetryRequest};
+
+    let mut fixture = pump_fixture().await;
+    let worker: i64 = sqlx::query_scalar(
+        "SELECT worker_id FROM worker_capabilities WHERE operation = 'scan_library'",
+    )
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    let acquire = RetryRequest::new(
+        "rooted-scan-acquire".to_owned(),
+        &AcquireRequest {
+            node_id: fixture.node_id,
+            worker_id: WorkerId(u64::try_from(worker).unwrap()),
+            incarnation_id: fixture.incarnation_id,
+            lease_ttl_seconds: 30,
+        },
+    )
+    .unwrap();
+    let AcquireOutcome::Leased(dispatch) = fixture.client.acquire(&acquire).await.unwrap() else {
+        unreachable!("the owner scan must acquire");
+    };
+    fixture.dispatch = dispatch;
+    let lease_id = fixture.dispatch.lease_id;
+    let mut context = fixture.context();
+    context.lease_id = lease_id;
+    let (LeaseOutcome::Complete(summary), dispatch_count) = fixture.empty_scan(&context).await
+    else {
+        unreachable!("valid rooted scan must publish");
+    };
+    assert_eq!(dispatch_count, 1);
+    assert_eq!(
+        summary["artifact_access"],
+        json!({
+            "validated": true,
+            "owner_node_id": fixture.dispatch.artifact_access_plan.owner_node_id,
+            "access_evidence": fixture.dispatch.artifact_access_plan.access_evidence,
+        })
+    );
+    let complete = |key: &str, result| {
+        RetryRequest::new(
+            key.to_owned(),
+            &CompleteRequest {
+                node_id: fixture.node_id,
+                worker_id: fixture.dispatch.worker_id,
+                incarnation_id: fixture.incarnation_id,
+                result,
+            },
+        )
+        .unwrap()
+    };
+    let mut changed = summary.clone();
+    changed["artifact_access"]["access_evidence"]["root_epochs"][0]["root_epoch"] = json!(999);
+    let error = fixture
+        .client
+        .complete(lease_id, &complete("rooted-scan-mismatch", changed))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, voom_core::VoomError::Conflict(_)));
+    let request = complete("rooted-scan-complete", summary);
+    let first = fixture.client.complete(lease_id, &request).await.unwrap();
+    assert_eq!(
+        fixture.client.complete(lease_id, &request).await.unwrap(),
+        first
+    );
+    assert_eq!(
+        fixture.client.acquire(&acquire).await.unwrap(),
+        AcquireOutcome::Leased(fixture.dispatch.clone())
+    );
+    let states: (String, String, String) = sqlx::query_as(
+        "SELECT t.state, l.state, p.status FROM tickets t JOIN leases l ON l.ticket_id=t.id \
+         JOIN artifact_access_plans p ON p.lease_id=l.id WHERE l.id = ?",
+    )
+    .bind(i64::try_from(lease_id.0).unwrap())
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        states,
+        (
+            "succeeded".to_owned(),
+            "released".to_owned(),
+            "consumed".to_owned()
+        )
+    );
+    let terminal_issues: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE kind='terminal_failure'")
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+    assert_eq!(terminal_issues, 0);
+    assert_eq!(session_status(&fixture).await, "succeeded");
+}
+
+#[tokio::test]
 async fn candidate_dispatch_keys_isolate_scan_executions_and_preserve_retries() {
     let incarnation = "0123456789abcdef0123456789abcdef".parse().unwrap();
     let hash = ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree);
@@ -707,7 +964,7 @@ async fn candidate_dispatch_keys_isolate_scan_executions_and_preserve_retries() 
 #[tokio::test]
 async fn ordered_batches_reach_the_control_plane_and_complete() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let registry = registry_with(
         ScriptedScanWorker::new(vec![
             ScanFrame::Candidates(vec![candidate("a.mkv"), candidate("b.mkv")]),
@@ -743,23 +1000,9 @@ async fn ordered_batches_reach_the_control_plane_and_complete() {
 #[tokio::test]
 async fn empty_enumeration_completes_with_null_last_sequence() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
-    let registry = registry_with(
-        ScriptedScanWorker::new(vec![ScanFrame::Result(0, 0)]),
-        ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree),
-        ScriptedSingleFileWorker::new(OperationKind::ProbeFile, SingleFileBehavior::Agree),
-    );
-    let scan_worker = registry.resolve(OperationKind::ScanLibrary).unwrap();
-
-    let outcome = pump_scan_session(
-        &fixture.dispatch,
-        scan_worker.client.clone(),
-        &scan_worker.credentials,
-        &registry,
-        &fixture.client,
-        &context,
-    )
-    .await;
+    let context = fixture.context();
+    let (outcome, dispatch_count) = fixture.empty_scan(&context).await;
+    assert_eq!(dispatch_count, 1);
 
     let LeaseOutcome::Complete(summary) = outcome else {
         unreachable!("scripted workers drive this fixture to completion")
@@ -772,7 +1015,7 @@ async fn empty_enumeration_completes_with_null_last_sequence() {
 #[tokio::test]
 async fn drift_candidate_yields_evidence_less_observation() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let registry = registry_with(
         ScriptedScanWorker::new(vec![
             ScanFrame::Candidates(vec![candidate("drifting.mkv")]),
@@ -807,7 +1050,7 @@ async fn drift_candidate_yields_evidence_less_observation() {
 #[tokio::test]
 async fn vanished_candidate_records_no_observation() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let registry = registry_with(
         ScriptedScanWorker::new(vec![
             ScanFrame::Candidates(vec![candidate("gone.mkv")]),
@@ -838,7 +1081,7 @@ async fn vanished_candidate_records_no_observation() {
 #[tokio::test]
 async fn unreadable_candidate_records_existence_without_evidence() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let registry = registry_with(
         ScriptedScanWorker::new(vec![
             ScanFrame::Candidates(vec![candidate("locked.mkv")]),
@@ -870,7 +1113,7 @@ async fn unreadable_candidate_records_existence_without_evidence() {
 #[tokio::test]
 async fn sidecar_digests_ride_the_primary_evidence() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let registry = registry_with(
         ScriptedScanWorker::new(vec![
             ScanFrame::Candidates(vec![sidecar_candidate("movie.mkv", "movie.srt")]),
@@ -906,7 +1149,7 @@ async fn sidecar_digests_ride_the_primary_evidence() {
 #[tokio::test]
 async fn oversized_enumeration_splits_into_ordered_batches() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let mut frames = Vec::new();
     for index in 0..8 {
         frames.push(ScanFrame::Candidates(
@@ -948,7 +1191,7 @@ async fn oversized_enumeration_splits_into_ordered_batches() {
 #[tokio::test]
 async fn evidence_dense_root_flushes_on_the_byte_budget() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     // One agreeing probe whose snapshot alone exceeds the 512 KiB batch
     // budget: the flush must fire before the API's request-body cap can.
     let registry = registry_with(
@@ -1041,7 +1284,7 @@ impl ClientHandle for DenseProbeWorker {
 #[tokio::test]
 async fn fatal_scan_worker_crash_fails_session_and_lease() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let registry = registry_with(
         ScriptedScanWorker::new(vec![ScanFrame::Crash]),
         ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree),
@@ -1059,9 +1302,10 @@ async fn fatal_scan_worker_crash_fails_session_and_lease() {
     )
     .await;
 
-    let LeaseOutcome::Failure(class, reason, _) = outcome else {
+    let LeaseOutcome::Failure(class, reason, evidence) = outcome else {
         unreachable!("the scripted crash fails this session");
     };
+    assert_eq!(evidence, json!({}));
     assert_eq!(class, FailureClass::WorkerCrash);
     assert!(reason.contains("scan worker failed"));
     // The best-effort fail call is fire-and-forget; poll briefly for it.
@@ -1080,7 +1324,7 @@ async fn fatal_scan_worker_crash_fails_session_and_lease() {
 #[tokio::test]
 async fn re_delivered_ticket_after_restart_fails_closed() {
     let fixture = pump_fixture().await;
-    let context = pump_context(fixture.node_id, fixture.incarnation_id);
+    let context = fixture.context();
     let registry = registry_with(
         ScriptedScanWorker::new(vec![ScanFrame::Result(0, 0)]),
         ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree),
@@ -1110,7 +1354,10 @@ async fn re_delivered_ticket_after_restart_fails_closed() {
         &scan_worker.credentials,
         &registry,
         &fixture.client,
-        &pump_context(fixture.node_id, restarted_incarnation),
+        &ScanPumpContext {
+            incarnation_id: restarted_incarnation,
+            ..fixture.context()
+        },
     )
     .await;
     let LeaseOutcome::Failure(_, reason, _) = second else {
