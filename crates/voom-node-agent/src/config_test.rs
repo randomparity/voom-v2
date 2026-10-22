@@ -622,3 +622,32 @@ fn replace_token_table(document: &str, replacement: &str) -> String {
         &document[end..]
     )
 }
+
+#[test]
+fn root_activation_config_rejects_zero_duplicate_and_oversized_bindings() {
+    let fixture = ConfigFixture::new("token");
+    let mut config = AgentConfig::load(&fixture.config_path).unwrap().config;
+    let binding = super::StorageRootBinding {
+        storage_root_id: 0,
+        provider_locator: fixture.temp_path().to_path_buf(),
+    };
+    config.storage_roots = vec![binding.clone()];
+    assert!(config.validate().is_err());
+    config.storage_roots = vec![
+        super::StorageRootBinding {
+            storage_root_id: 1,
+            ..binding.clone()
+        };
+        2
+    ];
+    assert!(config.validate().is_err());
+    config.storage_roots = (1..=65)
+        .map(|id| super::StorageRootBinding {
+            storage_root_id: id,
+            ..binding.clone()
+        })
+        .collect();
+    assert!(config.validate().is_err());
+    config.storage_roots.pop();
+    config.validate().unwrap();
+}

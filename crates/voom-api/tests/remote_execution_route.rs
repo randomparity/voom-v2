@@ -1277,3 +1277,153 @@ async fn acquire_replay_reports_store_corruption_as_database_error() {
     let json = response_json(res).await;
     assert_eq!(json["error"]["code"], "DB_UNREACHABLE");
 }
+
+async fn root_activation_fixture(
+    fixture: &ApiFixture,
+    owner: NodeId,
+    suffix: &str,
+) -> voom_store::repo::library::library_roots::LibraryRoot {
+    use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+    use voom_store::repo::library::library_roots::{
+        HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    };
+    let library = fixture
+        .cp
+        .create_library(NewLibrary {
+            slug: format!("root-activation-{suffix}"),
+            display_name: "Root activation".to_owned(),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .create_library_root(NewLibraryRoot {
+            library_id: library.id,
+            owner_node_id: owner,
+            provider_kind: voom_core::StorageProviderKind::LocalFilesystem,
+            provider_locator: voom_core::ProviderLocator::new(format!("/root-activation/{suffix}"))
+                .unwrap(),
+            display_locator: "Root activation fixture".to_owned(),
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            extension_allowlist: Vec::new(),
+            scan_mode: LibraryScanMode::ManualRecursive,
+            symlink_policy: SymlinkPolicy::Reject,
+            hidden_file_policy: HiddenFilePolicy::Ignore,
+            max_depth: None,
+            stability_seconds: 0,
+            debounce_seconds: 0,
+            default_output_root_id: None,
+            default_staging_root_id: None,
+            default_backup_root_id: None,
+            enabled: true,
+        })
+        .await
+        .unwrap()
+}
+
+fn root_activation_body(roots: &Value) -> Value {
+    json!({
+        "incarnation_id": "fedcba9876543210fedcba9876543210",
+        "storage_roots": roots,
+        "workers": [{"logical_name": "hash", "operations": ["hash_file"],
+                     "artifact_access": ["shared_mount"], "accelerator": null, "max_parallel": 1}]
+    })
+}
+
+#[tokio::test]
+async fn root_activation_route_authenticates_validates_and_replays_owner_proofs() {
+    let fixture = api_fixture().await;
+    let root = root_activation_fixture(&fixture, fixture.node_id, "owner").await;
+    let path = format!("/v1/execution/node/{}/activate", fixture.node_id);
+    let body = root_activation_body(&json!([{
+        "storage_root_id": root.id, "provider_locator": root.provider_locator,
+        "activation_identity": "dev=1;ino=2"
+    }]));
+    let rejected = fixture
+        .post_json_with_token(&path, "root-proof", "wrong-token", body.clone())
+        .await;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        fixture
+            .cp
+            .get_library_root(root.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        voom_core::StorageRootState::Configured
+    );
+    let mut malformed = body.clone();
+    malformed["storage_roots"][0]["unexpected"] = json!(true);
+    assert_bad_args_envelope(
+        fixture.post_json(&path, "malformed-proof", malformed).await,
+        "execution.activate",
+    )
+    .await;
+    let response = fixture.post_json(&path, "root-proof", body.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = response_json(response).await;
+    assert_eq!(
+        fixture
+            .cp
+            .get_library_root(root.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        voom_core::StorageRootState::Active
+    );
+    let replay = fixture.post_json(&path, "root-proof", body).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(replay).await, response);
+}
+
+#[tokio::test]
+async fn root_activation_route_rejects_foreign_owner_and_rolls_back_valid_root() {
+    let fixture = api_fixture().await;
+    let other = fixture
+        .cp
+        .register_node(RegisterNodeInput {
+            name: "foreign-root-owner".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let valid = root_activation_fixture(&fixture, fixture.node_id, "valid").await;
+    let foreign = root_activation_fixture(&fixture, other.node.id, "foreign").await;
+    let body = root_activation_body(&json!([
+        {"storage_root_id": valid.id, "provider_locator": valid.provider_locator,
+         "activation_identity": "valid"},
+        {"storage_root_id": foreign.id, "provider_locator": foreign.provider_locator,
+         "activation_identity": "foreign"}
+    ]));
+    let path = format!("/v1/execution/node/{}/activate", fixture.node_id);
+    let response = fixture.post_json(&path, "foreign-proof", body).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        fixture
+            .cp
+            .get_library_root(valid.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        voom_core::StorageRootState::Configured
+    );
+    assert_eq!(
+        fixture
+            .cp
+            .get_node(fixture.node_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active_incarnation_id,
+        Some(fixture.incarnation_id)
+    );
+}

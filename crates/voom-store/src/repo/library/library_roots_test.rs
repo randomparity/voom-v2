@@ -1033,3 +1033,53 @@ async fn retire_refusal_lists_a_bounded_number_of_blocking_records() {
     );
     assert!(!message.contains("commit record 6"), "{message}");
 }
+
+#[tokio::test]
+async fn root_activation_owned_enumeration_is_ordered_and_does_not_hide_corrupt_states() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "manifest", true).await;
+    let owner = node(&repo, "manifest-owner", NodeStatus::Active).await;
+    let other = node(&repo, "other-manifest-owner", NodeStatus::Active).await;
+    let first = repo
+        .create_library_root(new_root(library_id, owner, "/manifest/first"), at(2))
+        .await
+        .unwrap();
+    let second = repo
+        .create_library_root(new_root(library_id, owner, "/manifest/second"), at(1))
+        .await
+        .unwrap();
+    repo.create_library_root(new_root(library_id, other, "/manifest/foreign"), at(0))
+        .await
+        .unwrap();
+    let mut tx = crate::tx::begin_read_only(&repo.pool, "test owned enumeration")
+        .await
+        .unwrap();
+    let roots = repo
+        .list_owned_library_roots_in_tx(&mut tx, owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        roots.into_iter().map(|root| root.id).collect::<Vec<_>>(),
+        vec![first.id, second.id]
+    );
+    tx.commit().await.unwrap();
+    with_check_constraints_disabled(&repo.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE library_roots SET state = 'corrupt' WHERE id = ?")
+                .bind(i64::try_from(first.id.0).unwrap())
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let mut tx = crate::tx::begin_read_only(&repo.pool, "test corrupt owned enumeration")
+        .await
+        .unwrap();
+    let error = repo
+        .list_owned_library_roots_in_tx(&mut tx, owner)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+}

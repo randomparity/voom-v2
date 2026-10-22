@@ -222,6 +222,22 @@ impl SqliteLibraryRepo {
         get_root_in_tx(tx, id).await
     }
 
+    /// Decode this owner's complete root set before lifecycle classification.
+    pub async fn list_owned_library_roots_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        owner_node_id: NodeId,
+    ) -> Result<Vec<LibraryRoot>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {ROOT_COLS} FROM library_roots r WHERE r.owner_node_id = ? ORDER BY r.id"
+        ))
+        .bind(node_i64(owner_node_id)?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("library_roots list owned", error))?;
+        rows.iter().map(row_to_root).collect()
+    }
+
     pub async fn list_library_roots(
         &self,
         library_id: Option<LibraryId>,

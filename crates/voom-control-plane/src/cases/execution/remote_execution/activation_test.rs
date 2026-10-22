@@ -1433,6 +1433,7 @@ async fn stale_scan_event_failure_rolls_back_incarnation_and_worker_retirement()
 
 fn activation_input(node_id: voom_core::NodeId, token: SecretString) -> RemoteActivateInput {
     RemoteActivateInput {
+        storage_roots: Vec::new(),
         node_id,
         token,
         idempotency_key: "activate-1".to_owned(),
@@ -1696,4 +1697,215 @@ async fn cp_with_manual_clock(
     .await
     .unwrap();
     (cp, clock, tmp)
+}
+
+async fn configured_activation_root(
+    cp: &crate::ControlPlane,
+    node_id: voom_core::NodeId,
+    suffix: &str,
+) -> voom_store::repo::library::library_roots::LibraryRoot {
+    let library = cp
+        .create_library(NewLibrary {
+            slug: format!("root-proof-{suffix}"),
+            display_name: "Root proof test".to_owned(),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    cp.create_library_root(scan_root_input(library.id, node_id, suffix))
+        .await
+        .unwrap()
+}
+
+fn root_proof(
+    root: &voom_store::repo::library::library_roots::LibraryRoot,
+    identity: &str,
+) -> super::super::RemoteStorageRootProof {
+    super::super::RemoteStorageRootProof {
+        storage_root_id: root.id,
+        provider_locator: root.provider_locator.clone(),
+        activation_identity: identity.to_owned(),
+    }
+}
+
+async fn root_fact_count(cp: &crate::ControlPlane) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind LIKE 'storage_root.%'")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn root_activation_preserves_epochs_and_replays_without_reactivating() {
+    let (cp, _tmp) = cp_at(T0).await;
+    let owner = register_remote_node(&cp).await;
+    let root = configured_activation_root(&cp, owner.node.id, "epochs").await;
+    let mut first = activation_input_for(owner.node.id, owner.token.clone(), 1);
+    first.storage_roots = vec![root_proof(&root, "dev=1;ino=2")];
+    let outcome = cp.remote_activate(first.clone()).await.unwrap();
+    let activated = cp.get_library_root(root.id).await.unwrap().unwrap();
+    assert_eq!(activated.state, voom_core::StorageRootState::Active);
+    let count = root_fact_count(&cp).await;
+    assert_eq!(cp.remote_activate(first.clone()).await.unwrap(), outcome);
+    assert_eq!(root_fact_count(&cp).await, count);
+    let mut same = activation_input_for(owner.node.id, owner.token.clone(), 2);
+    same.storage_roots = first.storage_roots.clone();
+    cp.remote_activate(same).await.unwrap();
+    assert_eq!(
+        cp.get_library_root(root.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .root_epoch,
+        activated.root_epoch
+    );
+    let mut changed = activation_input_for(owner.node.id, owner.token.clone(), 3);
+    changed.storage_roots = vec![root_proof(&root, "dev=3;ino=4")];
+    cp.remote_activate(changed).await.unwrap();
+    assert_eq!(
+        cp.get_library_root(root.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .root_epoch,
+        activated.root_epoch + 1
+    );
+    cp.retire_library_root(root.id).await.unwrap();
+    let count = root_fact_count(&cp).await;
+    cp.remote_activate(first).await.unwrap();
+    assert_eq!(
+        cp.get_library_root(root.id).await.unwrap().unwrap().state,
+        voom_core::StorageRootState::Retired
+    );
+    assert_eq!(root_fact_count(&cp).await, count);
+}
+
+#[tokio::test]
+async fn root_activation_restart_invalidates_omitted_roots_and_fences_scan() {
+    let (cp, _tmp) = cp_at(T0).await;
+    let owner = register_remote_node(&cp).await;
+    let first = configured_activation_root(&cp, owner.node.id, "included").await;
+    let second = configured_activation_root(&cp, owner.node.id, "omitted").await;
+    let mut initial = activation_input_for(owner.node.id, owner.token.clone(), 1);
+    initial.storage_roots = vec![root_proof(&first, "first"), root_proof(&second, "second")];
+    cp.remote_activate(initial).await.unwrap();
+    let mut subset = activation_input_for(owner.node.id, owner.token.clone(), 2);
+    subset.storage_roots = vec![root_proof(&first, "first")];
+    cp.remote_activate(subset).await.unwrap();
+    assert!(
+        cp.effective_library_root(first.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .available
+    );
+    assert_eq!(
+        cp.get_library_root(second.id).await.unwrap().unwrap().state,
+        voom_core::StorageRootState::Unavailable
+    );
+    assert!(cp.request_scan_session(second.id, 300).await.is_err());
+    cp.remote_activate(activation_input_for(owner.node.id, owner.token.clone(), 3))
+        .await
+        .unwrap();
+    assert!(
+        !cp.effective_library_root(first.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .available
+    );
+    assert!(cp.request_scan_session(first.id, 300).await.is_err());
+    let epoch = cp
+        .get_library_root(first.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .root_epoch;
+    let mut restored = activation_input_for(owner.node.id, owner.token, 4);
+    restored.storage_roots = vec![root_proof(&first, "first")];
+    cp.remote_activate(restored).await.unwrap();
+    let root = cp.get_library_root(first.id).await.unwrap().unwrap();
+    assert_eq!(root.state, voom_core::StorageRootState::Active);
+    assert_eq!(root.root_epoch, epoch);
+}
+
+#[tokio::test]
+async fn root_activation_rejects_wrong_owner_and_locator_atomically() {
+    let (cp, _tmp) = cp_at(T0).await;
+    let owner = register_remote_node(&cp).await;
+    let other = cp
+        .register_node(RegisterNodeInput {
+            name: "other-root-owner".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let valid = configured_activation_root(&cp, owner.node.id, "valid").await;
+    let foreign = configured_activation_root(&cp, other.node.id, "foreign").await;
+    let mismatched = configured_activation_root(&cp, owner.node.id, "mismatched").await;
+    for (ordinal, invalid) in [
+        (1, root_proof(&foreign, "foreign")),
+        (
+            2,
+            super::super::RemoteStorageRootProof {
+                provider_locator: ProviderLocator::new("/wrong-locator".to_owned()).unwrap(),
+                ..root_proof(&mismatched, "mismatched")
+            },
+        ),
+    ] {
+        let mut input = activation_input_for(owner.node.id, owner.token.clone(), ordinal);
+        input.storage_roots = vec![root_proof(&valid, "valid"), invalid];
+        let counts = activation_row_counts(&cp).await;
+        let facts = root_fact_count(&cp).await;
+        assert!(cp.remote_activate(input).await.is_err());
+        assert_eq!(activation_row_counts(&cp).await, counts);
+        assert_eq!(root_fact_count(&cp).await, facts);
+        assert_eq!(
+            cp.get_library_root(valid.id).await.unwrap().unwrap().state,
+            voom_core::StorageRootState::Configured
+        );
+    }
+}
+
+#[tokio::test]
+async fn root_activation_rejects_malformed_duplicate_and_retired_proofs() {
+    let (cp, _tmp) = cp_at(T0).await;
+    let owner = register_remote_node(&cp).await;
+    let root = configured_activation_root(&cp, owner.node.id, "invalid").await;
+    let proof = root_proof(&root, "valid");
+    for proofs in [
+        vec![proof.clone(), proof.clone()],
+        vec![super::super::RemoteStorageRootProof {
+            activation_identity: String::new(),
+            ..proof.clone()
+        }],
+        vec![super::super::RemoteStorageRootProof {
+            activation_identity: "x".repeat(4097),
+            ..proof.clone()
+        }],
+        vec![super::super::RemoteStorageRootProof {
+            activation_identity: "bad\0identity".to_owned(),
+            ..proof.clone()
+        }],
+        vec![super::super::RemoteStorageRootProof {
+            storage_root_id: StorageRootId(0),
+            ..proof.clone()
+        }],
+        vec![proof.clone(); 65],
+    ] {
+        let mut input = activation_input(owner.node.id, owner.token.clone());
+        input.storage_roots = proofs;
+        assert_eq!(
+            cp.remote_activate(input).await.unwrap_err().error_code(),
+            ErrorCode::ConfigInvalid
+        );
+    }
+    cp.retire_library_root(root.id).await.unwrap();
+    let mut input = activation_input(owner.node.id, owner.token);
+    input.storage_roots = vec![proof];
+    assert!(cp.remote_activate(input).await.is_err());
 }

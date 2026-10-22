@@ -96,6 +96,7 @@ impl OwnerNodeEmulator {
     /// against `url`.
     #[must_use]
     pub fn spawn(url: &str) -> Self {
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let commit_url = url.to_owned();
         let media_url = commit_url.clone();
         let commit_handle = std::thread::spawn(move || {
@@ -114,6 +115,7 @@ impl OwnerNodeEmulator {
                         voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
                     )));
                 activate_owner_media_workers(&cp, &node).await.unwrap();
+                ready_tx.send(()).unwrap();
                 loop {
                     let pending: Option<(i64, i64)> = sqlx::query_as(
                         "SELECT id, artifact_handle_id FROM artifact_commit_intents \
@@ -142,6 +144,11 @@ impl OwnerNodeEmulator {
                 .unwrap();
             runtime.block_on(run_media_settlement(media_url));
         });
+        // Scan fixtures temporarily transfer root ownership. Finish the initial
+        // manifest before callers can begin that transfer.
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or_else(|error| panic!("activate owner emulator before returning: {error}"));
         Self {
             _handles: vec![commit_handle, media_handle],
         }
@@ -248,7 +255,8 @@ async fn activate_owner_media_workers(
     node: &SimulatedOwnerNode,
 ) -> Result<(), VoomError> {
     use voom_control_plane::execution::{
-        RemoteActivateInput, RemoteWorkerDeclaration, RemoteWorkerReadinessInput,
+        RemoteActivateInput, RemoteStorageRootProof, RemoteWorkerDeclaration,
+        RemoteWorkerReadinessInput,
     };
     use voom_core::{ArtifactAccessMode, WorkerReadiness};
     let declarations = OWNER_MEDIA_TOOLS
@@ -265,8 +273,27 @@ async fn activate_owner_media_workers(
     // drives the commit-intent protocol below. Activating a second incarnation
     // would supersede the principal used by `drive_pending_commit`.
     let incarnation_id = node.incarnation_id;
+    let storage_roots = cp
+        .list_library_roots(None)
+        .await?
+        .into_iter()
+        .filter(|root| {
+            root.owner_node_id == Some(node.node_id)
+                && root.state == voom_core::StorageRootState::Active
+        })
+        .map(|root| {
+            Ok(RemoteStorageRootProof {
+                storage_root_id: root.id,
+                provider_locator: root.provider_locator,
+                activation_identity: root.activation_identity.ok_or_else(|| {
+                    VoomError::database("active fixture root has no activation identity")
+                })?,
+            })
+        })
+        .collect::<Result<Vec<_>, VoomError>>()?;
     let activation = cp
         .remote_activate(RemoteActivateInput {
+            storage_roots,
             node_id: node.node_id,
             token: node.token.clone(),
             idempotency_key: "activate-owner-media-workers".to_owned(),

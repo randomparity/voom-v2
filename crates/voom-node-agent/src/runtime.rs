@@ -28,8 +28,8 @@ use crate::client::{
     CommitOutcomeRequest, CommitReceiptOutcome, CompleteOutcome, CompleteRequest,
     ControlPlaneClient, DeactivateOutcome, DeactivateRequest, FailOutcome, FailRequest,
     LeaseDispatch, LeaseHeartbeatOutcome, LeaseHeartbeatRequest, NodeHeartbeatOutcome,
-    NodeHeartbeatRequest, RetryRequest, WorkerDeclaration, WorkerReadinessOutcome,
-    WorkerReadinessRequest,
+    NodeHeartbeatRequest, RetryRequest, StorageRootProof, WorkerDeclaration,
+    WorkerReadinessOutcome, WorkerReadinessRequest,
 };
 use crate::commit::{CommitCoordinatorContext, run_commit_coordinator};
 use crate::config::{AgentConfig, LoadedAgentConfig, WorkerConfig};
@@ -440,6 +440,7 @@ impl AgentRuntime {
         let request = RetryRequest::new(
             new_key("activate"),
             &ActivateRequest {
+                storage_roots: validated_storage_roots(&self.config.config.storage_roots).await?,
                 incarnation_id,
                 workers,
             },
@@ -2187,6 +2188,65 @@ impl CoordinatorContext {
 }
 /// Index the configured storage-root provider locators by root id, rejecting
 /// duplicate bindings at spawn time.
+async fn validated_storage_roots(
+    bindings: &[crate::config::StorageRootBinding],
+) -> Result<Vec<StorageRootProof>, VoomError> {
+    let mut proofs = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let invalid = |error| {
+            VoomError::Config(format!(
+                "validate storage root {} at {}: {error}",
+                binding.storage_root_id,
+                binding.provider_locator.display()
+            ))
+        };
+        let canonical = tokio::fs::canonicalize(&binding.provider_locator)
+            .await
+            .map_err(invalid)?;
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(invalid)?;
+        if !metadata.is_dir() {
+            return Err(VoomError::Config(format!(
+                "storage root {} must resolve to a directory",
+                binding.storage_root_id
+            )));
+        }
+        // Opening the directory proves access without touching media or creating a probe file.
+        let _directory = tokio::fs::read_dir(&canonical).await.map_err(invalid)?;
+        let activation_identity = root_filesystem_identity(&metadata).ok_or_else(|| {
+            VoomError::Config(
+                "storage root activation requires Unix filesystem identity".to_owned(),
+            )
+        })?;
+        let locator = binding.provider_locator.to_str().ok_or_else(|| {
+            VoomError::Config(format!(
+                "storage root {} provider locator must be UTF-8",
+                binding.storage_root_id
+            ))
+        })?;
+        proofs.push(StorageRootProof {
+            storage_root_id: voom_core::StorageRootId(binding.storage_root_id),
+            provider_locator: voom_core::ProviderLocator::new(locator.to_owned())?,
+            activation_identity,
+        });
+    }
+    Ok(proofs)
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "non-Unix platforms cannot provide this identity"
+)]
+fn root_filesystem_identity(metadata: &std::fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    Some(format!("dev={};ino={}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn root_filesystem_identity(_metadata: &std::fs::Metadata) -> Option<String> {
+    None
+}
+
 pub(crate) fn storage_root_bindings(
     config: &AgentConfig,
 ) -> Result<HashMap<u64, PathBuf>, VoomError> {

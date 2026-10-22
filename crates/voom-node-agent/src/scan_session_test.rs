@@ -71,6 +71,7 @@ async fn seed_owner_node(cp: &ControlPlane) -> (NodeId, NodeIncarnationId, Secre
         .unwrap();
     let activation = cp
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: registered.node.id,
             token: registered.token.clone(),
             idempotency_key: "activate-pump-owner".to_owned(),

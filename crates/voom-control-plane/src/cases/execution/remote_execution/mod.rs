@@ -36,12 +36,21 @@ pub(crate) use recover::{validate_remote_node_freshness, validate_remote_node_li
 
 #[derive(Debug, Clone)]
 pub struct RemoteActivateInput {
+    pub storage_roots: Vec<RemoteStorageRootProof>,
     pub node_id: NodeId,
     pub token: SecretString,
     pub idempotency_key: String,
     pub request_hash: String,
     pub incarnation_id: NodeIncarnationId,
     pub workers: Vec<RemoteWorkerDeclaration>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteStorageRootProof {
+    pub storage_root_id: voom_core::StorageRootId,
+    pub provider_locator: voom_core::ProviderLocator,
+    pub activation_identity: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

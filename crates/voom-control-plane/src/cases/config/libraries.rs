@@ -2,6 +2,7 @@
 //! `voom library root` CLI, including atomic lifecycle facts.
 
 use sqlx::{Sqlite, Transaction};
+use time::OffsetDateTime;
 use voom_core::{LibraryId, NodeId, StorageRootId, StorageRootState, VoomError};
 use voom_events::payload::{
     StorageRootActivatedPayload, StorageRootCreatedPayload, StorageRootOwnerAssignedPayload,
@@ -255,45 +256,54 @@ impl ControlPlane {
     ) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
         let mut tx = begin_read_then_write(&self.pool, "libraries: activate_library_root").await?;
-        let result = async {
-            let prior = self
-                .libraries
-                .get_library_root_in_tx(&mut tx, id)
-                .await?
-                .ok_or_else(|| VoomError::NotFound(format!("library root {id} not found")))?;
-            let root = self
-                .libraries
-                .activate_library_root_in_tx(&mut tx, id, activation_identity.clone(), now)
-                .await?;
-            let owner_node_id = required_root_owner(&root)?;
-            let event = if prior.state == StorageRootState::Unavailable {
-                Event::StorageRootReactivated(StorageRootReactivatedPayload {
-                    storage_root_id: id,
-                    owner_node_id,
-                    activation_identity,
-                    root_epoch: root.root_epoch,
-                })
-            } else {
-                Event::StorageRootActivated(StorageRootActivatedPayload {
-                    storage_root_id: id,
-                    owner_node_id,
-                    activation_identity,
-                    root_epoch: root.root_epoch,
-                })
-            };
-            append_event(
-                &self.events,
-                &mut tx,
-                SubjectType::StorageRoot,
-                Some(id.0),
-                now,
-                event,
-            )
-            .await?;
-            Ok(root)
-        }
-        .await;
+        let result = self
+            .activate_library_root_in_tx(&mut tx, id, activation_identity, now)
+            .await;
         finish_library_root_tx(tx, "activate", result).await
+    }
+
+    pub(crate) async fn activate_library_root_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: StorageRootId,
+        activation_identity: String,
+        now: OffsetDateTime,
+    ) -> Result<LibraryRoot, VoomError> {
+        let prior = self
+            .libraries
+            .get_library_root_in_tx(tx, id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("library root {id} not found")))?;
+        let root = self
+            .libraries
+            .activate_library_root_in_tx(tx, id, activation_identity.clone(), now)
+            .await?;
+        let owner_node_id = required_root_owner(&root)?;
+        let event = if prior.state == StorageRootState::Unavailable {
+            Event::StorageRootReactivated(StorageRootReactivatedPayload {
+                storage_root_id: id,
+                owner_node_id,
+                activation_identity,
+                root_epoch: root.root_epoch,
+            })
+        } else {
+            Event::StorageRootActivated(StorageRootActivatedPayload {
+                storage_root_id: id,
+                owner_node_id,
+                activation_identity,
+                root_epoch: root.root_epoch,
+            })
+        };
+        append_event(
+            &self.events,
+            tx,
+            SubjectType::StorageRoot,
+            Some(id.0),
+            now,
+            event,
+        )
+        .await?;
+        Ok(root)
     }
 
     /// Mark an active root unavailable after owner validation is lost.
@@ -310,30 +320,39 @@ impl ControlPlane {
         let now = self.clock().now();
         let mut tx =
             begin_read_then_write(&self.pool, "libraries: mark_library_root_unavailable").await?;
-        let result = async {
-            let root = self
-                .libraries
-                .mark_library_root_unavailable_in_tx(&mut tx, id, now)
-                .await?;
-            let owner_node_id = required_root_owner(&root)?;
-            append_event(
-                &self.events,
-                &mut tx,
-                SubjectType::StorageRoot,
-                Some(id.0),
-                now,
-                Event::StorageRootValidationLost(StorageRootValidationLostPayload {
-                    storage_root_id: id,
-                    owner_node_id,
-                    reason,
-                    root_epoch: root.root_epoch,
-                }),
-            )
-            .await?;
-            Ok(root)
-        }
-        .await;
+        let result = self
+            .mark_library_root_unavailable_in_tx(&mut tx, id, reason, now)
+            .await;
         finish_library_root_tx(tx, "mark unavailable", result).await
+    }
+
+    pub(crate) async fn mark_library_root_unavailable_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: StorageRootId,
+        reason: String,
+        now: OffsetDateTime,
+    ) -> Result<LibraryRoot, VoomError> {
+        let root = self
+            .libraries
+            .mark_library_root_unavailable_in_tx(tx, id, now)
+            .await?;
+        let owner_node_id = required_root_owner(&root)?;
+        append_event(
+            &self.events,
+            tx,
+            SubjectType::StorageRoot,
+            Some(id.0),
+            now,
+            Event::StorageRootValidationLost(StorageRootValidationLostPayload {
+                storage_root_id: id,
+                owner_node_id,
+                reason,
+                root_epoch: root.root_epoch,
+            }),
+        )
+        .await?;
+        Ok(root)
     }
 
     /// Terminally retire a root while retaining its stable identity and facts.

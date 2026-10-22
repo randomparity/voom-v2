@@ -271,6 +271,7 @@ async fn valid_bearer_commits_heartbeat_through_real_tls() -> TestResult {
     let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse()?;
     control_plane
         .remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
             node_id: registered.node.id,
             token: registered.token.clone(),
             idempotency_key: "tls-activation".to_owned(),

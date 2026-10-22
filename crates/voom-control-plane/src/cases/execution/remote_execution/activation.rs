@@ -46,6 +46,7 @@ impl ControlPlane {
         input: RemoteActivateInput,
     ) -> Result<RemoteActivateOutcome, VoomError> {
         validate_manifest(&input.workers)?;
+        validate_root_proofs(&input.storage_roots)?;
         let route_key = super::route_node_activate(input.node_id);
         let mut tx = begin_read_then_write(&self.pool, "activation: remote_activate").await?;
         let now = self.clock().now();
@@ -118,6 +119,8 @@ impl ControlPlane {
         }
         let outcome = self
             .activate_manifest_in_tx(&mut tx, &input, auth.active_incarnation_id, now)
+            .await?;
+        self.activate_declared_roots_in_tx(&mut tx, &input, now)
             .await?;
         self.complete_remote_ok_in_tx(
             &mut tx,
@@ -245,6 +248,56 @@ impl ControlPlane {
                 .await?;
         }
         commit_tx(tx).await
+    }
+
+    async fn activate_declared_roots_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &RemoteActivateInput,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        for proof in &input.storage_roots {
+            let root = self
+                .libraries
+                .effective_library_root_in_tx(tx, proof.storage_root_id)
+                .await?
+                .ok_or_else(|| {
+                    VoomError::NotFound(format!("library root {} not found", proof.storage_root_id))
+                })?;
+            let root = root.root;
+            if root.owner_node_id != Some(input.node_id)
+                || root.provider_kind != voom_core::StorageProviderKind::LocalFilesystem
+                || root.provider_locator != proof.provider_locator
+            {
+                return Err(VoomError::Conflict(format!(
+                    "storage root {} owner or provider binding does not match activation",
+                    root.id
+                )));
+            }
+            self.activate_library_root_in_tx(tx, root.id, proof.activation_identity.clone(), now)
+                .await?;
+        }
+        let declared: BTreeSet<_> = input
+            .storage_roots
+            .iter()
+            .map(|proof| proof.storage_root_id)
+            .collect();
+        for root in self
+            .libraries
+            .list_owned_library_roots_in_tx(tx, input.node_id)
+            .await?
+        {
+            if root.state == voom_core::StorageRootState::Active && !declared.contains(&root.id) {
+                self.mark_library_root_unavailable_in_tx(
+                    tx,
+                    root.id,
+                    "root omitted from current incarnation validation".to_owned(),
+                    now,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn activate_manifest_in_tx(
@@ -572,6 +625,30 @@ impl ControlPlane {
             )
             .await
     }
+}
+
+fn validate_root_proofs(proofs: &[super::RemoteStorageRootProof]) -> Result<(), VoomError> {
+    if proofs.len() > 64 {
+        return Err(VoomError::Config(
+            "activation supports at most 64 storage roots".to_owned(),
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for proof in proofs {
+        if proof.storage_root_id.0 == 0 || !ids.insert(proof.storage_root_id) {
+            return Err(VoomError::Config(
+                "activation storage root IDs must be nonzero and unique".to_owned(),
+            ));
+        }
+        let identity = &proof.activation_identity;
+        if identity.is_empty() || identity.len() > 4096 || identity.contains('\0') {
+            return Err(VoomError::Config(
+                "storage root activation identity must contain 1..=4096 bytes without NUL"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_manifest(workers: &[RemoteWorkerDeclaration]) -> Result<(), VoomError> {

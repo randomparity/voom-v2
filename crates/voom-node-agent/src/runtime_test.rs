@@ -2892,3 +2892,50 @@ async fn a_crashed_worker_release_does_not_wait_out_the_retry_budget() {
     );
     server.stop().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn root_activation_forwards_owner_filesystem_identity_and_configured_locator() {
+    use std::os::unix::fs::{MetadataExt, symlink};
+    let directory = tempfile::tempdir().unwrap();
+    let actual = directory.path().join("actual");
+    std::fs::create_dir(&actual).unwrap();
+    let locator = directory.path().join("alias");
+    symlink(&actual, &locator).unwrap();
+    let metadata = std::fs::metadata(&actual).unwrap();
+    let control = Arc::new(FakeControlPlane::default());
+    let mut config = loaded_config();
+    config.config.storage_roots = vec![crate::config::StorageRootBinding {
+        storage_root_id: 7,
+        provider_locator: locator.clone(),
+    }];
+    let runtime = AgentRuntime::with_client(config, control.clone());
+    runtime.activate(incarnation()).await.unwrap();
+    let bodies = control.activation_bodies.lock().await;
+    assert_eq!(
+        bodies[0]["storage_roots"],
+        serde_json::json!([{
+            "storage_root_id": 7,
+            "provider_locator": locator.to_str().unwrap(),
+            "activation_identity": format!("dev={};ino={}", metadata.dev(), metadata.ino()),
+        }])
+    );
+}
+
+#[tokio::test]
+async fn root_activation_missing_or_non_directory_binding_prevents_remote_activation() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("file");
+    std::fs::write(&file, b"not a directory").unwrap();
+    for locator in [directory.path().join("missing"), file] {
+        let control = Arc::new(FakeControlPlane::default());
+        let mut config = loaded_config();
+        config.config.storage_roots = vec![crate::config::StorageRootBinding {
+            storage_root_id: 7,
+            provider_locator: locator,
+        }];
+        let runtime = AgentRuntime::with_client(config, control.clone());
+        assert!(runtime.activate(incarnation()).await.is_err());
+        assert_eq!(control.activate_started_count.load(Ordering::SeqCst), 0);
+    }
+}

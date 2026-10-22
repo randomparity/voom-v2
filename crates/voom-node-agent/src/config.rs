@@ -190,8 +190,16 @@ impl AgentConfig {
             }
         }
 
+        if self.storage_roots.len() > 64 {
+            return Err(config_error(
+                "storage_roots must contain at most 64 entries".to_owned(),
+            ));
+        }
         let mut storage_root_ids = HashSet::with_capacity(self.storage_roots.len());
         for root in &self.storage_roots {
+            if root.storage_root_id == 0 {
+                return Err(config_error("storage root ID must be nonzero".to_owned()));
+            }
             if !root.provider_locator.is_absolute() {
                 return Err(config_error(format!(
                     "storage root {} provider_locator {:?} must be an absolute path",

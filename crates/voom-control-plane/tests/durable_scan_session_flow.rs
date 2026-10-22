@@ -307,6 +307,7 @@ async fn fixture() -> Fixture {
         .unwrap();
     let incarnation_id = INCARNATION.parse().unwrap();
     cp.remote_activate(RemoteActivateInput {
+        storage_roots: Vec::new(),
         node_id: registered.node.id,
         token: registered.token.clone(),
         idempotency_key: "durable-scan-charter-activate".to_owned(),

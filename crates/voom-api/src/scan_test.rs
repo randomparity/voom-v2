@@ -1323,6 +1323,7 @@ async fn activate_node(
         .await
         .unwrap();
     cp.remote_activate(RemoteActivateInput {
+        storage_roots: Vec::new(),
         node_id: registered.node.id,
         token: registered.token.clone(),
         idempotency_key: format!("activate-{name}"),
