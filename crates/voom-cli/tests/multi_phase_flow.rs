@@ -29,9 +29,7 @@ use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
-use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build, target_debug_binary,
-};
+use voom_test_support::worker::cargo_bin_or_build;
 
 #[path = "support/owner_node.rs"]
 mod owner_node;
@@ -40,36 +38,10 @@ mod owner_node;
 /// the CLI, and `compliance report --job-id` reads the durable two-phase chain back: two `completed` phases, two `committed` per-file rows, phase 1 rooted at
 /// phase 0's produced version, and the post-run read returns the same chain with
 /// `latest_phase_index` pointing at phase 1.
-struct TranscodeWorkerLaunch {
-    inner: TestWorkerLaunch,
-}
-
-impl TranscodeWorkerLaunch {
-    async fn start(cp: &ControlPlane) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
-            inner: TestWorkerLaunch::start(
-                cp,
-                TestWorkerConfig::synthetic(
-                    target_debug_binary("voom-ffmpeg-worker"),
-                    "cli-multi-phase-transcode",
-                    "cli-multi-phase-e2e-secret",
-                    "transcode_video",
-                ),
-            )
-            .await?,
-        })
-    }
-
-    fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.inner.shutdown()
-    }
-}
-
 #[tokio::test]
 async fn multi_phase_execute_then_report_by_job_id() {
     let _verify_worker =
         cargo_bin_or_build("voom-verify-artifact-worker", "voom-verify-artifact-worker").unwrap();
-    cargo_build("voom-ffmpeg-worker");
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -128,7 +100,7 @@ async fn multi_phase_execute_then_report_by_job_id() {
     // `--staging-root` names the same root for promotion's working dirs to
     // match the committed paths (the flag/envelope split is #618).
     let staging_root = root.clone();
-    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
+    assert_no_legacy_endpoints(&url).await;
     let execute = run_voom(
         &url,
         &[
@@ -171,7 +143,6 @@ async fn multi_phase_execute_then_report_by_job_id() {
         &out_dir,
         &execute_json,
     );
-    worker.shutdown().unwrap();
     assert_eq!(
         std::fs::read(&source).unwrap(),
         b"multi-phase e2e source bytes"
@@ -445,10 +416,6 @@ fn single_file_input(file: ScannedFile) -> PolicyInputSetDraft {
     }
 }
 
-fn cargo_build(package: &str) {
-    voom_test_support::worker::cargo_build_package(package).unwrap();
-}
-
 /// The placement state of the committed record that produced `version`, and
 /// whether its result location is retired.
 async fn placement_of(url: &str, version: u64) -> (String, bool) {
@@ -476,4 +443,18 @@ async fn produced_from(url: &str, version: FileVersionId) -> Option<i64> {
     .fetch_one(&pool)
     .await
     .unwrap()
+}
+
+async fn assert_no_legacy_endpoints(url: &str) {
+    let pool = voom_store::connect(url).await.unwrap();
+    let endpoints: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM worker_capabilities WHERE json_extract(extra, '$.endpoint') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        endpoints, 0,
+        "owner-node acceptance must execute without legacy HTTP worker endpoints"
+    );
 }
