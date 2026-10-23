@@ -801,8 +801,8 @@ fn suppression_key_includes_operation_fingerprint() {
         ..transcode.clone()
     };
 
-    let transcode_key = suppression_key(&fixture_input, &transcode).unwrap();
-    let probe_key = suppression_key(&fixture_input, &probe).unwrap();
+    let transcode_key = suppression_key(&fixture_input, &transcode, 1).unwrap();
+    let probe_key = suppression_key(&fixture_input, &probe, 1).unwrap();
 
     assert_ne!(transcode_key, probe_key);
     assert!(transcode_key.contains("ops:transcode"));
@@ -826,17 +826,198 @@ fn capacity_suppression_key_includes_operation_fingerprint() {
         SchedulerReasonCode::NodeCapacityFull.as_str(),
         &ticket_op("transcode"),
         TicketId(3),
+        1,
     );
     let probe_key = capacity_suppression_key(
         &fixture_input,
         SchedulerReasonCode::NodeCapacityFull.as_str(),
         &ticket_op("probe"),
         TicketId(3),
+        1,
     );
 
     assert_ne!(transcode_key, probe_key);
     assert!(transcode_key.contains("ops:transcode"));
     assert!(probe_key.contains("ops:probe"));
+}
+
+fn counted_suppression_score(candidate_count: usize) -> ScoreDecision {
+    ScoreDecision {
+        outcome: ScoreOutcome::NoEligibleCandidate,
+        selected: None,
+        candidate_count,
+        reason_code: ScoreReasonCode::NodeCapacityFull,
+        explanation: json!({"operation_set": [OP]}),
+    }
+}
+
+#[tokio::test]
+async fn suppression_counts_persist_distinct_producer_decisions() {
+    for capacity in [false, true] {
+        let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+        let ticket_id = fixture.ready_ticket(OP).await;
+        let candidate = scheduler_candidate(OP, ticket_id);
+        let input = fixture.acquire_input("counted-decision", "counted-hash");
+        let mut ids = Vec::new();
+        for count in [2, 2, 1, 1] {
+            let decision = if capacity {
+                capacity_decision(
+                    &input,
+                    SchedulerReasonCode::NodeCapacityFull,
+                    &candidate,
+                    count,
+                    1,
+                    1,
+                    T0,
+                )
+            } else {
+                decision_from_score(
+                    &input,
+                    &counted_suppression_score(count),
+                    None,
+                    Ok(None),
+                    T0,
+                )
+                .unwrap()
+            };
+            let row = fixture
+                .cp
+                .scheduler_decisions
+                .create_or_suppress(decision)
+                .await
+                .unwrap();
+            assert_eq!(row.candidate_count, u32::try_from(count).unwrap());
+            ids.push(row.id);
+        }
+        assert_eq!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+        assert_eq!(ids[2], ids[3]);
+        let rows = fixture
+            .cp
+            .scheduler_decisions(SchedulerDecisionFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.suppressed_count == 1));
+    }
+}
+
+#[tokio::test]
+async fn suppression_producers_use_the_persisted_bounded_count() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let ticket_id = fixture.ready_ticket(OP).await;
+    let candidate = scheduler_candidate(OP, ticket_id);
+    let input = fixture.acquire_input("bounded-count", "bounded-hash");
+    for (raw, expected) in [(1, 1), (2, 2), (usize::MAX, u32::MAX)] {
+        let score = counted_suppression_score(raw);
+        let scored = decision_from_score(&input, &score, None, Ok(None), T0).unwrap();
+        let capacity = capacity_decision(
+            &input,
+            SchedulerReasonCode::NodeCapacityFull,
+            &candidate,
+            raw,
+            1,
+            1,
+            T0,
+        );
+        for row in [scored, capacity] {
+            assert_eq!(row.candidate_count, expected);
+            assert!(
+                row.suppression_key
+                    .unwrap()
+                    .contains(&format!(":candidates:{expected}:bucket:"))
+            );
+        }
+    }
+    let ticket = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
+    let changed = changed_gate_decision(
+        &input,
+        &ticket,
+        SchedulerReasonCode::WorkerCapacityFull,
+        json!({}),
+        T0,
+    );
+    let capacity = capacity_decision(
+        &input,
+        SchedulerReasonCode::WorkerCapacityFull,
+        &candidate,
+        1,
+        1,
+        1,
+        T0,
+    );
+    assert_eq!(changed.candidate_count, 1);
+    assert!(
+        changed
+            .suppression_key
+            .as_ref()
+            .unwrap()
+            .contains(":candidates:1:bucket:")
+    );
+    assert_eq!(changed.suppression_key, capacity.suppression_key);
+    let selected = ScoreDecision {
+        outcome: ScoreOutcome::Selected,
+        ..counted_suppression_score(1)
+    };
+    assert!(suppression_key(&input, &selected, 1).is_none());
+}
+
+#[tokio::test]
+async fn suppression_preserves_history_and_rejects_incompatible_reuse() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let input = fixture.acquire_input("historical-count", "historical-hash");
+    let current =
+        decision_from_score(&input, &counted_suppression_score(2), None, Ok(None), T0).unwrap();
+    let mut legacy = current.clone();
+    let old_key = format!(
+        "remote_acquire:node:{}:worker:{}:reason:node_capacity_full:ops:{OP}:bucket:2",
+        input.node_id, input.worker_id
+    );
+    legacy.suppression_key = Some(old_key.clone());
+    let historical = fixture
+        .cp
+        .scheduler_decisions
+        .create_or_suppress(legacy)
+        .await
+        .unwrap();
+    let new = fixture
+        .cp
+        .scheduler_decisions
+        .create_or_suppress(current.clone())
+        .await
+        .unwrap();
+    assert_ne!(historical.id, new.id);
+    let old = fixture
+        .cp
+        .scheduler_decision(historical.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.suppression_key.as_deref(), Some(old_key.as_str()));
+    assert_eq!(old.suppressed_count, 0);
+    let mut incompatible = current;
+    incompatible.candidate_count = 1;
+    let error = fixture
+        .cp
+        .scheduler_decisions
+        .create_or_suppress(incompatible)
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    assert!(
+        error
+            .to_string()
+            .contains("already belongs to a different decision")
+    );
+    assert_eq!(
+        fixture
+            .cp
+            .scheduler_decisions(SchedulerDecisionFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

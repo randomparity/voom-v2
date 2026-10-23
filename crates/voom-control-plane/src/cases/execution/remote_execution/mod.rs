@@ -28,7 +28,8 @@ mod recover;
 
 #[cfg(test)]
 use acquire::{
-    capacity_suppression_key, scheduler_reason, score_remote_candidates, suppression_key,
+    capacity_decision, capacity_suppression_key, changed_gate_decision, decision_from_score,
+    scheduler_reason, score_remote_candidates, suppression_key,
 };
 
 pub(super) const ROUTE_ACQUIRE: &str = "POST /v1/execution/lease/acquire";

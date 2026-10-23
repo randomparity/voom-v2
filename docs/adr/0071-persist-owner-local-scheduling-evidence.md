@@ -4,6 +4,9 @@
 
 Accepted
 
+> **Superseded by [0108](0108-candidate-count-suppression-identity.md)**
+> (2026-10-23), only for retaining the old aggregate suppression-key shape.
+
 ## Context
 
 Issue #477 closes the persistence gap in the owner-local artifact-access chain.
