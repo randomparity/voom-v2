@@ -312,21 +312,43 @@ async fn resolve_source(
     .await
 }
 
-/// Resolve planned outputs in order; callers clear their residue right after.
+/// Prepare rooted output parents in order; callers clear residue right after.
 async fn planned_outputs(
     storage_roots: &HashMap<u64, PathBuf>,
     planned: impl IntoIterator<Item = &MediaPlannedOutput>,
 ) -> Result<Vec<PlannedOutput>, VoomError> {
     let mut outputs = Vec::new();
     for output in planned {
+        let locator = output.provider_relative_locator.as_str();
+        let path = rooted_path(storage_roots, output.storage_root_id, locator).await?;
+        let parent = path.parent().ok_or_else(|| {
+            VoomError::Config(format!(
+                "planned media output has no parent: {}",
+                path.display()
+            ))
+        })?;
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            VoomError::ArtifactUnavailable(format!(
+                "cannot prepare planned media output parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+        rooted_path(storage_roots, output.storage_root_id, locator).await?;
+        let metadata = tokio::fs::symlink_metadata(parent).await.map_err(|error| {
+            VoomError::ArtifactUnavailable(format!(
+                "cannot inspect planned media output parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(VoomError::Config(format!(
+                "planned media output parent must be a non-symlink directory: {}",
+                parent.display()
+            )));
+        }
         outputs.push(PlannedOutput {
-            provider_relative_locator: output.provider_relative_locator.as_str().to_owned(),
-            path: rooted_path(
-                storage_roots,
-                output.storage_root_id,
-                output.provider_relative_locator.as_str(),
-            )
-            .await?,
+            provider_relative_locator: locator.to_owned(),
+            path,
         });
     }
     Ok(outputs)

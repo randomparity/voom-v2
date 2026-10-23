@@ -542,6 +542,7 @@ async fn malformed_workflow_payloads_fail_before_child_dispatch() {
             super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, _, _)
         ));
         assert!(recorded_requests(&worker).await.is_empty());
+        assert!(!root.path().join("staged").exists());
     }
 }
 
@@ -653,6 +654,127 @@ async fn source_fact_mismatch_fails_without_child_dispatch() {
         other => unreachable!("expected checksum-mismatch failure, got {other:?}"),
     }
     assert!(recorded_requests(&worker).await.is_empty());
+}
+
+#[tokio::test]
+async fn invalid_output_parents_fail_before_child_dispatch() {
+    for (root_id, locator, expected_reason) in [
+        (99, "fresh/out.mkv", "no provider locator configured"),
+        (1, "../escape/out.mkv", "provider-relative locator invalid"),
+        (
+            1,
+            "blocked/out.mkv",
+            "cannot prepare planned media output parent",
+        ),
+    ] {
+        let root = TempDir::new().unwrap();
+        write_source(&root);
+        std::fs::write(root.path().join("blocked"), b"keep-existing-file").unwrap();
+        let mut envelope =
+            transcode_audio_envelope(SOURCE_BYTES.len() as u64, &hash_of(SOURCE_BYTES));
+        envelope["output"]["storage_root_id"] = json!(root_id);
+        envelope["output"]["provider_relative_locator"] = json!(locator);
+        let worker = ScriptedMediaWorker::new(Box::new(|_| unreachable!("no dispatch expected")));
+        let outcome = run(
+            &root,
+            worker.clone(),
+            registry_with(None),
+            media_payload(&envelope),
+        )
+        .await;
+        match outcome {
+            super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, reason, _) => {
+                assert!(reason.contains(expected_reason), "{reason}");
+            }
+            other => unreachable!("expected invalid parent failure, got {other:?}"),
+        }
+        assert!(recorded_requests(&worker).await.is_empty());
+        assert!(!root.path().join("fresh").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("blocked")).unwrap(),
+            b"keep-existing-file"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("media/source.mkv")).unwrap(),
+            SOURCE_BYTES
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_output_parent_fails_without_creating_outside_directories() {
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    write_source(&root);
+    std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+    let mut envelope = transcode_audio_envelope(SOURCE_BYTES.len() as u64, &hash_of(SOURCE_BYTES));
+    envelope["output"]["provider_relative_locator"] = json!("linked/new/out.mkv");
+    let worker = ScriptedMediaWorker::new(Box::new(|_| unreachable!("no dispatch expected")));
+    let outcome = run(
+        &root,
+        worker.clone(),
+        registry_with(None),
+        media_payload(&envelope),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, _, _)
+    ));
+    assert!(recorded_requests(&worker).await.is_empty());
+    assert!(!outside.path().join("new").exists());
+}
+
+#[tokio::test]
+async fn read_only_media_source_parent_is_not_created() {
+    let root = TempDir::new().unwrap();
+    let envelope = json!({
+        "operation": "probe", "schema": voom_core::PROTOCOL_VERSION,
+        "source": {"storage_root_id": 1, "provider_relative_locator": "missing/source.mkv"},
+        "expected": {"size_bytes": 1, "content_hash": hash_of(SOURCE_BYTES),
+                     "modified_at": null, "local_file_key": null}
+    });
+    let decoded = voom_worker_protocol::decode_media_dispatch(&envelope).unwrap();
+    super::resolve_plan(&storage_roots(&root), &decoded)
+        .await
+        .unwrap();
+    assert!(!root.path().join("missing").exists());
+}
+
+#[tokio::test]
+async fn fresh_output_parent_is_prepared_before_child_dispatch() {
+    let root = TempDir::new().unwrap();
+    write_source(&root);
+    let output = std::fs::canonicalize(root.path())
+        .unwrap()
+        .join("fresh/nested/out.mkv");
+    assert!(!output.parent().unwrap().exists());
+    let mut envelope = transcode_audio_envelope(SOURCE_BYTES.len() as u64, &hash_of(SOURCE_BYTES));
+    envelope["output"]["provider_relative_locator"] = json!("fresh/nested/out.mkv");
+    let decoded = voom_worker_protocol::decode_media_dispatch(&envelope).unwrap();
+    let plan = super::resolve_plan(&storage_roots(&root), &decoded)
+        .await
+        .unwrap();
+    assert!(plan.outputs[0].path.parent().unwrap().is_dir());
+    let worker = ScriptedMediaWorker::new(transcode_script(output.clone()));
+    let outcome = run(
+        &root,
+        worker.clone(),
+        registry_with(Some(ScriptedMediaWorker::new(probe_script()))),
+        media_payload(&envelope),
+    )
+    .await;
+    assert!(
+        matches!(outcome, super::LeaseOutcome::Complete(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(recorded_requests(&worker).await.len(), 1);
+    assert_eq!(std::fs::read(output).unwrap(), OUTPUT_BYTES);
+    assert_eq!(
+        std::fs::read(root.path().join("media/source.mkv")).unwrap(),
+        SOURCE_BYTES
+    );
 }
 
 #[tokio::test]
