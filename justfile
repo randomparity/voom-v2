@@ -34,7 +34,12 @@ source-checks: check-workflows check-workflows-selftest check-test-layout \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
     check-transaction-openers check-transaction-openers-selftest \
-    check-adr-index check-adr-index-selftest acceptance-bootstrap-selftest
+    check-adr-index check-adr-index-selftest acceptance-bootstrap-selftest \
+    media-inventory-selftest
+
+# Filename/path diversity must affect real canary recommendation membership.
+media-inventory-selftest:
+    python3 scripts/issue-339-media-inventory-selftest.py
 
 # Acceptance setup must fail closed and retain no registration bearer.
 acceptance-bootstrap-selftest:

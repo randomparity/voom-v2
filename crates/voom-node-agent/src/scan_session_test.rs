@@ -962,6 +962,58 @@ async fn candidate_dispatch_keys_isolate_scan_executions_and_preserve_retries() 
 }
 
 #[tokio::test]
+async fn candidate_dispatch_keys_encode_unicode_and_separate_locator_components() {
+    let incarnation = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let context = pump_context(NodeId(9_000_001), incarnation);
+    let hash = ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree);
+    let probe = ScriptedSingleFileWorker::new(OperationKind::ProbeFile, SingleFileBehavior::Agree);
+    let registry = registry_with(
+        ScriptedScanWorker::new(Vec::new()),
+        hash.clone(),
+        probe.clone(),
+    );
+    let long_locator = format!("{}.mkv", "路".repeat(200));
+    for (primary, sidecar) in [
+        ("é.mkv", "字幕.srt"),
+        ("a-b", "c.srt"),
+        ("a", "b-c.srt"),
+        (long_locator.as_str(), "space and | delimiter.srt"),
+        ("é.mkv", "字幕.srt"),
+    ] {
+        let contribution = super::process_candidate(
+            registry.clone(),
+            "/media".into(),
+            sidecar_candidate(primary, sidecar),
+            context.clone(),
+        )
+        .await
+        .unwrap_or_else(|failure| unreachable!("candidate failed: {}", failure.reason));
+        assert!(contribution.observation.unwrap().evidence.is_some());
+    }
+    let hashes = hash.dispatches.lock().await;
+    let probes = probe.dispatches.lock().await;
+    assert_eq!(hashes[0].1.payload["provider_relative_locator"], "é.mkv");
+    assert_eq!(hashes[1].1.payload["provider_relative_locator"], "字幕.srt");
+    assert_eq!(probes[0].1.payload["path"], "/media/é.mkv");
+    let mut bodies = std::collections::BTreeMap::new();
+    for (key, request) in hashes.iter().chain(probes.iter()) {
+        assert!(key.is_ascii(), "valid locators must yield HTTP-text keys");
+        assert!(key.len() <= 192, "locator length must not grow the key");
+        let body = serde_json::to_vec(request).unwrap();
+        if let Some(previous) = bodies.insert(key, body.clone()) {
+            assert_eq!(previous, body, "distinct locator tuples must not alias");
+        }
+    }
+    assert_eq!(
+        bodies.len(),
+        12,
+        "four distinct candidates, three operations"
+    );
+    assert_eq!(&hashes[..2], &hashes[8..]);
+    assert_eq!(probes[0], probes[4]);
+}
+
+#[tokio::test]
 async fn ordered_batches_reach_the_control_plane_and_complete() {
     let fixture = pump_fixture().await;
     let context = fixture.context();
