@@ -68,9 +68,18 @@ fn storage_roots(root: &TempDir) -> HashMap<u64, PathBuf> {
     HashMap::from([(1_u64, root.path().to_path_buf())])
 }
 
-/// A rendered ticket payload: declaration scalars beside the nested envelope.
+/// The workflow wrapper retained by the acquisition API around rendered media.
 fn media_payload(envelope: &JsonValue) -> JsonValue {
-    json!({"ticket_id": 7, "media_dispatch": envelope})
+    voom_control_plane::workflow::WorkflowTicketPayload::new_for_test(
+        "media-workflow",
+        "media-plan",
+        "media-node",
+        "media-branch",
+        OperationKind::TranscodeAudio,
+        json!({"ticket_id": 7, "media_dispatch": envelope}),
+    )
+    .to_ticket_payload()
+    .unwrap()
 }
 
 fn transcode_audio_envelope(source_size: u64, source_hash: &str) -> JsonValue {
@@ -511,6 +520,29 @@ async fn missing_envelope_object_fails_before_child_dispatch() {
         super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, _, _)
     ));
     assert!(recorded_requests(&worker).await.is_empty());
+}
+
+#[tokio::test]
+async fn malformed_workflow_payloads_fail_before_child_dispatch() {
+    let envelope = transcode_audio_envelope(SOURCE_BYTES.len() as u64, &hash_of(SOURCE_BYTES));
+    for payload in [
+        json!({"media_dispatch": envelope}),
+        json!({"rendered_payload": null}),
+        json!({"rendered_payload": []}),
+        json!({"rendered_payload": "invalid"}),
+        json!({"rendered_payload": {}}),
+        json!({"rendered_payload": {"media_dispatch": null}}),
+        json!({"rendered_payload": {"media_dispatch": []}}),
+    ] {
+        let root = TempDir::new().unwrap();
+        let worker = ScriptedMediaWorker::new(Box::new(|_| unreachable!("no dispatch expected")));
+        let outcome = run(&root, worker.clone(), registry_with(None), payload).await;
+        assert!(matches!(
+            outcome,
+            super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, _, _)
+        ));
+        assert!(recorded_requests(&worker).await.is_empty());
+    }
 }
 
 #[tokio::test]

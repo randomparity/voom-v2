@@ -144,7 +144,11 @@ pub(crate) async fn media_outcome(
     // The control plane renders the envelope under a dedicated object so the
     // declaration-derivation scalar keys survive beside it (spec C2); a
     // payload without it is not a renderable media dispatch.
-    let Some(envelope_payload) = dispatch.dispatch_payload.get("media_dispatch") else {
+    let Some(envelope_payload) = dispatch
+        .dispatch_payload
+        .get("rendered_payload")
+        .and_then(|payload| payload.get("media_dispatch"))
+    else {
         return malformed(
             "media dispatch payload carries no `media_dispatch` envelope object".to_owned(),
             json!({}),

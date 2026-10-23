@@ -798,6 +798,57 @@ async fn recover_commit_requires_operator_when_target_already_exists() {
 }
 
 #[tokio::test]
+async fn mark_pending_committed_contends_at_the_opener() {
+    let (cp, _db, dir) = fixture().await;
+    let staged =
+        std::sync::Arc::new(stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await);
+    let verification_id = cp
+        .artifacts()
+        .list_verifications(staged.artifact_handle_id)
+        .await
+        .unwrap()[0]
+        .id;
+    let target = dir.path().join("target.bin").display().to_string();
+    let pending = create_pending_commit(&cp, &staged, verification_id, &target).await;
+    // busy_timeout is connection-local; hold every slot while configuring it.
+    let mut connections = Vec::new();
+    for _ in 0..cp.pool_for_test().options().get_max_connections() {
+        let mut connection = cp.pool_for_test().acquire().await.unwrap();
+        sqlx::query("PRAGMA busy_timeout = 0")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        connections.push(connection);
+    }
+    drop(connections);
+    let writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
+    let task = tokio::spawn({
+        let cp = cp.clone();
+        let staged = std::sync::Arc::clone(&staged);
+        let target = target.clone();
+        async move { mark_pending_committed(&cp, pending.id, &staged, &target).await }
+    });
+    let failure = task.await.unwrap_err();
+    writer.rollback().await.unwrap();
+    let reason = failure.to_string();
+    assert!(reason.contains("test: mark pending committed"), "{reason}");
+    assert!(!reason.contains("file_versions insert"), "{reason}");
+    // Anti-vacuity: without the writer, the helper must perform the commit.
+    mark_pending_committed(&cp, pending.id, &staged, &target).await;
+    let record = cp
+        .artifacts()
+        .get_commit_record(pending.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, ArtifactCommitState::Committed);
+}
+
+#[tokio::test]
 async fn duplicate_pending_committed_and_recovery_owners_are_rejected_by_repo_constraints() {
     let (cp, _db, dir) = fixture().await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
@@ -1928,7 +1979,10 @@ async fn mark_pending_committed(
     staged: &VerifiedStage,
     target_path: &str,
 ) {
-    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    let mut tx =
+        voom_store::tx::begin_read_then_write(cp.pool_for_test(), "test: mark pending committed")
+            .await
+            .unwrap();
     let source = cp
         .identity()
         .get_file_version_in_tx(&mut tx, staged.source_file_version_id)
