@@ -1001,7 +1001,7 @@ fn selected_candidate_key(
     )
 }
 
-fn decision_from_score(
+pub(super) fn decision_from_score(
     input: &RemoteAcquireInput,
     score: &voom_scheduler::ScoreDecision,
     selected: Option<(TicketId, WorkerId, NodeId, LeaseId)>,
@@ -1030,6 +1030,7 @@ fn decision_from_score(
             SchedulerDecisionOutcome::NoEligibleCandidate,
         ),
     };
+    let candidate_count = u32::try_from(score.candidate_count).unwrap_or(u32::MAX);
     Ok(NewSchedulerDecision {
         decision_kind,
         request_source: SchedulerRequestSource::RemoteAcquire,
@@ -1043,19 +1044,19 @@ fn decision_from_score(
         outcome,
         reason_code: scheduler_reason(score.reason_code),
         summary: scheduler_summary(score),
-        candidate_count: u32::try_from(score.candidate_count).unwrap_or(u32::MAX),
+        candidate_count,
         selected_score: match score.outcome {
             ScoreOutcome::Selected => score.selected.as_ref().map(|selected| selected.score),
             ScoreOutcome::Idle | ScoreOutcome::NoEligibleCandidate => None,
         },
         access_evidence: access_evidence?,
-        suppression_key: suppression_key(input, score),
+        suppression_key: suppression_key(input, score, candidate_count),
         explanation: score.explanation.clone(),
         now,
     })
 }
 
-fn capacity_decision(
+pub(super) fn capacity_decision(
     input: &RemoteAcquireInput,
     reason_code: StoreSchedulerReasonCode,
     selected_candidate: &SchedulerCandidate,
@@ -1065,6 +1066,7 @@ fn capacity_decision(
     now: OffsetDateTime,
 ) -> NewSchedulerDecision {
     let reason = reason_code.as_str();
+    let candidate_count = u32::try_from(candidate_count).unwrap_or(u32::MAX);
     NewSchedulerDecision {
         decision_kind: SchedulerDecisionKind::NoCandidate,
         request_source: SchedulerRequestSource::RemoteAcquire,
@@ -1079,7 +1081,7 @@ fn capacity_decision(
         outcome: SchedulerDecisionOutcome::NoEligibleCandidate,
         reason_code,
         summary: format!("no eligible candidate: {reason}"),
-        candidate_count: u32::try_from(candidate_count).unwrap_or(u32::MAX),
+        candidate_count,
         selected_score: None,
         access_evidence: None,
         suppression_key: Some(capacity_suppression_key(
@@ -1087,6 +1089,7 @@ fn capacity_decision(
             reason,
             &selected_candidate.ticket.operation,
             selected_candidate.ticket.ticket_id,
+            candidate_count,
         )),
         explanation: json!({
             "scoring_version": SCORING_VERSION,
@@ -1144,6 +1147,7 @@ fn scheduler_summary(score: &voom_scheduler::ScoreDecision) -> String {
 pub(super) fn suppression_key(
     input: &RemoteAcquireInput,
     score: &voom_scheduler::ScoreDecision,
+    candidate_count: u32,
 ) -> Option<String> {
     if score.outcome == ScoreOutcome::Selected {
         return None;
@@ -1153,6 +1157,7 @@ pub(super) fn suppression_key(
         score.reason_code.as_str(),
         &operation_fingerprint(&score.explanation),
         None,
+        candidate_count,
     ))
 }
 
@@ -1161,8 +1166,15 @@ pub(super) fn capacity_suppression_key(
     reason: &str,
     operation: &TicketOperation,
     ticket_id: TicketId,
+    candidate_count: u32,
 ) -> String {
-    remote_acquire_suppression_key(input, reason, operation.as_str(), Some(ticket_id))
+    remote_acquire_suppression_key(
+        input,
+        reason,
+        operation.as_str(),
+        Some(ticket_id),
+        candidate_count,
+    )
 }
 
 fn remote_acquire_suppression_key(
@@ -1170,13 +1182,15 @@ fn remote_acquire_suppression_key(
     reason: &str,
     operation_fingerprint: &str,
     ticket_id: Option<TicketId>,
+    candidate_count: u32,
 ) -> String {
     let bucket = input.lease_ttl_seconds.max(1) / 30;
     let ticket_segment = ticket_id
         .map(|ticket| format!(":ticket:{}", ticket.0))
         .unwrap_or_default();
     format!(
-        "remote_acquire:node:{}:worker:{}{ticket_segment}:reason:{}:ops:{}:bucket:{}",
+        "remote_acquire:node:{}:worker:{}{ticket_segment}:reason:{}:ops:{}:\
+         candidates:{candidate_count}:bucket:{}",
         input.node_id, input.worker_id, reason, operation_fingerprint, bucket
     )
 }
@@ -1426,7 +1440,7 @@ pub(super) fn changed_gate_explanation(
 /// Durable no-candidate record for one changed post-selection gate: it names
 /// the selected ticket, and its suppression key carries the matching ticket
 /// segment so key and row agree (ADR 0072).
-fn changed_gate_decision(
+pub(super) fn changed_gate_decision(
     input: &RemoteAcquireInput,
     ticket: &Ticket,
     reason_code: StoreSchedulerReasonCode,
@@ -1454,6 +1468,7 @@ fn changed_gate_decision(
             reason_code.as_str(),
             ticket.kind.as_str(),
             Some(ticket.id),
+            1,
         )),
         explanation,
         now,
