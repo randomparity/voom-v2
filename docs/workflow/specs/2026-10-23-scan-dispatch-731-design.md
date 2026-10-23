@@ -9,7 +9,8 @@ non-ASCII locator bytes therefore fail its existing nonempty-header check.
 `process_candidate` currently embeds primary and sidecar locators in child keys.
 
 ## Scope and authority
-Issue #731 and approved `WORK:SCOPE` token `q731-61f553cb` authorize a demonstrated
+Issue #731, the later explicit inventory request and re-frozen `WORK:SCOPE`
+comment 6373240608 (token `q731-61f553cb`) authorize a demonstrated
 producer repair and direct tests. Preserve ADR0067 lifecycle/fences and ADR0050
 owner-byte responsibility. No ownership transition or caller migration is needed:
 the node-agent pump owns dispatch identity and continues calling existing clients.
@@ -29,6 +30,26 @@ arbitrary bytes server-side would weaken the existing contract. Hex-encoding ful
 locators is avoidable key growth; fixed digests bound the locator contribution and
 avoid exposing names in keys. No new durable format, migration or ADR is required.
 
+## Inventory selection support
+The operator additionally requested path diversity in the existing interesting-media
+inventory. Derive deterministic tags from the root-relative locator, not the host
+root: non-ASCII characters anywhere, any component at least 200 UTF-8 bytes,
+relative path at least 1024 UTF-8 bytes, leading-dash components, and ASCII control
+characters (U+0000–001F/U+007F). The thresholds are sampling heuristics near common
+255-byte component and multi-component path pressure, not filesystem validity rules.
+Do not normalize or rename paths. Common spaces/shell punctuation and Unicode
+normalization forms need no separate category: argv remains literal and exact
+locator bytes already distinguish names.
+
+Attach tags to successful and failed-probe records. Add path priorities before
+broad media/compatibility priorities in both existing profiles; reference-user
+still excludes incompatible inputs. Extend the existing size/basename dedup key
+with the path-feature tuple so a non-ASCII parent variant survives an otherwise
+identical basename/size. Do not abandon equivalent-media dedup within a feature
+class. Focused selftests must prove recommendation membership and byte boundaries,
+root-prefix isolation, failed-probe retention and unchanged compatibility filtering.
+Wire them into `just source-checks`, which both CI source jobs already execute.
+
 ## Failure model
 Accepted deployments are authenticated bundled software workers on supported
 hosts, with UTF-8 locators already accepted by existing scan contracts.
@@ -46,7 +67,9 @@ hosts, with UTF-8 locators already accepted by existing scan contracts.
 3. Real rooted Unicode scan and repeated scan succeed with expected observations,
    successful tickets and consumed access plans; rejected child dispatch still
    returns a failed scan without publishing/retiring locations.
-4. Focused regression, repository guards and independent review pass.
+4. Inventory recommendations preserve path edge cases in both modes even when
+   codec facts match; failed probes retain path tags and root prefixes never tag.
+5. Focused regressions, repository guards and independent review pass.
 
 ## Validation
 The implementation plan inventories the changed key contract. Capture the focused
