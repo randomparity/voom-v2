@@ -104,3 +104,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0105](0105-child-written-executable-fixtures.md) | Write executable fixtures in child processes |
 | [0106](0106-atomic-owner-root-activation.md) | Activate owner roots atomically with a node incarnation |
 | [0107](0107-normalize-known-operations-during-scheduling.md) | Normalize known operations during scheduling |
+| [0108](0108-candidate-count-suppression-identity.md) | Candidate counts qualify scheduler suppression identity |
