@@ -405,19 +405,21 @@ impl LiveFixture {
                 kind: TicketOperation::new("probe_file").unwrap(),
                 priority: 0,
                 payload: json!({
-                    "media_dispatch": {
-                        "operation": "probe",
-                        "schema": voom_core::PROTOCOL_VERSION,
-                        "source": {
-                            "storage_root_id": self.media_root_id,
-                            "provider_relative_locator": "lifecycle.mkv",
-                        },
-                        "expected": {
-                            "size_bytes": 21,
-                            "content_hash": content_hash,
-                            "modified_at": null,
-                            "local_file_key": null,
-                        },
+                    "rendered_payload": {
+                        "media_dispatch": {
+                            "operation": "probe",
+                            "schema": voom_core::PROTOCOL_VERSION,
+                            "source": {
+                                "storage_root_id": self.media_root_id,
+                                "provider_relative_locator": "lifecycle.mkv",
+                            },
+                            "expected": {
+                                "size_bytes": 21,
+                                "content_hash": content_hash,
+                                "modified_at": null,
+                                "local_file_key": null,
+                            },
+                        }
                     }
                 }),
                 max_attempts: 2,
