@@ -227,7 +227,13 @@ class InventoryPathTests(unittest.TestCase):
         ]
         plain = self.record("a/plain.mkv")
         for relative in paths:
-            feature = self.record(relative)
+            if len(relative.encode()) >= 1024:
+                # Exercise the selector value without requiring a host to create
+                # a path beyond its own filesystem limit.
+                feature = dict(plain, path=str(self.root / relative), relative_path=relative)
+                feature["interest_tags"] = inventory.interest_tags(feature)
+            else:
+                feature = self.record(relative)
             for mode in ["interesting", "reference-user"]:
                 with self.subTest(path=relative, mode=mode):
                     self.assertEqual(self.selected([plain, feature], mode), [relative])

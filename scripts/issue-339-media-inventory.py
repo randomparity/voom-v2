@@ -35,7 +35,17 @@ DEFAULT_EXCLUDED_DIR_NAMES = {
     "@Recently-Snapshot",
 }
 
+# Path diversity precedes broad codec tags so a bounded canary retains edge cases.
+PATH_TAG_PRIORITY = [
+    "path_non_ascii",
+    "path_long_component",
+    "path_long_relative",
+    "path_leading_dash",
+    "path_control_character",
+]
+
 CANARY_TAG_PRIORITY = [
+    *PATH_TAG_PRIORITY,
     "probe_failure",
     "no_audio",
     "no_policy_audio_language_match",
@@ -50,6 +60,7 @@ CANARY_TAG_PRIORITY = [
 ]
 
 REFERENCE_USER_TAG_PRIORITY = [
+    *PATH_TAG_PRIORITY,
     "reference_user_current_compatible",
     "non_mkv_container",
     "video_transcode_candidate",
@@ -324,8 +335,25 @@ def reference_user_current(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def interest_tags(record: dict[str, Any]) -> list[str]:
+def path_interest_tags(relative_path: str) -> list[str]:
+    """Sample relative-locator hazards; thresholds are heuristics, not validity limits."""
+    components = Path(relative_path).parts
     tags: list[str] = []
+    if not relative_path.isascii():
+        tags.append("path_non_ascii")
+    if any(len(part.encode("utf-8", errors="surrogateescape")) >= 200 for part in components):
+        tags.append("path_long_component")
+    if len(relative_path.encode("utf-8", errors="surrogateescape")) >= 1024:
+        tags.append("path_long_relative")
+    if any(part.startswith("-") for part in components):
+        tags.append("path_leading_dash")
+    if any(ord(character) < 32 or ord(character) == 127 for character in relative_path):
+        tags.append("path_control_character")
+    return tags
+
+
+def interest_tags(record: dict[str, Any]) -> list[str]:
+    tags = path_interest_tags(record["relative_path"])
     format_name = str(record["format_name"])
     video_codecs = set(record["video_codecs"])
     audio_languages = set(record["audio_languages"])
@@ -366,7 +394,7 @@ def failed_record(path: Path, root: Path, status: str, error: str) -> dict[str, 
         "extension": path.suffix.lower(),
         "probe_status": status,
         "probe_error": error,
-        "interest_tags": ["probe_failure"],
+        "interest_tags": ["probe_failure", *path_interest_tags(str(path.relative_to(root)))],
     }
 
 
@@ -436,7 +464,7 @@ def select_recommended(
     priority_tags: list[str],
 ) -> list[dict[str, Any]]:
     selected_paths: set[str] = set()
-    selected_media: set[tuple[int, str]] = set()
+    selected_media: set[tuple[int, str, tuple[str, ...]]] = set()
     selected: list[dict[str, Any]] = []
     for tag in priority_tags:
         tagged = sorted(
@@ -448,7 +476,11 @@ def select_recommended(
                 return selected
             if record["path"] in selected_paths:
                 continue
-            media_key = (int(record["size_bytes"]), Path(record["relative_path"]).name)
+            media_key = (
+                int(record["size_bytes"]),
+                Path(record["relative_path"]).name,
+                tuple(path_interest_tags(record["relative_path"])),
+            )
             if media_key in selected_media:
                 continue
             selected_paths.add(record["path"])

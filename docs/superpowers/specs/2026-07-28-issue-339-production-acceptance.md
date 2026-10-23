@@ -38,6 +38,10 @@ measured canary capacity and runtime before authorizing the full-library start.
 - [ ] Review the recommended canary set for coverage across:
   containers, video codecs, audio codecs, channel counts, audio languages,
   subtitles, attachments, large files, and probe failures.
+- [ ] Include path diversity: non-ASCII names or parent directories, components
+  at least 200 UTF-8 bytes, relative paths at least 1024 bytes, leading-dash
+  components, and control characters when present. Inventory thresholds select
+  representative stress cases; they are not filesystem validity limits.
 - [ ] Copy production-selected canary files only into a local test directory.
 - [ ] Register the intended canary storage root and its owner-node bindings,
   with dedicated staging/output defaults; start the owner node's scan, hash,

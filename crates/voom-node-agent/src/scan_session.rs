@@ -812,9 +812,13 @@ async fn process_candidate(
     let primary = &candidate.primary;
     let locator = primary.provider_relative_locator.as_str();
     let root_str = root.to_string_lossy().to_string();
+    // Locators are UTF-8 payloads, but HTTP idempotency keys must be ASCII.
+    let locator_digest = blake3::hash(locator.as_bytes());
     let tag = format!(
-        "{}-{}-{locator}",
-        context.incarnation_id, context.lease_id.0
+        "{}-{}-{}",
+        context.incarnation_id,
+        context.lease_id.0,
+        locator_digest.to_hex()
     );
 
     let hash = match hash_one(&registry, &root_str, locator, &context, &tag).await {
@@ -828,7 +832,8 @@ async fn process_candidate(
 
     let mut sidecars = Vec::with_capacity(candidate.sidecars.len());
     for sidecar in &candidate.sidecars {
-        let sidecar_tag = format!("{tag}-{}", sidecar.provider_relative_locator);
+        let sidecar_digest = blake3::hash(sidecar.provider_relative_locator.as_bytes());
+        let sidecar_tag = format!("{tag}-{}", sidecar_digest.to_hex());
         match hash_one(
             &registry,
             &root_str,
