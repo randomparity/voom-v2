@@ -13,8 +13,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use voom_control_plane::artifact_commit::{
-    CommitOutcomeEvidence, RemoteCommitApplyingInput, RemoteCommitAuthorizeInput,
-    RemoteCommitCompleteInput, RemoteCommitIntentsOpenInput, RemoteCommitOutcomeInput,
+    CommitGroupProof, CommitOutcomeEvidence, RemoteCommitApplyingInput, RemoteCommitAuthorizeInput,
+    RemoteCommitCompleteInput, RemoteCommitGroupCompleteInput, RemoteCommitIntentsOpenInput,
+    RemoteCommitOutcomeInput,
 };
 use voom_core::ids::ArtifactCommitIntentId;
 use voom_core::{ErrorCode, NodeId, NodeIncarnationId};
@@ -28,6 +29,15 @@ const AUTHORIZE_COMMAND: &str = "artifact.commit.authorize";
 const APPLYING_COMMAND: &str = "artifact.commit.applying";
 const OUTCOME_COMMAND: &str = "artifact.commit.outcome";
 const COMPLETE_COMMAND: &str = "artifact.commit.complete";
+const GROUP_COMPLETE_COMMAND: &str = "artifact.commit.group.complete";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GroupCompleteRequest {
+    node_id: u64,
+    incarnation_id: NodeIncarnationId,
+    proof: CommitGroupProof,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +96,62 @@ pub(crate) fn routes() -> axum::Router<AppState> {
         .route("/v1/artifact/commit/{intent_id}/applying", post(applying))
         .route("/v1/artifact/commit/{intent_id}/outcome", post(outcome))
         .route("/v1/artifact/commit/{intent_id}/complete", post(complete))
+        .route(
+            "/v1/artifact/commit/group/{operation_id}/complete",
+            post(complete_group),
+        )
+}
+
+async fn complete_group(
+    State(state): State<AppState>,
+    path: Result<Path<u64>, PathRejection>,
+    headers: HeaderMap,
+    body: Result<Json<JsonValue>, JsonRejection>,
+) -> axum::response::Response {
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
+        Err(error) => return credentials_error_response(GROUP_COMPLETE_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(GROUP_COMPLETE_COMMAND);
+    };
+    let operation_id = match path_intent_id(path) {
+        Ok(id) => id,
+        Err(message) => return bad_args_response(GROUP_COMPLETE_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
+        Err(error) => return json_body_error_response(GROUP_COMPLETE_COMMAND, error),
+    };
+    let request: GroupCompleteRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(GROUP_COMPLETE_COMMAND, message),
+    };
+    if request.proof.group.operation_id != operation_id {
+        return bad_args_response(
+            GROUP_COMPLETE_COMMAND,
+            "group path/body operation differs".to_owned(),
+        );
+    }
+    let route = format!("/v1/artifact/commit/group/{operation_id}/complete");
+    let request_hash = match stable_request_hash("POST", &route, &body) {
+        Ok(hash) => hash,
+        Err(message) => return bad_args_response(GROUP_COMPLETE_COMMAND, message),
+    };
+    match control_plane
+        .remote_complete_commit_group(RemoteCommitGroupCompleteInput {
+            node_id: NodeId(request.node_id),
+            token,
+            incarnation_id: request.incarnation_id,
+            idempotency_key,
+            request_hash,
+            proof: request.proof,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(GROUP_COMPLETE_COMMAND, outcome),
+        Err(error) => voom_route_error_response(GROUP_COMPLETE_COMMAND, &error),
+    }
 }
 
 async fn open(

@@ -22,6 +22,8 @@ use super::{append_event, commit_tx};
 mod acquire;
 mod activation;
 mod complete;
+pub(crate) use acquire::remote_plan;
+pub(crate) use complete::validated_artifact_complete_evidence;
 mod fail;
 mod heartbeat;
 mod recover;

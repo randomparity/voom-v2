@@ -106,60 +106,78 @@ impl ControlPlane {
             return Err(err);
         }
 
-        let prepared = match self
-            .remote_acquire_preflight_in_tx(&mut tx, &input, now)
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(err) => {
-                if !is_remote_replayable_error(&err) {
+        // Every reuse releases a distinct existing ticket. No ticket is
+        // created here, so this loop is bounded by the finite persisted queue.
+        let mut reused = std::collections::BTreeSet::new();
+        let outcome = loop {
+            let prepared = match self
+                .remote_acquire_preflight_in_tx(&mut tx, &input, now)
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    if !is_remote_replayable_error(&err) {
+                        return Err(err);
+                    }
+                    self.complete_remote_error_in_tx(
+                        &mut tx,
+                        input.node_id,
+                        ROUTE_ACQUIRE,
+                        Some(input.worker_id),
+                        &replay_key,
+                        &err,
+                    )
+                    .await?;
+                    commit_tx(tx).await?;
                     return Err(err);
                 }
-                self.complete_remote_error_in_tx(
-                    &mut tx,
-                    input.node_id,
-                    ROUTE_ACQUIRE,
-                    Some(input.worker_id),
-                    &replay_key,
-                    &err,
-                )
-                .await?;
-                commit_tx(tx).await?;
-                return Err(err);
-            }
-        };
+            };
 
-        let outcome = match prepared {
-            RemoteAcquirePrepared::Idle(outcome) | RemoteAcquirePrepared::NoCandidate(outcome) => {
-                self.complete_remote_ok_in_tx(
-                    &mut tx,
-                    input.node_id,
-                    ROUTE_ACQUIRE,
-                    Some(input.worker_id),
-                    &replay_key,
-                    &outcome,
-                )
-                .await?;
-                commit_tx(tx).await?;
-                return Ok(outcome);
-            }
-            RemoteAcquirePrepared::Leased {
-                ticket,
-                eligibility,
-                locality,
-                score,
-            } => {
-                self.remote_acquire_leased_in_tx(
-                    &mut tx,
-                    &input,
+            let outcome = match prepared {
+                RemoteAcquirePrepared::Idle(outcome)
+                | RemoteAcquirePrepared::NoCandidate(outcome) => {
+                    self.complete_remote_ok_in_tx(
+                        &mut tx,
+                        input.node_id,
+                        ROUTE_ACQUIRE,
+                        Some(input.worker_id),
+                        &replay_key,
+                        &outcome,
+                    )
+                    .await?;
+                    commit_tx(tx).await?;
+                    return Ok(outcome);
+                }
+                RemoteAcquirePrepared::Leased {
                     ticket,
                     eligibility,
                     locality,
-                    &score,
-                    now,
-                )
-                .await?
-            }
+                    score,
+                } => {
+                    let ticket_id = ticket.id;
+                    let next = self
+                        .remote_acquire_leased_in_tx(
+                            &mut tx,
+                            &input,
+                            ticket,
+                            eligibility,
+                            locality,
+                            &score,
+                            now,
+                        )
+                        .await?;
+                    let Some(outcome) = next else {
+                        if !reused.insert(ticket_id) {
+                            return Err(VoomError::database(
+                                "audio reuse did not retire its selected ticket".to_owned(),
+                            ));
+                        }
+                        continue;
+                    };
+                    outcome
+                }
+            };
+            break outcome;
         };
         commit_tx(tx).await?;
         Ok(outcome)
@@ -193,6 +211,12 @@ impl ControlPlane {
         let mut gated = Vec::with_capacity(tickets.len());
         let mut locality_by_ticket = HashMap::new();
         for ticket in tickets {
+            // ADR0075 leaves markerless policy verification on its existing
+            // bundled adapter. A remote lease must not race that adapter for
+            // a workflow ticket carrying no node execution envelope.
+            if legacy_workflow_media_ticket(&ticket)? {
+                continue;
+            }
             match resolve_ticket_owner_locality_in_tx(tx, &ticket, input.node_id).await? {
                 TicketLocality::OwnerLocal(declaration, resolution) => {
                     locality_by_ticket.insert(ticket.id, (declaration, resolution));
@@ -496,7 +520,7 @@ impl ControlPlane {
         locality: Option<(ArtifactAccessDeclaration, AccessResolution)>,
         score: &ScoreDecision,
         now: time::OffsetDateTime,
-    ) -> Result<RemoteAcquireOutcome, VoomError> {
+    ) -> Result<Option<RemoteAcquireOutcome>, VoomError> {
         let outcome = self
             .try_acquire_lease_in_tx(
                 tx,
@@ -557,10 +581,20 @@ impl ControlPlane {
                     &outcome,
                 )
                 .await?;
-                return Ok(outcome);
+                return Ok(Some(outcome));
             }
         };
 
+        let dispatch_payload =
+            match crate::artifact::publication::admit_audio_in_tx(self, tx, &ticket, &lease, now)
+                .await?
+            {
+                crate::artifact::publication::AudioAdmission::Dispatch(payload) => payload,
+                crate::artifact::publication::AudioAdmission::Committed(result) => {
+                    self.release_lease_in_tx(tx, lease.id, result, now).await?;
+                    return Ok(None);
+                }
+            };
         let plan = self
             .artifact_access_plans
             .create_selected_in_tx(
@@ -598,7 +632,7 @@ impl ControlPlane {
             ticket_id: ticket.id,
             worker_id: input.worker_id,
             operation: ticket.kind.normalize().matching_token().into_string(),
-            dispatch_payload: ticket.payload,
+            dispatch_payload,
             lease_ttl_seconds: lease.ttl_seconds,
             heartbeat_after_seconds: heartbeat_after_seconds(lease.ttl_seconds),
             artifact_access_plan: remote_plan(&plan),
@@ -612,8 +646,21 @@ impl ControlPlane {
             &outcome,
         )
         .await?;
-        Ok(outcome)
+        Ok(Some(outcome))
     }
+}
+
+pub(super) fn legacy_workflow_media_ticket(ticket: &Ticket) -> Result<bool, VoomError> {
+    if !matches!(ticket.kind.normalize(), voom_core::NormalizedTicketOperation::Known { kind, namespaced: true }
+        if kind.is_node_local_media_dispatch())
+    {
+        return Ok(false);
+    }
+    let payload = WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
+        .map_err(|error| {
+            VoomError::database(format!("workflow remote eligibility payload: {error}"))
+        })?;
+    Ok(payload.rendered_payload.get("media_dispatch").is_none())
 }
 
 /// What the owner-local gate proved about one ready ticket.
@@ -1479,7 +1526,7 @@ fn heartbeat_after_seconds(ttl_seconds: i64) -> i64 {
     (ttl_seconds / 2).max(1)
 }
 
-pub(super) fn remote_plan(plan: &ArtifactAccessPlan) -> RemoteArtifactAccessPlan {
+pub(crate) fn remote_plan(plan: &ArtifactAccessPlan) -> RemoteArtifactAccessPlan {
     RemoteArtifactAccessPlan {
         id: plan.id,
         owner_node_id: plan.owner_node_id.map(|id| id.0),

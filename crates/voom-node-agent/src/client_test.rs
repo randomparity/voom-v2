@@ -315,6 +315,7 @@ fn test_client(
 
 #[derive(Clone, Copy)]
 enum RawResponse {
+    CompletionWindow,
     Status(u16),
     Timeout,
     Disconnect,
@@ -353,6 +354,11 @@ fn raw_server<const N: usize>(
                     .unwrap();
                 sender.send(read_request(&mut stream)).unwrap();
                 match response {
+                    RawResponse::CompletionWindow => write_response(
+                        &mut stream,
+                        408,
+                        r#"{"schema_version":"0","command":"execution.complete","status":"error","data":null,"warnings":[],"error":{"code":"REQUEST_TIMEOUT","message":"completion response window elapsed"}}"#,
+                    ),
                     RawResponse::Status(status) => write_response(&mut stream, status, "{}"),
                     RawResponse::Timeout => thread::sleep(SERVER_STALL),
                     RawResponse::Disconnect => {}
@@ -524,4 +530,143 @@ fn commit_dtos_debug_redact_fence_hex() {
         assert!(!rendered.contains("deadbeef"), "{rendered}");
         assert!(rendered.contains("[REDACTED]"), "{rendered}");
     }
+}
+
+#[tokio::test]
+async fn completion_windows_do_not_exhaust_the_network_failure_budget() {
+    let (address, received, server) = raw_server([
+        RawResponse::CompletionWindow,
+        RawResponse::CompletionWindow,
+        RawResponse::CompletionWindow,
+        RawResponse::CompletionWindow,
+        RawResponse::CompletionWindow,
+        RawResponse::CompletionWindow,
+        RawResponse::Success,
+    ]);
+    let client = test_client(address, Some(2), Duration::ZERO, REQUEST_TIMEOUT);
+    let request = RetryRequest::new(
+        "same-completion".to_owned(),
+        &TestBody {
+            incarnation_id: "0123456789abcdef0123456789abcdef",
+        },
+    )
+    .unwrap();
+    let response: TestResponse = client
+        .send_completion_windows("/complete", &request)
+        .await
+        .unwrap();
+    assert!(response.accepted);
+    let captured: Vec<_> = received.iter().collect();
+    assert_eq!(
+        captured.len(),
+        7,
+        "healthy publication can span more than five bounded requests"
+    );
+    assert!(captured.iter().all(
+        |sent| sent.idempotency_key == request.idempotency_key() && sent.body == request.body()
+    ));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn completion_windows_preserve_accumulated_network_failures() {
+    let (address, received, server) = raw_server([
+        RawResponse::Status(500),
+        RawResponse::CompletionWindow,
+        RawResponse::Status(500),
+    ]);
+    let client = test_client(address, Some(2), Duration::ZERO, REQUEST_TIMEOUT);
+    let request = RetryRequest::new(
+        "failed-completion".to_owned(),
+        &TestBody {
+            incarnation_id: "0123456789abcdef0123456789abcdef",
+        },
+    )
+    .unwrap();
+    let error = client
+        .send_completion_windows::<TestResponse, _>("/complete", &request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::ExternalSystemUnavailable);
+    assert_eq!(
+        received.iter().count(),
+        3,
+        "a healthy response window must not reset the two-error limit"
+    );
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn completion_windows_reject_malformed_timeout_envelopes() {
+    let (address, received, server) = raw_server([RawResponse::Status(408)]);
+    let client = test_client(address, Some(2), Duration::ZERO, REQUEST_TIMEOUT);
+    let request = RetryRequest::new(
+        "malformed-completion".to_owned(),
+        &TestBody {
+            incarnation_id: "0123456789abcdef0123456789abcdef",
+        },
+    )
+    .unwrap();
+    assert!(
+        client
+            .send_completion_windows::<TestResponse, _>("/complete", &request)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        received.iter().count(),
+        1,
+        "unvalidated 408 is not a completion continuation"
+    );
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn generic_timeout_still_spends_the_ordinary_retry_budget() {
+    let (address, received, server) =
+        raw_server([RawResponse::CompletionWindow, RawResponse::CompletionWindow]);
+    let client = test_client(address, Some(2), Duration::ZERO, REQUEST_TIMEOUT);
+    let request = RetryRequest::new(
+        "generic-timeout".to_owned(),
+        &TestBody {
+            incarnation_id: "0123456789abcdef0123456789abcdef",
+        },
+    )
+    .unwrap();
+    assert!(
+        client
+            .send::<TestResponse, _>("/other", &request)
+            .await
+            .is_err()
+    );
+    assert_eq!(received.iter().count(), 2);
+    server.join().unwrap();
+}
+
+#[test]
+fn completion_window_rejects_mismatched_and_unknown_envelope_fields() {
+    let valid = serde_json::json!({"schema_version":"0","command":"execution.complete","status":"error","data":null,"warnings":[],"error":{"code":"REQUEST_TIMEOUT","message":"window elapsed"}});
+    assert!(super::validate_completion_window(&serde_json::to_vec(&valid).unwrap()).is_ok());
+    for (field, value) in [
+        ("schema_version", serde_json::json!("1")),
+        ("command", serde_json::json!("other")),
+        ("status", serde_json::json!("ok")),
+        ("data", serde_json::json!({"completed":true})),
+        ("unexpected", serde_json::json!(true)),
+    ] {
+        let mut changed = valid.clone();
+        changed[field] = value;
+        assert!(
+            super::validate_completion_window(&serde_json::to_vec(&changed).unwrap()).is_err(),
+            "mismatched {field} must never continue completion"
+        );
+    }
+    for code in ["CONFLICT", "UNKNOWN_CODE"] {
+        let mut changed = valid.clone();
+        changed["error"]["code"] = serde_json::json!(code);
+        assert!(super::validate_completion_window(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    let mut changed = valid;
+    changed["error"]["unexpected"] = serde_json::json!(true);
+    assert!(super::validate_completion_window(&serde_json::to_vec(&changed).unwrap()).is_err());
 }

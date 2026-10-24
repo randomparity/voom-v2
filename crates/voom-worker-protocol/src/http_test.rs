@@ -887,7 +887,7 @@ async fn handshake_rejects_mismatched_agreed_version() {
     // ADR-0016 is an exact match, so the client defends the server->client
     // direction even though a conforming server never emits this.
     let offered = voom_core::PROTOCOL_VERSION;
-    let agreed = offered + 1;
+    let agreed = 3; // A legacy endpoint cannot agree to the protocol-4 offer.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -924,6 +924,23 @@ async fn handshake_accepts_matching_agreed_version() {
     let client = HttpClient::new(addr);
     let resp = client.handshake(voom_core::PROTOCOL_VERSION).await.unwrap();
     assert_eq!(resp.agreed, voom_core::PROTOCOL_VERSION);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
+async fn handshake_rejects_legacy_protocol_three_offer_on_current_http_server() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (addr, running) = running_server(operation_handler(calls.clone(), None)).await;
+    let error = HttpClient::new(addr).handshake(3).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ProtocolError::UnsupportedProtocolVersion {
+            offered: 3,
+            expected: 4
+        }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     let _ = running.shutdown.send(());
     let _ = running.joined.await;
 }

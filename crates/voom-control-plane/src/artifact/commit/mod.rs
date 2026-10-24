@@ -28,6 +28,10 @@ pub(crate) mod intent;
 pub(crate) mod commit_test_support;
 
 mod prepare;
+pub(crate) use prepare::prepare_owner_media_in_tx;
+pub use voom_worker_protocol::{
+    CommitGroupCompleteOutcome, CommitGroupProof, OpenCommitGroupMember,
+};
 mod recovery;
 
 /// Upper bound on how long [`ControlPlane::commit_artifact`] waits after the

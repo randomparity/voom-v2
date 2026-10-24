@@ -10,6 +10,7 @@ pub(crate) mod commit;
 pub(crate) mod fs;
 pub(crate) mod inspect;
 pub(crate) mod policy_target;
+pub(crate) mod publication;
 pub(crate) mod verify;
 pub(crate) mod worker;
 

@@ -1438,3 +1438,37 @@ async fn event_count(cp: &crate::ControlPlane, kind: &str) -> i64 {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn required_mutation_without_publication_fails() {
+    let (cp, _db) = crate::cases::cp().await;
+    let source = seed_version(&cp, "/library/unpublished.mkv", "source").await;
+    let mut files = vec![phase_file(&cp, source, "unpublished").await];
+    let job = open_policy_job(&cp).await;
+    activate_file_progress(&cp, job.id, &files[0]).await;
+    seed_succeeded_ticket_without_commit(&cp, job.id, source, "unpublished").await;
+    let envelope = json!({"operation":"transcode_video", "schema":voom_core::PROTOCOL_VERSION,
+        "source":{"storage_root_id":1,"provider_relative_locator":"source.mkv"},
+        "expected":{"size_bytes":1,"content_hash":"source","modified_at":null,"local_file_key":null},
+        "output_container":"mkv", "output_video_codec":"hevc",
+        "output":{"storage_root_id":1,"provider_relative_locator":"staged/output.mkv","overwrite":false},
+        "profile":voom_worker_protocol::TranscodeVideoProfile::default_hevc()});
+    sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.rendered_payload.media_dispatch', json(?)) WHERE job_id = ?")
+        .bind(serde_json::to_string(&envelope).unwrap()).bind(i64::try_from(job.id.0).unwrap())
+        .execute(&cp.pool).await.unwrap();
+    let error = cp
+        .finalize_phase(
+            job.id,
+            0,
+            &mut files,
+            &[Disposition::Planned {
+                node_ids: vec![NODE_ID.to_owned()],
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, VoomError::CommitFailure(_)),
+        "missing required publication must not become a skipped/completed file: {error}"
+    );
+}

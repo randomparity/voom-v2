@@ -1,0 +1,283 @@
+{
+  "worker_result": {
+    "status": "transcoded",
+    "provider": "ffmpeg",
+    "provider_version": "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers",
+    "input_pre": {
+      "size_bytes": 82650,
+      "content_hash": "blake3:5ec1bea7122f82c291985a7ed0d20d25bf4a36e1481ad6c75727209f2b0f284e",
+      "modified_at": "2026-10-24T00:45:52.372028361Z"
+    },
+    "input_post": {
+      "size_bytes": 82650,
+      "content_hash": "blake3:5ec1bea7122f82c291985a7ed0d20d25bf4a36e1481ad6c75727209f2b0f284e",
+      "modified_at": "2026-10-24T00:45:52.372028361Z"
+    },
+    "output": {
+      "size_bytes": 88443,
+      "content_hash": "blake3:1e2443cf6adb0308ab087156470b86d02428c06de9a352f50567df537c03e39f",
+      "modified_at": "2026-10-24T00:45:52.730054067Z"
+    },
+    "output_container": "mkv",
+    "selected_snapshot_stream_ids": [
+      "synth_companion_c93d538a5d3a390c"
+    ],
+    "output_audio_codecs": [
+      "aac"
+    ],
+    "selected_output_streams": [
+      {
+        "snapshot_stream_id": "synth_companion_c93d538a5d3a390c",
+        "output_provider_stream_index": 2,
+        "codec": "aac",
+        "language": "eng",
+        "title": null,
+        "default": true,
+        "disposition": {
+          "default": true,
+          "forced": false,
+          "commentary": false
+        },
+        "channels": 2
+      }
+    ]
+  },
+  "original_output": {
+    "provider_relative_locator": "operation-0fb49c0a87ce6094/generation-0/t4-t3-t2-fixture.default-hevc.hevc.audio-eac3.audio-aac.mkv",
+    "facts": {
+      "size_bytes": 88443,
+      "content_hash": "blake3:1e2443cf6adb0308ab087156470b86d02428c06de9a352f50567df537c03e39f"
+    },
+    "snapshot": {
+      "format": "sprint10-v1",
+      "probe": {
+        "provider": "ffprobe",
+        "provider_version": "8.0.1-3ubuntu2",
+        "command": "ffprobe",
+        "probed_at": "2026-10-24T00:45:52.789717046Z"
+      },
+      "container": {
+        "format_name": "matroska,webm",
+        "format_long_name": "Matroska / WebM",
+        "duration_seconds": 1.044,
+        "bit_rate": 677724
+      },
+      "streams": [
+        {
+          "index": 0,
+          "kind": "video",
+          "codec_name": "hevc",
+          "width": 64,
+          "height": 64,
+          "avg_frame_rate": "10/1",
+          "pixel_format": "yuv420p",
+          "profile": "Main",
+          "level": "30",
+          "disposition": {
+            "default": true,
+            "forced": false,
+            "commentary": false
+          }
+        },
+        {
+          "index": 1,
+          "kind": "audio",
+          "codec_name": "eac3",
+          "avg_frame_rate": "0/0",
+          "sample_rate": 48000,
+          "channels": 6,
+          "channel_layout": "5.1(side)",
+          "language": "eng",
+          "disposition": {
+            "default": true,
+            "forced": false,
+            "commentary": false
+          }
+        },
+        {
+          "index": 2,
+          "kind": "audio",
+          "codec_name": "aac",
+          "avg_frame_rate": "0/0",
+          "sample_rate": 48000,
+          "channels": 2,
+          "channel_layout": "stereo",
+          "profile": "LC",
+          "language": "eng",
+          "disposition": {
+            "default": true,
+            "forced": false,
+            "commentary": false
+          }
+        }
+      ]
+    },
+    "probe": {
+      "worker_id": 3,
+      "result": {
+        "status": "probed",
+        "provider": "ffprobe",
+        "provider_version": "8.0.1-3ubuntu2",
+        "pre_probe": {
+          "size_bytes": 88443,
+          "content_hash": "blake3:1e2443cf6adb0308ab087156470b86d02428c06de9a352f50567df537c03e39f",
+          "modified_at": "2026-10-24T00:45:52.730054067Z"
+        },
+        "post_probe": {
+          "size_bytes": 88443,
+          "content_hash": "blake3:1e2443cf6adb0308ab087156470b86d02428c06de9a352f50567df537c03e39f",
+          "modified_at": "2026-10-24T00:45:52.730054067Z"
+        },
+        "snapshot": {
+          "format": "sprint10-v1",
+          "probe": {
+            "provider": "ffprobe",
+            "provider_version": "8.0.1-3ubuntu2",
+            "command": "ffprobe",
+            "probed_at": "2026-10-24T00:45:52.789717046Z"
+          },
+          "container": {
+            "format_name": "matroska,webm",
+            "format_long_name": "Matroska / WebM",
+            "duration_seconds": 1.044,
+            "bit_rate": 677724
+          },
+          "streams": [
+            {
+              "index": 0,
+              "kind": "video",
+              "codec_name": "hevc",
+              "width": 64,
+              "height": 64,
+              "avg_frame_rate": "10/1",
+              "pixel_format": "yuv420p",
+              "profile": "Main",
+              "level": "30",
+              "disposition": {
+                "default": true,
+                "forced": false,
+                "commentary": false
+              }
+            },
+            {
+              "index": 1,
+              "kind": "audio",
+              "codec_name": "eac3",
+              "avg_frame_rate": "0/0",
+              "sample_rate": 48000,
+              "channels": 6,
+              "channel_layout": "5.1(side)",
+              "language": "eng",
+              "disposition": {
+                "default": true,
+                "forced": false,
+                "commentary": false
+              }
+            },
+            {
+              "index": 2,
+              "kind": "audio",
+              "codec_name": "aac",
+              "avg_frame_rate": "0/0",
+              "sample_rate": 48000,
+              "channels": 2,
+              "channel_layout": "stereo",
+              "profile": "LC",
+              "language": "eng",
+              "disposition": {
+                "default": true,
+                "forced": false,
+                "commentary": false
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "canonical_probe": {
+    "worker_id": 3,
+    "result": {
+      "status": "probed",
+      "provider": "ffprobe",
+      "provider_version": "8.0.1-3ubuntu2",
+      "pre_probe": {
+        "size_bytes": 88443,
+        "content_hash": "blake3:1e2443cf6adb0308ab087156470b86d02428c06de9a352f50567df537c03e39f",
+        "modified_at": "2026-10-24T00:45:52.730054067Z"
+      },
+      "post_probe": {
+        "size_bytes": 88443,
+        "content_hash": "blake3:1e2443cf6adb0308ab087156470b86d02428c06de9a352f50567df537c03e39f",
+        "modified_at": "2026-10-24T00:45:52.730054067Z"
+      },
+      "snapshot": {
+        "format": "sprint10-v1",
+        "probe": {
+          "provider": "ffprobe",
+          "provider_version": "8.0.1-3ubuntu2",
+          "command": "ffprobe",
+          "probed_at": "2026-10-24T00:45:52.789717046Z"
+        },
+        "container": {
+          "format_name": "matroska,webm",
+          "format_long_name": "Matroska / WebM",
+          "duration_seconds": 1.044,
+          "bit_rate": 677724
+        },
+        "streams": [
+          {
+            "index": 0,
+            "kind": "video",
+            "codec_name": "hevc",
+            "width": 64,
+            "height": 64,
+            "avg_frame_rate": "10/1",
+            "pixel_format": "yuv420p",
+            "profile": "Main",
+            "level": "30",
+            "disposition": {
+              "default": true,
+              "forced": false,
+              "commentary": false
+            },
+            "id": "stream-0"
+          },
+          {
+            "index": 1,
+            "kind": "audio",
+            "codec_name": "eac3",
+            "avg_frame_rate": "0/0",
+            "sample_rate": 48000,
+            "channels": 6,
+            "channel_layout": "5.1(side)",
+            "language": "eng",
+            "disposition": {
+              "default": true,
+              "forced": false,
+              "commentary": false
+            },
+            "id": "stream-1"
+          },
+          {
+            "index": 2,
+            "kind": "audio",
+            "codec_name": "aac",
+            "avg_frame_rate": "0/0",
+            "sample_rate": 48000,
+            "channels": 2,
+            "channel_layout": "stereo",
+            "profile": "LC",
+            "language": "eng",
+            "disposition": {
+              "default": true,
+              "forced": false,
+              "commentary": false
+            },
+            "id": "synth_companion_c93d538a5d3a390c"
+          }
+        ]
+      }
+    }
+  }
+}

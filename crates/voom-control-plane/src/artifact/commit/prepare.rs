@@ -790,3 +790,81 @@ async fn append_failed_pre_mutation(
     )
     .await
 }
+
+/// Prepare an owner-observed media artifact from typed rooted addresses. Unlike
+/// the retained path-based manual API, this never resolves paths on the CP host.
+pub(crate) async fn prepare_owner_media_in_tx(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    artifact_handle_id: ArtifactHandleId,
+    staging_root_id: StorageRootId,
+    staging_locator: voom_core::ProviderRelativeLocator,
+    target_locator: voom_core::ProviderRelativeLocator,
+    now: time::OffsetDateTime,
+) -> Result<voom_core::ids::ArtifactCommitRecordId, VoomError> {
+    let root = cp
+        .libraries
+        .get_library_root_in_tx(tx, staging_root_id)
+        .await?
+        .ok_or_else(|| VoomError::NotFound(format!("storage root {staging_root_id}")))?;
+    let owner = root
+        .owner_node_id
+        .ok_or_else(|| VoomError::Config("media staging root has no owner".to_owned()))?;
+    if root.state != voom_core::StorageRootState::Active || !root.enabled {
+        return Err(VoomError::ArtifactUnavailable(
+            "media staging root is not active and enabled".to_owned(),
+        ));
+    }
+    let target_path = PathBuf::from(root.provider_locator.as_str()).join(target_locator.as_str());
+    let staged_path = PathBuf::from(root.provider_locator.as_str()).join(staging_locator.as_str());
+    let context = PreMutationContext {
+        artifact_handle_id,
+        verification_id: None,
+        target_path: target_path.clone(),
+    };
+    let result = async {
+        let source = read_commit_source_facts(cp, tx, artifact_handle_id, &context).await?;
+        let source_root = cp.libraries.get_library_root_in_tx(tx, source.source_storage_root_id).await
+            .map_err(PrepareCommitError::AfterPending)?
+            .ok_or_else(|| pre_mutation_error(&context, &VoomError::NotFound("media source root".to_owned())))?;
+        let configured = if let Some(id) = source_root.default_staging_root_id { Some(id) } else {
+            cp.libraries.list_owned_library_roots_in_tx(tx, owner).await
+                .map_err(PrepareCommitError::AfterPending)?.iter()
+                .find_map(|naming| (naming.default_staging_root_id == Some(source_root.id))
+                    .then_some(source_root.id))
+        };
+        if configured != Some(staging_root_id) || source_root.library_id != root.library_id
+            || source_root.owner_node_id != Some(owner) {
+            return Err(pre_mutation_error(&context, &VoomError::Config(
+                "media output root does not match the source's configured staging root/owner/library".to_owned())));
+        }
+        let verified = read_verified_staging_facts(cp, tx, artifact_handle_id, &target_path, &context).await?;
+        if verified.staging.value != staged_path.to_string_lossy() {
+            return Err(pre_mutation_error(&context, &VoomError::Conflict("media staged address changed".to_owned())));
+        }
+        let expected_facts = expected_facts_from_verification(&source.handle, &verified.verification)
+            .map_err(|e| pre_mutation_error(&context, &e))?;
+        check_commit_safety_gate(cp, tx, &source, &verified.context, now).await?;
+        let source_location_id = source.handle.source_file_location_id
+            .ok_or_else(|| pre_mutation_error(&context, &VoomError::Config("media handle lacks source location".to_owned())))?;
+        let source_location = cp.identity.get_file_location_in_tx(tx, source_location_id).await
+            .map_err(PrepareCommitError::AfterPending)?
+            .ok_or_else(|| pre_mutation_error(&context, &VoomError::NotFound("media source location".to_owned())))?;
+        let (source_storage_root_id, source_locator) = source_location.rooted_address()
+            .map_err(|e| pre_mutation_error(&context, &e))?;
+        let draft = PendingIntentDraft {artifact_handle_id, source_file_version_id: source.source_file_version_id,
+            verification_id: verified.verification.id, expected_facts, source_storage_root_id,
+            source_provider_relative_locator: source_locator.clone(), placement_intent: CommitPlacementIntent::Staged,
+            context: verified.context};
+        let scope = AgreedCommitScope {staging_root_id, staging_locator, owner_node_id: owner,
+            target_storage_root_id: staging_root_id, target_root_epoch: root.root_epoch,
+            target_locator, resolved_target_path: target_path};
+        let record = create_prepared_record(cp, tx, &draft, &staged_path, &scope, now).await?;
+        pin_staging_and_record_intent(cp, tx, &draft, record.id, scope, now).await?;
+        Ok(record.id)
+    }.await;
+    result.map_err(|error| match error {
+        PrepareCommitError::AfterPending(error) => error,
+        PrepareCommitError::PreMutation(report) => VoomError::CommitFailure(report.message),
+    })
+}

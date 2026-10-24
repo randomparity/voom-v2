@@ -147,6 +147,23 @@ impl SqliteRemoteIdempotencyRepo {
             return Ok(IdempotencyOutcome::Reserved);
         }
 
+        self.lookup_replay_in_tx(tx, &input)
+            .await?
+            .map(IdempotencyOutcome::Replay)
+            .ok_or_else(|| {
+                VoomError::database(
+                    "remote idempotency insert conflict had no existing row".to_owned(),
+                )
+            })
+    }
+
+    /// Inspect an existing exact replay without creating a reservation. This
+    /// permits a held media completion to wait for owner commits outside a tx.
+    pub async fn lookup_replay_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: &RemoteIdempotencyInput,
+    ) -> Result<Option<RemoteMutationReplay>, VoomError> {
         let existing = sqlx::query(
             "SELECT request_hash, response_json, status FROM remote_idempotency_keys \
              WHERE node_id = ? AND route_key = ? AND worker_scope_id = ? AND idempotency_key = ?",
@@ -156,31 +173,23 @@ impl SqliteRemoteIdempotencyRepo {
             concat!(module_path!(), ": ", stringify!(input.node_id.0)),
         )?)
         .bind(&input.route_key)
-        .bind(worker_scope_id)
+        .bind(worker_scope_id(input.worker_id)?)
         .bind(&input.idempotency_key)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("remote idempotency get", e))?;
 
         let Some(row) = existing else {
-            return Err(VoomError::database(
-                "remote idempotency insert conflict had no existing row".to_owned(),
-            ));
+            return Ok(None);
         };
 
         let request_hash: String = row
             .try_get("request_hash")
             .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
-        if request_hash != input.request_hash {
-            return Err(VoomError::Conflict(
-                "idempotency key reused with different request body".to_owned(),
-            ));
-        }
-
         let status: String = row
             .try_get("status")
             .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
-        match status.as_str() {
+        let response: Option<RemoteMutationReplay> = match status.as_str() {
             "completed" => {
                 let response_json: String = row
                     .try_get("response_json")
@@ -188,14 +197,35 @@ impl SqliteRemoteIdempotencyRepo {
                 let response = serde_json::from_str(&response_json).map_err(|e| {
                     VoomError::database_context("remote idempotency response_json", e)
                 })?;
-                Ok(IdempotencyOutcome::Replay(response))
+                Some(response)
             }
-            "in_progress" => Err(VoomError::Conflict(
+            "in_progress" => {
+                let response: Option<String> = row
+                    .try_get("response_json")
+                    .map_err(|error| map_row_err("remote_idempotency_keys", error))?;
+                if response.is_some() {
+                    return Err(VoomError::database(
+                        "in-progress remote replay has a terminal response".to_owned(),
+                    ));
+                }
+                None
+            }
+            other => {
+                return Err(VoomError::database(format!(
+                    "remote_idempotency_keys.status {other:?} not in vocab"
+                )));
+            }
+        };
+        if request_hash != input.request_hash {
+            return Err(VoomError::Conflict(
+                "idempotency key reused with different request body".to_owned(),
+            ));
+        }
+        match response {
+            Some(response) => Ok(Some(response)),
+            None => Err(VoomError::Conflict(
                 "idempotency key is already in progress".to_owned(),
             )),
-            other => Err(VoomError::database(format!(
-                "remote_idempotency_keys.status {other:?} not in vocab"
-            ))),
         }
     }
 

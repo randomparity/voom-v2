@@ -1,8 +1,15 @@
 # Implement owner media publication (#733)
 
-Scope token q733-182619fe; BASE_BRANCH main; branch feat/owner-publication-733.
+Scope token q733-29de38e1 (approved resumption; same charter); BASE_BRANCH main; branch feat/owner-publication-733.
 Spec: ../specs/2026-10-23-owner-media-publication-design.md; ADR0109.
-Expected implementation size: 4500–6500 changed lines (L).
+Expected implementation size: 8000–9500 changed lines (L).
+Build reconciliation measured 6982 changed lines before final negative-proof additions.
+Exact source/probe association, truthful terminal failure and explicit validation/catalog
+helper boundaries exceeded 4500–6500; required surface remains unchanged.
+The final estimate also includes exact persisted-provenance correlation, isolated
+retained-database regressions and restoration of healthy completion lifetime through
+strict bounded response windows. These are required correctness dependencies of
+the unchanged approved outcome. The prior 6500–8500 estimate missed that work.
 The estimate includes evidence/group contracts, pre-dispatch audio admission,
 held receipt/atomic source completion, API/node/commit integration and regressions.
 Review exposed absent audio lifecycle callers; their data-only responsibilities plus
@@ -108,7 +115,11 @@ completion context. Scalar verification lease uniqueness or exact audio operatio
 attempt is re-entry anchor. Context mismatch rejects. Preserve replayable preflight
 error recording; roll back staged domain/database failures without orphan state.
 
-Keep source lease HELD/plan Selected during bounded wait outside SQLite locks.
+Keep source lease HELD/plan Selected while awaiting publication outside SQLite
+locks. Bound individual completion responses (existing REQUEST_TIMEOUT), not the
+healthy producer lifetime. Strict validated timeout windows repeat the frozen
+request under heartbeat/cancellation, preserving the cumulative ordinary failure
+budget. Validate source/operation claims and terminal intent states between polls.
 Existing run_lease heartbeat through settle_lease renews claims; no post-release
 lifecycle. Finalization records real normalized snapshots and audio metadata BEFORE
 source release; finish_remote_media_in_tx writes full result/dependency events and
@@ -194,7 +205,7 @@ Verification:
   exact RED assertion with baseline code, then checks remux->HEVC->EAC3->AAC2 chain,
   durable version/location/snapshot and correct final verify target, final output
   physical facts, separate plural extraction group, and explicit resume with unchanged
-  output bytes/mtime and no new mutation tickets/commits/lineage. Green command `just test-owner-publication-real`; record prerequisites/results; keep real-media opt-in clearly named.
+  output bytes/mtime and no new mutation tickets/commits/lineage. Green command `just check-owner-publication <fresh-private-workdir> extract`; record prerequisites/results; keep real-media opt-in clearly named.
 - Mode: focused-test; coordinator finalize test `required_mutation_without_publication_fails`:
   red planned mutation becomes Skipped; command
   `cargo test -p voom-control-plane required_mutation_without_publication_`.
@@ -206,11 +217,11 @@ core protocol constant and immediate consumers/fixtures/snapshots.
 - Mode: focused-test; public `compliance execute --resume-job-id` after lost terminal
   response proves complete original catalog/ticket/snapshot and no new encoder,
   artifact/commit/snapshot/lineage. Preterminal injected failure proves no committed
-  partial state. Commands `just test-owner-publication-real` and
-  `cargo test -p voom-control-plane publication_resume_`.
+  partial state. Commands `just check-owner-publication <fresh-private-workdir> extract` and
+  `just check-owner-publication <fresh-private-workdir> chain`.
 - Mode: focused-test; exact-version tests reject old3/new4 BOTH directions before
-  execution: `cargo test -p voom-control-plane protocol` and
-  `cargo test -p voom-node-agent protocol`. Change only PROTOCOL_VERSION3->4 and
+  execution: `cargo test -p voom-worker-protocol handshake_` and
+  `cargo test -p voom-node-agent schema_mismatch_fails_before_child_dispatch`. Change only PROTOCOL_VERSION3->4 and
   immediate asserted consumers; no package bump, SQL migration or negotiation.
 
 ## Design review dispositions
@@ -236,3 +247,32 @@ record verified forge review and commit-bound MERGE-READY; root alone merges.
 No deferrals or follow-up candidates; the two disclosed suppressions above remain. Cumulative
 fixture setup attempts2 (one setup error, one exactRED); liveness probes0/replacements0;
 review/full-suite/CI counts0. Update private progress at design/build/review/ship seams.
+
+## Final verification mapping
+
+Named scenario filters above describe planned intent; they are not claims that a
+filter with zero matching tests ran. The authenticated `check-owner-publication`
+chain/extract/abort fixtures implement admission, correlated receipt, all-member
+authorization-before-apply, grouped negatives/replay/operator recovery, physical
+lineage/resume, original-TTL heartbeat, terminal failure/shutdown, semantic reuse
+with remaining ready work and acquire replay. Focused actual tests additionally
+cover `lookup_replay_`, `required_mutation_without_publication_fails`,
+`synthesis_probe_comparison_uses_exact_admitted_companion_projection`,
+`standalone_audio_dispatch_does_not_enter_workflow_operation_admission`,
+`rejected_fresh_authorization_stands_down_only_when_no_longer_actionable` and
+`rejected_authorization_does_not_treat_listing_failure_as_absence`.
+Old/new compatibility uses the actual nested agent dispatch entry and HTTP worker
+handshake. The immutable baseline decoder has the same exact equality gate with
+expected version 3, while the new renderer/decoder expects 4. This does not claim
+a node/API registration version check or full mixed-binary deployment acceptance.
+
+
+Healthy-publication lifetime correction: actual healthy twelve-second owner delay
+reproduced premature producer failure at the reused manual ten-second deadline.
+ADR0050/0109 require healthy lease/claim lifetime through commit. The bounded
+continuation therefore separates the existing HTTP response timeout from terminal
+producer settlement, with strict timeout envelopes, unchanged generic error budget,
+cancellation and authoritative expiry. This restores the reviewed outcome without a
+new wire state, error code, SQL schema or byte owner. Focused tests exercise more
+than five response windows, malformed/mismatched envelopes, accumulated failures,
+heartbeat/cancellation/shutdown/fencing, and the real delayed owner plus resume.

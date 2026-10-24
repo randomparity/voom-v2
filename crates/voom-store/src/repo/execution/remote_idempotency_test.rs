@@ -565,3 +565,97 @@ async fn repoint_completed_replay_rejects_unknown_or_in_progress_key() {
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
 }
+
+#[tokio::test]
+async fn lookup_replay_does_not_reserve_and_preserves_exact_response() {
+    let f = fixture().await;
+    let mut tx = f.pool.begin().await.unwrap();
+    let input = RemoteIdempotencyInput {
+        node_id: f.node_id,
+        worker_id: Some(f.worker_id),
+        route_key: "publication-test".to_owned(),
+        idempotency_key: "exact-key".to_owned(),
+        request_hash: "exact-hash".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    assert_eq!(
+        f.repo.lookup_replay_in_tx(&mut tx, &input).await.unwrap(),
+        None
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_idempotency_keys")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "waiting publication must not persist an in-progress reservation"
+    );
+    f.repo
+        .reserve_or_replay_in_tx(&mut tx, input.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.repo.lookup_replay_in_tx(&mut tx, &input).await,
+        Err(VoomError::Conflict(_))
+    ));
+    let response = RemoteMutationReplay::Ok {
+        data: json!({"published": 7}),
+    };
+    f.repo
+        .complete_in_tx(
+            &mut tx,
+            input.node_id,
+            &input.route_key,
+            input.worker_id,
+            &input.idempotency_key,
+            response.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.repo.lookup_replay_in_tx(&mut tx, &input).await.unwrap(),
+        Some(response)
+    );
+    let changed = RemoteIdempotencyInput {
+        request_hash: "other".to_owned(),
+        ..input
+    };
+    assert!(matches!(
+        f.repo.lookup_replay_in_tx(&mut tx, &changed).await,
+        Err(VoomError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn lookup_replay_decodes_corrupt_response_before_request_conflict() {
+    let fixture = fixture().await;
+    let mut tx = fixture.pool.begin().await.unwrap();
+    let mut input = RemoteIdempotencyInput {
+        node_id: fixture.node_id,
+        worker_id: Some(fixture.worker_id),
+        route_key: "publication-corruption".to_owned(),
+        idempotency_key: "key".to_owned(),
+        request_hash: "original".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    fixture
+        .repo
+        .reserve_or_replay_in_tx(&mut tx, input.clone())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE remote_idempotency_keys SET status = 'completed', response_json = ?")
+        .bind(r#"{"status":"ok","data":{},"unknown":true}"#)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    input.request_hash = "different".to_owned();
+    let error = fixture
+        .repo
+        .lookup_replay_in_tx(&mut tx, &input)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, VoomError::Database { .. }),
+        "corrupt persisted response must not be reported as a request conflict: {error:?}"
+    );
+}

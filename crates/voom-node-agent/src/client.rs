@@ -28,8 +28,9 @@ const DEFAULT_MAXIMUM_ATTEMPTS: usize = 5;
 /// client abandons it.
 ///
 /// This bounds a single attempt, not the logical call — a retried call can take
-/// up to [`production_request_budget`]. Callers reasoning about how long a node
-/// agent can be stuck almost always want that one instead.
+/// up to [`production_request_budget`]. Validated completion response windows
+/// instead await the held lease under heartbeat and cancellation; they do not
+/// extend the ordinary network failure budget.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -200,15 +201,37 @@ impl ControlPlaneClient {
     where
         TResponse: DeserializeOwned,
     {
+        self.send_request(path, request, false).await
+    }
+
+    async fn send_completion_windows<TResponse: DeserializeOwned, TBody>(
+        &self,
+        path: &str,
+        request: &RetryRequest<TBody>,
+    ) -> Result<TResponse, VoomError> {
+        self.send_request(path, request, true).await
+    }
+
+    async fn send_request<TResponse: DeserializeOwned, TBody>(
+        &self,
+        path: &str,
+        request: &RetryRequest<TBody>,
+        completion_windows: bool,
+    ) -> Result<TResponse, VoomError> {
         let url = self.route_url(path)?;
         let mut attempt = 0_usize;
         let mut backoff = RetryBackoff::new(self.retry.initial_delay, self.retry.maximum_delay);
         loop {
-            attempt += 1;
-            let result = self.send_attempt(url.clone(), request).await;
+            let result = self
+                .send_attempt(url.clone(), request, completion_windows)
+                .await;
             match result {
                 AttemptResult::Complete(result) => return result,
+                AttemptResult::CompletionWindowElapsed => {
+                    tokio::task::yield_now().await;
+                }
                 AttemptResult::Retry(error) => {
+                    attempt += 1;
                     if self
                         .retry
                         .maximum_attempts
@@ -232,6 +255,7 @@ impl ControlPlaneClient {
         &self,
         url: reqwest::Url,
         request: &RetryRequest<TBody>,
+        completion_windows: bool,
     ) -> AttemptResult<TResponse>
     where
         TResponse: DeserializeOwned,
@@ -254,6 +278,15 @@ impl ControlPlaneClient {
             }
         };
         let status = response.status();
+        if completion_windows && status == StatusCode::REQUEST_TIMEOUT {
+            return match read_bounded_body(&mut response)
+                .await
+                .and_then(|body| validate_completion_window(&body))
+            {
+                Ok(()) => AttemptResult::CompletionWindowElapsed,
+                Err(error) => AttemptResult::Complete(Err(error)),
+            };
+        }
         if status == StatusCode::REQUEST_TIMEOUT
             || status == StatusCode::TOO_MANY_REQUESTS
             || status.is_server_error()
@@ -360,7 +393,7 @@ impl ControlPlaneClient {
         lease_id: LeaseId,
         request: &RetryRequest<CompleteRequest>,
     ) -> Result<CompleteOutcome, VoomError> {
-        self.send(
+        self.send_completion_windows(
             &format!("/v1/execution/lease/{}/complete", lease_id.0),
             request,
         )
@@ -430,15 +463,29 @@ impl ControlPlaneClient {
         )
         .await
     }
+
+    pub async fn complete_commit_group(
+        &self,
+        operation_id: u64,
+        request: &RetryRequest<CommitGroupCompleteRequest>,
+    ) -> Result<voom_worker_protocol::CommitGroupCompleteOutcome, VoomError> {
+        self.send(
+            &format!("/v1/artifact/commit/group/{operation_id}/complete"),
+            request,
+        )
+        .await
+    }
 }
 
 enum AttemptResult<T> {
+    CompletionWindowElapsed,
     Complete(Result<T, VoomError>),
     Retry(VoomError),
 }
 
-/// Worst-case wall clock one logical control-plane call can consume under the
-/// production retry policy.
+/// Worst-case wall clock of the ordinary control-plane failure/retry budget.
+/// Healthy completion response windows are excluded: that await remains governed
+/// by the source lease, operation claim, cancellation and terminal publication.
 ///
 /// Every attempt is assumed to burn the full [`REQUEST_TIMEOUT`], and every
 /// backoff to draw its ceiling. That is the number to compare against when
@@ -536,6 +583,33 @@ async fn read_bounded_body(response: &mut reqwest::Response) -> Result<Vec<u8>, 
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+fn validate_completion_window(body: &[u8]) -> Result<(), VoomError> {
+    let invalid = |message: String| {
+        VoomError::ExternalSystemUnavailable(format!(
+            "invalid completion timeout response: {message}"
+        ))
+    };
+    let envelope: ApiEnvelope<serde_json::Value> =
+        serde_json::from_slice(body).map_err(|error| invalid(error.to_string()))?;
+    let error = envelope
+        .error
+        .ok_or_else(|| invalid("missing error".to_owned()))?;
+    let code: voom_core::ErrorCode = serde_json::from_value(serde_json::Value::String(error.code))
+        .map_err(|error| invalid(error.to_string()))?;
+    if envelope.schema_version != "0"
+        || envelope.status != "error"
+        || envelope.data.is_some()
+        || !matches!(
+            envelope.command.as_str(),
+            "execution.complete" | "api.request"
+        )
+        || code != voom_core::ErrorCode::RequestTimeout
+    {
+        return Err(invalid("inconsistent REQUEST_TIMEOUT envelope".to_owned()));
+    }
+    Ok(())
 }
 
 fn decode_envelope<T: DeserializeOwned>(status: StatusCode, body: &[u8]) -> Result<T, VoomError> {
@@ -852,6 +926,8 @@ pub struct OpenCommitIntent {
     pub target_root_epoch: u64,
     pub intent_epoch: u64,
     pub expected_facts: CommitExpectedFacts,
+    #[serde(default)]
+    pub group: Option<voom_worker_protocol::OpenCommitGroupMember>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -988,6 +1064,14 @@ pub struct CommitCompleteRequest {
     pub node_id: NodeId,
     pub incarnation_id: NodeIncarnationId,
     pub fence_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitGroupCompleteRequest {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+    pub proof: voom_worker_protocol::CommitGroupProof,
 }
 
 impl std::fmt::Debug for CommitCompleteRequest {

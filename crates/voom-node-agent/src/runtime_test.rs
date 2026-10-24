@@ -1511,6 +1511,8 @@ struct FakeControlPlane {
     readiness_started: Notify,
     readiness_started_count: AtomicUsize,
     complete_calls: AtomicUsize,
+    complete_gate: Mutex<Option<Arc<Notify>>>,
+    complete_started: Notify,
     reject_complete: AtomicBool,
     events: Mutex<Vec<String>>,
 }
@@ -1545,6 +1547,8 @@ impl Default for FakeControlPlane {
             readiness_started: Notify::new(),
             readiness_started_count: AtomicUsize::new(0),
             complete_calls: AtomicUsize::new(0),
+            complete_gate: Mutex::new(None),
+            complete_started: Notify::new(),
             reject_complete: AtomicBool::new(false),
             events: Mutex::new(Vec::new()),
         }
@@ -1709,6 +1713,10 @@ impl ControlPlaneApi for FakeControlPlane {
         _request: &RetryRequest<CompleteRequest>,
     ) -> Result<CompleteOutcome, VoomError> {
         self.complete_calls.fetch_add(1, Ordering::SeqCst);
+        self.complete_started.notify_waiters();
+        if let Some(gate) = self.complete_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         if self.reject_complete.load(Ordering::SeqCst) {
             return Err(VoomError::Conflict(
                 "remote complete rejected: artifact access validation missing".to_owned(),
@@ -2294,12 +2302,14 @@ async fn advance_seconds(seconds: u64) {
 #[derive(Debug)]
 struct CapturingWorker {
     request: Mutex<Option<OperationRequest>>,
+    key: Mutex<Option<String>>,
 }
 
 impl CapturingWorker {
     fn new() -> Self {
         Self {
             request: Mutex::new(None),
+            key: Mutex::new(None),
         }
     }
 }
@@ -2325,9 +2335,10 @@ impl ClientHandle for CapturingWorker {
     async fn dispatch(
         &self,
         _credentials: &WorkerCredentials,
-        _idempotency_key: &str,
+        idempotency_key: &str,
         request: OperationRequest,
     ) -> Result<DispatchStream, ProtocolError> {
+        *self.key.lock().await = Some(idempotency_key.to_owned());
         *self.request.lock().await = Some(request.clone());
         let frame = ProgressFrame::Result {
             lease_id: request.lease_id,
@@ -2386,6 +2397,17 @@ async fn dispatch_to_child_forwards_owner_local_plan_and_normalized_operation() 
     assert!(
         matches!(outcome, LeaseOutcome::Complete(_)),
         "expected a completed dispatch"
+    );
+    assert_eq!(
+        child.key.lock().await.as_deref(),
+        Some(
+            voom_worker_protocol::owner_dispatch_idempotency_key(
+                context(Arc::clone(&control)).incarnation_id,
+                dispatch.lease_id
+            )
+            .as_str()
+        ),
+        "actual child request uses the same typed identity retained by admission"
     );
     let request = child.request.lock().await.take().unwrap();
     assert!(
@@ -2938,4 +2960,101 @@ async fn root_activation_missing_or_non_directory_binding_prevents_remote_activa
         assert!(runtime.activate(incarnation()).await.is_err());
         assert_eq!(control.activate_started_count.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_completion_keeps_heartbeat_until_user_cancellation_settles() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.complete_gate.lock().await = Some(Arc::new(Notify::new()));
+    let permits = Arc::new(Semaphore::new(1));
+    let held = held_lease(Arc::clone(&permits)).await;
+    let (cancel, cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (_shutdown, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let task = tokio::spawn(run_lease(
+        held,
+        Arc::new(CapturingWorker::new()),
+        credentials(),
+        context(control.clone()),
+        cancel_rx,
+        shutdown_rx,
+        StdRng::seed_from_u64(459),
+    ));
+    wait_for_count(&control.complete_started, &control.complete_calls, 1).await;
+    advance_seconds(12).await;
+    assert!(
+        !task.is_finished(),
+        "healthy completion remains held beyond the old ten-second producer deadline"
+    );
+    assert!(control.lease_heartbeats.load(Ordering::SeqCst) >= 6);
+    assert!(control.failures.lock().await.is_empty());
+    assert!(Arc::clone(&permits).try_acquire_owned().is_err());
+    cancel.send(LeaseCancellation::User).unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        *control.failures.lock().await,
+        [FailureClass::UserCancellation]
+    );
+    assert!(permits.try_acquire_owned().is_ok());
+    let count = control.lease_heartbeats.load(Ordering::SeqCst);
+    advance_seconds(3).await;
+    assert_eq!(control.lease_heartbeats.load(Ordering::SeqCst), count);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_completion_stops_on_authoritative_lease_fence() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.complete_gate.lock().await = Some(Arc::new(Notify::new()));
+    control
+        .heartbeat_actions
+        .lock()
+        .await
+        .push_back(HeartbeatAction::Conflict);
+    let permits = Arc::new(Semaphore::new(1));
+    let held = held_lease(Arc::clone(&permits)).await;
+    let (_cancel, cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (_shutdown, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let task = tokio::spawn(run_lease(
+        held,
+        Arc::new(CapturingWorker::new()),
+        credentials(),
+        context(control.clone()),
+        cancel_rx,
+        shutdown_rx,
+        StdRng::seed_from_u64(459),
+    ));
+    wait_for_count(&control.complete_started, &control.complete_calls, 1).await;
+    advance_seconds(2).await;
+    task.await.unwrap();
+    assert!(
+        control.failures.lock().await.is_empty(),
+        "an authoritative fence must not be restamped as worker failure"
+    );
+    assert!(permits.try_acquire_owned().is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_completion_observes_shutdown_without_waiting_for_http_deadline() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.complete_gate.lock().await = Some(Arc::new(Notify::new()));
+    let permits = Arc::new(Semaphore::new(1));
+    let held = held_lease(Arc::clone(&permits)).await;
+    let (_cancel, cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (shutdown, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let task = tokio::spawn(run_lease(
+        held,
+        Arc::new(CapturingWorker::new()),
+        credentials(),
+        context(control.clone()),
+        cancel_rx,
+        shutdown_rx,
+        StdRng::seed_from_u64(459),
+    ));
+    wait_for_count(&control.complete_started, &control.complete_calls, 1).await;
+    shutdown.send(ShutdownKind::User).unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        *control.failures.lock().await,
+        [FailureClass::UserCancellation]
+    );
+    assert!(permits.try_acquire_owned().is_ok());
 }

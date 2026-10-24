@@ -39,6 +39,9 @@ keeping the workflow lease held. Its existing heartbeat renews lease and operati
 claims throughout healthy validation/commit (ADR0050). A lease-keyed verification or
 exact audio operation/attempt anchors repeated receipt handling. Retain safe original
 completion identity/hash/result context in verification evidence, never the bearer.
+Retain its original source location epoch and rooted identity internally and reload
+that same live version/location at publication fences. Missing legacy evidence
+fails truthfully; it is not inferred from the current registry or location.
 Check completed replay read-only before staging; reserve and complete the original
 completion key only in terminal finalization, so no committed in-progress reservation
 spans a network wait.
@@ -50,6 +53,17 @@ rolls back the whole transaction. Thus dependencies never observe raw Succeeded 
 read-only public resume cannot see committed media without snapshot/ticket references.
 The waiting receipt call holds no SQLite transaction. Missing required publication
 fails truthfully rather than becoming a skip.
+The completion route bounds each response to ten seconds using the existing
+HTTP408/REQUEST_TIMEOUT envelope, below unchanged thirty-second server/client
+bounds. An elapsed response window does not fail a healthy producer. The node
+strictly validates that envelope and repeats the same frozen completion while
+heartbeats renew the held source lease and operation claim. Ordinary network,
+429 and 5xx failures retain their existing cumulative retry budget. Cancellation,
+lease/claim expiry and known terminal publication stop the await through existing
+settlement; no SQL transaction spans the wait. Manual commit convergence keeps
+its existing bounded caller timeout and pending/recoverable result. A rejected fresh authorization may stand down only after the complete
+authenticated actionable-intent projection no longer advertises that exact intent;
+read failures, still-actionable conflicts and frozen-request errors stay strict.
 
 For extraction, prepare every member intent and bind every ordered output in one
 transaction using the existing operation ledger. Advertise the exact group and

@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 
 use crate::client::{CommitObservedFacts, LeaseDispatch};
@@ -27,7 +26,7 @@ use crate::runtime::{
     ChildEndpoint, ChildEndpointRegistry, CoordinatorContext, LeaseOutcome,
     consume_progress_stream, duration_millis_u32, open_worker_stream,
 };
-use voom_core::{FailureClass, OperationKind, VoomError};
+use voom_core::{FailureClass, OperationKind, ProviderRelativeLocator, VoomError};
 use voom_worker_protocol::{
     BackUpFileRequest, BackUpFileResult, ClientHandle, ExpectedFileFacts, ExtractAudioInput,
     ExtractAudioOutput, ExtractAudioOutputDescriptor, ExtractAudioRequest, ExtractAudioResult,
@@ -39,10 +38,14 @@ use voom_worker_protocol::{
     TranscodeVideoResult, VerifyArtifactRequest, VerifyArtifactResult, WorkerCredentials,
     decode_media_dispatch,
 };
+use voom_worker_protocol::{
+    OwnerObservedEvidence as AgentObservedEvidence, OwnerObservedOutput as AgentObservedOutput,
+    OwnerProbeEvidence,
+};
 
 /// How long the post-dispatch staged-output probe waits for a live ffprobe
-/// child. Mirrors the scan pump's endpoint budget; probe evidence is
-/// optional, so expiry skips the attachment rather than failing the lease.
+/// child. Mirrors the scan pump's endpoint budget; expiry fails a required
+/// mutation before it can claim successful publication.
 const PROBE_ENDPOINT_WAIT: Duration = Duration::from_secs(2);
 
 /// Whether a leased operation routes through the media executor rather than
@@ -67,7 +70,7 @@ pub(crate) fn is_media_dispatch_operation(operation: &str) -> bool {
 /// One planned output whose absolute path was resolved on this node.
 #[derive(Debug)]
 struct PlannedOutput {
-    provider_relative_locator: String,
+    provider_relative_locator: ProviderRelativeLocator,
     path: PathBuf,
 }
 
@@ -84,28 +87,6 @@ struct ResolvedPlan {
     /// Canonical containment root for `verify_artifact` requests; the worker
     /// rejects any path whose parent escapes it.
     verify_staging_root: Option<String>,
-}
-
-/// Typed agent-side evidence serialized into the completion result under the
-/// top-level `agent_observed` key. Facts come from this agent's own
-/// observations, never from the worker's report.
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AgentObservedEvidence {
-    pub(crate) input_pre: ObservedFileFacts,
-    pub(crate) input_post: ObservedFileFacts,
-    pub(crate) outputs: Vec<AgentObservedOutput>,
-}
-
-/// One independently observed output file, optionally carrying an ffprobe
-/// snapshot gathered through the shared child-endpoint registry.
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AgentObservedOutput {
-    pub(crate) provider_relative_locator: String,
-    pub(crate) facts: ObservedFileFacts,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) snapshot: Option<JsonValue>,
 }
 
 /// Worker-reported output facts the agent verifies byte-for-byte.
@@ -347,7 +328,7 @@ async fn planned_outputs(
             )));
         }
         outputs.push(PlannedOutput {
-            provider_relative_locator: locator.to_owned(),
+            provider_relative_locator: output.provider_relative_locator.clone(),
             path,
         });
     }
@@ -541,6 +522,23 @@ fn transcode_video_payload(
     }))
 }
 
+fn validate_extraction_result(
+    envelope: &MediaDispatch,
+    plan: &ResolvedPlan,
+    result_payload: &JsonValue,
+) -> Result<(), VoomError> {
+    let MediaDispatch::ExtractAudio(extraction) = envelope else {
+        return Ok(());
+    };
+    let request = extract_audio_payload(extraction, plan, text(&plan.source))?;
+    let request = serde_json::from_value::<ExtractAudioRequest>(request)
+        .map_err(|error| VoomError::MalformedWorkerResult(error.to_string()))?;
+    let result = serde_json::from_value::<ExtractAudioResult>(result_payload.clone())
+        .map_err(|error| VoomError::MalformedWorkerResult(error.to_string()))?;
+    voom_worker_protocol::validate_extract_audio_result(&request, &result)
+        .map_err(|error| VoomError::MalformedWorkerResult(error.to_string()))
+}
+
 /// Strictly parse the worker's terminal payload, re-observe everything it
 /// claims, and assemble the completion result with the `agent_observed`
 /// evidence block attached.
@@ -554,6 +552,9 @@ async fn settle_media_result(
     registry: &ChildEndpointRegistry,
 ) -> LeaseOutcome {
     let operation = envelope_operation(envelope);
+    if let Err(error) = validate_extraction_result(envelope, plan, &result_payload) {
+        return malformed(error.to_string(), result_payload);
+    }
     let parsed = match parse_worker_result(envelope, &result_payload) {
         Ok(parsed) => parsed,
         Err(reason) => return malformed(reason, result_payload),
@@ -595,17 +596,21 @@ async fn settle_media_result(
         }
     }
 
-    // Staged-output probes: best-effort identity snapshots through the shared
-    // ffprobe child. A missing endpoint only thins the evidence, never fails
-    // the lease.
+    // A required mutation cannot publish without a probe of these exact bytes
+    // attributed to the child that actually performed it (ADR0109).
     if is_staged_output_operation(operation) {
         for (index, output) in evidence.outputs.iter_mut().enumerate() {
             let path = plan.outputs[index].path.clone();
-            if let Some(snapshot) =
+            let Some(probe) =
                 probe_output(registry, dispatch, context, &path, &output.facts, index).await
-            {
-                output.snapshot = Some(snapshot);
-            }
+            else {
+                return malformed(
+                    "staged output has no attributed matching probe".to_owned(),
+                    json!({}),
+                );
+            };
+            output.snapshot = Some(probe.result.snapshot.clone());
+            output.probe = Some(probe);
         }
     }
 
@@ -697,7 +702,7 @@ async fn verify_reported_outputs(
                 "output",
                 &format!(
                     "at {}: worker reported {} bytes hashed {}, agent observed {} bytes hashed {}",
-                    resolved.provider_relative_locator,
+                    resolved.provider_relative_locator.as_str(),
                     worker_reported.size_bytes,
                     worker_reported.content_hash,
                     facts.size_bytes,
@@ -710,6 +715,7 @@ async fn verify_reported_outputs(
             provider_relative_locator: resolved.provider_relative_locator.clone(),
             facts: wire_facts(facts),
             snapshot: None,
+            probe: None,
         });
     }
     None
@@ -805,8 +811,8 @@ fn is_staged_output_operation(operation: OperationKind) -> bool {
     )
 }
 
-/// Wait briefly for a live ffprobe child, probe the staged output once, and
-/// return its snapshot. Any failure along the way simply drops the evidence.
+/// Probe through the actual live child and retain its identity and exact facts.
+/// A failure leaves the required mutation without publication evidence.
 async fn probe_output(
     registry: &ChildEndpointRegistry,
     dispatch: &LeaseDispatch,
@@ -814,7 +820,7 @@ async fn probe_output(
     path: &Path,
     facts: &ObservedFileFacts,
     index: usize,
-) -> Option<JsonValue> {
+) -> Option<OwnerProbeEvidence> {
     let endpoint = wait_for_probe_endpoint(registry).await?;
     let request = OperationRequest {
         operation: OperationKind::ProbeFile,
@@ -848,9 +854,20 @@ async fn probe_output(
     loop {
         match tokio::time::timeout(context.progress_timeout, frames.next_frame()).await {
             Ok(Ok(NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }))) => {
-                return serde_json::from_value::<ProbeFileResult>(payload)
-                    .ok()
-                    .map(|p| p.snapshot);
+                let result = serde_json::from_value::<ProbeFileResult>(payload).ok()?;
+                if [&result.pre_probe, &result.post_probe]
+                    .iter()
+                    .any(|observed| {
+                        observed.size_bytes != facts.size_bytes
+                            || observed.content_hash != facts.content_hash
+                    })
+                {
+                    return None;
+                }
+                return Some(OwnerProbeEvidence {
+                    worker_id: endpoint.credentials.worker_id,
+                    result,
+                });
             }
             Ok(Ok(NdjsonOutcome::Frame(ProgressFrame::Progress { .. }))) => {}
             Ok(Ok(_) | Err(_)) | Err(_) => return None,

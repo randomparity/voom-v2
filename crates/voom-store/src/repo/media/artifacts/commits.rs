@@ -598,6 +598,23 @@ impl SqliteArtifactRepo {
         row.as_ref().map(row_to_commit_record).transpose()
     }
 
+    pub async fn get_commit_record_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+    ) -> Result<Option<ArtifactCommitRecord>, VoomError> {
+        let sql = SELECT_ARTIFACT_COMMIT_RECORD_COLS.to_owned()
+            + " FROM artifact_commit_records c WHERE c.id = ?";
+        let row = sqlx::query(&sql)
+            .bind(i64_from_u64(id.0, "artifact commit record id")?)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("artifact commit record get in tx", error)
+            })?;
+        row.as_ref().map(row_to_commit_record).transpose()
+    }
+
     /// The committed record whose result is `location`, if any (ADR 0103).
     ///
     /// # Errors
@@ -671,6 +688,23 @@ impl SqliteArtifactRepo {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("artifact_commit_records list", e))?;
+        rows.iter().map(row_to_commit_record).collect()
+    }
+
+    pub async fn list_commit_records_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactCommitRecord>, VoomError> {
+        let sql = SELECT_ARTIFACT_COMMIT_RECORD_COLS.to_owned()
+            + " FROM artifact_commit_records c WHERE c.artifact_handle_id = ? ORDER BY c.id ASC";
+        let rows = sqlx::query(&sql)
+            .bind(i64_from_u64(handle_id.0, "artifact handle id")?)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("artifact commit records list in tx", error)
+            })?;
         rows.iter().map(row_to_commit_record).collect()
     }
 

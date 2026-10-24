@@ -2,7 +2,7 @@
 
 ## Authority and problem
 
-Frozen scope: #733 token q733-182619fe, WORK:SCOPE6375486010. Operator approved
+Frozen scope: #733 token q733-60db64db, WORK:SCOPE6383576036. Operator approved
 original repair/exclusions, “Approve additive probe evidence”, and “Approve grouped
 completion”. ADR0109 records the additive decisions. Root confirmed existing exact
 protocol gating 3->4 is a necessary compatibility consequence.
@@ -74,16 +74,26 @@ before strict worker decode. Validate ALL before creating durable staged state.
 
 One receipt transaction creates/reuses immutable handles with existing source lineage,
 exact rooted staging locations, data-only successful verifications/events and prepared
-commits/ledger bindings. Scalar uniqueness uses existing verification workflow-lease;
-plural audio uses exact operation/output/attempt identity and preserves per-output
-verification association semantics. Persist safe original completion context: node,
+commits/ledger bindings. Remux/video uniqueness uses existing verification workflow-lease;
+audio uses exact operation/output/attempt identity, preserving both verification
+workflow fields as NULL for existing semantic-operation reuse. Never rewrite an old
+bound verification to claim another ticket's provenance. Persist safe original completion context: node,
 incarnation, worker, lease, original idempotency key/hash and exact result; NO bearer.
-Duplicate context must match before reuse. Prepare uses the handle's exact source-
+The internal context also retains the original source location epoch and rooted
+identity; every publication fence reloads the same live version/location. Missing
+legacy context evidence fails truthfully. Duplicate context must match before reuse. Prepare uses the handle's exact source-
 location pin so sibling staging pins cannot make the source ambiguous. Any failure
 rolls back all receipt-created state, without orphan artifacts/reservations.
 
 DO NOT consume access plan, release source lease, mark ticket Succeeded, complete its
-idempotency key or expand work at this stage. Wait boundedly outside SQLite locks.
+idempotency key or expand work at this stage. Wait outside SQLite locks under
+live source/claim/terminal checks. Bound each API completion response window to ten
+seconds using existing HTTP408/REQUEST_TIMEOUT, preserving its truthful message
+through the global thirty-second boundary. The completion client strictly decodes
+that envelope and repeats the frozen request without consuming or resetting the
+ordinary cumulative network/429/5xx error budget. Invalid timeout envelopes remain
+errors. Completion settlement observes existing cancellation/shutdown/lease fences;
+healthy apply/copy/hash work has no ten-second producer deadline.
 Existing node run_lease heartbeat remains running through settle_lease; existing
 held-lease heartbeat renews operation claims. No post-release renewal authority.
 True expiry never revives a stale claim; retries reuse exact durable attempts.
@@ -137,8 +147,13 @@ Existing dependency and read-only resume readers remain sufficient; no post-succ
 CAS or mutation inside prepare_resume. Legacy missing-evidence mutation success is
 rejected truthfully rather than reinterpreted.
 
-Protocol4 uses existing exact-version gates: reject new-agent/old-API and old-agent/
-new-API before execution. Package version, SQL schema and negotiation unchanged.
+Protocol4 retains the existing exact equality gates. The current agent rejects a
+schema3 media dispatch before source byte access or child dispatch; the immutable
+baseline schema3 decoder rejects schema4 envelopes. Worker HTTP handshakes likewise
+require exact agreement. Matched API/agent/child binaries remain an operator rollout
+requirement; this does not promise node/API registration-level version rejection or
+full mixed-binary deployment acceptance. Package version, SQL schema and negotiation
+remain unchanged.
 Register strict new durable JSON subpayload boundaries in inventory/scope. Upgrade
 matched binaries before new execution; do not reinterpret retained protocol3 jobs.
 

@@ -50,7 +50,7 @@ pub(super) async fn recover_commit(
                 "artifact_handle {artifact_handle_id} has no non-terminal commit to recover"
             ))
         })?;
-    let intent = {
+    let (intent, extraction_group) = {
         let mut tx = begin_read_only(&cp.pool, "recovery: recover_commit").await?;
         let intent = cp
             .artifact_commit_intents
@@ -62,9 +62,14 @@ pub(super) async fn recover_commit(
                     record.id
                 ))
             })?;
+        let extraction_group = voom_store::repo::media::audio_extract_operations::SqliteAudioExtractOperationRepo::operation_for_commit_in_tx(&mut tx, record.id).await?.is_some();
         commit_tx(tx).await?;
-        intent
+        (intent, extraction_group)
     };
+
+    if extraction_group {
+        return recover_extraction_group(cp, &record).await;
+    }
 
     let receiptless = intent.receipt.is_none();
     match intent.state {
@@ -101,6 +106,148 @@ pub(super) async fn recover_commit(
             )))
         }
     }
+}
+
+/// Explicit operator recovery classifies the entire extraction. It never
+/// supplies normal completion capabilities or lets one applied sibling publish
+/// while another member is unresolved.
+async fn recover_extraction_group(
+    cp: &ControlPlane,
+    requested: &ArtifactCommitRecord,
+) -> Result<CommitArtifactReport, VoomError> {
+    use voom_store::repo::media::audio_extract_operations::{
+        AudioExtractOperationState, SqliteAudioExtractOperationRepo,
+    };
+    let mut tx = begin_read_then_write(&cp.pool, "recovery: extraction operation").await?;
+    let now = cp.clock().now();
+    let (operation, claim) =
+        SqliteAudioExtractOperationRepo::operation_for_commit_in_tx(&mut tx, requested.id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::database("extraction recovery association disappeared".to_owned())
+            })?;
+    let members = read_extraction_members_in_tx(cp, &mut tx, &operation).await?;
+    if operation.outputs.is_empty()
+        || operation.outputs.len() > voom_worker_protocol::MAX_COMMIT_GROUP_OUTPUTS
+        || !matches!(
+            operation.operation.state,
+            AudioExtractOperationState::Prepared | AudioExtractOperationState::RecoveryRequired
+        )
+        || claim.expires_at <= now
+    {
+        return Err(VoomError::Conflict(
+            "extraction recovery requires the entire live prepared operation".to_owned(),
+        ));
+    }
+    let unresolved =
+        classify_extraction_members_in_tx(cp, &mut tx, &operation, &members, now).await?;
+    if unresolved {
+        let error = VoomError::Conflict(
+            "extraction recovery has an unresolved member; no outputs published".to_owned(),
+        );
+        mark_extraction_recovery_in_tx(
+            cp,
+            &mut tx,
+            operation.operation.id,
+            &claim,
+            &members,
+            &error,
+            now,
+        )
+        .await?;
+        commit_tx(tx).await?;
+        return Err(error);
+    }
+    let outcome = crate::artifact::publication::finish_extraction_group_in_tx(
+        cp, &mut tx, &operation, &claim, &members, now,
+    )
+    .await?;
+    let result = outcome
+        .results
+        .iter()
+        .find(|result| result.commit_record_id == requested.id)
+        .ok_or_else(|| {
+            VoomError::database("extraction recovery result omitted requested member".to_owned())
+        })?;
+    let report = CommitArtifactReport {
+        commit_record_id: requested.id,
+        artifact_handle_id: requested.artifact_handle_id,
+        verification_id: requested.verification_id,
+        target_path: std::path::PathBuf::from(&requested.target_path),
+        temp_path: requested.temp_path.as_ref().map(std::path::PathBuf::from),
+        state: ArtifactCommitState::Committed,
+        result_file_version_id: Some(result.result_file_version_id),
+        result_file_location_id: Some(result.result_file_location_id),
+        recovery_required: None,
+    };
+    commit_tx(tx).await?;
+    Ok(report)
+}
+
+async fn mark_extraction_recovery_in_tx(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    operation_id: u64,
+    claim: &voom_store::repo::media::audio_extract_operations::NewAudioExtractClaim,
+    members: &[(ArtifactCommitIntent, ArtifactCommitRecord)],
+    error: &VoomError,
+    now: OffsetDateTime,
+) -> Result<(), VoomError> {
+    for (intent, record) in members {
+        if intent.state == ArtifactCommitIntentState::Authorized {
+            cp.artifact_commit_intents
+                .mark_recovery_required_in_tx(tx, intent.id, now)
+                .await?;
+        }
+        cp.artifacts
+            .mark_commit_recovery_required_in_tx(
+                tx,
+                record.id,
+                ArtifactCommitFailure {
+                    failure_class: FailureClass::CommitFailure,
+                    error_code: error.error_code(),
+                    message: error.to_string(),
+                    finished_at: now,
+                },
+                error.to_string(),
+            )
+            .await?;
+    }
+    voom_store::repo::media::audio_extract_operations::SqliteAudioExtractOperationRepo::mark_recovery_required_in_tx(tx, operation_id, claim,
+            &voom_store::repo::media::audio_extract_operations::AudioExtractRecoveryFailure { error_code: error.error_code().as_str().to_owned(), message: error.to_string() }, now).await?;
+    Ok(())
+}
+
+async fn read_extraction_members_in_tx(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    operation: &voom_store::repo::media::audio_extract_operations::AudioExtractOperationRecord,
+) -> Result<Vec<(ArtifactCommitIntent, ArtifactCommitRecord)>, VoomError> {
+    let mut members = Vec::with_capacity(operation.outputs.len());
+    for output in &operation.outputs {
+        let record_id = output.commit_record_id.ok_or_else(|| {
+            VoomError::database("prepared extraction output has no commit".to_owned())
+        })?;
+        let record = cp
+            .artifacts
+            .get_commit_record_in_tx(tx, record_id)
+            .await?
+            .ok_or_else(|| VoomError::database("extraction recovery commit missing".to_owned()))?;
+        let intent = cp
+            .artifact_commit_intents
+            .get_by_commit_record_in_tx(tx, record_id)
+            .await?
+            .ok_or_else(|| VoomError::database("extraction recovery intent missing".to_owned()))?;
+        crate::artifact::publication::validate_verification_evidence_in_tx(
+            cp,
+            tx,
+            intent.verification_id,
+            record.id,
+        )
+        .await?;
+        members.push((intent, record));
+    }
+    Ok(members)
 }
 
 /// Classify a `recovery_required` intent from its receipts.
@@ -358,4 +505,48 @@ pub(super) fn durable_recovery_report(
         result_file_version_id: record.result_file_version_id,
         result_file_location_id: record.result_file_location_id,
     }
+}
+
+async fn classify_extraction_members_in_tx(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    operation: &voom_store::repo::media::audio_extract_operations::AudioExtractOperationRecord,
+    members: &[(ArtifactCommitIntent, ArtifactCommitRecord)],
+    now: OffsetDateTime,
+) -> Result<bool, VoomError> {
+    let mut unresolved = false;
+    for ((intent, record), output) in members.iter().zip(&operation.outputs) {
+        if !matches!(
+            intent.state,
+            ArtifactCommitIntentState::Authorized | ArtifactCommitIntentState::RecoveryRequired
+        ) || output.verification_id != Some(intent.verification_id)
+            || output.artifact_handle_id != Some(intent.artifact_handle_id)
+            || record.source_file_version_id != operation.operation.source_file_version_id
+        {
+            return Err(VoomError::Conflict(
+                "extraction recovery member is not fully applied; operator classification required"
+                    .to_owned(),
+            ));
+        }
+        let matching_applied = [
+            intent.receipt.as_ref(),
+            intent.supplemental_receipt.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|receipt| {
+            matches!(receipt, CommitReceipt::Applied(applied)
+                if applied.observed.size_bytes == intent.expected_facts.size_bytes
+                    && applied.observed.content_hash == intent.expected_facts.content_hash)
+        });
+        if !matching_applied {
+            unresolved = true;
+        }
+        guard_intent_scope_in_tx(cp, tx, intent, intent.owner_node_id).await?;
+        let source_asset =
+            crate::artifact::commit::intent::intent_source_asset_id(cp, tx, intent).await?;
+        evaluate_commit_safety_gate(cp, tx, source_asset, intent.source_file_version_id, now)
+            .await?;
+    }
+    Ok(unresolved)
 }

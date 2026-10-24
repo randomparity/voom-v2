@@ -2,8 +2,19 @@ use super::*;
 use crate::ProtocolError;
 
 #[test]
-fn protocol_version_is_three() {
-    assert_eq!(voom_core::PROTOCOL_VERSION, 3);
+fn protocol_version_is_four_for_owner_publication_evidence() {
+    assert_eq!(voom_core::PROTOCOL_VERSION, 4);
+}
+
+#[test]
+fn legacy_worker_cannot_negotiate_without_required_publication_evidence() {
+    assert!(matches!(
+        negotiate(3),
+        Err(ProtocolError::UnsupportedProtocolVersion {
+            offered: 3,
+            expected: 4
+        })
+    ));
 }
 
 #[test]

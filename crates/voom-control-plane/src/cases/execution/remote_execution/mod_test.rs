@@ -403,7 +403,7 @@ async fn node_incarnations_may_reuse_external_idempotency_keys() {
             incarnation_id: next_incarnation_id,
             workers: vec![RemoteWorkerDeclaration {
                 logical_name: "replacement-worker".to_owned(),
-                operations: vec![voom_core::OperationKind::TranscodeVideo],
+                operations: vec![voom_core::OperationKind::BackUpFile],
                 artifact_access: vec![ArtifactAccessMode::SharedMount],
                 accelerator: None,
                 max_parallel: 1,
@@ -1610,7 +1610,129 @@ async fn remote_acquire_skips_ineligible_higher_priority_work_for_eligible_ticke
     assert_eq!(dispatch.operation, "test.allowed");
 }
 
-const WF_OP: &str = "synthetic.workflow.operation.transcode_video";
+const WF_OP: &str = "synthetic.workflow.operation.back_up_file";
+
+// These fixtures exercise owner access consumption, not media publication.
+// Backup retains the same source-read/root-write declaration while keeping
+// mutation-publication success out of a synthetic access-protocol fixture.
+fn backup_envelope(root: u64) -> serde_json::Value {
+    json!({"operation": "back_up_file", "schema": voom_core::PROTOCOL_VERSION,
+        "source": {"storage_root_id": root, "provider_relative_locator": "movie.mkv"},
+        "destination": {"storage_root_id": root, "provider_relative_locator": "backup/movie.mkv", "overwrite": false}})
+}
+
+#[tokio::test]
+async fn markerless_policy_verifier_stays_available_to_legacy_claim() {
+    let operation = "synthetic.workflow.operation.verify_artifact";
+    let fixture = remote_fixture(&[(operation, vec!["shared_mount"])], &[operation], &[]).await;
+    let root = create_remote_scan_root(&fixture, "legacy-verifier").await;
+    let location = seed_scan_location(&fixture.cp, root, "final.mkv").await;
+    let payload = WorkflowTicketPayload::new_for_test(
+        "wf",
+        "plan",
+        "verify",
+        "root",
+        OperationKind::VerifyArtifact,
+        json!({"source_storage_root_id": root, "source_location_id": location}),
+    )
+    .to_ticket_payload()
+    .unwrap();
+    let ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: None,
+            kind: ticket_op(operation),
+            priority: 0,
+            payload,
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("legacy-verify", "legacy-verify-hash"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, RemoteAcquireOutcome::Idle { .. }),
+        "a markerless legacy verifier has no node execution contract: {outcome:?}"
+    );
+    assert_eq!(
+        fixture
+            .cp
+            .tickets
+            .get(ticket.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+    let lease = fixture
+        .cp
+        .acquire_lease(voom_store::repo::execution::leases::NewLease {
+            ticket_id: ticket.id,
+            worker_id: fixture.worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.ticket_id, ticket.id,
+        "eligibility filtering must not retire legacy work"
+    );
+}
+
+#[tokio::test]
+async fn enveloped_workflow_verifier_remains_remote_eligible() {
+    let operation = "synthetic.workflow.operation.verify_artifact";
+    let fixture = remote_fixture(&[(operation, vec!["shared_mount"])], &[operation], &[]).await;
+    let root = create_remote_scan_root(&fixture, "enveloped-verifier").await;
+    let location = seed_scan_location(&fixture.cp, root, "staged.mkv").await;
+    let payload = WorkflowTicketPayload::new_for_test("wf", "plan", "verify", "root", OperationKind::VerifyArtifact,
+        json!({"source_storage_root_id": root, "source_location_id": location,
+            "media_dispatch": {"operation": "verify_artifact", "schema": voom_core::PROTOCOL_VERSION,
+                "target": {"storage_root_id": root, "provider_relative_locator": "staged.mkv"},
+                "expected": {"size_bytes": 1, "content_hash": "blake3:fixture", "modified_at": null, "local_file_key": null}}
+        })).to_ticket_payload().unwrap();
+    let ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: None,
+            kind: ticket_op(operation),
+            priority: 0,
+            payload,
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("enveloped-verify", "enveloped-verify-hash"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("enveloped verification must remain remotely eligible: {outcome:?}")
+    };
+    assert_eq!(dispatch.ticket_id, ticket.id);
+    assert_eq!(
+        dispatch.dispatch_payload["rendered_payload"]["media_dispatch"]["operation"],
+        "verify_artifact"
+    );
+}
 
 /// A ready byte-touching ticket whose canonical declaration names the supplied
 /// rendered source, as the workflow planner would persist it.
@@ -1625,11 +1747,12 @@ async fn ready_workflow_ticket(
         "plan-owner-local",
         "node-owner-local",
         "branch-owner-local",
-        OperationKind::TranscodeVideo,
+        OperationKind::BackUpFile,
         json!({
-            "operation": "transcode_video",
+            "operation": "back_up_file",
             "source_storage_root_id": source_storage_root_id,
             "source_location_id": source_location_id,
+            "media_dispatch": backup_envelope(source_storage_root_id),
         }),
     )
     .to_ticket_payload()
@@ -1662,9 +1785,9 @@ async fn remote_acquire_skips_unresolvable_declaration_and_preserves_order() {
     let fixture = remote_fixture(
         &[
             (WF_OP, vec!["shared_mount"]),
-            ("transcode_video", vec!["shared_mount"]),
+            ("back_up_file", vec!["shared_mount"]),
         ],
-        &[WF_OP, "transcode_video"],
+        &[WF_OP, "back_up_file"],
         &[],
     )
     .await;
@@ -1692,9 +1815,9 @@ async fn remote_acquire_rejects_byte_work_owned_by_another_node() {
     let fixture = remote_fixture(
         &[
             (WF_OP, vec!["shared_mount"]),
-            ("transcode_video", vec!["shared_mount"]),
+            ("back_up_file", vec!["shared_mount"]),
         ],
-        &[WF_OP, "transcode_video"],
+        &[WF_OP, "back_up_file"],
         &[],
     )
     .await;
@@ -2569,9 +2692,9 @@ async fn remote_acquire_leased_binds_one_lease_plan_and_decision_atomically() {
     let fixture = remote_fixture(
         &[
             (WF_OP, vec!["shared_mount"]),
-            ("transcode_video", vec!["shared_mount"]),
+            ("back_up_file", vec!["shared_mount"]),
         ],
-        &[WF_OP, "transcode_video"],
+        &[WF_OP, "back_up_file"],
         &[],
     )
     .await;
@@ -2590,7 +2713,7 @@ async fn remote_acquire_leased_binds_one_lease_plan_and_decision_atomically() {
     assert_eq!(dispatch.ticket_id, ticket);
     // Criterion 4: the namespaced byte-work ticket dispatches under its bare
     // wire token, exactly like the canonical encoding.
-    assert_eq!(dispatch.operation, "transcode_video");
+    assert_eq!(dispatch.operation, "back_up_file");
     assert!(dispatch.artifact_access_plan.owner_node_id.is_some());
     assert!(dispatch.artifact_access_plan.access_evidence.is_some());
 
@@ -2923,13 +3046,13 @@ async fn overwrite_acquire_data(fixture: &RemoteFixture, key: &str, data: serde_
 /// location, so the declared declaration resolves owner-local (the control-plane
 /// twin of the API route's owner-local seeding).
 async fn byte_work_fixture() -> (RemoteFixture, StorageRootId, u64) {
-    let namespaced = "synthetic.workflow.operation.transcode_video";
+    let namespaced = "synthetic.workflow.operation.back_up_file";
     let fixture = remote_fixture(
         &[
             (namespaced, vec!["shared_mount"]),
-            ("transcode_video", vec!["shared_mount"]),
+            ("back_up_file", vec!["shared_mount"]),
         ],
-        &[namespaced, "transcode_video"],
+        &[namespaced, "back_up_file"],
         &[],
     )
     .await;
@@ -3010,17 +3133,18 @@ async fn byte_work_fixture() -> (RemoteFixture, StorageRootId, u64) {
 /// Create and ready one owner-local byte-work ticket against the fixture's
 /// rooted location.
 async fn ready_byte_work_ticket(fixture: &RemoteFixture, root_id: StorageRootId, location_id: u64) {
-    let namespaced = "synthetic.workflow.operation.transcode_video";
+    let namespaced = "synthetic.workflow.operation.back_up_file";
     let payload = json!({
         "workflow_id": "wf-replay",
         "plan_id": "plan-replay",
         "node_id": "node-replay",
         "branch_id": "branch-replay",
-        "operation": "transcode_video",
+        "operation": "back_up_file",
         "rendered_payload": {
-            "operation": "transcode_video",
+            "operation": "back_up_file",
             "source_storage_root_id": root_id.0,
             "source_location_id": location_id,
+            "media_dispatch": backup_envelope(root_id.0),
         },
         "timing": {"duration_ms": 25, "progress_interval_ms": 10},
         "declared_artifact_access": [
@@ -3889,4 +4013,42 @@ async fn concurrent_remote_acquire_across_nodes_at_one_ticket_leases_exactly_onc
     );
 
     assert_losers_lost_on_readiness(&fixture.cp, &outcomes.idle_decisions, OP, &observed).await;
+}
+
+#[tokio::test]
+async fn standalone_audio_dispatch_does_not_enter_workflow_operation_admission() {
+    let operation = "transcode_audio";
+    let fixture = remote_fixture(&[(operation, vec!["shared_mount"])], &[operation], &[]).await;
+    let ticket = fixture.cp.create_ticket(NewTicket {
+        job_id: None, kind: ticket_op(operation), priority: 0,
+        payload: json!({"rendered_payload": {"media_dispatch": {
+            "operation": "transcode_audio", "schema": voom_core::PROTOCOL_VERSION,
+            "source": {"storage_root_id": 1, "provider_relative_locator": "source.mkv"},
+            "expected": {"size_bytes": 1, "content_hash": "hash", "modified_at": null, "local_file_key": null},
+            "output_container": "mkv", "output": {"storage_root_id": 1, "provider_relative_locator": "output.mkv", "overwrite": false},
+            "selection": {"selected_streams": [{"snapshot_stream_id": "stream-1", "provider_stream_index": 1}]},
+            "settings": {"target_codec": "opus", "profile": "default"}
+        }}}), max_attempts: 1, created_at: T0,
+    }).await.unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("standalone-audio", "standalone-audio-hash"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, RemoteAcquireOutcome::Leased(dispatch) if dispatch.ticket_id == ticket.id)
+    );
+    let operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audio_synthesis_operations")
+        .fetch_one(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        operations, 0,
+        "standalone work has no workflow semantic-operation authority"
+    );
 }
