@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--workdir", type=Path, required=True)
+    parser.add_argument("--mode", choices=("reuse", "late-rollback"), default="reuse")
     args = parser.parse_args()
     os.umask(0o077)
     args.workdir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -32,6 +33,11 @@ def main():
         target.execute("UPDATE nodes SET status='active',active_incarnation_id=?,last_seen_at=?,auth_token_hash=? WHERE id=?", (context["incarnation_id"], now, digest, context["node_id"]))
         target.execute("UPDATE node_incarnations SET status='active',last_seen_at=?,ended_at=NULL,end_reason=NULL WHERE incarnation_id=?", (now, context["incarnation_id"]))
         target.execute("UPDATE workers SET status='active',last_seen_at=?,retired_at=NULL WHERE node_id=?", (now, context["node_id"]))
+        if args.mode == "late-rollback":
+            assert target.execute("SELECT state FROM leases WHERE id=?", (context["lease_id"],)).fetchone()[0] == "held", "late rollback needs a genuine prepublication capture"
+            expiry = target.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+60 seconds')").fetchone()[0]
+            target.execute("UPDATE leases SET expires_at=? WHERE id=?", (expiry, context["lease_id"]))
+            target.execute("UPDATE audio_extract_operations SET claim_expires_at=? WHERE claim_lease_id=?", (expiry, context["lease_id"]))
     credential = args.workdir / "credential"
     credential.write_text(token)
     repo = Path(__file__).resolve().parents[1]
@@ -58,7 +64,10 @@ def main():
                 def send_signal(self, _signal):
                     pass
             try:
-                proxy.check_reuse_acquire(credential, NoOwner())
+                if args.mode == "late-rollback":
+                    proxy.check_late_publication_rollback(credential)
+                else:
+                    proxy.check_reuse_acquire(credential, NoOwner())
                 assert not proxy.failures, proxy.failures
             finally:
                 (args.workdir / "checks.json").write_text(json.dumps(proxy.checks, indent=2))

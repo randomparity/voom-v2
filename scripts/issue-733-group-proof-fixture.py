@@ -677,6 +677,81 @@ class GroupProofProxy:
         finally:
             node_process.send_signal(signal.SIGCONT)
 
+    def complete_database_state(self):
+        with sqlite3.connect(f"file:{self.database}?mode=ro", uri=True) as database:
+            tables = [row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+            state = {}
+            for table in tables:
+                quoted = '"' + table.replace('"', '""') + '"'
+                columns = [row[1] for row in database.execute(f"PRAGMA table_info({quoted})")]
+                order = ",".join('"' + column.replace('"', '""') + '"' for column in columns)
+                state[table] = database.execute(f"SELECT * FROM {quoted} ORDER BY {order}").fetchall()
+            return state
+
+    def check_late_publication_rollback(self, credential):
+        # Reuse real supplied capabilities from their durable authorization
+        # responses, never manufacture or replace an intent fence.
+        with sqlite3.connect(self.database) as database:
+            context = json.loads(database.execute("SELECT report FROM artifact_verifications ORDER BY id LIMIT 1").fetchone()[0])["remote_completion"]
+            operation, generation, lease, claim = database.execute("SELECT id,dispatch_generation,claim_lease_id,claim_token FROM audio_extract_operations WHERE state='prepared'").fetchone()
+            rows = database.execute("SELECT intent.id,intent.receipt FROM audio_extract_operation_outputs AS output JOIN artifact_commit_intents AS intent ON intent.commit_record_id=output.commit_record_id WHERE output.operation_id=? ORDER BY output.ordinal", (operation,)).fetchall()
+            members = []
+            for intent, encoded_receipt in rows:
+                responses = database.execute("SELECT response_json FROM remote_idempotency_keys WHERE route_key=? AND status='completed'", (f"POST /v1/artifact/commit/{intent}/authorize",)).fetchall()
+                fences = {json.loads(row[0])["data"]["fence_hex"] for row in responses if json.loads(row[0])["status"] == "ok"}
+                assert len(fences) == 1, "captured authorization capability association is ambiguous"
+                receipt = json.loads(encoded_receipt)
+                assert receipt["kind"] == "applied"
+                members.append({"intent_id": intent, "fence_hex": fences.pop(), "applied": receipt["observed"]})
+            original_route = f"POST /v1/execution/lease/{context['lease_id']}/complete"
+            original_key = f"{context['incarnation_id']}:{context['idempotency_key']}"
+            assert database.execute("SELECT COUNT(*) FROM remote_idempotency_keys WHERE node_id=? AND route_key=? AND worker_scope_id=? AND idempotency_key=?", (context["node_id"], original_route, context["worker_id"], original_key)).fetchone()[0] == 0
+            now = database.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')").fetchone()[0]
+            other_hash = hashlib.sha256(context["request_hash"].encode()).hexdigest()
+            assert other_hash != context["request_hash"]
+            injected = database.execute("INSERT INTO remote_idempotency_keys (node_id,route_key,worker_scope_id,worker_id,idempotency_key,request_hash,response_json,status,created_at) VALUES (?,?,?,?,?,?,?,'completed',?)", (context["node_id"], original_route, context["worker_id"], context["worker_id"], original_key, other_hash, json.dumps({"status":"error","code":"CONFLICT","message":"synthetic original completion"}), now)).lastrowid
+        encoded = {"node_id": context["node_id"], "incarnation_id": context["incarnation_id"], "proof": {"group": {"operation_id": operation, "generation": generation, "claim_lease_id": lease, "claim_token": claim, "output_count": len(members)}, "members": members}}
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + Path(credential).read_text().strip(), "X-Voom-Idempotency-Key": "fixture-late-rollback-" + uuid.uuid4().hex}
+        path = f"/v1/artifact/commit/group/{operation}/complete"
+        body = json.dumps(encoded).encode()
+        before = self.complete_database_state()
+        response = self.forward(path, body, headers)
+        value = json.loads(response[1])
+        assert response[0] == 409 and value["error"]["code"] == "CONFLICT"
+        assert "idempotency key reused with different request body" in value["error"]["message"], "failure must reach the original completion reservation AFTER catalog writes"
+        after = self.complete_database_state()
+        for table in before.keys() - {"remote_idempotency_keys"}:
+            assert before[table] == after[table], "late publication failure changed " + table
+        old_replays = before["remote_idempotency_keys"]
+        new_replays = after["remote_idempotency_keys"]
+        assert all(row in new_replays for row in old_replays), "original completion replay changed"
+        added = [row for row in new_replays if row not in old_replays]
+        assert len(added) == 1, "only the accepted group-error replay may persist"
+        with sqlite3.connect(self.database) as database:
+            database.row_factory = sqlite3.Row
+            error = database.execute("SELECT * FROM remote_idempotency_keys WHERE id=?", (added[0][0],)).fetchone()
+            assert error["route_key"] == "POST " + path and error["status"] == "completed"
+            stored = json.loads(error["response_json"])
+            assert stored["status"] == "error" and stored["code"] == "CONFLICT"
+        assert self.forward(path, body, headers) == response
+        assert self.complete_database_state() == after, "exact late-error replay changed durable state"
+        self.checks.append({"case": "late-original-replay-conflict-rolls-back-all-publication-and-events", "status": 409, "unchanged_tables": len(before) - 1, "allowed_group_error_replays": 1})
+        # Remove only this test's injected row. A fresh group key must now
+        # publish the otherwise identical proof, proving the error was late.
+        with sqlite3.connect(self.database) as database:
+            database.execute("DELETE FROM remote_idempotency_keys WHERE id=?", (injected,))
+        headers["X-Voom-Idempotency-Key"] = "fixture-late-positive-" + uuid.uuid4().hex
+        positive = self.forward(path, body, headers)
+        assert positive[0] == 200, "valid captured proof did not publish after fixture conflict removal"
+        with sqlite3.connect(self.database) as database:
+            assert database.execute("SELECT COUNT(*) FROM artifact_commit_records WHERE state='committed'").fetchone()[0] == len(members)
+            assert database.execute("SELECT COUNT(*) FROM artifact_commit_intents WHERE state='completed'").fetchone()[0] == len(members)
+            assert database.execute("SELECT state FROM tickets WHERE id=?", (context["ticket_id"],)).fetchone()[0] == "succeeded"
+        published = self.complete_database_state()
+        assert self.forward(path, body, headers) == positive
+        assert self.complete_database_state() == published, "positive control replay duplicated publication"
+        self.checks.append({"case": "late-rollback-valid-proof-positive-control", "status": 200, "members": len(members)})
+
     def close(self):
         self.closing = True
         self.server.shutdown()
