@@ -31,9 +31,10 @@ use voom_core::{NodeId, NodeIncarnationId, StorageRootId, VoomError};
 
 use crate::client::{
     CommitAppliedEvidence, CommitApplyingRequest, CommitAuthorizeOutcome, CommitAuthorizeRequest,
-    CommitCompleteOutcome, CommitCompleteRequest, CommitMismatchedEvidence, CommitObservedFacts,
-    CommitOpenOutcome, CommitOpenRequest, CommitOutcomeEvidence, CommitOutcomeRequest,
-    CommitOutcomeUnknownEvidence, CommitReceiptOutcome, OpenCommitIntent, RetryRequest,
+    CommitCompleteOutcome, CommitCompleteRequest, CommitGroupCompleteRequest,
+    CommitMismatchedEvidence, CommitObservedFacts, CommitOpenOutcome, CommitOpenRequest,
+    CommitOutcomeEvidence, CommitOutcomeRequest, CommitOutcomeUnknownEvidence,
+    CommitReceiptOutcome, OpenCommitIntent, RetryRequest,
 };
 use crate::runtime::{
     ControlPlaneApi, CoordinatorExit, LeaseSettlement, RuntimeFatal, ShutdownForce, ShutdownKind,
@@ -166,9 +167,17 @@ async fn drive_open_intents(
     let Some(listing) = until_shutdown(shutdown, open_commit_intents(context)).await else {
         return Ok(DrivePass::ShutdownObserved);
     };
+    let mut groups = std::collections::BTreeMap::<u64, Vec<OpenCommitIntent>>::new();
     for intent in listing?.intents {
         if *shutdown.borrow() != ShutdownKind::Running {
             return Ok(DrivePass::ShutdownObserved);
+        }
+        if let Some(member) = &intent.group {
+            groups
+                .entry(member.group.operation_id)
+                .or_default()
+                .push(intent);
+            continue;
         }
         match intent.state.as_str() {
             "pending" | "authorized" => {
@@ -182,6 +191,12 @@ async fn drive_open_intents(
                 )));
             }
         }
+    }
+    for members in groups.into_values() {
+        if *shutdown.borrow() != ShutdownKind::Running {
+            return Ok(DrivePass::ShutdownObserved);
+        }
+        drive_commit_group(context, members, authorize_requests).await?;
     }
     Ok(DrivePass::Drained)
 }
@@ -197,14 +212,23 @@ async fn drive_commit_intent(
     authorize_requests: &mut HashMap<u64, RetryRequest<CommitAuthorizeRequest>>,
 ) -> Result<(), VoomError> {
     let Some(authorized) = authorize_intent(context, intent_id, authorize_requests).await? else {
-        // The intent left the pending state between the listing and the
-        // authorize — the signature of an `authorized` intent minted by a
-        // prior agent incarnation. Per the module contract it belongs to the
-        // control plane's recovery classification: skip it and keep the
-        // normal poll cadence instead of standing down fatally.
+        // A prior incarnation's authorization or a fresh rejection whose exact
+        // intent is no longer actionable cannot grant byte work. Keep polling;
+        // publication failure settles through the source completion separately.
         return Ok(());
     };
 
+    if let Some(proof) = apply_authorized_intent(context, intent_id, &authorized).await? {
+        complete_commit(context, intent_id, &proof.fence_hex).await?;
+    }
+    Ok(())
+}
+
+async fn apply_authorized_intent(
+    context: &CommitCoordinatorContext,
+    intent_id: ArtifactCommitIntentId,
+    authorized: &CommitAuthorizeOutcome,
+) -> Result<Option<voom_worker_protocol::CommitGroupMemberProof>, VoomError> {
     let applying_request = RetryRequest::new(
         new_key("commit-applying"),
         &CommitApplyingRequest {
@@ -253,7 +277,7 @@ async fn drive_commit_intent(
                 }),
             )
             .await?;
-            return Ok(());
+            return Ok(None);
         }
         Materialize::Present | Materialize::Materialized => {}
     }
@@ -266,9 +290,104 @@ async fn drive_commit_intent(
         }
     };
     report_outcome(context, intent_id, evidence.clone()).await?;
-    if matches!(evidence, CommitOutcomeEvidence::Applied(_)) {
-        complete_commit(context, intent_id, &authorized.fence_hex).await?;
+    if let CommitOutcomeEvidence::Applied(applied) = evidence {
+        return Ok(Some(voom_worker_protocol::CommitGroupMemberProof {
+            intent_id,
+            fence_hex: authorized.fence_hex.clone(),
+            applied: voom_worker_protocol::ObservedFileFacts {
+                size_bytes: applied.observed.size_bytes,
+                content_hash: applied.observed.content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        }));
     }
+    Ok(None)
+}
+
+async fn drive_commit_group(
+    context: &CommitCoordinatorContext,
+    mut members: Vec<OpenCommitIntent>,
+    authorize_requests: &mut HashMap<u64, RetryRequest<CommitAuthorizeRequest>>,
+) -> Result<(), VoomError> {
+    members.sort_by_key(|intent| intent.group.as_ref().map(|member| member.ordinal));
+    let identity = members
+        .first()
+        .and_then(|intent| intent.group.as_ref())
+        .map(|member| member.group.clone())
+        .ok_or_else(|| VoomError::Internal("empty commit group listing".to_owned()))?;
+    if members.len() > voom_worker_protocol::MAX_COMMIT_GROUP_OUTPUTS
+        || usize::try_from(identity.output_count).ok() != Some(members.len())
+    {
+        return Err(VoomError::Conflict(
+            "open commit group is incomplete or exceeds bound".to_owned(),
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for (ordinal, intent) in members.iter().enumerate() {
+        let member = intent
+            .group
+            .as_ref()
+            .ok_or_else(|| VoomError::Internal("group member lost identity".to_owned()))?;
+        if member.group != identity
+            || usize::try_from(member.ordinal).ok() != Some(ordinal)
+            || !ids.insert(intent.id)
+        {
+            return Err(VoomError::Conflict(
+                "open commit group has ambiguous identity, ordinal or member".to_owned(),
+            ));
+        }
+    }
+    if members
+        .iter()
+        .any(|intent| intent.state == "recovery_required")
+    {
+        for intent in members
+            .iter()
+            .filter(|intent| intent.state == "recovery_required")
+        {
+            drive_recovery_intent(context, intent).await?;
+        }
+        return Ok(());
+    }
+    // Obtain every member's own authorization before the first apply. A prior
+    // incarnation's member remains recovery-owned; no sibling capability can
+    // substitute for it.
+    let mut authorized = Vec::with_capacity(members.len());
+    for intent in &members {
+        if !matches!(intent.state.as_str(), "pending" | "authorized") {
+            return Err(VoomError::Internal(
+                "unknown open group intent state".to_owned(),
+            ));
+        }
+        let Some(member) = authorize_intent(context, intent.id, authorize_requests).await? else {
+            return Ok(());
+        };
+        authorized.push(member);
+    }
+    let mut proofs = Vec::with_capacity(members.len());
+    for (intent, authorized) in members.iter().zip(&authorized) {
+        let Some(proof) = apply_authorized_intent(context, intent.id, authorized).await? else {
+            return Ok(());
+        };
+        proofs.push(proof);
+    }
+    let operation_id = identity.operation_id;
+    let request = RetryRequest::new(
+        new_key("commit-group-complete"),
+        &CommitGroupCompleteRequest {
+            node_id: context.node_id,
+            incarnation_id: context.incarnation_id,
+            proof: voom_worker_protocol::CommitGroupProof {
+                group: identity,
+                members: proofs,
+            },
+        },
+    )?;
+    context
+        .api
+        .complete_commit_group(operation_id, &request)
+        .await?;
     Ok(())
 }
 
@@ -276,8 +395,9 @@ async fn drive_commit_intent(
 /// already issued it. Returns `Ok(None)` when a fresh authorization is
 /// refused because the intent is no longer pending — the control plane's
 /// marker that the intent was authorized by an earlier agent incarnation and
-/// now belongs to its recovery classification. Any other error, including
-/// every other conflict (fence mismatch, recovery disputes), stays fatal.
+/// now belongs to its recovery classification. Other fresh conflicts stand down
+/// only when a complete successful listing proves this intent is not actionable.
+/// Read errors, still-actionable conflicts and frozen-request errors stay fatal.
 async fn authorize_intent(
     context: &CommitCoordinatorContext,
     intent_id: ArtifactCommitIntentId,
@@ -308,6 +428,17 @@ async fn authorize_intent(
             Ok(Some(outcome))
         }
         Err(VoomError::Conflict(message)) if message.contains("not pending") => Ok(None),
+        Err(error @ VoomError::Conflict(_)) => {
+            // This endpoint projects every actionable intent (no pagination or
+            // cap). A rejected fresh authorization can have aborted its intent
+            // under a publication fence. Never turn a failed read into absence.
+            let open = open_commit_intents(context).await?;
+            if open.intents.iter().any(|intent| intent.id == intent_id) {
+                Err(error)
+            } else {
+                Ok(None)
+            }
+        }
         Err(error) => Err(error),
     }
 }

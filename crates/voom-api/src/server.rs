@@ -352,8 +352,31 @@ pub fn bounded_router(router: Router, limits: ServerLimits) -> Router {
         .layer(middleware::map_response(normalize_boundary_response))
 }
 
+#[derive(Clone, Copy)]
+struct StructuredRequestTimeout;
+
+pub(crate) fn structured_request_timeout(command: &'static str, message: &str) -> Response {
+    let mut response = err_response(
+        StatusCode::REQUEST_TIMEOUT,
+        command,
+        ErrorCode::RequestTimeout.as_str(),
+        message.to_owned(),
+        Some(TIMEOUT_HINT.to_owned()),
+    );
+    response.extensions_mut().insert(StructuredRequestTimeout);
+    response
+}
+
 async fn normalize_boundary_response(response: Response) -> Response {
     match response.status() {
+        StatusCode::REQUEST_TIMEOUT
+            if response
+                .extensions()
+                .get::<StructuredRequestTimeout>()
+                .is_some() =>
+        {
+            response
+        }
         StatusCode::REQUEST_TIMEOUT => err_response(
             StatusCode::REQUEST_TIMEOUT,
             "api.request",

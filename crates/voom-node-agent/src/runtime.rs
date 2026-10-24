@@ -24,10 +24,10 @@ use crate::child::{ChildErrorKind, ChildSpec, ChildSupervisor, RunningChild};
 use crate::client::{
     AcquireOutcome, AcquireRequest, ActivateOutcome, ActivateRequest, ActivatedWorker,
     CommitApplyingOutcome, CommitApplyingRequest, CommitAuthorizeOutcome, CommitAuthorizeRequest,
-    CommitCompleteOutcome, CommitCompleteRequest, CommitOpenOutcome, CommitOpenRequest,
-    CommitOutcomeRequest, CommitReceiptOutcome, CompleteOutcome, CompleteRequest,
-    ControlPlaneClient, DeactivateOutcome, DeactivateRequest, FailOutcome, FailRequest,
-    LeaseDispatch, LeaseHeartbeatOutcome, LeaseHeartbeatRequest, NodeHeartbeatOutcome,
+    CommitCompleteOutcome, CommitCompleteRequest, CommitGroupCompleteRequest, CommitOpenOutcome,
+    CommitOpenRequest, CommitOutcomeRequest, CommitReceiptOutcome, CompleteOutcome,
+    CompleteRequest, ControlPlaneClient, DeactivateOutcome, DeactivateRequest, FailOutcome,
+    FailRequest, LeaseDispatch, LeaseHeartbeatOutcome, LeaseHeartbeatRequest, NodeHeartbeatOutcome,
     NodeHeartbeatRequest, RetryRequest, StorageRootProof, WorkerDeclaration,
     WorkerReadinessOutcome, WorkerReadinessRequest,
 };
@@ -1193,7 +1193,23 @@ async fn run_lease(
         changed = shutdown.changed() => shutdown_outcome(&changed, *shutdown.borrow()),
         Some(()) = lease_fence_rx.recv() => LeaseOutcome::TerminalElsewhere,
     };
-    if let Err(error) = settle_lease(&context, &lease.dispatch, outcome).await {
+    let settled = if matches!(&outcome, LeaseOutcome::Complete(_)) {
+        tokio::select! {
+            result = settle_lease(&context, &lease.dispatch, outcome) => result,
+            changed = worker_cancel.changed() => {
+                let cancellation = *worker_cancel.borrow();
+                settle_lease(&context, &lease.dispatch, cancellation_outcome(&changed, cancellation)).await
+            },
+            changed = shutdown.changed() => {
+                let kind = *shutdown.borrow();
+                settle_lease(&context, &lease.dispatch, shutdown_outcome(&changed, kind)).await
+            },
+            Some(()) = lease_fence_rx.recv() => Ok(()),
+        }
+    } else {
+        settle_lease(&context, &lease.dispatch, outcome).await
+    };
+    if let Err(error) = settled {
         let _ = context.fatal_tx.send(error);
     }
     let _ = heartbeat_stop_tx.send(true);
@@ -1365,7 +1381,10 @@ pub(crate) async fn open_worker_stream(
         context.progress_timeout,
         child.dispatch(
             credentials,
-            &format!("{}-{}", context.incarnation_id, dispatch.lease_id.0),
+            &voom_worker_protocol::owner_dispatch_idempotency_key(
+                context.incarnation_id,
+                dispatch.lease_id,
+            ),
             request,
         ),
     )
@@ -1716,10 +1735,27 @@ pub(crate) trait ControlPlaneApi: std::fmt::Debug + Send + Sync {
         intent_id: ArtifactCommitIntentId,
         request: &RetryRequest<CommitCompleteRequest>,
     ) -> Result<CommitCompleteOutcome, VoomError>;
+
+    async fn complete_commit_group(
+        &self,
+        _operation_id: u64,
+        _request: &RetryRequest<CommitGroupCompleteRequest>,
+    ) -> Result<voom_worker_protocol::CommitGroupCompleteOutcome, VoomError> {
+        Err(VoomError::Config(
+            "control-plane API does not support grouped completion".to_owned(),
+        ))
+    }
 }
 
 #[async_trait]
 impl ControlPlaneApi for ControlPlaneClient {
+    async fn complete_commit_group(
+        &self,
+        operation_id: u64,
+        request: &RetryRequest<CommitGroupCompleteRequest>,
+    ) -> Result<voom_worker_protocol::CommitGroupCompleteOutcome, VoomError> {
+        Self::complete_commit_group(self, operation_id, request).await
+    }
     async fn activate(
         &self,
         node_id: voom_core::NodeId,

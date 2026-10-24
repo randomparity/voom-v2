@@ -48,6 +48,11 @@ pub use operations::hash_file::{HashFileRequest, HashFileResult, HashedSidecar};
 pub use operations::probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
 };
+pub use operations::publication::{
+    CommitGroupCompleteOutcome, CommitGroupIdentity, CommitGroupMemberProof, CommitGroupProof,
+    CommitGroupResult, MAX_COMMIT_GROUP_OUTPUTS, OpenCommitGroupMember, OwnerObservedEvidence,
+    OwnerObservedOutput, OwnerProbeEvidence, owner_dispatch_idempotency_key,
+};
 pub use operations::remux::{
     REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxObservedFacts, RemuxOutput,
     RemuxRequest, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,

@@ -434,8 +434,9 @@ async fn complete(
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
     };
 
-    match control_plane
-        .remote_complete(RemoteCompleteInput {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        control_plane.remote_complete(RemoteCompleteInput {
             node_id: NodeId(request.node_id),
             token,
             incarnation_id: request.incarnation_id,
@@ -444,11 +445,16 @@ async fn complete(
             idempotency_key,
             request_hash,
             result: request.result,
-        })
-        .await
+        }),
+    )
+    .await
     {
-        Ok(outcome) => ok_response(COMPLETE_COMMAND, outcome),
-        Err(err) => voom_route_error_response(COMPLETE_COMMAND, &err),
+        Ok(Ok(outcome)) => ok_response(COMPLETE_COMMAND, outcome),
+        Ok(Err(err)) => voom_route_error_response(COMPLETE_COMMAND, &err),
+        Err(_) => crate::server::structured_request_timeout(
+            COMPLETE_COMMAND,
+            "completion request exceeded its 10-second response window; outcome remains unknown",
+        ),
     }
 }
 

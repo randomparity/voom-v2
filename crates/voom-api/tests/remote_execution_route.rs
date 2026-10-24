@@ -1148,8 +1148,17 @@ async fn canonical_worker_acquires_namespaced_workflow() {
         "operation": "transcode_video",
         "rendered_payload": {
             "operation": "transcode_video",
+            "source_file_version_id": version_id,
             "source_storage_root_id": root.id.0,
             "source_location_id": location_id,
+            "media_dispatch": {
+                "operation": "transcode_video", "schema": voom_core::PROTOCOL_VERSION,
+                "source": {"storage_root_id": root.id.0, "provider_relative_locator": "movie.mkv"},
+                "expected": {"size_bytes": 1, "content_hash": "owner-local-api", "modified_at": null, "local_file_key": null},
+                "output_container": "mkv", "output_video_codec": "hevc",
+                "output": {"storage_root_id": root.id.0, "provider_relative_locator": "staged/movie.hevc.mkv", "overwrite": false},
+                "profile": voom_core::TranscodeVideoProfile::default_hevc()
+            },
         },
         "timing": {"duration_ms": 25, "progress_interval_ms": 10},
         "declared_artifact_access": [

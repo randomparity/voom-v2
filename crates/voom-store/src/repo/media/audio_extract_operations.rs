@@ -73,6 +73,20 @@ pub struct NewPreparedAudioExtractOutput {
     pub probe_payload: serde_json::Value,
 }
 
+/// Fenced owner preparation has no control-plane-selected temp sibling. The
+/// existing nullable ledger column stays NULL; the node journals actual apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFencedPreparedAudioExtractOutput {
+    pub operation_output_id: u64,
+    pub staging_path: String,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
+    pub verification_id: ArtifactVerificationId,
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub probe_worker_id: WorkerId,
+    pub probe_payload: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFinalizedAudioExtractOutput {
     pub operation_output_id: u64,
@@ -243,6 +257,181 @@ pub struct SqliteAudioExtractOperationRepo {
 }
 
 impl SqliteAudioExtractOperationRepo {
+    pub async fn require_committed_lineage_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        record: &AudioExtractOperationRecord,
+    ) -> Result<AudioExtractDispatchAttempt, VoomError> {
+        let attempt = Self::get_dispatch_attempt_in_tx(
+            tx,
+            record.operation.id,
+            record.operation.dispatch_generation,
+        )
+        .await?
+        .ok_or_else(|| {
+            VoomError::database(
+                "committed extraction lacks its exact dispatch generation".to_owned(),
+            )
+        })?;
+        if record.operation.state != AudioExtractOperationState::Committed
+            || record.outputs.is_empty()
+        {
+            return Err(VoomError::database(
+                "audio extraction canonical reuse is not committed".to_owned(),
+            ));
+        }
+        if attempt.status != AudioExtractDispatchAttemptStatus::Terminal
+            || attempt.paths.len() != record.outputs.len()
+        {
+            return Err(VoomError::database(
+                "committed extraction attempt is not terminal or has a different output set"
+                    .to_owned(),
+            ));
+        }
+        for (output, path) in record.outputs.iter().zip(&attempt.paths) {
+            if output.staging_path.as_ref() != Some(path) {
+                return Err(VoomError::database(
+                    "committed extraction path differs from its exact attempt".to_owned(),
+                ));
+            }
+            let present: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM audio_extract_output_lineage \
+                 WHERE id = ? AND operation_output_id = ? AND source_file_version_id = ? \
+                   AND source_media_snapshot_id = ? AND source_snapshot_stream_id = ? \
+                   AND source_provider_stream_index = ? AND result_file_version_id = ?)",
+            )
+            .bind(
+                output
+                    .lineage_id
+                    .map(|id| i64_from_u64(id, "extraction lineage id"))
+                    .transpose()?,
+            )
+            .bind(i64_from_u64(output.id, "extraction operation output id")?)
+            .bind(i64_from_u64(
+                record.operation.source_file_version_id.0,
+                "extraction source version",
+            )?)
+            .bind(i64_from_u64(
+                record.operation.source_media_snapshot_id.0,
+                "extraction source snapshot",
+            )?)
+            .bind(&output.source_snapshot_stream_id)
+            .bind(i64::from(output.source_provider_stream_index))
+            .bind(
+                output
+                    .result_file_version_id
+                    .map(|id| i64_from_u64(id.0, "extraction result version"))
+                    .transpose()?,
+            )
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("extraction canonical lineage proof", error)
+            })?;
+            if !present {
+                return Err(VoomError::database(
+                    "committed extraction lineage differs from canonical operation output"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(attempt)
+    }
+
+    pub async fn operation_for_commit_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        commit_id: ArtifactCommitRecordId,
+    ) -> Result<Option<(AudioExtractOperationRecord, NewAudioExtractClaim)>, VoomError> {
+        let row = sqlx::query(
+            "SELECT operation.id, operation.claim_lease_id FROM audio_extract_operation_outputs AS output \
+             JOIN audio_extract_operations AS operation ON operation.id = output.operation_id \
+             WHERE output.commit_record_id = ?",
+        )
+        .bind(i64_from_u64(commit_id.0, "extraction commit association")?)
+        .fetch_optional(&mut **tx).await
+        .map_err(|error| VoomError::database_context("extraction commit association", error))?;
+        let Some(row) = row else { return Ok(None) };
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|error| map_row_err("audio_extract_operations", error))?;
+        let lease: i64 = row
+            .try_get("claim_lease_id")
+            .map_err(|error| map_row_err("audio_extract_operations", error))?;
+        let lease = u64_from_i64(lease, "extraction claim lease")?;
+        if lease == 0 {
+            return Err(VoomError::database(
+                "extraction claim lease is zero".to_owned(),
+            ));
+        }
+        let (record, claim) = Self::claimed_for_lease_in_tx(tx, LeaseId(lease))
+            .await?
+            .ok_or_else(|| {
+                VoomError::database("extraction commit has no operation claim".to_owned())
+            })?;
+        if i64_from_u64(record.operation.id, "extraction operation id")? != id
+            || !record
+                .outputs
+                .iter()
+                .any(|output| output.commit_record_id == Some(commit_id))
+        {
+            return Err(VoomError::database(
+                "extraction commit association is ambiguous".to_owned(),
+            ));
+        }
+        Ok(Some((record, claim)))
+    }
+
+    /// Resolve the exact operation admitted by a source workflow lease. Decode
+    /// every candidate before deciding whether this association is ambiguous.
+    pub async fn claimed_for_lease_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+    ) -> Result<Option<(AudioExtractOperationRecord, NewAudioExtractClaim)>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, claim_token, claim_expires_at FROM audio_extract_operations \
+             WHERE claim_lease_id = ? ORDER BY id",
+        )
+        .bind(i64_from_u64(lease_id.0, "audio extraction source lease")?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("audio extraction lease association", error)
+        })?;
+        let mut decoded = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|error| map_row_err("audio_extract_operations", error))?;
+            let token: String = row
+                .try_get("claim_token")
+                .map_err(|error| map_row_err("audio_extract_operations", error))?;
+            let expiry: String = row
+                .try_get("claim_expires_at")
+                .map_err(|error| map_row_err("audio_extract_operations", error))?;
+            let record = load_record_by_id(tx, id).await?.ok_or_else(|| {
+                VoomError::database("audio extraction association disappeared".to_owned())
+            })?;
+            if token.is_empty() {
+                return Err(VoomError::database(
+                    "audio extraction claim token is empty".to_owned(),
+                ));
+            }
+            let claim = NewAudioExtractClaim {
+                operation_key: record.operation.operation_key.clone(),
+                expected_generation: record.operation.dispatch_generation,
+                lease_id,
+                claim_token: token,
+                expires_at: super::common::parse_iso8601(&expiry)?,
+            };
+            decoded.push((record, claim));
+        }
+        if decoded.len() > 1 {
+            return Err(VoomError::database(
+                "source lease has ambiguous audio extraction operations".to_owned(),
+            ));
+        }
+        Ok(decoded.pop())
+    }
+
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -352,8 +541,40 @@ impl SqliteAudioExtractOperationRepo {
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
         for output in outputs {
-            bind_prepared_output(tx, output).await?;
+            let binding = NewFencedPreparedAudioExtractOutput {
+                operation_output_id: output.operation_output_id,
+                staging_path: output.staging_path.clone(),
+                artifact_handle_id: output.artifact_handle_id,
+                artifact_location_id: output.artifact_location_id,
+                verification_id: output.verification_id,
+                commit_record_id: output.commit_record_id,
+                probe_worker_id: output.probe_worker_id,
+                probe_payload: output.probe_payload.clone(),
+            };
+            bind_prepared_output(tx, &binding, Some(&output.temp_path)).await?;
         }
+        Self::mark_prepared_in_tx(tx, operation_id, claim, now).await
+    }
+
+    pub async fn prepare_fenced_operation_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        operation_id: u64,
+        claim: &NewAudioExtractClaim,
+        outputs: &[NewFencedPreparedAudioExtractOutput],
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        for output in outputs {
+            bind_prepared_output(tx, output, None).await?;
+        }
+        Self::mark_prepared_in_tx(tx, operation_id, claim, now).await
+    }
+
+    async fn mark_prepared_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        operation_id: u64,
+        claim: &NewAudioExtractClaim,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
         let result = sqlx::query(
             "UPDATE audio_extract_operations SET state = 'prepared' \
              WHERE id = ? AND state = 'staged' \
@@ -508,6 +729,18 @@ impl SqliteAudioExtractOperationRepo {
         claim: &NewAudioExtractClaim,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
+        let mut tx = begin_read_then_write(&self.pool, "audio_extract: acquire_claim").await?;
+        Self::acquire_claim_in_tx(&mut tx, claim, now).await?;
+        tx.commit()
+            .await
+            .map_err(|error| VoomError::database_context("audio extraction claim commit", error))
+    }
+
+    pub async fn acquire_claim_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        claim: &NewAudioExtractClaim,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
         if claim.claim_token.is_empty() || claim.expires_at <= now {
             return Err(VoomError::Config(
                 "audio extraction claim requires a non-empty token and future expiry".to_owned(),
@@ -536,7 +769,7 @@ impl SqliteAudioExtractOperationRepo {
             concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
         )?)
         .bind(&claim.claim_token)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| {
             VoomError::database_context("audio_extract_operations acquire claim", error)
@@ -669,18 +902,40 @@ impl SqliteAudioExtractOperationRepo {
         validate_dispatch_attempt(&attempt)?;
         let mut tx =
             begin_read_then_write(&self.pool, "audio_extract: record_dispatch_attempt").await?;
-        let operation_id = require_live_planned_claim(&mut tx, claim, now).await?;
-        let attempt_id =
-            insert_dispatch_attempt(&mut tx, operation_id, claim, &attempt, now).await?;
-        let stored = load_dispatch_attempt(&mut tx, attempt_id).await?;
+        let stored = Self::record_dispatch_attempt_in_tx(&mut tx, claim, attempt, now).await?;
         tx.commit().await.map_err(|error| {
             VoomError::database_context("audio extract dispatch attempt commit", error)
         })?;
         Ok(stored)
     }
 
+    pub async fn record_dispatch_attempt_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        claim: &NewAudioExtractClaim,
+        attempt: NewAudioExtractDispatchAttempt,
+        now: OffsetDateTime,
+    ) -> Result<AudioExtractDispatchAttempt, VoomError> {
+        validate_dispatch_attempt(&attempt)?;
+        let operation_id = require_live_planned_claim(tx, claim, now).await?;
+        let attempt_id = insert_dispatch_attempt(tx, operation_id, claim, &attempt, now).await?;
+        load_dispatch_attempt(tx, attempt_id).await
+    }
+
     pub async fn get_dispatch_attempt(
         &self,
+        operation_id: u64,
+        generation: u32,
+    ) -> Result<Option<AudioExtractDispatchAttempt>, VoomError> {
+        let mut tx = begin_read_only(&self.pool, "audio_extract: get_dispatch_attempt").await?;
+        let attempt = Self::get_dispatch_attempt_in_tx(&mut tx, operation_id, generation).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio extract dispatch attempt get commit", error)
+        })?;
+        Ok(attempt)
+    }
+
+    pub async fn get_dispatch_attempt_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
         operation_id: u64,
         generation: u32,
     ) -> Result<Option<AudioExtractDispatchAttempt>, VoomError> {
@@ -693,7 +948,7 @@ impl SqliteAudioExtractOperationRepo {
             concat!(module_path!(), ": ", stringify!(operation_id)),
         )?)
         .bind(i64::from(generation))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|error| {
             VoomError::database_context("audio extract dispatch attempt find", error)
@@ -701,11 +956,7 @@ impl SqliteAudioExtractOperationRepo {
         let Some(attempt_id) = attempt_id else {
             return Ok(None);
         };
-        let mut tx = begin_read_only(&self.pool, "audio_extract: get_dispatch_attempt").await?;
-        let attempt = load_dispatch_attempt(&mut tx, attempt_id).await?;
-        tx.commit().await.map_err(|error| {
-            VoomError::database_context("audio extract dispatch attempt get commit", error)
-        })?;
+        let attempt = load_dispatch_attempt(tx, attempt_id).await?;
         Ok(Some(attempt))
     }
 
@@ -746,6 +997,36 @@ impl SqliteAudioExtractOperationRepo {
         status: AudioExtractDispatchAttemptStatus,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
+        let mut tx = begin_write_first(&self.pool, "audio_extract: dispatch status").await?;
+        Self::update_dispatch_status_in_tx(&mut tx, claim, attempt_id, status, now).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio extraction dispatch status commit", error)
+        })
+    }
+
+    pub async fn mark_dispatch_terminal_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        claim: &NewAudioExtractClaim,
+        attempt_id: u64,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        Self::update_dispatch_status_in_tx(
+            tx,
+            claim,
+            attempt_id,
+            AudioExtractDispatchAttemptStatus::Terminal,
+            now,
+        )
+        .await
+    }
+
+    async fn update_dispatch_status_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        claim: &NewAudioExtractClaim,
+        attempt_id: u64,
+        status: AudioExtractDispatchAttemptStatus,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
         let (status, evidence_kind, evidence_at) = match status {
             AudioExtractDispatchAttemptStatus::Terminal => {
                 ("terminal", Some("terminal_response"), Some(iso8601(now)?))
@@ -780,7 +1061,7 @@ impl SqliteAudioExtractOperationRepo {
         )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| {
             VoomError::database_context("audio extract dispatch status update", error)
@@ -958,7 +1239,8 @@ async fn bind_staged_output(
 
 async fn bind_prepared_output(
     tx: &mut Transaction<'_, Sqlite>,
-    output: &NewPreparedAudioExtractOutput,
+    output: &NewFencedPreparedAudioExtractOutput,
+    temp_path: Option<&str>,
 ) -> Result<(), VoomError> {
     let probe_payload = serde_json::to_string(&output.probe_payload).map_err(|error| {
         VoomError::Internal(format!("serialize audio extraction probe payload: {error}"))
@@ -969,7 +1251,7 @@ async fn bind_prepared_output(
          WHERE id = ? AND staging_path = ? AND artifact_handle_id = ? \
            AND artifact_location_id = ? AND verification_id IS NULL AND commit_record_id IS NULL",
     )
-    .bind(&output.temp_path)
+    .bind(temp_path)
     .bind(i64_from_u64(
         output.verification_id.0,
         concat!(module_path!(), ": ", stringify!(output.verification_id.0)),

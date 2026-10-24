@@ -493,3 +493,23 @@ impl AsyncWrite for PendingFlush {
         Poll::Ready(Ok(()))
     }
 }
+
+#[tokio::test]
+async fn intentional_completion_timeout_keeps_its_truthful_window_message() -> TestResult {
+    let router = Router::new().route("/complete", post(|| async {
+        super::structured_request_timeout("execution.complete", "completion request exceeded its 10-second response window; outcome remains unknown")
+    }));
+    let response = bounded_router(router, test_limits()?)
+        .oneshot(Request::post("/complete").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    let body = response.into_body().collect().await?.to_bytes();
+    let value: Value = serde_json::from_slice(&body)?;
+    assert_eq!(value["error"]["code"], "REQUEST_TIMEOUT");
+    assert_eq!(value["command"], "execution.complete");
+    assert_eq!(
+        value["error"]["message"],
+        "completion request exceeded its 10-second response window; outcome remains unknown"
+    );
+    Ok(())
+}

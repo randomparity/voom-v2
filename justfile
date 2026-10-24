@@ -86,6 +86,11 @@ test-hook:
     cargo build --workspace --all-targets
     VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --quiet
 
+# Small authenticated real-media regression; requires a new retained workdir.
+check-owner-publication WORKDIR MODE='chain' APPLY_DELAY='0':
+    cargo build --workspace --all-features --bins
+    python3 scripts/issue-733-owner-publication-regression.py --workdir {{quote(WORKDIR)}} --mode {{quote(MODE)}} --apply-delay-seconds {{quote(APPLY_DELAY)}}
+
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc \
         --workspace --all-features --no-deps --document-private-items

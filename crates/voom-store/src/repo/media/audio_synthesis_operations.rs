@@ -213,6 +213,191 @@ pub struct SqliteAudioSynthesisOperationRepo {
 }
 
 impl SqliteAudioSynthesisOperationRepo {
+    pub async fn for_verification_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        verification_id: ArtifactVerificationId,
+    ) -> Result<Option<AudioSynthesisOperationRecord>, VoomError> {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM audio_synthesis_operations WHERE verification_id = ? ORDER BY id",
+        )
+        .bind(i64_from_u64(
+            verification_id.0,
+            "synthesis verification association",
+        )?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("synthesis verification association", error)
+        })?;
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = u64_from_i64(id, "synthesis operation id")?;
+            if id == 0 {
+                return Err(VoomError::database(
+                    "synthesis operation id is zero".to_owned(),
+                ));
+            }
+            records.push(load_record_by_id(tx, id).await?.ok_or_else(|| {
+                VoomError::database("synthesis verification association disappeared".to_owned())
+            })?);
+        }
+        if records.len() > 1 {
+            return Err(VoomError::database(
+                "synthesis verification association is ambiguous".to_owned(),
+            ));
+        }
+        Ok(records.pop())
+    }
+
+    pub async fn require_committed_lineage_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        record: &AudioSynthesisOperationRecord,
+    ) -> Result<AudioSynthesisDispatchAttempt, VoomError> {
+        let attempt = Self::get_dispatch_attempt_in_tx(
+            tx,
+            record.operation.id,
+            record.operation.dispatch_generation,
+        )
+        .await?
+        .ok_or_else(|| {
+            VoomError::database(
+                "committed synthesis lacks its exact dispatch generation".to_owned(),
+            )
+        })?;
+        if record.operation.state != AudioSynthesisOperationState::Committed
+            || record.companions.is_empty()
+        {
+            return Err(VoomError::database(
+                "audio synthesis canonical reuse is not committed".to_owned(),
+            ));
+        }
+        if attempt.status != AudioSynthesisDispatchAttemptStatus::Terminal
+            || record.operation.staging_path.as_ref() != Some(&attempt.staging_path)
+        {
+            return Err(VoomError::database(
+                "committed synthesis attempt is not terminal or has a different staging path"
+                    .to_owned(),
+            ));
+        }
+        for companion in &record.companions {
+            let present: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM audio_synthesis_stream_lineage \
+                 WHERE id = ? AND companion_id = ? AND source_file_version_id = ? \
+                   AND source_media_snapshot_id = ? AND source_snapshot_stream_id = ? \
+                   AND source_provider_stream_index = ? AND result_file_version_id = ? \
+                   AND result_media_snapshot_id = ? AND result_snapshot_stream_id = ? \
+                   AND result_provider_stream_index = ? AND codec = ? AND channels = ? \
+                   AND language IS ? AND title IS ? AND disposition_default = ? \
+                   AND disposition_forced = ? AND disposition_commentary = ?)",
+            )
+            .bind(
+                companion
+                    .lineage_id
+                    .map(|id| i64_from_u64(id, "synthesis lineage id"))
+                    .transpose()?,
+            )
+            .bind(i64_from_u64(companion.id, "synthesis companion id")?)
+            .bind(i64_from_u64(
+                record.operation.source_file_version_id.0,
+                "synthesis source version",
+            )?)
+            .bind(i64_from_u64(
+                record.operation.source_media_snapshot_id.0,
+                "synthesis source snapshot",
+            )?)
+            .bind(&companion.source_snapshot_stream_id)
+            .bind(i64::from(companion.source_provider_stream_index))
+            .bind(
+                record
+                    .operation
+                    .result_file_version_id
+                    .map(|id| i64_from_u64(id.0, "synthesis result version"))
+                    .transpose()?,
+            )
+            .bind(
+                record
+                    .operation
+                    .result_media_snapshot_id
+                    .map(|id| i64_from_u64(id.0, "synthesis result snapshot"))
+                    .transpose()?,
+            )
+            .bind(&companion.result_snapshot_stream_id)
+            .bind(companion.result_provider_stream_index.map(i64::from))
+            .bind(&companion.codec)
+            .bind(companion.channels.map(i64::from))
+            .bind(&companion.language)
+            .bind(&companion.title)
+            .bind(companion.disposition_default)
+            .bind(companion.disposition_forced)
+            .bind(companion.disposition_commentary)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("synthesis canonical lineage proof", error)
+            })?;
+            if !present {
+                return Err(VoomError::database(
+                    "committed synthesis lineage differs from canonical companion".to_owned(),
+                ));
+            }
+        }
+        Ok(attempt)
+    }
+
+    pub async fn claimed_for_lease_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+    ) -> Result<Option<(AudioSynthesisOperationRecord, NewAudioSynthesisClaim)>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, claim_token, claim_expires_at FROM audio_synthesis_operations \
+             WHERE claim_lease_id = ? ORDER BY id",
+        )
+        .bind(i64_from_u64(lease_id.0, "audio synthesis source lease")?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("audio synthesis lease association", error))?;
+        let mut decoded = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|error| map_row_err("audio_synthesis_operations", error))?;
+            let token: String = row
+                .try_get("claim_token")
+                .map_err(|error| map_row_err("audio_synthesis_operations", error))?;
+            let expiry: String = row
+                .try_get("claim_expires_at")
+                .map_err(|error| map_row_err("audio_synthesis_operations", error))?;
+            let id = u64_from_i64(id, "audio synthesis operation id")?;
+            if id == 0 {
+                return Err(VoomError::database(
+                    "audio synthesis operation id is zero".to_owned(),
+                ));
+            }
+            let record = load_record_by_id(tx, id).await?.ok_or_else(|| {
+                VoomError::database("audio synthesis association disappeared".to_owned())
+            })?;
+            if token.is_empty() {
+                return Err(VoomError::database(
+                    "audio synthesis claim token is empty".to_owned(),
+                ));
+            }
+            let claim = NewAudioSynthesisClaim {
+                operation_key: record.operation.operation_key.clone(),
+                expected_generation: record.operation.dispatch_generation,
+                lease_id,
+                claim_token: token,
+                expires_at: super::common::parse_iso8601(&expiry)?,
+            };
+            decoded.push((record, claim));
+        }
+        if decoded.len() > 1 {
+            return Err(VoomError::database(
+                "source lease has ambiguous audio synthesis operations".to_owned(),
+            ));
+        }
+        Ok(decoded.pop())
+    }
+
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -226,24 +411,29 @@ impl SqliteAudioSynthesisOperationRepo {
     ) -> Result<AudioSynthesisOperationRecord, VoomError> {
         validate_new_operation(&input, companions)?;
         let mut tx = begin_read_then_write(&self.pool, "audio_synthesis: create_planned").await?;
-        if let Some(existing) = load_record_by_key(&mut tx, &input.operation_key).await? {
-            require_exact_replay(&existing, &input, companions)?;
-            tx.commit().await.map_err(|error| {
-                VoomError::database_context("audio synthesis replay commit", error)
-            })?;
-            return Ok(existing);
-        }
-        let operation_id = insert_operation(&mut tx, &input, now).await?;
-        insert_companions(&mut tx, operation_id, companions).await?;
-        let record = load_record_by_id(&mut tx, operation_id)
-            .await?
-            .ok_or_else(|| {
-                VoomError::Internal("audio synthesis operation disappeared".to_owned())
-            })?;
+        let record = Self::create_planned_in_tx(&mut tx, &input, companions, now).await?;
         tx.commit()
             .await
             .map_err(|error| VoomError::database_context("audio synthesis create commit", error))?;
         Ok(record)
+    }
+
+    pub async fn create_planned_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &NewAudioSynthesisOperation,
+        companions: &[NewAudioSynthesisCompanion],
+        now: OffsetDateTime,
+    ) -> Result<AudioSynthesisOperationRecord, VoomError> {
+        validate_new_operation(input, companions)?;
+        if let Some(existing) = load_record_by_key(tx, &input.operation_key).await? {
+            require_exact_replay(&existing, input, companions)?;
+            return Ok(existing);
+        }
+        let operation_id = insert_operation(tx, input, now).await?;
+        insert_companions(tx, operation_id, companions).await?;
+        load_record_by_id(tx, operation_id)
+            .await?
+            .ok_or_else(|| VoomError::Internal("audio synthesis operation disappeared".to_owned()))
     }
 
     pub async fn get_by_key(
@@ -256,6 +446,13 @@ impl SqliteAudioSynthesisOperationRepo {
             .await
             .map_err(|error| VoomError::database_context("audio synthesis get commit", error))?;
         Ok(record)
+    }
+
+    pub async fn get_by_key_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        operation_key: &str,
+    ) -> Result<Option<AudioSynthesisOperationRecord>, VoomError> {
+        load_record_by_key(tx, operation_key).await
     }
 
     pub async fn bind_staged_in_tx(
@@ -355,6 +552,17 @@ impl SqliteAudioSynthesisOperationRepo {
         &self,
         input: &ValidateAudioSynthesisOperation,
     ) -> Result<(), VoomError> {
+        let mut tx = begin_write_first(&self.pool, "audio_synthesis: record_validation").await?;
+        Self::record_validation_in_tx(&mut tx, input).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio synthesis validation commit", error)
+        })
+    }
+
+    pub async fn record_validation_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &ValidateAudioSynthesisOperation,
+    ) -> Result<(), VoomError> {
         let result = sqlx::query(
             "UPDATE audio_synthesis_operations SET verification_id = ?, probe_worker_id = ?, \
              probe_payload = ? WHERE id = ? AND state = 'staged' AND verification_id IS NULL \
@@ -377,7 +585,7 @@ impl SqliteAudioSynthesisOperationRepo {
             input.operation_id,
             concat!(module_path!(), ": ", stringify!(input.operation_id)),
         )?)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| {
             VoomError::database_context("validate audio synthesis operation", error)
@@ -469,6 +677,18 @@ impl SqliteAudioSynthesisOperationRepo {
         claim: &NewAudioSynthesisClaim,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
+        let mut tx = begin_read_then_write(&self.pool, "audio_synthesis: acquire_claim").await?;
+        Self::acquire_claim_in_tx(&mut tx, claim, now).await?;
+        tx.commit()
+            .await
+            .map_err(|error| VoomError::database_context("audio synthesis claim commit", error))
+    }
+
+    pub async fn acquire_claim_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        claim: &NewAudioSynthesisClaim,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
         validate_claim(claim, now)?;
         let result = sqlx::query(
             "UPDATE audio_synthesis_operations \
@@ -491,7 +711,7 @@ impl SqliteAudioSynthesisOperationRepo {
             concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
         )?)
         .bind(&claim.claim_token)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("acquire audio synthesis claim", error))?;
         require_one_update(
@@ -645,15 +865,28 @@ impl SqliteAudioSynthesisOperationRepo {
         attempt: &NewAudioSynthesisDispatchAttempt,
         now: OffsetDateTime,
     ) -> Result<AudioSynthesisDispatchAttempt, VoomError> {
+        let mut tx =
+            begin_read_then_write(&self.pool, "audio_synthesis: record_dispatch_attempt").await?;
+        let stored = Self::record_dispatch_attempt_in_tx(&mut tx, claim, attempt, now).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio synthesis dispatch commit", error)
+        })?;
+        Ok(stored)
+    }
+
+    pub async fn record_dispatch_attempt_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        claim: &NewAudioSynthesisClaim,
+        attempt: &NewAudioSynthesisDispatchAttempt,
+        now: OffsetDateTime,
+    ) -> Result<AudioSynthesisDispatchAttempt, VoomError> {
         validate_dispatch_attempt(attempt)?;
         if attempt.dispatch_lease_id != claim.lease_id {
             return Err(VoomError::Config(
                 "audio synthesis dispatch lease must match the creating claim".to_owned(),
             ));
         }
-        let mut tx =
-            begin_read_then_write(&self.pool, "audio_synthesis: record_dispatch_attempt").await?;
-        let operation_id = require_live_planned_claim(&mut tx, claim, now).await?;
+        let operation_id = require_live_planned_claim(tx, claim, now).await?;
         let result = sqlx::query(
             "INSERT INTO audio_synthesis_dispatch_attempts \
              (operation_id, generation, dispatch_lease_id, worker_id, worker_epoch, idempotency_key, \
@@ -683,20 +916,29 @@ impl SqliteAudioSynthesisOperationRepo {
         .bind(&attempt.staging_path)
         .bind(AudioSynthesisDispatchAttemptStatus::Active.as_str())
         .bind(iso8601(now)?)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| {
             VoomError::database_context("insert audio synthesis dispatch attempt", error)
         })?;
-        let stored = load_dispatch_attempt(&mut tx, result.last_insert_rowid()).await?;
-        tx.commit().await.map_err(|error| {
-            VoomError::database_context("audio synthesis dispatch commit", error)
-        })?;
-        Ok(stored)
+        load_dispatch_attempt(tx, result.last_insert_rowid()).await
     }
 
     pub async fn get_dispatch_attempt(
         &self,
+        operation_id: u64,
+        generation: u32,
+    ) -> Result<Option<AudioSynthesisDispatchAttempt>, VoomError> {
+        let mut tx = begin_read_only(&self.pool, "audio_synthesis: get_dispatch_attempt").await?;
+        let attempt = Self::get_dispatch_attempt_in_tx(&mut tx, operation_id, generation).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio synthesis dispatch attempt get commit", error)
+        })?;
+        Ok(attempt)
+    }
+
+    pub async fn get_dispatch_attempt_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
         operation_id: u64,
         generation: u32,
     ) -> Result<Option<AudioSynthesisDispatchAttempt>, VoomError> {
@@ -709,7 +951,7 @@ impl SqliteAudioSynthesisOperationRepo {
             concat!(module_path!(), ": ", stringify!(operation_id)),
         )?)
         .bind(i64::from(generation))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|error| {
             VoomError::database_context("audio synthesis dispatch attempt find", error)
@@ -717,16 +959,25 @@ impl SqliteAudioSynthesisOperationRepo {
         let Some(attempt_id) = attempt_id else {
             return Ok(None);
         };
-        let mut tx = begin_read_only(&self.pool, "audio_synthesis: get_dispatch_attempt").await?;
-        let attempt = load_dispatch_attempt(&mut tx, attempt_id).await?;
-        tx.commit().await.map_err(|error| {
-            VoomError::database_context("audio synthesis dispatch attempt get commit", error)
-        })?;
+        let attempt = load_dispatch_attempt(tx, attempt_id).await?;
         Ok(Some(attempt))
     }
 
     pub async fn mark_dispatch_terminal(
         &self,
+        claim: &NewAudioSynthesisClaim,
+        attempt_id: u64,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let mut tx = begin_write_first(&self.pool, "audio_synthesis: dispatch terminal").await?;
+        Self::mark_dispatch_terminal_in_tx(&mut tx, claim, attempt_id, now).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio synthesis dispatch terminal commit", error)
+        })
+    }
+
+    pub async fn mark_dispatch_terminal_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
         claim: &NewAudioSynthesisClaim,
         attempt_id: u64,
         now: OffsetDateTime,
@@ -755,7 +1006,7 @@ impl SqliteAudioSynthesisOperationRepo {
         )?)
         .bind(&claim.claim_token)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("complete audio synthesis dispatch", error))?;
         require_one_update(

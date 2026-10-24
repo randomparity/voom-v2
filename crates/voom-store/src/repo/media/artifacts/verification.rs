@@ -160,18 +160,48 @@ impl SqliteArtifactRepo {
         &self,
         lease_id: LeaseId,
     ) -> Result<Option<ArtifactVerification>, VoomError> {
-        let sql = SELECT_ARTIFACT_VERIFICATION_COLS.to_owned()
-            + " FROM artifact_verifications v WHERE v.workflow_lease_id = ?";
-        let row = sqlx::query(&sql)
-            .bind(i64_from_u64(
-                lease_id.0,
-                concat!(module_path!(), ": ", stringify!(lease_id.0)),
-            )?)
-            .fetch_optional(&self.pool)
+        let mut tx = crate::tx::begin_read_only(&self.pool, "verification workflow lease").await?;
+        let result = self
+            .verification_for_workflow_lease_in_tx(&mut tx, lease_id)
+            .await?;
+        tx.commit()
             .await
-            .map_err(|err| {
-                VoomError::database_context("artifact_verifications workflow lease lookup", err)
-            })?;
+            .map_err(|e| VoomError::database_context("verification workflow lease commit", e))?;
+        Ok(result)
+    }
+
+    pub async fn verification_for_workflow_lease_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        lease_id: LeaseId,
+    ) -> Result<Option<ArtifactVerification>, VoomError> {
+        let row = sqlx::query(
+            &(SELECT_ARTIFACT_VERIFICATION_COLS.to_owned()
+                + " FROM artifact_verifications v WHERE v.workflow_lease_id = ?"),
+        )
+        .bind(i64_from_u64(
+            lease_id.0,
+            "artifact_verifications.workflow_lease_id",
+        )?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("artifact verification lease lookup", e))?;
+        row.as_ref().map(row_to_verification).transpose()
+    }
+
+    pub async fn get_verification_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: ArtifactVerificationId,
+    ) -> Result<Option<ArtifactVerification>, VoomError> {
+        let row = sqlx::query(
+            &(SELECT_ARTIFACT_VERIFICATION_COLS.to_owned()
+                + " FROM artifact_verifications v WHERE v.id = ?"),
+        )
+        .bind(i64_from_u64(id.0, "artifact_verifications.id")?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("artifact verification lookup", e))?;
         row.as_ref().map(row_to_verification).transpose()
     }
 

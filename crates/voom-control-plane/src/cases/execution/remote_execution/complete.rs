@@ -43,34 +43,32 @@ impl ControlPlane {
         let replay_key =
             super::incarnation_replay_key(input.incarnation_id, &input.idempotency_key);
 
-        match self
+        let replay_input = RemoteIdempotencyInput {
+            node_id: input.node_id,
+            route_key: route_key.clone(),
+            worker_id: Some(input.worker_id),
+            idempotency_key: replay_key.clone(),
+            request_hash: input.request_hash.clone(),
+            created_at: now,
+        };
+        if let Some(replay) = self
             .remote_idempotency
-            .reserve_or_replay_in_tx(
-                &mut tx,
-                RemoteIdempotencyInput {
-                    node_id: input.node_id,
-                    route_key: route_key.clone(),
-                    worker_id: Some(input.worker_id),
-                    idempotency_key: replay_key.clone(),
-                    request_hash: input.request_hash.clone(),
-                    created_at: now,
-                },
-            )
+            .lookup_replay_in_tx(&mut tx, &replay_input)
             .await?
         {
-            IdempotencyOutcome::Reserved => {}
-            IdempotencyOutcome::Replay(replay) => {
-                return self
-                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
-                        decode_replay::<RemoteCompleteOutcome>(data, "remote complete")
-                    })
-                    .await;
-            }
+            return self
+                .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
+                    decode_replay::<RemoteCompleteOutcome>(data, "remote complete")
+                })
+                .await;
         }
 
         if let Err(err) =
             super::recover::validate_remote_node_live(&auth, input.node_id, now, false)
         {
+            self.remote_idempotency
+                .reserve_or_replay_in_tx(&mut tx, replay_input.clone())
+                .await?;
             self.complete_remote_error_in_tx(
                 &mut tx,
                 input.node_id,
@@ -90,6 +88,9 @@ impl ControlPlane {
                 if !is_remote_replayable_error(&err) {
                     return Err(err);
                 }
+                self.remote_idempotency
+                    .reserve_or_replay_in_tx(&mut tx, replay_input.clone())
+                    .await?;
                 self.complete_remote_error_in_tx(
                     &mut tx,
                     input.node_id,
@@ -104,6 +105,46 @@ impl ControlPlane {
             }
         };
 
+        self.remote_complete_after_preflight(tx, input, prepared, replay_input, now)
+            .await
+    }
+
+    async fn remote_complete_after_preflight(
+        &self,
+        mut tx: Transaction<'_, Sqlite>,
+        input: RemoteCompleteInput,
+        prepared: RemoteCompletePrepared,
+        replay_input: RemoteIdempotencyInput,
+        now: time::OffsetDateTime,
+    ) -> Result<RemoteCompleteOutcome, VoomError> {
+        let route_key = replay_input.route_key.clone();
+        let lease = self
+            .leases
+            .get_held_for_worker_in_tx(&mut tx, input.lease_id, input.worker_id)
+            .await?;
+        let ticket = self
+            .tickets
+            .get_in_tx(&mut tx, lease.ticket_id)
+            .await?
+            .ok_or_else(|| VoomError::database("held completion ticket disappeared".to_owned()))?;
+        if let Some(pending) =
+            crate::artifact::publication::stage_in_tx(self, &mut tx, &input, &ticket, now).await?
+        {
+            commit_tx(tx).await?;
+            return pending.wait(self).await;
+        }
+        match self
+            .remote_idempotency
+            .reserve_or_replay_in_tx(&mut tx, replay_input)
+            .await?
+        {
+            IdempotencyOutcome::Reserved => {}
+            IdempotencyOutcome::Replay(_) => {
+                return Err(VoomError::Conflict(
+                    "completion changed while held".to_owned(),
+                ));
+            }
+        }
         let outcome = self
             .remote_complete_mutation_in_tx(&mut tx, &input, &route_key, prepared, now)
             .await?;
@@ -273,7 +314,7 @@ pub(super) fn artifact_failure_status(
     }
 }
 
-fn validated_artifact_complete_evidence(
+pub(crate) fn validated_artifact_complete_evidence(
     result: &JsonValue,
     plan: &ArtifactAccessPlan,
 ) -> Result<JsonValue, VoomError> {

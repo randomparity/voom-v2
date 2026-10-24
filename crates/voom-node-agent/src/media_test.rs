@@ -421,7 +421,10 @@ fn registry_with(probe: Option<Arc<dyn ClientHandle>>) -> ChildEndpointRegistry 
             "ffprobe",
             ChildEndpoint {
                 client,
-                credentials: credentials(),
+                credentials: WorkerCredentials {
+                    worker_id: WorkerId(99),
+                    ..credentials()
+                },
                 operations: vec![OperationKind::ProbeFile],
             },
         );
@@ -462,6 +465,43 @@ fn probe_script() -> Script {
             }),
         )
     })
+}
+
+#[tokio::test]
+async fn mutation_requires_attributed_matching_probe() {
+    let root = TempDir::new().unwrap();
+    write_source(&root);
+    let output = ensure_output_parent(&root);
+    let worker = ScriptedMediaWorker::new(transcode_script(output));
+    let probe = ScriptedMediaWorker::new(Box::new(|request| {
+        let expected = &request.payload["expected"];
+        result_frame(
+            request.lease_id,
+            json!({
+                "status": "probed", "provider": "test-ffprobe", "provider_version": "0",
+                "pre_probe": {"size_bytes": expected["size_bytes"], "content_hash": "blake3:wrong"},
+                "post_probe": {"size_bytes": expected["size_bytes"], "content_hash": expected["content_hash"]},
+                "snapshot": {"format": "probe-v1"}
+            }),
+        )
+    }));
+    let outcome = run(
+        &root,
+        worker,
+        registry_with(Some(probe)),
+        media_payload(&transcode_audio_envelope(
+            SOURCE_BYTES.len() as u64,
+            &hash_of(SOURCE_BYTES),
+        )),
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, _, _)
+        ),
+        "a probe of different bytes cannot authorize publication: {outcome:?}"
+    );
 }
 
 async fn run(
@@ -571,7 +611,7 @@ async fn unknown_envelope_field_fails_before_child_dispatch() {
 async fn schema_mismatch_fails_before_child_dispatch() {
     let root = TempDir::new().unwrap();
     let mut envelope = transcode_audio_envelope(SOURCE_BYTES.len() as u64, &hash_of(SOURCE_BYTES));
-    envelope["schema"] = json!(voom_core::PROTOCOL_VERSION + 1);
+    envelope["schema"] = json!(3); // A legacy API's envelope must fail before byte access.
     let worker = ScriptedMediaWorker::new(Box::new(|_| unreachable!("no dispatch expected")));
     let outcome = run(
         &root,
@@ -581,9 +621,9 @@ async fn schema_mismatch_fails_before_child_dispatch() {
     )
     .await;
 
-    assert!(matches!(
-        outcome,
-        super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, _, _)
+    assert!(matches!(outcome,
+        super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, reason, _)
+            if reason.contains("media dispatch schema 3 does not match protocol version 4")
     ));
     assert!(recorded_requests(&worker).await.is_empty());
 }
@@ -846,6 +886,11 @@ async fn happy_path_completes_with_agent_observed_evidence() {
         json!(hash_of(OUTPUT_BYTES))
     );
     assert_eq!(outputs[0]["snapshot"]["format"], json!("probe-v1"));
+    assert_eq!(
+        outputs[0]["probe"]["worker_id"],
+        json!(99),
+        "probe attribution must name the actual child, not mutation credentials"
+    );
 
     // The staged output survives completion; settlement stays data-only.
     assert_eq!(std::fs::read(&output).unwrap(), OUTPUT_BYTES);
@@ -874,7 +919,7 @@ async fn stale_residue_is_cleared_before_child_dispatch() {
     let outcome = run(
         &root,
         worker,
-        registry_with(None),
+        registry_with(Some(ScriptedMediaWorker::new(probe_script()))),
         media_payload(&transcode_audio_envelope(
             SOURCE_BYTES.len() as u64,
             &hash_of(SOURCE_BYTES),

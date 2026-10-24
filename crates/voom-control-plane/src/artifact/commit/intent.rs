@@ -50,6 +50,16 @@ pub const RESOLVED_NOT_APPLIED_REASON: &str = "target_absent_no_temp_sibling";
 /// one-time fence value.
 const FENCE_DEBUG_REDACTED: &str = "[REDACTED]";
 
+#[derive(Debug, Clone)]
+pub struct RemoteCommitGroupCompleteInput {
+    pub node_id: NodeId,
+    pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub proof: voom_worker_protocol::CommitGroupProof,
+}
+
 pub(crate) fn route_intent_authorize(intent_id: ArtifactCommitIntentId) -> String {
     format!("POST /v1/artifact/commit/{}/authorize", intent_id.0)
 }
@@ -251,6 +261,8 @@ pub struct OpenCommitIntent {
     pub target_provider_relative_locator: String,
     pub target_root_epoch: u64,
     pub intent_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<voom_worker_protocol::OpenCommitGroupMember>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -380,6 +392,88 @@ async fn store_case_error(
 }
 
 impl ControlPlane {
+    /// Validate every exact extraction member capability and applied receipt,
+    /// then publish every output and the source ticket together.
+    ///
+    /// # Errors
+    /// Returns authentication, stale claim/fence/scope, incomplete proof, or
+    /// corrupt persisted-evidence errors. Rejection publishes no group member.
+    pub async fn remote_complete_commit_group(
+        &self,
+        input: RemoteCommitGroupCompleteInput,
+    ) -> Result<voom_worker_protocol::CommitGroupCompleteOutcome, VoomError> {
+        let route = format!(
+            "POST /v1/artifact/commit/group/{}/complete",
+            input.proof.group.operation_id
+        );
+        let now = self.clock().now();
+        match begin_intent_case(
+            self,
+            input.node_id,
+            &input.token,
+            input.incarnation_id,
+            &CaseIdentity {
+                route_key: &route,
+                idempotency_key: &input.idempotency_key,
+                request_hash: &input.request_hash,
+            },
+            now,
+        )
+        .await?
+        {
+            CaseReservation::Replay {
+                tx,
+                replay,
+                replay_key,
+            } => {
+                finish_intent_replay(self, tx, input.node_id, route, replay_key, replay, |data| {
+                    decode_replay(data, "commit group complete")
+                })
+                .await
+            }
+            CaseReservation::Fresh { mut tx, replay_key } => {
+                let mut mutation =
+                    voom_store::tx::begin_savepoint(&mut tx, "commit group publication savepoint")
+                        .await?;
+                let result = complete_group_mutation(self, &mut mutation, &input, now).await;
+                let outcome = match result {
+                    Ok(outcome) => {
+                        commit_tx(mutation).await?;
+                        outcome
+                    }
+                    Err(error) => {
+                        mutation.rollback().await.map_err(|rollback| {
+                            VoomError::database_context(
+                                "commit group publication rollback",
+                                rollback,
+                            )
+                        })?;
+                        return Err(store_case_error(
+                            self,
+                            tx,
+                            input.node_id,
+                            &route,
+                            &replay_key,
+                            error,
+                        )
+                        .await);
+                    }
+                };
+                self.complete_remote_ok_in_tx(
+                    &mut tx,
+                    input.node_id,
+                    &route,
+                    None,
+                    &replay_key,
+                    &outcome,
+                )
+                .await?;
+                commit_tx(tx).await?;
+                Ok(outcome)
+            }
+        }
+    }
+
     /// Authorize a pending commit intent for the requesting storage owner
     /// (spec step 2): revalidate ownership, liveness, pinned epochs and the
     /// lineage safety gate, then transition `pending -> authorized`, minting
@@ -740,6 +834,17 @@ impl ControlPlane {
             .await?;
         let mut listed = Vec::with_capacity(intents.len());
         for intent in intents {
+            let group = if let Some((record, claim)) = voom_store::repo::media::audio_extract_operations::SqliteAudioExtractOperationRepo::operation_for_commit_in_tx(&mut tx, intent.commit_record_id).await? {
+                let ordinal = record.outputs.iter().position(|output| output.commit_record_id == Some(intent.commit_record_id)).ok_or_else(|| VoomError::database("group intent output missing".to_owned()))?;
+                Some(voom_worker_protocol::OpenCommitGroupMember {
+                    group: voom_worker_protocol::CommitGroupIdentity {
+                        operation_id: record.operation.id, generation: claim.expected_generation,
+                        claim_lease_id: claim.lease_id, claim_token: claim.claim_token,
+                        output_count: u32::try_from(record.outputs.len()).map_err(|error| VoomError::database_context("group output count", error))?,
+                    },
+                    ordinal: u32::try_from(ordinal).map_err(|error| VoomError::database_context("group ordinal", error))?,
+                })
+            } else { None };
             let Some(location) = self
                 .identity
                 .get_file_location_in_tx(&mut tx, intent.staging_location_id)
@@ -771,11 +876,112 @@ impl ControlPlane {
                 target_provider_relative_locator: intent.target_provider_relative_locator,
                 target_root_epoch: intent.target_root_epoch,
                 intent_epoch: intent.intent_epoch,
+                group,
             });
         }
         commit_tx(tx).await?;
         Ok(RemoteCommitIntentsOpenOutcome { intents: listed })
     }
+}
+
+async fn complete_group_mutation(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    input: &RemoteCommitGroupCompleteInput,
+    now: time::OffsetDateTime,
+) -> Result<voom_worker_protocol::CommitGroupCompleteOutcome, VoomError> {
+    use voom_store::repo::media::audio_extract_operations::{
+        AudioExtractOperationState, SqliteAudioExtractOperationRepo,
+    };
+    let proof = &input.proof;
+    if proof.members.is_empty()
+        || proof.members.len() > voom_worker_protocol::MAX_COMMIT_GROUP_OUTPUTS
+        || usize::try_from(proof.group.output_count).ok() != Some(proof.members.len())
+    {
+        return Err(VoomError::Conflict(
+            "group completion requires the complete bounded output set".to_owned(),
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut members = Vec::with_capacity(proof.members.len());
+    for member in &proof.members {
+        if member.intent_id.0 == 0 || !ids.insert(member.intent_id) {
+            return Err(VoomError::Conflict(
+                "group completion has an invalid or duplicate member".to_owned(),
+            ));
+        }
+        let intent = cp
+            .artifact_commit_intents
+            .require_intent_in_tx(tx, member.intent_id)
+            .await?;
+        let record = cp
+            .artifacts
+            .get_commit_record_in_tx(tx, intent.commit_record_id)
+            .await?
+            .ok_or_else(|| VoomError::database("group commit record missing".to_owned()))?;
+        crate::artifact::publication::validate_verification_evidence_in_tx(
+            cp,
+            tx,
+            intent.verification_id,
+            record.id,
+        )
+        .await?;
+        members.push((intent, record));
+    }
+    let (operation, claim) =
+        SqliteAudioExtractOperationRepo::operation_for_commit_in_tx(tx, members[0].1.id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::Conflict("group member is not an extraction output".to_owned())
+            })?;
+    if operation.operation.id != proof.group.operation_id
+        || claim.expected_generation != proof.group.generation
+        || claim.lease_id != proof.group.claim_lease_id
+        || !constant_time_eq(
+            claim.claim_token.as_bytes(),
+            proof.group.claim_token.as_bytes(),
+        )
+        || claim.expires_at <= now
+        || operation.outputs.len() != proof.members.len()
+        || operation.operation.state != AudioExtractOperationState::Prepared
+    {
+        return Err(VoomError::Conflict(
+            "group completion does not match the exact live prepared operation claim".to_owned(),
+        ));
+    }
+    for (((intent, record), supplied), output) in
+        members.iter().zip(&proof.members).zip(&operation.outputs)
+    {
+        if output.commit_record_id != Some(record.id)
+            || output.verification_id != Some(intent.verification_id)
+            || output.artifact_handle_id != Some(intent.artifact_handle_id)
+            || record.source_file_version_id != operation.operation.source_file_version_id
+            || intent.owner_incarnation_id != Some(input.incarnation_id)
+            || intent.state != ArtifactCommitIntentState::Authorized
+        {
+            return Err(VoomError::Conflict(
+                "group completion member order, binding or incarnation differs".to_owned(),
+            ));
+        }
+        guard_intent_scope_in_tx(cp, tx, intent, input.node_id).await?;
+        validate_fence_and_evidence(intent, &supplied.fence_hex)?;
+        let Some(CommitReceipt::Applied(applied)) = &intent.receipt else {
+            return Err(VoomError::Conflict(
+                "group member has no applied receipt".to_owned(),
+            ));
+        };
+        if supplied.applied.size_bytes != applied.observed.size_bytes
+            || supplied.applied.content_hash != applied.observed.content_hash
+        {
+            return Err(VoomError::Conflict(
+                "group supplied applied facts differ from durable receipt".to_owned(),
+            ));
+        }
+    }
+    crate::artifact::publication::finish_extraction_group_in_tx(
+        cp, tx, &operation, &claim, &members, now,
+    )
+    .await
 }
 
 /// Journal the `applying` receipt on the authorized intent (spec step 3).
@@ -861,9 +1067,35 @@ async fn complete_mutation(
     input: &RemoteCommitCompleteInput,
     now: time::OffsetDateTime,
 ) -> Result<RemoteCommitCompleteOutcome, VoomError> {
+    let mut mutation =
+        voom_store::tx::begin_savepoint(tx, "commit complete publication savepoint").await?;
+    let result = complete_mutation_inner(cp, &mut mutation, input, now).await;
+    match result {
+        Ok(outcome) => {
+            commit_tx(mutation).await?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            mutation.rollback().await.map_err(|rollback| {
+                VoomError::database_context("commit complete publication rollback", rollback)
+            })?;
+            Err(error)
+        }
+    }
+}
+
+async fn complete_mutation_inner(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    input: &RemoteCommitCompleteInput,
+    now: time::OffsetDateTime,
+) -> Result<RemoteCommitCompleteOutcome, VoomError> {
     let intent = require_authorized_intent_in_tx(cp, tx, input.intent_id, input.node_id).await?;
     validate_fence_and_evidence(&intent, &input.fence_hex)?;
     let record = require_commit_record(cp, &intent).await?;
+    if voom_store::repo::media::audio_extract_operations::SqliteAudioExtractOperationRepo::operation_for_commit_in_tx(tx, record.id).await?.is_some() {
+        return Err(VoomError::Conflict("extraction member requires complete grouped proof".to_owned()));
+    }
     // The authorize transaction re-ran the gate and audited its evaluated
     // leases on the authorized event; nothing further belongs here.
     converge_intent_in_tx(cp, tx, &intent, &record, now, Vec::new()).await
@@ -991,6 +1223,13 @@ pub(super) async fn guard_intent_scope_in_tx(
 ) -> Result<StagingAddress, VoomError> {
     use voom_store::repo::media::identity::{FileLocationAddress, FileLocationRepo};
 
+    crate::artifact::publication::guard_verification_source_in_tx(
+        cp,
+        tx,
+        intent.verification_id,
+        intent.commit_record_id,
+    )
+    .await?;
     let root = cp
         .libraries
         .get_library_root_in_tx(tx, intent.target_storage_root_id)
@@ -1215,6 +1454,9 @@ pub(crate) async fn converge_intent_in_tx(
     now: time::OffsetDateTime,
     gate_evaluated_lease_ids: Vec<voom_core::UseLeaseId>,
 ) -> Result<RemoteCommitCompleteOutcome, VoomError> {
+    if voom_store::repo::media::audio_extract_operations::SqliteAudioExtractOperationRepo::operation_for_commit_in_tx(tx, record.id).await?.is_some() {
+        return Err(VoomError::Conflict("extraction publication requires the entire operation".to_owned()));
+    }
     let Some(CommitReceipt::Applied(applied)) = &intent.receipt else {
         return Err(VoomError::Conflict(format!(
             "commit intent {} completion rejected: no applied receipt",
@@ -1260,6 +1502,13 @@ pub(crate) async fn converge_intent_in_tx(
     cp.artifact_commit_intents
         .mark_completed_in_tx(tx, intent.id, now)
         .await?;
+    if let (Some(version_id), Some(location_id)) = (
+        report.result_file_version_id,
+        report.result_file_location_id,
+    ) {
+        crate::artifact::publication::finish_scalar_in_tx(cp, tx, record, version_id, location_id)
+            .await?;
+    }
     Ok(RemoteCommitCompleteOutcome {
         intent_id: intent.id,
         commit_record_id: report.commit_record_id,

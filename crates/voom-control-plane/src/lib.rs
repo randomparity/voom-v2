@@ -90,12 +90,13 @@ pub mod artifact_commit {
         AppliedEvidence, AuthorizeCommitOutcome, CommitOutcomeEvidence, MismatchedEvidence,
         OpenCommitIntent, OutcomeUnknownEvidence, RemoteCommitApplyingInput,
         RemoteCommitApplyingOutcome, RemoteCommitAuthorizeInput, RemoteCommitCompleteInput,
-        RemoteCommitCompleteOutcome, RemoteCommitIntentsOpenInput, RemoteCommitIntentsOpenOutcome,
-        RemoteCommitOutcomeInput, RemoteCommitReceiptOutcome,
+        RemoteCommitCompleteOutcome, RemoteCommitGroupCompleteInput, RemoteCommitIntentsOpenInput,
+        RemoteCommitIntentsOpenOutcome, RemoteCommitOutcomeInput, RemoteCommitReceiptOutcome,
     };
     pub use crate::artifact::commit::{
         COMMIT_CONVERGENCE_TIMEOUT, CommitArtifactCommandError, CommitArtifactInput,
-        CommitArtifactPreMutationReport, CommitArtifactReport,
+        CommitArtifactPreMutationReport, CommitArtifactReport, CommitGroupCompleteOutcome,
+        CommitGroupProof, OpenCommitGroupMember,
     };
 }
 

@@ -105,3 +105,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0106](0106-atomic-owner-root-activation.md) | Activate owner roots atomically with a node incarnation |
 | [0107](0107-normalize-known-operations-during-scheduling.md) | Normalize known operations during scheduling |
 | [0108](0108-candidate-count-suppression-identity.md) | Candidate counts qualify scheduler suppression identity |
+| [0109](0109-owner-media-publication-and-group-completion.md) | Owner media publication and grouped completion |

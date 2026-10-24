@@ -23,6 +23,7 @@ use voom_store::repo::media::artifacts::{
 use voom_store::repo::media::identity::{
     FileLocationRepo, FileVersionRepo, MediaSnapshot, MediaSnapshotRepo,
 };
+use voom_worker_protocol::{MediaDispatch, decode_media_dispatch};
 
 use crate::ControlPlane;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};
@@ -823,6 +824,29 @@ impl ControlPlane {
         for evidence in rows {
             let ticket_id = evidence.ticket_id;
             let Some(result) = CommittedResultFields::decode(ticket_id, &evidence.result)? else {
+                let ticket = self.tickets.get(ticket_id).await?.ok_or_else(|| {
+                    VoomError::database(format!("committed evidence ticket {ticket_id} is missing"))
+                })?;
+                if let Some(encoded) = ticket
+                    .payload
+                    .get("rendered_payload")
+                    .and_then(|payload| payload.get("media_dispatch"))
+                {
+                    let dispatch = decode_media_dispatch(encoded).map_err(|error| {
+                        VoomError::database(format!("media dispatch for {ticket_id}: {error}"))
+                    })?;
+                    if matches!(
+                        dispatch,
+                        MediaDispatch::Remux(_)
+                            | MediaDispatch::TranscodeVideo(_)
+                            | MediaDispatch::TranscodeAudio(_)
+                            | MediaDispatch::ExtractAudio(_)
+                    ) {
+                        return Err(VoomError::CommitFailure(format!(
+                            "successful mutation ticket {ticket_id} has no committed publication"
+                        )));
+                    }
+                }
                 continue;
             };
             match evidence.validate(job_id, file.asset_id, &result)? {

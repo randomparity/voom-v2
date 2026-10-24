@@ -26,10 +26,22 @@
 //! [ADR 0086]: https://github.com/randomparity/voom-v2/blob/main/docs/adr/0086-transaction-openers-are-named-helpers.md
 //! [ADR 0087]: https://github.com/randomparity/voom-v2/blob/main/docs/adr/0087-cancellation-safe-begin-immediate.md
 
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{Acquire, Sqlite, SqlitePool, Transaction};
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use voom_core::VoomError;
+
+/// Isolate a multi-write mutation while its caller retains an outer replay
+/// reservation. A rejected mutation can roll back without committing partial
+/// domain rows when the caller records its terminal error.
+pub async fn begin_savepoint<'a>(
+    tx: &'a mut Transaction<'_, Sqlite>,
+    context: &'static str,
+) -> Result<Transaction<'a, Sqlite>, VoomError> {
+    tx.begin()
+        .await
+        .map_err(|error| VoomError::database_context(context, error))
+}
 
 /// Open a `BEGIN IMMEDIATE` transaction on a detached task and take its result
 /// over a channel.

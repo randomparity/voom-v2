@@ -61,6 +61,7 @@ fn open_intent(state: &str, bytes: &[u8]) -> OpenCommitIntent {
         target_root_epoch: 4,
         intent_epoch: 0,
         expected_facts: expected_facts(bytes),
+        group: None,
     }
 }
 
@@ -83,7 +84,9 @@ fn authorize_outcome(bytes: &[u8]) -> CommitAuthorizeOutcome {
 #[derive(Debug, Default)]
 struct FakeCommitControlPlane {
     open_queue: Mutex<VecDeque<CommitOpenOutcome>>,
+    open_error: Mutex<bool>,
     authorize: Mutex<Option<CommitAuthorizeOutcome>>,
+    authorize_conflict: Mutex<Option<String>>,
     /// When set, the complete route rejects with this conflict.
     complete_conflict: Mutex<Option<String>>,
     calls: Mutex<Vec<String>>,
@@ -172,6 +175,11 @@ impl ControlPlaneApi for FakeCommitControlPlane {
     ) -> Result<CommitOpenOutcome, VoomError> {
         self.calls.lock().await.push("open".to_owned());
         self.open_started.notify_waiters();
+        if *self.open_error.lock().await {
+            return Err(VoomError::ExternalSystemUnavailable(
+                "listing unavailable".to_owned(),
+            ));
+        }
         if let Some(gate) = self.open_gate.lock().await.clone() {
             gate.notified().await;
         }
@@ -193,6 +201,9 @@ impl ControlPlaneApi for FakeCommitControlPlane {
             .lock()
             .await
             .push(request.idempotency_key().to_owned());
+        if let Some(message) = self.authorize_conflict.lock().await.clone() {
+            return Err(VoomError::Conflict(message));
+        }
         self.authorize
             .lock()
             .await
@@ -624,6 +635,45 @@ async fn restarted_agent_defers_authorized_intent_minted_by_prior_incarnation() 
     assert_eq!(f.calls().await, vec!["open", "authorize"]);
     assert!(f.api.evidences.lock().await.is_empty());
     assert!(f.api.fences_sent_to_complete.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn rejected_fresh_authorization_stands_down_only_when_no_longer_actionable() {
+    let bytes = b"source-drift";
+    let f = fixture_with_bytes(bytes);
+    *f.api.authorize_conflict.lock().await = Some("media source location fence changed".to_owned());
+    f.queue_listing(open_intent("pending", bytes)).await;
+    f.drive().await.unwrap();
+    assert_eq!(f.calls().await, vec!["open", "authorize", "open"]);
+    assert!(f.api.evidences.lock().await.is_empty());
+    assert!(!f.target_path().exists());
+
+    let f = fixture_with_bytes(bytes);
+    *f.api.authorize_conflict.lock().await = Some("unclassified conflict".to_owned());
+    f.queue_listing(open_intent("pending", bytes)).await;
+    f.queue_listing(open_intent("pending", bytes)).await;
+    assert!(matches!(f.drive().await, Err(VoomError::Conflict(_))));
+    assert!(f.api.evidences.lock().await.is_empty());
+    assert!(!f.target_path().exists());
+}
+
+#[tokio::test]
+async fn rejected_authorization_does_not_treat_listing_failure_as_absence() {
+    let f = fixture_with_bytes(b"unreadable-list");
+    *f.api.authorize_conflict.lock().await = Some("media source location fence changed".to_owned());
+    *f.api.open_error.lock().await = true;
+    let result = authorize_intent(
+        &f.context,
+        ArtifactCommitIntentId(INTENT_ID),
+        &mut HashMap::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(VoomError::ExternalSystemUnavailable(_))
+    ));
+    assert!(f.api.evidences.lock().await.is_empty());
+    assert!(!f.target_path().exists());
 }
 
 /// The same scenario through the real coordinator loop: the classified
