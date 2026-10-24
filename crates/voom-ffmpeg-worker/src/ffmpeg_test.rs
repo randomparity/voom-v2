@@ -1316,9 +1316,116 @@ async fn synthesize_audio_appends_downmixed_companion_stream() {
     assert!(args.contains("-ac:a:2\n2\n"));
     assert!(args.contains("-b:a:2\n128k\n"));
     assert!(args.contains("-metadata:s:a:2\nsnapshot_stream_id=synth-1\n"));
+    assert!(args.contains("-disposition:a:0\n+default\n"));
+    assert!(args.contains("-disposition:a:2\n-default\n"));
+    assert_eq!(probe.selected_output_streams[0].default, Some(false));
     // The companion carries the downmixed channel count, not the source's six.
     assert_eq!(probe.selected_output_streams[0].channels, Some(2));
     assert_eq!(probe.selected_output_streams[0].codec, "aac");
+}
+
+#[tokio::test]
+async fn synthesize_multiple_companions_preserves_original_default_selection() {
+    for source_default in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+        let streams = serde_json::json!([
+            {"index":1,"codec_type":"audio","codec_name":"eac3","channels":6,
+             "tags":{"language":"eng","title":"Main"},
+             "disposition":{"default":u8::from(source_default),"forced":1,"comment":1}},
+            {"index":3,"codec_type":"audio","codec_name":"eac3","channels":6,
+             "tags":{"language":"jpn"},"disposition":{"default":0}}
+        ]);
+        let mut output_streams = streams.as_array().unwrap().clone();
+        for (offset, language) in ["eng", "jpn"].into_iter().enumerate() {
+            output_streams.push(serde_json::json!({
+                "index":4+offset,"codec_type":"audio","codec_name":"aac","channels":2,
+                "tags":{"language":language,"snapshot_stream_id":format!("synth-{offset}")},
+                "disposition":{"default":0,"forced":1,"comment":1}
+            }));
+        }
+        let ffprobe = stub_bin(
+            dir.path(),
+            "ffprobe",
+            &format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in *input.mkv) echo '{}' ;; *) echo '{}' ;; esac\n",
+                serde_json::json!({"format":{"format_name":"matroska"},"streams":streams}),
+                serde_json::json!({"format":{"format_name":"matroska"},"streams":output_streams})
+            ),
+        );
+        let mut request = synthesize_audio_request(dir.path());
+        request.selection.selected_streams = [1, 3]
+            .into_iter()
+            .enumerate()
+            .map(|(i, index)| AudioStreamRef {
+                snapshot_stream_id: format!("synth-{i}"),
+                provider_stream_index: index,
+            })
+            .collect();
+        let input = dir.path().join("input.mkv");
+        tokio::fs::write(&input, b"input").await.unwrap();
+        run_ffmpeg_transcode_audio(
+            &FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT),
+            &input,
+            &dir.path().join("out.mkv"),
+            &request,
+        )
+        .await
+        .unwrap();
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let original_flag = if source_default {
+            "+default"
+        } else {
+            "-default"
+        };
+        assert!(
+            args.contains(&format!("-disposition:a:0\n{original_flag}\n")),
+            "original default selection must remain explicit"
+        );
+        assert!(args.contains("-disposition:a:1\n-default\n"));
+        for ordinal in [2, 3] {
+            assert!(
+                args.contains(&format!("-disposition:a:{ordinal}\n-default\n")),
+                "companions cannot compete with original default selection"
+            );
+        }
+        assert!(args.contains(if source_default {
+            "default+forced+comment"
+        } else {
+            "forced+comment"
+        }));
+    }
+}
+
+#[tokio::test]
+async fn synthesize_rejects_unexpected_or_unobserved_companion_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let ffprobe = ffprobe_synthesize_stub(dir.path());
+    let config = FfmpegConfig::new(
+        PathBuf::from("unused"),
+        ffprobe,
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let sources = probe_audio_streams(&config, &dir.path().join("input.mkv"))
+        .await
+        .unwrap();
+    let request = synthesize_audio_request(dir.path());
+    let mut probe = probe_audio_output(
+        &config,
+        &dir.path().join("out.mkv"),
+        "mkv",
+        &request.selection.selected_streams,
+        Some("aac"),
+    )
+    .await
+    .unwrap();
+    for unexpected in [Some(true), None] {
+        probe.selected_output_streams[0].default = unexpected;
+        assert!(
+            matches!(verify_synthesize_audio_probe(&sources[..1], &request, 2, &probe), Err(FfmpegError::OutputFactsMismatch(message)) if message.contains("non-default"))
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,7 +1449,7 @@ fn ffprobe_synthesize_stub(dir: &Path) -> PathBuf {
     stub_bin(
         dir,
         "ffprobe",
-        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"eac3\",\"channels\":6,\"tags\":{\"language\":\"eng\",\"title\":\"Main\"},\"disposition\":{\"default\":1,\"forced\":0,\"comment\":0}},{\"index\":4,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2,\"tags\":{\"language\":\"eng\",\"snapshot_stream_id\":\"synth-1\"}}]}\nJSON\n",
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"eac3\",\"channels\":6,\"tags\":{\"language\":\"eng\",\"title\":\"Main\"},\"disposition\":{\"default\":1,\"forced\":0,\"comment\":0}},{\"index\":4,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2,\"tags\":{\"language\":\"eng\",\"snapshot_stream_id\":\"synth-1\"},\"disposition\":{\"default\":0}}]}\nJSON\n",
     )
 }
 

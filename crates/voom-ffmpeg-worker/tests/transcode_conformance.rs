@@ -17,15 +17,17 @@
 use std::path::Path;
 use std::process::Command;
 
+use tokio::io::{AsyncBufReadExt, BufReader};
 use voom_ffmpeg_worker::handler::handle_transcode_audio;
 use voom_ffmpeg_worker::{
     DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, handle_transcode_video, preflight_from_process_env,
 };
 use voom_worker_protocol::{
-    AUDIO_PROFILE_DEFAULT, AudioExpectedFacts, AudioStreamRef, TranscodeAudioInput,
-    TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioSelection, TranscodeAudioSettings,
-    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
-    TranscodeVideoRequest,
+    AUDIO_PROFILE_DEFAULT, AudioExpectedFacts, AudioStreamRef, ClientHandle, HttpClient,
+    NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, TranscodeAudioInput,
+    TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioSelection,
+    TranscodeAudioSettings, TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput,
+    TranscodeVideoProfile, TranscodeVideoRequest, WorkerCredentials,
 };
 
 // ---------------------------------------------------------------------------
@@ -1032,66 +1034,200 @@ async fn eac3_transcode_preserves_5_1_channels() {
 async fn add_track_synthesis_preserves_surround_and_appends_stereo_companion() {
     let preflight = preflight_from_process_env()
         .expect("preflight failed — ensure ffmpeg and ffprobe are available");
-    let config = ffmpeg_config(&preflight);
-    let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("source.mkv");
-    let output = dir.path().join("synthesized.mkv");
-    generate_5_1_audio_fixture(&preflight.ffmpeg_path, &input);
-    let companion_id = "synth_companion_stable".to_owned();
-    let request = TranscodeAudioRequest {
-        input: TranscodeAudioInput {
-            path: input.to_string_lossy().into_owned(),
-            expected: audio_expected(&input).await,
-        },
-        output: TranscodeAudioOutput {
-            staging_root: dir.path().to_string_lossy().into_owned(),
-            path: output.to_string_lossy().into_owned(),
-            container: "mkv".to_owned(),
-            overwrite: false,
-        },
-        selection: TranscodeAudioSelection {
-            selected_streams: vec![AudioStreamRef {
-                snapshot_stream_id: companion_id.clone(),
-                provider_stream_index: 0,
-            }],
-        },
-        audio: TranscodeAudioSettings {
-            target_codec: "aac".to_owned(),
-            profile: AUDIO_PROFILE_DEFAULT.to_owned(),
-            add_track: true,
-            target_channels: Some(2),
-        },
-    };
+    for source_default in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("synthesized.mkv");
+        let generated = Command::new(&preflight.ffmpeg_path)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=5.1:sample_rate=48000",
+                "-t",
+                "0.25",
+                "-c:a",
+                "eac3",
+                "-metadata:s:a:0",
+                "language=eng",
+                "-metadata:s:a:0",
+                "title=Main",
+                "-disposition:a:0",
+                if source_default {
+                    "default+forced+comment"
+                } else {
+                    "forced+comment"
+                },
+            ])
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let companion_id = "synth_companion_stable".to_owned();
+        let request = TranscodeAudioRequest {
+            input: TranscodeAudioInput {
+                path: input.to_string_lossy().into_owned(),
+                expected: audio_expected(&input).await,
+            },
+            output: TranscodeAudioOutput {
+                staging_root: dir.path().to_string_lossy().into_owned(),
+                path: output.to_string_lossy().into_owned(),
+                container: "mkv".to_owned(),
+                overwrite: false,
+            },
+            selection: TranscodeAudioSelection {
+                selected_streams: vec![AudioStreamRef {
+                    snapshot_stream_id: companion_id.clone(),
+                    provider_stream_index: 0,
+                }],
+            },
+            audio: TranscodeAudioSettings {
+                target_codec: "aac".to_owned(),
+                profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+                add_track: true,
+                target_channels: Some(2),
+            },
+        };
 
-    let result = handle_transcode_audio(&request, &config)
+        // Exercise the actual worker HTTP/progress boundary with generated media.
+        let result = synthesize_through_worker(&request).await;
+
+        assert_eq!(result.selected_snapshot_stream_ids, vec![companion_id]);
+        assert_eq!(result.selected_output_streams[0].channels, Some(2));
+        assert_eq!(
+            result.selected_output_streams[0].output_provider_stream_index,
+            1
+        );
+        assert_synthesized_audio_file(&preflight.ffprobe_path, &output, source_default, &result);
+    }
+}
+
+#[expect(
+    clippy::panic,
+    reason = "unexpected worker terminal frames must fail this integration test"
+)]
+async fn synthesize_through_worker(request: &TranscodeAudioRequest) -> TranscodeAudioResult {
+    let mut worker = tokio::process::Command::new(env!("CARGO_BIN_EXE_voom-ffmpeg-worker"))
+        .env("VOOM_WORKER_ID", "737")
+        .env("VOOM_WORKER_EPOCH", "1")
+        .env("VOOM_WORKER_SECRET", "generated-fixture-test-secret")
+        .env("VOOM_WORKER_BIND", "127.0.0.1:0")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(worker.stdout.take().unwrap()).lines();
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
         .await
-        .expect("stereo companion synthesis failed");
-
-    assert_eq!(result.selected_snapshot_stream_ids, vec![companion_id]);
-    assert_eq!(result.selected_output_streams[0].channels, Some(2));
-    assert_eq!(
-        result.selected_output_streams[0].output_provider_stream_index,
-        1
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let bound = ready
+        .strip_prefix("BOUND addr=")
+        .expect("worker readiness")
+        .parse()
+        .unwrap();
+    let credentials = WorkerCredentials {
+        worker_id: voom_core::WorkerId(737),
+        worker_epoch: 1,
+        secret: "generated-fixture-test-secret".to_owned().into(),
+    };
+    let mut dispatch = HttpClient::new(bound)
+        .dispatch(
+            &credentials,
+            "synthesis-737",
+            OperationRequest {
+                operation: OperationKind::TranscodeAudio,
+                lease_id: voom_core::LeaseId(737),
+                payload: serde_json::to_value(request).unwrap(),
+                heartbeat_deadline_ms: 1000,
+                progress_idle_deadline_ms: 30000,
+            },
+        )
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match dispatch.frames.next_frame().await.unwrap() {
+                NdjsonOutcome::Frame(_) => {}
+                NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
+                    break serde_json::from_value(payload).unwrap();
+                }
+                other => panic!("synthesis failed: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(worker.stdin.take());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
     );
-    let probe = Command::new(&preflight.ffprobe_path)
+    result
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "retain physical probe and returned facts for generated-media proof"
+)]
+fn assert_synthesized_audio_file(
+    ffprobe: &Path,
+    output: &Path,
+    source_default: bool,
+    result: &TranscodeAudioResult,
+) {
+    let probe = Command::new(ffprobe)
         .args([
             "-v",
             "error",
             "-show_entries",
-            "stream=index,codec_name,channels",
+            "stream=index,codec_name,channels:stream_disposition:stream_tags",
             "-of",
             "json",
         ])
-        .arg(&output)
+        .arg(output)
         .output()
         .expect("ffprobe synthesized media failed to start");
     assert!(probe.status.success());
     let payload: serde_json::Value =
         serde_json::from_slice(&probe.stdout).expect("ffprobe emitted invalid JSON");
+    eprintln!("generated synthesis physical ffprobe facts: {payload}");
+    eprintln!(
+        "worker synthesis returned facts: {:?}",
+        result.selected_output_streams
+    );
     let streams = payload["streams"].as_array().unwrap();
     assert_eq!(streams.len(), 2);
-    assert_eq!(streams[0]["codec_name"], "flac");
+    assert_eq!(streams[0]["codec_name"], "eac3");
     assert_eq!(streams[0]["channels"], 6);
     assert_eq!(streams[1]["codec_name"], "aac");
     assert_eq!(streams[1]["channels"], 2);
+    assert_eq!(
+        streams[0]["disposition"]["default"],
+        u8::from(source_default),
+        "EAC3 default selection stays unchanged"
+    );
+    assert_eq!(
+        streams[1]["disposition"]["default"], 0,
+        "AAC companion must not compete with EAC3"
+    );
+    for stream in streams {
+        assert_eq!(stream["disposition"]["forced"], 1);
+        assert_eq!(stream["disposition"]["comment"], 1);
+    }
+    assert_eq!(streams[1]["tags"]["language"], "eng");
+    assert_eq!(streams[1]["tags"]["title"], "Main");
+    assert_eq!(
+        result.selected_output_streams[0].default,
+        Some(false),
+        "returned facts must match the physical file"
+    );
 }

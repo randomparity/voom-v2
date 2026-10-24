@@ -3,7 +3,7 @@
 Base: main. Branch: feat/audio-companion-default-737. Scope: q737-0108ebe4. Artifact lane full-spec; complexity M, fixed denominator 250 changed lines, provenance issue #737 and live synthesis/shared-helper inspection. Hazards: generated-media disposition contract and shared-helper compatibility. Design: ../specs/2026-10-24-audio-companion-default-design.md.
 
 ## One coupled Cast unit
-Add synthesis-specific command handling and output rejection without changing ordinary metadata copying. Expected implementation/test diff: approximately 140 lines.
+Add synthesis-specific command handling and output rejection without changing ordinary metadata copying. Expected implementation/test diff: approximately 260 lines. Initial estimate undercounted formatted command/validator regressions and the required worker HTTP/process proof plumbing; this corrects estimation only, with frozen scope and denominator unchanged.
 
 Verification inventory (`focused-test`):
 - Original default preservation and non-default companions for default/non-default sources and multiple selections: ffmpeg_test.rs command regressions; expected red inherited default/missing explicit disposition, green `cargo test -p voom-ffmpeg-worker --lib synthesize`.

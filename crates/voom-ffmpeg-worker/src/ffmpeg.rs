@@ -1082,6 +1082,17 @@ async fn run_ffmpeg_synthesize_audio(
         .arg("-0:t?")
         .arg("-c")
         .arg("copy");
+    // Explicit original defaults also prevent FFmpeg from choosing a default
+    // automatically when the source has none. Relative flags retain other bits.
+    for source in &source_streams {
+        command
+            .arg(format!("-disposition:a:{}", source.audio_ordinal))
+            .arg(if source.default == Some(true) {
+                "+default"
+            } else {
+                "-default"
+            });
+    }
     for (offset, source) in selected.iter().enumerate() {
         let out_ordinal = original_audio_count + offset;
         command
@@ -1097,6 +1108,11 @@ async fn run_ffmpeg_synthesize_audio(
                 u64::from(bitrate_kbps_per_channel) * target_channels
             ));
         append_audio_metadata(&mut command, out_ordinal, source);
+        // A companion inherits metadata, but must not compete with the source's
+        // default selection. Keep ordinary transcode metadata handling unchanged.
+        command
+            .arg(format!("-disposition:a:{out_ordinal}"))
+            .arg("-default");
     }
     command
         .arg("-map")
@@ -1793,6 +1809,11 @@ fn verify_synthesize_audio_probe(
         ));
     }
     for (source, output) in selected_sources.iter().zip(&probe.selected_output_streams) {
+        if output.default != Some(false) {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "synthesized audio must be non-default".to_owned(),
+            ));
+        }
         if output.codec != request.audio.target_codec {
             return Err(FfmpegError::OutputFactsMismatch(
                 "synthesized audio codec mismatch".to_owned(),
