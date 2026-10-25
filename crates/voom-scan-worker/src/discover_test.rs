@@ -128,3 +128,18 @@ fn unmatched_sidecar_yields_none_so_the_walker_can_count_it() {
     assert_eq!(best_sidecar_candidate(&[], "dir/movie.srt"), None);
     assert_eq!(best_sidecar_candidate(&candidates, "dir/orphan.srt"), None);
 }
+
+#[test]
+fn ass_subtitles_use_existing_role_without_enabling_other_formats() {
+    for path in ["movie.eng.ass", "movie.fra.AsS"] {
+        assert_eq!(
+            classify_sidecar(Path::new(path)),
+            Some(SidecarKind::Subtitle)
+        );
+        assert!(!is_supported_media_path(Path::new(path)));
+    }
+    assert_eq!(SidecarKind::Subtitle.role(), "external_subtitle");
+    for path in ["movie.ssa", "movie.sub", "movie.vtt"] {
+        assert_eq!(classify_sidecar(Path::new(path)), None);
+    }
+}

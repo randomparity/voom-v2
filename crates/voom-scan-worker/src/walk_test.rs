@@ -392,3 +392,56 @@ fn depth_overflow_degrades_to_a_counted_skip() {
     assert!(outcome.candidates.is_empty());
     assert!(outcome.skipped_count >= 1);
 }
+
+#[test]
+fn ass_sidecars_keep_longest_stem_grouping_and_orphan_skips() {
+    let directory = TempDir::new();
+    assert!(directory.is_ok(), "create test root");
+    let Some(dir) = directory.ok() else {
+        return;
+    };
+    for name in [
+        "movie.mkv",
+        "movie.extended.mkv",
+        "movie.extended.fra.AsS",
+        "movie.eng.srt",
+        "orphan.ass",
+        "movie.vtt",
+    ] {
+        assert!(fs::write(dir.path().join(name), b"fixture").is_ok());
+    }
+    let Some(outcome) = scan(dir.path(), &[]) else {
+        return;
+    };
+    let grouped: Vec<_> = outcome
+        .candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.primary.locator.as_str(),
+                candidate
+                    .sidecars
+                    .iter()
+                    .map(|sidecar| (sidecar.locator.as_str(), sidecar.kind))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        grouped,
+        vec![
+            (
+                "movie.extended.mkv",
+                vec![("movie.extended.fra.AsS", Some("external_subtitle"))]
+            ),
+            (
+                "movie.mkv",
+                vec![("movie.eng.srt", Some("external_subtitle"))]
+            ),
+        ]
+    );
+    assert_eq!(
+        outcome.skipped_count, 2,
+        "orphan ASS and unsupported VTT stay visible as skips"
+    );
+}
