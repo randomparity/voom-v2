@@ -21,7 +21,9 @@ def main():
     spec.loader.exec_module(bootstrap)
     existing = "--existing-fixtures" in sys.argv
     argv = [arg for arg in sys.argv[1:] if arg != "--existing-fixtures"]
-    args = bootstrap.parser().parse_args(argv)
+    parser = bootstrap.parser()
+    parser.add_argument("--media-extension", action="append", default=[])
+    args = parser.parse_args(argv)
     library = args.input[0]
     args.workdir.mkdir(mode=0o700)
     if not existing:
@@ -58,6 +60,9 @@ def main():
     os.environ["VOOM_FFPROBE_BIN"] = str(shim)
     with bootstrap.Bootstrap(args) as stack:
         root = next(root for root in stack.roots if root["role"] == "input")
+        if args.media_extension:
+            extensions = [part for value in args.media_extension for part in ("--extension", value)]
+            stack.voom("library", "root", "update", "--root-id", root["root_id"], *extensions)
         scanned = stack.voom("scan", "--root", root["root_id"])["data"]
         # Scan publication precedes ticket settlement. Wait for the durable
         # result, not a fixed sleep or the CLI publication response alone.

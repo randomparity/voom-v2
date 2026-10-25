@@ -11,6 +11,9 @@ mod owner_node;
 #[path = "support/track_matrix.rs"]
 mod track_matrix;
 
+#[path = "support/structural_matrix.rs"]
+mod structural_matrix;
+
 use std::path::Path;
 
 use support::chaos_librarian::{ChaosLibrarian, ChaosRun};
@@ -653,6 +656,77 @@ fn metadata_helper(
         String::from_utf8_lossy(&result.stderr)
     );
     serde_json::from_slice(&result.stdout).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
+async fn production_scan_structural_corruption() {
+    let chaos = ready_chaos();
+    let work = tempfile::tempdir().unwrap();
+    let run = work.path().join("structural");
+    let generated = std::process::Command::new("uv")
+        .current_dir(&chaos.submodule_dir)
+        .args(["run", "python"])
+        .arg(
+            chaos
+                .workspace_root
+                .join("crates/voom-cli/tests/support/structural_cases.py"),
+        )
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "fixture verification: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let receipt: serde_json::Value = serde_json::from_slice(&generated.stdout).unwrap();
+    assert_eq!(
+        receipt["cells"],
+        serde_json::json!(["mp4-start", "mp4-end", "mkv-cues", "mp3-16"])
+    );
+    assert_eq!(receipt["files"], 7);
+    // Only the run identity is supplied to export; fixture expectations stay outside it.
+    std::fs::write(
+        run.join("replay.json"),
+        br#"{"run_id":"74500000-0000-4000-8000-000000000001"}"#,
+    )
+    .unwrap();
+    let evidence = run_real_owner_process(
+        &chaos,
+        &run.join("library"),
+        work.path(),
+        "real_owner_scan.py",
+        &[
+            "--existing-fixtures",
+            "--media-extension",
+            "mp4",
+            "--media-extension",
+            "mkv",
+            "--media-extension",
+            "mp3",
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(evidence["scan"]["status"], "succeeded");
+    assert_eq!(
+        evidence["scan"]["observation_count"], 7,
+        "MP3 must be explicitly discoverable"
+    );
+    assert_eq!(evidence["completion"]["failed_content_count"], 2);
+    assert_eq!(evidence["completion"]["degraded_evidence_count"], 0);
+    let url = format!("sqlite://{}", work.path().join("stack/voom.db").display());
+    let observed = export_observed_state(
+        &url,
+        &run,
+        &run.join("observed-state.json"),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    .unwrap();
+    chaos.validate_contract("observed", &observed).unwrap();
+    structural_matrix::assert_outcomes(&url, &evidence, &observed).await;
 }
 
 #[tokio::test]
