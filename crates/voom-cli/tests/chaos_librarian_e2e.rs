@@ -426,10 +426,70 @@ async fn run_real_owner_encode(
         };
     assert!(
         status.success(),
-        "real owner encode failed: {}",
-        std::fs::read_to_string(stderr).unwrap()
+        "real owner encode failed: {}\nCLI errors: {}",
+        std::fs::read_to_string(stderr).unwrap(),
+        real_owner_cli_errors(work.path())
     );
     Ok(serde_json::from_slice(&std::fs::read(stdout).unwrap())?)
+}
+
+/// Bootstrap already sanitizes registration receipts. Project only CLI error
+/// fields here; never dump the agent config, credential files or whole receipts.
+fn real_owner_cli_errors(work: &Path) -> serde_json::Value {
+    let mut errors = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(work.join("stack/bootstrap-evidence")) {
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        for path in paths {
+            if !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("cli-"))
+                || path.extension().is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            let receipt = std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if let Some(receipt) = receipt.filter(|value| value["error"].is_object()) {
+                errors.push(serde_json::json!({
+                    "code": receipt["error"]["code"],
+                    "message": receipt["error"]["message"]
+                }));
+            }
+        }
+    }
+    serde_json::Value::Array(errors)
+}
+
+#[test]
+fn real_owner_failure_reports_cli_error_without_registration_or_configuration() {
+    let work = tempfile::tempdir().unwrap();
+    let evidence = work.path().join("stack/bootstrap-evidence");
+    std::fs::create_dir_all(&evidence).unwrap();
+    std::fs::write(
+        evidence.join("cli-0001.json"),
+        br#"{"status":"error","node_id":null}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        evidence.join("cli-0002.json"),
+        br#"{
+        "error":{"code":"CONFIG_INVALID","message":"policy slug mismatch","token":"hidden"},
+        "data":{"token":"hidden"},"local":{"config_path":"hidden"}}
+    "#,
+    )
+    .unwrap();
+    std::fs::write(evidence.join("node-agent.toml"), b"hidden").unwrap();
+    assert_eq!(
+        real_owner_cli_errors(work.path()),
+        serde_json::json!([
+            {"code":"CONFIG_INVALID","message":"policy slug mismatch"}
+        ])
+    );
 }
 
 fn is_hevc_matroska_probe(probe: &serde_json::Value) -> bool {
