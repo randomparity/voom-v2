@@ -287,6 +287,10 @@ clean:
 
 # Run deterministic Chaos Librarian E2E tests. Not part of default `just ci`.
 chaos-e2e-ci:
+    python3 ./scripts/chaos-e2e-bounded.py heavy -- just _chaos-e2e-ci
+
+[private]
+_chaos-e2e-ci:
     cd third_party/chaos-librarian && uv sync --locked
     cargo build -p voom-cli -p voom-api -p voom-node-agent -p voom-scan-worker -p voom-hash-worker -p voom-ffprobe-worker -p voom-verify-artifact-worker -p voom-ffmpeg-worker -p voom-mkvtoolnix-worker
     cargo test -p voom-cli --test chaos_librarian_e2e -- --ignored --nocapture
@@ -299,9 +303,13 @@ chaos-e2e-local:
 chaos-e2e-local-script-test:
     ./scripts/test-chaos-e2e-local.sh
 
+# Verify bounded lifecycle, retention, publication and workflow contracts.
+chaos-e2e-bounded-selftest:
+    python3 ./scripts/test-chaos-e2e-bounded.py
+
 # Run an extended local-only Chaos Librarian wall-clock soak.
 chaos-e2e-soak:
-    CHAOS_DURATION=${CHAOS_DURATION:-2h} CHAOS_SPEED=${CHAOS_SPEED:-10x} CHAOS_PRESERVE_OUTPUT=1 ./scripts/chaos-e2e-local.sh
+    CHAOS_DURATION=${CHAOS_DURATION:-2h} CHAOS_SPEED=${CHAOS_SPEED:-10x} CHAOS_MAX_SECONDS=${CHAOS_MAX_SECONDS:-7500} CHAOS_SEED=${CHAOS_SEED:-248} CHAOS_LANE=${CHAOS_LANE:-adversarial-media} ./scripts/chaos-e2e-local.sh
 
 # Run the opt-in Toxiproxy network-resilience suite (server from PATH). Not part of `just ci`.
 net-resilience *ARGS:

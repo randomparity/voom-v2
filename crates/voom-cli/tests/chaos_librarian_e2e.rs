@@ -80,7 +80,7 @@ async fn voom_e2e_support_runs_version_envelope() {
 #[test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 fn observed_state_rejects_paths_outside_library() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let library = tmp.path().join("chaos-run/library");
     let outside_dir = tmp.path().join("other");
     std::fs::create_dir_all(&library).unwrap();
@@ -238,7 +238,7 @@ fn observed_state_coverage_rejects_unreported_tags_and_each_stream_flag() {
 
 #[test]
 fn chaos_run_scan_root_uses_fixture_library_directory() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let run = support::chaos_librarian::ChaosRun {
         _tmp: tmp,
         run_dir: std::path::PathBuf::from("/tmp/voom-chaos/run"),
@@ -457,7 +457,7 @@ async fn transcode_required_executes_real_owner_and_commits_hevc_mkv() {
 #[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
 async fn production_scan_persists_probe_evidence_and_isolates_invalid_file() {
     let chaos = ready_chaos();
-    let work = tempfile::tempdir().unwrap();
+    let work = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let run_dir = work.path().join("run");
     let library = run_dir.join("library");
     std::fs::create_dir_all(&library).unwrap();
@@ -565,7 +565,7 @@ async fn production_scan_persists_probe_evidence_and_isolates_invalid_file() {
 #[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
 async fn production_scan_retains_seven_misleading_metadata_cases() {
     let chaos = ready_chaos();
-    let cases = tempfile::tempdir().unwrap();
+    let cases = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let generated = metadata_helper(&chaos, "generate", cases.path(), cases.path());
     let scenarios = generated.as_array().unwrap();
     assert_eq!(
@@ -577,7 +577,7 @@ async fn production_scan_retains_seven_misleading_metadata_cases() {
         let run = chaos
             .materialize(Path::new(scenario.as_str().unwrap()))
             .unwrap();
-        let work = tempfile::tempdir().unwrap();
+        let work = crate::support::chaos_librarian::retained_tempdir().unwrap();
         let evidence = run_real_owner_process(
             &chaos,
             &run.scan_root(),
@@ -665,7 +665,7 @@ fn metadata_helper(
 #[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
 async fn production_scan_structural_corruption() {
     let chaos = ready_chaos();
-    let work = tempfile::tempdir().unwrap();
+    let work = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let run = work.path().join("structural");
     let generated = std::process::Command::new("uv")
         .current_dir(&chaos.submodule_dir)
@@ -736,7 +736,7 @@ async fn production_scan_structural_corruption() {
 #[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
 async fn production_scan_track_matrix() {
     let chaos = ready_chaos();
-    let cases = tempfile::tempdir().unwrap();
+    let cases = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let scenario = cases.path().join("tracks.json");
     let generated = std::process::Command::new("uv")
         .current_dir(&chaos.submodule_dir)
@@ -755,7 +755,7 @@ async fn production_scan_track_matrix() {
         String::from_utf8_lossy(&generated.stderr)
     );
     let run = chaos.materialize(&scenario).unwrap();
-    let work = tempfile::tempdir().unwrap();
+    let work = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let evidence = run_real_owner_process(
         &chaos,
         &run.scan_root(),
@@ -824,7 +824,7 @@ async fn run_real_owner_encode(
     chaos: &ChaosLibrarian,
     run: &ChaosRun,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let work = tempfile::tempdir().unwrap();
+    let work = crate::support::chaos_librarian::retained_tempdir().unwrap();
     run_real_owner_process(
         chaos,
         &run.scan_root(),
@@ -938,7 +938,7 @@ fn real_owner_cli_errors(work: &Path) -> serde_json::Value {
 
 #[test]
 fn real_owner_failure_reports_cli_error_without_registration_or_configuration() {
-    let work = tempfile::tempdir().unwrap();
+    let work = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let evidence = work.path().join("stack/bootstrap-evidence");
     std::fs::create_dir_all(&evidence).unwrap();
     std::fs::write(
@@ -1061,7 +1061,7 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
 async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
     let chaos = ready_chaos();
     let scenario = chaos.upstream_scenario("reencode-video.yaml");
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let run_dir = tmp.path().canonicalize().unwrap().join("run");
     // File existence does not order the seeder's delayed byte read before a
     // timed mutation. Finish a zero-event baseline before publishing identity.
@@ -1339,8 +1339,8 @@ async fn seed_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> 
 
 #[tokio::test]
 async fn staging_path_outside_registered_roots_is_not_a_staging_root() {
-    let library = tempfile::tempdir().unwrap();
-    let sibling = tempfile::tempdir().unwrap();
+    let library = crate::support::chaos_librarian::retained_tempdir().unwrap();
+    let sibling = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let db = VoomTestDb::init().await.unwrap();
     db.configure_local_root(library.path()).await.unwrap();
 

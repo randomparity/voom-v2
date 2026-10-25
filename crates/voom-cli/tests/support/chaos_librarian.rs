@@ -3,7 +3,7 @@
     reason = "E2E support helpers are introduced before every test uses them"
 )]
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
@@ -121,7 +121,7 @@ TypeAdapter(models[sys.argv[1]]).validate_python(value)
 
     pub fn materialize(&self, scenario: &Path) -> Result<ChaosRun, Box<dyn std::error::Error>> {
         self.validate_scenario(scenario)?;
-        let tmp = TempDir::new()?;
+        let tmp = retained_tempdir()?;
         // Canonicalize so downstream staging/output paths do not traverse the
         // macOS /var -> /private/var symlink, which voom's staging guard rejects.
         let run_dir = tmp.path().canonicalize()?.join("run");
@@ -214,6 +214,10 @@ TypeAdapter(models[sys.argv[1]]).validate_python(value)
             "final-state",
             "--json",
         ])?;
+        std::fs::write(
+            run_dir.join("comparison.json"),
+            serde_json::to_vec_pretty(&report)?,
+        )?;
         self.validate_contract("divergence", &report)?;
         Ok(report)
     }
@@ -251,6 +255,16 @@ TypeAdapter(models[sys.argv[1]]).validate_python(value)
 
 fn command_output(command: &mut Command) -> Result<Output, Box<dyn std::error::Error>> {
     let output = command.output()?;
+    if let Some(root) = std::env::var_os("CHAOS_EVIDENCE_ROOT") {
+        for (suffix, bytes) in [(".stdout", &output.stdout), (".stderr", &output.stderr)] {
+            let mut log = tempfile::Builder::new()
+                .prefix("process-")
+                .suffix(suffix)
+                .tempfile_in(&root)?;
+            log.write_all(bytes)?;
+            log.keep().map_err(|error| error.error)?;
+        }
+    }
     if output.status.success() {
         return Ok(output);
     }
@@ -269,3 +283,22 @@ pub fn workspace_root() -> PathBuf {
         .and_then(Path::parent)
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
+
+/// The bounded consumer owns cleanup after collecting diagnostics, including on unwind.
+pub fn retained_tempdir() -> io::Result<TempDir> {
+    let root = std::env::var_os("CHAOS_EVIDENCE_ROOT").map(PathBuf::from);
+    tempdir_for_evidence(root.as_deref())
+}
+
+fn tempdir_for_evidence(root: Option<&Path>) -> io::Result<TempDir> {
+    let mut directory = match root {
+        Some(root) => tempfile::Builder::new().prefix("chaos-").tempdir_in(root)?,
+        None => TempDir::new()?,
+    };
+    directory.disable_cleanup(root.is_some());
+    Ok(directory)
+}
+
+#[cfg(test)]
+#[path = "chaos_librarian_test.rs"]
+mod tests;

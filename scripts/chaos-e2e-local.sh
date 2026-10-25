@@ -2,6 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${CHAOS_SUPERVISED:-0}" != 1 ]]; then
+  exec python3 "$repo_root/scripts/chaos-e2e-bounded.py" local -- bash "$0" "$@"
+fi
 chaos_dir="$repo_root/third_party/chaos-librarian"
 source "$repo_root/scripts/acceptance-bootstrap.sh"
 
@@ -83,7 +86,16 @@ cargo build -p voom-cli -p voom-api -p voom-node-agent -p voom-scan-worker -p vo
 voom_bin="$(cd "$(dirname "$voom_bin")" && pwd -P)/$(basename "$voom_bin")"
 
 cd "$chaos_dir"
-uv run chaos-librarian run "$scenario_path" --out "$run_dir" --duration "$duration" --speed "$speed" --json > "$workdir/chaos-run.json" &
+if [[ -n "${CHAOS_SEED:-}" || -n "${CHAOS_LANE:-}" ]]; then
+  if [[ ! "${CHAOS_SEED:-}" =~ ^[0-9]+$ || -z "${CHAOS_LANE:-}" ]]; then
+    echo "CHAOS_SEED and CHAOS_LANE must be supplied together (nonnegative seed)" >&2
+    exit 2
+  fi
+  scenario_path="$workdir/scenario.yaml"
+  uv run chaos-librarian generate --profile fuzz-regression --seed "$CHAOS_SEED" \
+    --lane "$CHAOS_LANE" --out "$scenario_path" --json > "$workdir/generation.json"
+fi
+uv run chaos-librarian run "$scenario_path" --out "$run_dir" --duration "$duration" --speed "$speed" --json > "$workdir/chaos-run.json" 2> "$workdir/chaos.stderr" &
 chaos_pid=$!
 
 started_at="$(date +%s)"

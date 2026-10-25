@@ -4,6 +4,7 @@
 import importlib.util
 import itertools
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,17 @@ class BootstrapTests(unittest.TestCase):
         for path in (directory or self.workdir).rglob("*"):
             if path.is_file():
                 self.assertNotIn(TOKEN.encode(), path.read_bytes(), str(path))
+
+    def test_supervised_children_inherit_group_and_credentials_stay_owned(self):
+        with patch.dict(os.environ, {"VOOM_ACCEPTANCE_PROCESS_GROUP": "inherit"}):
+            credential = self.stack.write_credential(TOKEN)
+            self.assertTrue(credential.is_relative_to(self.workdir))
+            with patch.object(bootstrap.subprocess, "Popen") as launch:
+                self.stack.launch("voom-api", [])
+                self.assertFalse(launch.call_args.kwargs["start_new_session"])
+            self.stack.children.clear()
+        self.stack.close()
+        self.assertFalse(credential.exists())
 
     def test_registration_evidence_contains_only_nonsecret_node_metadata(self):
         envelope = {

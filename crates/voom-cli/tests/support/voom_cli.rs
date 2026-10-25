@@ -25,7 +25,10 @@ pub struct VoomOutput {
 
 impl VoomTestDb {
     pub async fn init() -> Result<Self, Box<dyn std::error::Error>> {
-        let file = TempDatabase::new()?;
+        let file = match std::env::var_os("CHAOS_EVIDENCE_ROOT") {
+            Some(root) => TempDatabase::new_in(root)?,
+            None => TempDatabase::new()?,
+        };
         let url = voom_store::test_support::sqlite_url_for(file.path());
         voom_store::init(&url).await?;
         Ok(Self { _file: file, url })

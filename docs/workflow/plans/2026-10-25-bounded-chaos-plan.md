@@ -1,8 +1,11 @@
 # Bounded chaos implementation plan
 
 Branch feat/bounded-chaos-soak-747; BASE_BRANCH main. Frozen scope q747-7668b66b.
-Expected implementation size: 450–650 changed lines (M); the cross-language test and
-lifecycle paths exceed the advisory 250-line denominator; no scope change is implied.
+Expected implementation size: 750–950 changed lines (M). The original 450–650 estimate
+under-counted the regular-file/parent-link/content publication checks, bounded diagnostics,
+resource/interrupt failure tests and private DB/credential ownership adapters. The current
+file inventory measures about 800 implementation changes; each maps to the approved criteria.
+The frozen denominator stays 250; this corrects planning evidence, not scope or complexity.
 Execution is Cast: tasks share the supervisor lifecycle, environment and evidence contract.
 
 ## Task 1 — supervisor and executable contract evidence
@@ -60,9 +63,3 @@ before push. Own worktree target only. Mandatory hooks run unmodified. Revert th
 back; no persisted product change. Preserve private raw evidence until bundle finalized, then
 remove heavy evidence; never delete caller directories or upload raw evidence. Open findings,
 owned deferrals and follow-up candidates: none at planning time.
-
-Design review disposition: both independent corpus-retention findings accepted-fixed by
-the explicit caller inventory; both artifact-pin notes accepted-fixed by the verified pin.
-No deferrals, follow-up candidates, rejected findings or outstanding notes. Suppressions:
-host crash/supervisor SIGKILL/escaping sessions and pre-materialization partial replay are
-accepted only on the Failure model terms. Two valid independent passes; no confirming prose pass.

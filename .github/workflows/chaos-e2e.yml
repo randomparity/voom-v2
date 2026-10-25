@@ -121,7 +121,19 @@ jobs:
 
       - name: Run Chaos Librarian E2E
         id: run-chaos-e2e
+        env:
+          CHAOS_WORKDIR: ${{ runner.temp }}/chaos-e2e
         run: just chaos-e2e-ci
+
+      - name: Upload chaos failure diagnostics
+        id: upload-chaos-diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: chaos-e2e-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/chaos-e2e/bundle
+          retention-days: 7
+          if-no-files-found: warn
 
       # Names the step that failed, so notify-failure can key one tracking issue per
       # distinct failure instead of filing a fresh one every week. Keyed by step id

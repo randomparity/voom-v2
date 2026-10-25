@@ -5,6 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workdir="$(mktemp -d -t voom-chaos-script-test.XXXXXX)"
 fake_bin="$workdir/bin"
 fake_voom="$workdir/voom"
+real_python=$(command -v python3)
+export CHAOS_TEST_REAL_PYTHON="$real_python"
 chaos_workdir="$workdir/chaos-work"
 mkdir -p "$fake_bin"
 trap 'rm -rf "$workdir"' EXIT
@@ -48,6 +50,13 @@ fi
 if [[ "$1" == "run" && "$2" == "python" && "$3" == */fixed_seed_corpus.py && "$4" == summary ]]; then
   jq -nc --argjson applied "${FAKE_APPLIED_EVENTS:-11}" \
     '{applied_events:$applied,timeline_events:11,timeline_complete:($applied == 11)}'
+  exit 0
+fi
+if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "generate" ]]; then
+  [[ " $* " == *" --seed 248 "* && " $* " == *" --lane adversarial-media "* ]]
+  while [[ "$1" != "--out" ]]; do shift; done
+  printf 'seed: 248\n' > "$2"
+  echo '{"seed":248,"lane":"adversarial-media"}'
   exit 0
 fi
 if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "run" ]]; then
@@ -110,7 +119,10 @@ SH
 cat >"$fake_bin/python3" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == */scripts/acceptance-bootstrap.py && "$2" == serve ]]
+if [[ "$1" != */scripts/acceptance-bootstrap.py ]]; then
+  exec "$CHAOS_TEST_REAL_PYTHON" "$@"
+fi
+[[ "$2" == serve ]]
 if [[ "${FAKE_BOOTSTRAP_WAIT_FOR_PRODUCER_EXIT:-0}" == 1 ]]; then
   while kill -0 "$(cat "$CHAOS_WORKDIR/run/producer-pid")" 2>/dev/null; do
     sleep 0.01
@@ -175,3 +187,10 @@ relative_target=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1],
   "$workdir/target" "$repo_root")
 FAKE_VOOM_OVERRIDE='' CARGO_TARGET_DIR="$relative_target" run_case "$workdir/relative-target"
 test -s "$workdir/relative-target/summary.jsonl"
+
+CHAOS_SEED=248 CHAOS_LANE=adversarial-media run_case "$workdir/explicit-lane"
+jq -e '.seed == 248 and .lane == "adversarial-media"' "$workdir/explicit-lane/generation.json"
+if CHAOS_SEED=248 run_case "$workdir/missing-lane"; then
+  echo "seed without lane falsely succeeded" >&2
+  exit 1
+fi
