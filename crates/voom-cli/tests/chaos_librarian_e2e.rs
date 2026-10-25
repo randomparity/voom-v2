@@ -33,7 +33,7 @@ fn chaos_librarian_submodule_is_pinned_and_ready() {
 
     assert_eq!(
         readiness.revision,
-        "9f4c3bf7b7908484ad179d288dd59f3f85185053"
+        "3b26eb9625babca61feaf1f56cb7ed8d36f1bd1a"
     );
     assert!(
         readiness.capabilities["ready_for"]["materialize_static"]
@@ -124,6 +124,34 @@ fn observed_state_does_not_infer_mp4_language_when_snapshot_omits_it() {
 }
 
 #[test]
+fn observed_state_v6_preserves_recorded_audio_and_subtitle_dispositions() {
+    for kind in ["audio", "subtitle"] {
+        for (default, forced) in [(true, false), (false, true), (false, false)] {
+            let stream = serde_json::json!({
+                "kind": kind, "codec_name": "aac",
+                "disposition": {"default": default, "forced": forced}
+            });
+            let observed = support::observed_state::probed_stream_for_test(&stream).unwrap();
+            assert_eq!(observed["default"], default, "{kind} default evidence");
+            assert_eq!(observed["forced"], forced, "{kind} forced evidence");
+        }
+    }
+}
+
+#[test]
+fn observed_state_v6_does_not_invent_disposition_evidence() {
+    for kind in ["audio", "subtitle", "video"] {
+        let mut stream = serde_json::json!({"kind": kind, "codec_name": "aac"});
+        if kind == "video" {
+            stream["disposition"] = serde_json::json!({"default": true, "forced": false});
+        }
+        let observed = support::observed_state::probed_stream_for_test(&stream).unwrap();
+        assert!(observed.get("default").is_none(), "{kind}");
+        assert!(observed.get("forced").is_none(), "{kind}");
+    }
+}
+
+#[test]
 fn chaos_run_scan_root_uses_fixture_library_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let run = support::chaos_librarian::ChaosRun {
@@ -150,7 +178,7 @@ async fn static_library_baseline_seeds_exports_and_compares() {
     );
 
     let observed_path = run.run_dir.join("observed-state.json");
-    export_observed_state(
+    let observed = export_observed_state(
         &db.url,
         &run.run_dir,
         &observed_path,
@@ -158,11 +186,131 @@ async fn static_library_baseline_seeds_exports_and_compares() {
     )
     .await
     .unwrap();
+    assert_eq!(observed["schema_version"], 6);
     let compare = chaos
         .compare_final_state(&run.run_dir, &observed_path)
         .unwrap();
 
     assert_eq!(compare["ok"], true);
+}
+
+#[test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+fn chaos_contract_validation_rejects_incompatible_artifacts() {
+    let chaos = ready_chaos();
+    let run = chaos
+        .materialize(&chaos.upstream_scenario("static-library.yaml"))
+        .unwrap();
+    let replay: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(run.run_dir.join("replay.json")).unwrap()).unwrap();
+    let scenario = std::fs::read_to_string(chaos.upstream_scenario("static-library.yaml")).unwrap();
+    chaos
+        .validate_contract("scenario", &serde_json::Value::String(scenario.clone()))
+        .unwrap();
+    let incompatible = scenario.replacen("schema_version: 37", "schema_version: 999", 1);
+    assert_ne!(incompatible, scenario);
+    assert!(
+        chaos
+            .validate_contract("scenario", &serde_json::Value::String(incompatible))
+            .is_err()
+    );
+    assert_eq!(run.report["schema_version"], 17);
+    assert_eq!(replay["schema_version"], 15);
+    let mut contracts = vec![("materialization", run.report.clone()), ("replay", replay)];
+    let reports = std::fs::read_dir(run.run_dir.join("reports/assets")).unwrap();
+    let mut asset_count = 0;
+    for report in reports {
+        let report = report.unwrap();
+        if report
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            contracts.push((
+                "asset",
+                serde_json::from_slice(&std::fs::read(report.path()).unwrap()).unwrap(),
+            ));
+            asset_count += 1;
+        }
+    }
+    assert!(
+        asset_count > 0,
+        "asset schema validation must not be vacuous"
+    );
+    contracts.push((
+        "observed",
+        serde_json::json!({
+            "schema_version": 6, "consumer": {"name": "voom"},
+            "run_id": run.report["run_id"], "observed_at": "2026-10-25T00:00:00Z", "assets": []
+        }),
+    ));
+    for (contract, value) in contracts {
+        chaos.validate_contract(contract, &value).unwrap();
+        for version in [0, 4, 999] {
+            let mut incompatible = value.clone();
+            incompatible["schema_version"] = version.into();
+            assert!(
+                chaos.validate_contract(contract, &incompatible).is_err(),
+                "{contract} accepted version {version}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+fn observed_state_v6_oracle_detects_missing_flags_and_preserves_tag_evidence() {
+    let chaos = ready_chaos();
+    let streams: Vec<_> = ["audio", "subtitle"]
+        .into_iter()
+        .map(|kind| {
+            support::observed_state::probed_stream_for_test(&serde_json::json!({
+                "kind": kind, "codec_name": "aac",
+                "disposition": {"default": true, "forced": false}
+            }))
+            .unwrap()
+        })
+        .collect();
+    let output = std::process::Command::new("uv")
+        .current_dir(&chaos.submodule_dir)
+        .args([
+            "run",
+            "python",
+            "-c",
+            r#"
+import json, sys
+from chaos_librarian.contract.manifest import ProbedMedia, ProbedStream
+from chaos_librarian.adapter.probe import compare_probed_media
+base = dict(container="matroska", duration_seconds=1.0, size_bytes=1, streams=[])
+for tags in (None, {}, {"title": ""}, {"year": "9999"}):
+    value = ProbedMedia(**base, format_tags=tags)
+    assert value.model_dump()["format_tags"] == tags
+assert ProbedMedia(**base).format_tags is None
+assert compare_probed_media(ProbedMedia(**base, format_tags={"title": "expected"}),
+                            ProbedMedia(**base)) == [], "null metadata is unreported, not coverage"
+assert compare_probed_media(ProbedMedia(**base, format_tags={}),
+                            ProbedMedia(**base, format_tags={"title": ""})) == [
+                                ("format_tags.title", None, "")]
+for stream in json.loads(sys.argv[1]):
+    expected = ProbedStream(kind=stream["kind"], codec="aac", default=True, forced=False)
+    expected_media = ProbedMedia(**(base | {"streams": [expected]}))
+    observed = ProbedMedia(**(base | {"streams": [stream]}))
+    assert compare_probed_media(expected_media, observed) == []
+    del stream["default"]
+    del stream["forced"]
+    missing = ProbedMedia(**(base | {"streams": [stream]}))
+    assert compare_probed_media(expected_media, missing) == [
+        ("streams.0.default", True, None), ("streams.0.forced", False, None)]
+"#,
+            &serde_json::to_string(&streams).unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]

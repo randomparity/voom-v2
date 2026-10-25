@@ -87,7 +87,7 @@ pub async fn export_observed_state(
 
     let observed_at = time::OffsetDateTime::now_utc().format(&Rfc3339)?;
     let observed = json!({
-        "schema_version": 4,
+        "schema_version": 6,
         "consumer": {
             "name": "voom",
             "version": consumer_version,
@@ -215,6 +215,8 @@ fn probed_media(
         "duration_seconds": duration_seconds,
         "size_bytes": size_bytes,
         "streams": streams,
+        // Production extraction of persisted raw probe tags is owned by #742.
+        "format_tags": null,
     })))
 }
 
@@ -265,9 +267,8 @@ fn probed_stream(stream: &Value) -> Option<Value> {
             out.insert(target.to_owned(), Value::Number(value.into()));
         }
     }
-    // The oracle records default/forced dispositions only for subtitle streams;
-    // exporting them for audio/video would diverge against an expected null.
-    if kind == "subtitle" {
+    // v6 retains recorded audio/subtitle flags; absence is not observed false.
+    if matches!(kind, "audio" | "subtitle") {
         for flag in ["default", "forced"] {
             if let Some(value) = stream
                 .pointer(&format!("/disposition/{flag}"))
