@@ -44,3 +44,40 @@ Also re-check the observed-state contract version: the exporter in
 submodule, and `compare` strictly checks optional probe stream fields
 (`channel_layout`, `title`, `role`) whenever the oracle records them — see
 chaos-librarian issue #222 for the consumer-side normalization rules.
+
+## Fixed-seed corpus
+
+The ignored `fixed_seed_corpus_production_run_and_replay` case explicitly generates
+`fuzz-regression` / `adversarial-media`, seed 248. Generated YAML must byte-match the
+pinned upstream fixture. Coverage reads recipe parameters, not just action names:
+
+| Family | Required recipe cells |
+| --- | --- |
+| Track flags | multiple defaults, no defaults, default+forced, forced-only |
+| Metadata | title, year, long Unicode, control characters, deletion, missing tags, eng/fra labels |
+| Structural | MP4 moov at start, MP4 moov at end, MKV Cues, MP3 after 16 frames |
+
+The unchanged golden contains 18 assets, eleven timeline events, at most two seconds
+per asset and eight audio/subtitle streams. Both the complete run and its genuine
+replay get separate real owner scans and DB exports; comparisons require observed
+metadata/dispositions and semantic probe facts. They do not require encoded byte
+identity across tool versions. The test uses a 30-second wall-clock window; a prefix
+fails the eleven-event assertion. Ordinary upstream lane selection remains unchanged.
+
+Supplemental cases are explicitly reduced seed-248 lane slices, not full random tails:
+`malformed` retains `fuzz_0005_corrupt_tags` (64 null bytes on `asset_005`) and healthy
+`asset_007`; `network-fs-chaos` retains its first eight events and eight assets, including
+paired unmount/remount and acquire/release. Both slices bound media to 0.2 seconds and
+SD video, retain the original generated YAML as provenance and revalidate the model.
+An independent healthy ASS sidecar uses the landed track fixture recipe.
+
+The network case asserts six materialization receipts: permissions, quota, readonly,
+stale-handle, remount and release. Only permissions/readonly are enforced on disk;
+the others are audit-only simulations. Actual modes are checked before and after
+upstream restoration, followed by a production scan of the recovered corpus. This
+proves simulation application/restoration and recovered-state readability, not VOOM
+handling transient ENOSPC, ESTALE, EAGAIN or unavailability, and not real NFS behavior.
+
+Local runs write `timeline-summary.json` with applied and scheduled counts and a
+`timeline_complete` boolean. A successful short prefix is explicitly reported incomplete.
+Aggregate soak limits, retained failure bundles and upload lifecycle remain #747.

@@ -239,6 +239,14 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
 done
 
 wait "$chaos_pid"
+(
+  cd "$chaos_dir"
+  uv run python "$repo_root/crates/voom-cli/tests/support/fixed_seed_corpus.py" summary "$run_dir"
+) > "$workdir/timeline-summary.json"
+jq -e '.timeline_complete | type == "boolean"' "$workdir/timeline-summary.json" >/dev/null
+if [[ "$(jq -r '.timeline_complete' "$workdir/timeline-summary.json")" != true ]]; then
+  echo "chaos timeline is an incomplete prefix; see $workdir/timeline-summary.json" >&2
+fi
 if (( checkpoint == 0 )); then
   echo "Chaos ended before a scan checkpoint; increase CHAOS_DURATION for owner startup" >&2
   exit 1

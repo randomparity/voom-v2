@@ -14,6 +14,9 @@ mod track_matrix;
 #[path = "support/structural_matrix.rs"]
 mod structural_matrix;
 
+#[path = "support/corpus_matrix.rs"]
+mod corpus_matrix;
+
 use std::path::Path;
 
 use support::chaos_librarian::{ChaosLibrarian, ChaosRun};
@@ -1343,4 +1346,10 @@ async fn staging_path_outside_registered_roots_is_not_a_staging_root() {
 
     assert!(db.is_registered_staging_root(library.path()).await.unwrap());
     assert!(!db.is_registered_staging_root(sibling.path()).await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
+async fn fixed_seed_corpus_production_run_and_replay() {
+    corpus_matrix::run().await;
 }
