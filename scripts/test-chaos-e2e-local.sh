@@ -45,6 +45,11 @@ if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "capabilities" ]]; t
   echo '{"ready_for":{"materialize_static":true,"materialize_filesystem_mutations":true,"materialize_media_mutations":true}}'
   exit 0
 fi
+if [[ "$1" == "run" && "$2" == "python" && "$3" == */fixed_seed_corpus.py && "$4" == summary ]]; then
+  jq -nc --argjson applied "${FAKE_APPLIED_EVENTS:-11}" \
+    '{applied_events:$applied,timeline_events:11,timeline_complete:($applied == 11)}'
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "run" ]]; then
   out=""
   while [[ "$#" -gt 0 ]]; do
@@ -149,6 +154,10 @@ jq -e '
 ' "$chaos_workdir/summary.jsonl" >/dev/null
 
 test -s "$chaos_workdir/bootstrap-stopped"
+jq -e '.timeline_complete == true and .applied_events == 11' "$chaos_workdir/timeline-summary.json" >/dev/null
+FAKE_APPLIED_EVENTS=1 run_case "$workdir/prefix"
+jq -e '.timeline_complete == false and .applied_events == 1 and .timeline_events == 11' \
+  "$workdir/prefix/timeline-summary.json" >/dev/null
 
 if FAKE_BOOTSTRAP_EXIT_CODE=2 run_case "$workdir/failed-shutdown"; then
   echo "Chaos falsely succeeded after bootstrap shutdown failed" >&2
