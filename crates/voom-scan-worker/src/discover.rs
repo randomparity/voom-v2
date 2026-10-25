@@ -76,7 +76,7 @@ pub fn matches_media_extension(path: &Path, allowlist: &[String]) -> bool {
 #[must_use]
 pub fn classify_sidecar(path: &Path) -> Option<SidecarKind> {
     let ext = path.extension().and_then(std::ffi::OsStr::to_str)?;
-    if ext.eq_ignore_ascii_case("srt") {
+    if ext.eq_ignore_ascii_case("srt") || ext.eq_ignore_ascii_case("ass") {
         return Some(SidecarKind::Subtitle);
     }
     if ext.eq_ignore_ascii_case("nfo") {

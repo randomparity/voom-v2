@@ -8,6 +8,9 @@ mod support;
 #[path = "support/owner_node.rs"]
 mod owner_node;
 
+#[path = "support/track_matrix.rs"]
+mod track_matrix;
+
 use std::path::Path;
 
 use support::chaos_librarian::{ChaosLibrarian, ChaosRun};
@@ -650,6 +653,94 @@ fn metadata_helper(
         String::from_utf8_lossy(&result.stderr)
     );
     serde_json::from_slice(&result.stdout).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
+async fn production_scan_track_matrix() {
+    let chaos = ready_chaos();
+    let cases = tempfile::tempdir().unwrap();
+    let scenario = cases.path().join("tracks.json");
+    let generated = std::process::Command::new("uv")
+        .current_dir(&chaos.submodule_dir)
+        .args(["run", "python"])
+        .arg(
+            chaos
+                .workspace_root
+                .join("crates/voom-cli/tests/support/track_cases.py"),
+        )
+        .arg(&scenario)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "fixture authoring: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = chaos.materialize(&scenario).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let evidence = run_real_owner_process(
+        &chaos,
+        &run.scan_root(),
+        work.path(),
+        "real_owner_scan.py",
+        &["--existing-fixtures"],
+    )
+    .await
+    .unwrap();
+    assert_eq!(evidence["scan"]["status"], "succeeded");
+    assert_eq!(evidence["scan"]["observation_count"], 5);
+    assert_eq!(evidence["completion"]["failed_content_count"], 0);
+    assert_eq!(evidence["completion"]["degraded_evidence_count"], 0);
+    let media_calls: Vec<_> = evidence["probe_invocations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|call| {
+            call["args"].as_array().unwrap().iter().any(|arg| {
+                arg.as_str().is_some_and(|arg| {
+                    Path::new(arg)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("mkv"))
+                })
+            })
+        })
+        .collect();
+    assert_eq!(
+        media_calls.len(),
+        5,
+        "real worker probes every authored primary"
+    );
+    for call in media_calls {
+        assert_eq!(call["exit_code"].as_i64(), Some(0));
+    }
+    let url = format!("sqlite://{}", work.path().join("stack/voom.db").display());
+    let observed = export_observed_state(
+        &url,
+        &run.run_dir,
+        &run.run_dir.join("observed-state.json"),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    .unwrap();
+    chaos.validate_contract("observed", &observed).unwrap();
+    for asset in observed["assets"].as_array().unwrap() {
+        let path = asset["current_path"].as_str().unwrap();
+        let calls = evidence["probe_invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                call["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg.as_str().is_some_and(|arg| arg.ends_with(path)))
+            })
+            .count();
+        assert_eq!(calls, 1, "one actual worker probe for {path}");
+    }
+    track_matrix::assert_cases(&url, &observed, &run.scan_root()).await;
 }
 
 async fn run_real_owner_encode(
