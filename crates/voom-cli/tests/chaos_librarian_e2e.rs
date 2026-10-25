@@ -339,105 +339,145 @@ async fn policy_seed_creates_durable_ids_from_seeded_source() {
     assert!(ids.input_set_id > 0);
 }
 
-/// ADR 0075 routes every byte-touching media ticket through its storage
-/// owner's agent: the bundled executor never leases such a ticket, so a bare
-/// `register_worker` worker can neither satisfy tool preflight nor execute the
-/// transcode. The owner-node emulator stands in for that agent — the same path
-/// `operator_execution_e2e` and `multi_phase_flow` already use.
+/// Only this chaos case uses the real authenticated owner stack. The other
+/// cases retain emulation to isolate their durable orchestration assertions.
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn transcode_required_settles_through_owner_node_and_commits_hevc_mkv() {
+async fn transcode_required_executes_real_owner_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
-    let SeededChaosRun { run, db, seeded } = seed_materialized_scenario(
-        &chaos,
-        &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
-    )
-    .await;
-
-    // Storage-owner stand-ins: fenced commit-intent driver + media settlement.
-    // Its activated manifest is what makes the owner node's ffmpeg worker
-    // visible to the software-transcode hardware preflight.
-    let _emulator = owner_node::OwnerNodeEmulator::spawn(&db.url);
-    owner_node::wait_for_owner_tooling(&db.url).await.unwrap();
-
-    let cp = db.control_plane().await.unwrap();
-    let ids = seed_transcode_policy(
-        &cp,
-        "chaos-h264",
-        "mp4",
-        "h264",
-        seeded[0].file_version_id,
-        Some(seeded[0].media_snapshot_id),
-    )
-    .await
-    .unwrap();
-    let plan = run_voom(
-        &db.url,
-        [
-            "plan",
-            "show",
-            "--policy-version-id",
-            &ids.policy_version_id.to_string(),
-            "--input-set-id",
-            &ids.input_set_id.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(plan.status_code, Some(0), "stderr: {}", plan.stderr);
+    let run = chaos
+        .materialize(&chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"))
+        .unwrap();
+    let evidence = run_real_owner_encode(&chaos, &run).await.unwrap();
     assert!(
-        plan.json["data"]["plan"]["nodes"]
+        evidence["plan"]["nodes"]
             .as_array()
             .unwrap()
             .iter()
             .any(|node| node["operation_kind"] == "transcode_video")
     );
-
-    // ADR 0097: the staging path must be a registered root that some root names
-    // as `default_staging_root_id`; no nesting relative to the output directory
-    // is required. `configure_local_root` makes the scan root its own staging
-    // default, so the scan root conforms. The CLI does not reject other paths
-    // itself, so assert the layout here to keep an unregistered sibling out.
-    let stage = run.scan_root();
-    assert!(
-        db.is_registered_staging_root(&stage).await.unwrap(),
-        "staging path {} names no registered default_staging_root_id root",
-        stage.display()
-    );
-    let out = stage.join("voom-output");
-    let execute = run_voom(
-        &db.url,
-        [
-            "compliance",
-            "execute",
-            "--policy-version-id",
-            &ids.policy_version_id.to_string(),
-            "--input-set-id",
-            &ids.input_set_id.to_string(),
-            "--staging-root",
-            stage.to_str().unwrap(),
-            "--output-dir",
-            out.to_str().unwrap(),
-        ],
-    )
-    .unwrap();
-
-    assert_eq!(
-        execute.status_code,
-        Some(0),
-        "envelope: {} stderr: {}",
-        execute.json,
-        execute.stderr
-    );
-    let transcode_summary = &execute.json["data"]["summary"]["per_operation"]["transcode_video"];
+    let execute = &evidence["execution"];
+    let transcode_summary = &execute["summary"]["per_operation"]["transcode_video"];
     assert_eq!(transcode_summary["success_count"], 1);
     assert_eq!(transcode_summary["failure_count"], 0);
-    let file_phase = &execute.json["data"]["file_phases"][0];
+    let file_phase = &execute["file_phases"][0];
     assert_eq!(file_phase["outcome"], "committed");
     assert!(!file_phase["ticket_ids"].as_array().unwrap().is_empty());
     assert!(file_phase["produced_file_version_id"].as_u64().unwrap() > 0);
     assert!(file_phase["reprobe_snapshot_id"].as_u64().unwrap() > 0);
-    let produced = first_file_with_extension(&out, "mkv").unwrap();
-    assert!(produced.is_file());
+    assert!(is_hevc_matroska_probe(&evidence["probe"]));
+}
+
+async fn run_real_owner_encode(
+    chaos: &ChaosLibrarian,
+    run: &ChaosRun,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use std::time::Duration;
+
+    let work = tempfile::tempdir().unwrap();
+    let stdout = work.path().join("stdout.json");
+    let stderr = work.path().join("stderr.log");
+    let binary = voom_test_support::worker::target_debug_binary("voom");
+    // Files avoid undrained pipe deadlocks while the bounded wait supervises
+    // Python; Bootstrap owns authenticated activation and descendant shutdown.
+    let mut child = tokio::process::Command::new("python3")
+        .arg(
+            chaos
+                .workspace_root
+                .join("crates/voom-cli/tests/support/real_owner_encode.py"),
+        )
+        .args(["serve", "--workdir"])
+        .arg(work.path().join("stack"))
+        .arg("--input")
+        .arg(run.scan_root())
+        .arg("--bin-dir")
+        .arg(binary.parent().unwrap())
+        .stdout(std::fs::File::create(&stdout).unwrap())
+        .stderr(std::fs::File::create(&stderr).unwrap())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let status =
+        if let Ok(status) = tokio::time::timeout(Duration::from_mins(15), child.wait()).await {
+            status.unwrap()
+        } else {
+            // Bootstrap observes SIGTERM between bounded CLI calls. Allow an
+            // in-flight 60s CLI plus its two bounded child-shutdown waits.
+            let terminated = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(child.id().unwrap().to_string())
+                .status()
+                .unwrap();
+            assert!(terminated.success());
+            if tokio::time::timeout(Duration::from_mins(3), child.wait())
+                .await
+                .is_err()
+            {
+                child.kill().await.unwrap();
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "real owner encode exceeded its deadline: {}",
+                    std::fs::read_to_string(stderr).unwrap()
+                ),
+            )
+            .into());
+        };
+    assert!(
+        status.success(),
+        "real owner encode failed: {}",
+        std::fs::read_to_string(stderr).unwrap()
+    );
+    Ok(serde_json::from_slice(&std::fs::read(stdout).unwrap())?)
+}
+
+fn is_hevc_matroska_probe(probe: &serde_json::Value) -> bool {
+    let matroska = probe["format"]["format_name"]
+        .as_str()
+        .is_some_and(|format| format.split(',').any(|name| name == "matroska"));
+    let duration = probe["format"]["duration"]
+        .as_str()
+        .and_then(|value| value.parse::<f64>().ok())
+        .is_some_and(|value| value.is_finite() && value > 0.0);
+    let hevc = probe["streams"].as_array().is_some_and(|streams| {
+        streams.iter().any(|stream| {
+            stream["codec_type"] == "video"
+                && stream["codec_name"] == "hevc"
+                && stream["width"].as_u64().is_some_and(|value| value > 0)
+                && stream["height"].as_u64().is_some_and(|value| value > 0)
+        })
+    });
+    matroska && duration && hevc
+}
+
+#[test]
+fn real_encode_probe_rejects_synthetic_bytes_wrong_codec_and_container() {
+    // A filename or a fabricated successful commit cannot establish media facts.
+    let synthetic: serde_json::Value =
+        serde_json::from_slice(b"synthetic output").unwrap_or_default();
+    assert!(!is_hevc_matroska_probe(&synthetic));
+    let valid = serde_json::json!({
+        "format": {"format_name": "matroska,webm", "duration": "1.0"},
+        "streams": [{"codec_type": "video", "codec_name": "hevc", "width": 32, "height": 32}]
+    });
+    assert!(is_hevc_matroska_probe(&valid));
+    for (pointer, invalid) in [
+        ("/streams/0/codec_name", serde_json::json!("h264")),
+        (
+            "/format/format_name",
+            serde_json::json!("mov,mp4,m4a,3gp,3g2,mj2"),
+        ),
+        ("/format/duration", serde_json::json!("0")),
+        ("/streams/0/width", serde_json::json!(0)),
+    ] {
+        let mut wrong = valid.clone();
+        *wrong.pointer_mut(pointer).unwrap() = invalid;
+        assert!(
+            !is_hevc_matroska_probe(&wrong),
+            "accepted invalid {pointer}"
+        );
+    }
 }
 
 #[tokio::test]
