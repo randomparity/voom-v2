@@ -6,6 +6,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -18,22 +19,25 @@ def main():
     )
     bootstrap = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bootstrap)
-    args = bootstrap.parser().parse_args()
+    existing = "--existing-fixtures" in sys.argv
+    argv = [arg for arg in sys.argv[1:] if arg != "--existing-fixtures"]
+    args = bootstrap.parser().parse_args(argv)
     library = args.input[0]
     args.workdir.mkdir(mode=0o700)
-    subtitle = args.workdir / "fixture.srt"
-    subtitle.write_text("1\n00:00:00,000 --> 00:00:00,400\nEvidence\n")
-    subprocess.run(
-        ["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
-         "color=size=64x64:rate=5:duration=0.4", "-f", "lavfi", "-i",
-         "sine=duration=0.4", "-i", str(subtitle), "-map", "0:v", "-map", "1:a",
-         "-map", "2:s", "-c:v", "libx264", "-threads", "1", "-c:a", "aac",
-         "-c:s", "srt", "-disposition:a:0", "default", "-disposition:s:0", "forced",
-         "-metadata", "title=Persisted Évidence", "-metadata", "year=2026",
-         str(library / "healthy.mkv")],
-        capture_output=True, timeout=30, check=True,
-    )
-    (library / "invalid.mp4").write_bytes(b"not an MP4 container\n")
+    if not existing:
+        subtitle = args.workdir / "fixture.srt"
+        subtitle.write_text("1\n00:00:00,000 --> 00:00:00,400\nEvidence\n")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+             "color=size=64x64:rate=5:duration=0.4", "-f", "lavfi", "-i",
+             "sine=duration=0.4", "-i", str(subtitle), "-map", "0:v", "-map", "1:a",
+             "-map", "2:s", "-c:v", "libx264", "-threads", "1", "-c:a", "aac",
+             "-c:s", "srt", "-disposition:a:0", "default", "-disposition:s:0", "forced",
+             "-metadata", "title=Persisted Évidence", "-metadata", "year=2026",
+             str(library / "healthy.mkv")],
+            capture_output=True, timeout=30, check=True,
+        )
+        (library / "invalid.mp4").write_bytes(b"not an MP4 container\n")
     # The shim observes actual worker tool calls, without implementing worker
     # requests or returning invented probe facts. Both streams remain inherited.
     trace = args.workdir / "probe-invocations.jsonl"

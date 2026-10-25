@@ -457,7 +457,7 @@ async fn production_scan_persists_probe_evidence_and_isolates_invalid_file() {
         br#"{"run_id":"74200000-0000-4000-8000-000000000001"}"#,
     )
     .unwrap();
-    let evidence = run_real_owner_process(&chaos, &library, work.path(), "real_owner_scan.py")
+    let evidence = run_real_owner_process(&chaos, &library, work.path(), "real_owner_scan.py", &[])
         .await
         .unwrap();
     assert_eq!(evidence["scan"]["status"], "succeeded");
@@ -552,12 +552,119 @@ async fn production_scan_persists_probe_evidence_and_isolates_invalid_file() {
     );
 }
 
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
+async fn production_scan_retains_seven_misleading_metadata_cases() {
+    let chaos = ready_chaos();
+    let cases = tempfile::tempdir().unwrap();
+    let generated = metadata_helper(&chaos, "generate", cases.path(), cases.path());
+    let scenarios = generated.as_array().unwrap();
+    assert_eq!(
+        scenarios.len(),
+        7,
+        "the pinned seven-case matrix must execute"
+    );
+    for scenario in scenarios {
+        let run = chaos
+            .materialize(Path::new(scenario.as_str().unwrap()))
+            .unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let evidence = run_real_owner_process(
+            &chaos,
+            &run.scan_root(),
+            work.path(),
+            "real_owner_scan.py",
+            &["--existing-fixtures"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(evidence["scan"]["status"], "succeeded");
+        assert_eq!(
+            evidence["scan"]["observation_count"], 1,
+            "only the materialized media is scanned"
+        );
+        assert_eq!(evidence["completion"]["failed_content_count"], 0);
+        assert_eq!(evidence["completion"]["degraded_evidence_count"], 0);
+        let invocations: Vec<_> = evidence["probe_invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                call["args"].as_array().unwrap().iter().any(|arg| {
+                    arg.as_str().is_some_and(|arg| {
+                        Path::new(arg)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("mkv"))
+                    })
+                })
+            })
+            .collect();
+        assert_eq!(
+            invocations.len(),
+            1,
+            "one real media probe per metadata case"
+        );
+        assert_eq!(invocations[0]["exit_code"].as_i64(), Some(0));
+        let output = run.run_dir.join("observed-state.json");
+        let url = format!("sqlite://{}", work.path().join("stack/voom.db").display());
+        let pool = voom_store::connect(&url).await.unwrap();
+        let snapshots: i64 = sqlx::query_scalar("SELECT count(*) FROM media_snapshots")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshots, 1,
+            "one durable production snapshot per metadata case"
+        );
+        pool.close().await;
+        export_observed_state(&url, &run.run_dir, &output, env!("CARGO_PKG_VERSION"))
+            .await
+            .unwrap();
+        let receipt = metadata_helper(&chaos, "compare", &run.run_dir, &output);
+        assert_eq!(receipt["metadata_compared"], true);
+    }
+}
+
+fn metadata_helper(
+    chaos: &ChaosLibrarian,
+    mode: &str,
+    source: &Path,
+    output: &Path,
+) -> serde_json::Value {
+    let result = std::process::Command::new("uv")
+        .current_dir(&chaos.submodule_dir)
+        .args(["run", "python"])
+        .arg(
+            chaos
+                .workspace_root
+                .join("crates/voom-cli/tests/support/metadata_cases.py"),
+        )
+        .arg(mode)
+        .arg(source)
+        .arg(output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "metadata {mode}: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
 async fn run_real_owner_encode(
     chaos: &ChaosLibrarian,
     run: &ChaosRun,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let work = tempfile::tempdir().unwrap();
-    run_real_owner_process(chaos, &run.scan_root(), work.path(), "real_owner_encode.py").await
+    run_real_owner_process(
+        chaos,
+        &run.scan_root(),
+        work.path(),
+        "real_owner_encode.py",
+        &[],
+    )
+    .await
 }
 
 async fn run_real_owner_process(
@@ -565,6 +672,7 @@ async fn run_real_owner_process(
     input_root: &Path,
     work: &Path,
     script: &str,
+    extra_args: &[&str],
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::time::Duration;
 
@@ -580,6 +688,7 @@ async fn run_real_owner_process(
                 .join("crates/voom-cli/tests/support")
                 .join(script),
         )
+        .args(extra_args)
         .args(["serve", "--workdir"])
         .arg(work.join("stack"))
         .arg("--input")
