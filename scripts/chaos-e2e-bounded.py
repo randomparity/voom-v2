@@ -330,8 +330,12 @@ def main():
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"diagnostic collection failed: {type(error).__name__}", file=sys.stderr)
         receipt["diagnostic_error"] = type(error).__name__
+        receipt["raw_retained"] = evidence.exists()
         if original == 0:
             original = 125
+    if receipt["command_exit_code"] == 0 and interrupted[0]:
+        original = interrupted[0]
+        receipt["reason"] = "interrupted-during-diagnostics"
     receipt["exit_code"] = original
     receipt["total_elapsed_seconds"] = round(time.monotonic() - overall_started, 3)
     try:

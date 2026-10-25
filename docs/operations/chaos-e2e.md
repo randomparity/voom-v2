@@ -140,7 +140,8 @@ databases, agent configuration, credentials and environment dumps are excluded. 
 known credential patterns are omitted rather than published. This boundary serves repository
 synthetic fixtures; review diagnostics before sharing a custom scenario. Raw local workdirs
 remain private and can contain DB/config; never upload them. Heavy raw evidence is removed after complete collection; missing replay evidence or
-collection omissions retain the private raw tree for inspection. A successful heavy command
+collection omissions retain the private raw tree for inspection. Cleanup failures also report
+any remaining raw evidence. A successful heavy command
 with no collected replay fails with exit 125. The weekly/manual workflow uploads only the bundle on failure, for seven
 days, with separate artifact names for each rerun attempt; it introduces no required PR chaos gate or additional schedule.
 

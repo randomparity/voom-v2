@@ -39,6 +39,54 @@ class BoundedTests(unittest.TestCase):
         self.assertEqual(child.returncode, expected, (out, err))
         return json.loads((self.work / "bundle/runner.json").read_text())
 
+    def test_late_interrupts_preserve_failures_and_cancel_success(self):
+        fake_bin = Path(self.temp.name) / "bin"
+        fake_bin.mkdir()
+        uv = fake_bin / "uv"
+        uv.write_text(f"#!{sys.executable}\n" + """
+import os,signal,time
+from pathlib import Path
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+Path(os.environ['CHAOS_WORKDIR'],'diagnostic.started').touch()
+time.sleep(60)
+""")
+        uv.chmod(0o700)
+        for code, kind, expected in ((0, signal.SIGINT, 130), (0, signal.SIGTERM, 143),
+                                      (17, signal.SIGINT, 17)):
+            with self.subTest(code=code, kind=kind):
+                self.work = Path(self.temp.name) / f"late-{code}-{kind}"
+                child = self.start(f"raise SystemExit({code})",
+                                   PATH=str(fake_bin) + os.pathsep + os.environ["PATH"])
+                deadline = time.monotonic() + 5
+                while not (self.work / "diagnostic.started").exists():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                child.send_signal(kind)
+                receipt = self.finish(child, expected)
+                self.assertEqual(receipt["command_exit_code"], code)
+
+    def test_cleanup_failure_reports_raw_evidence_as_retained(self):
+        spec = importlib.util.spec_from_file_location("bounded", RUNNER)
+        bounded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bounded)
+        original_remove = bounded.shutil.rmtree
+
+        def fail_final_removal(path, *args, **kwargs):
+            if Path(path) == self.work / "evidence":
+                raise PermissionError("constructed raw cleanup denial")
+            return original_remove(path, *args, **kwargs)
+
+        body = "import os;from pathlib import Path;p=Path(os.environ['CHAOS_EVIDENCE_ROOT']);(p/'replay.json').write_text('{\"resolved_seed\":248,\"applied_events\":0}');raise SystemExit(17)"
+        with (patch.dict(os.environ, {"CHAOS_WORKDIR": str(self.work)}),
+              patch.object(sys, "argv", [str(RUNNER), "heavy", "--", sys.executable, "-c", body]),
+              patch.object(bounded.signal, "signal"), patch.object(sys, "stderr"),
+              patch.object(bounded.shutil, "rmtree", side_effect=fail_final_removal)):
+            result = bounded.main()
+        receipt = json.loads((self.work / "bundle/runner.json").read_text())
+        self.assertEqual(result, 17)
+        self.assertTrue((self.work / "evidence").exists())
+        self.assertTrue(receipt["raw_retained"])
+
     def test_default_workdir_uses_pinned_repo_storage(self):
         env = dict(os.environ, TMPDIR=self.temp.name, CHAOS_MAX_SECONDS="8",
                    CHAOS_MAX_MIB="8", CHAOS_MAX_PROCESSES="32", CHAOS_BUNDLE_MIB="1")
