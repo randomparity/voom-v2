@@ -589,42 +589,55 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
     let chaos = ready_chaos();
-
+    let scenario = chaos.upstream_scenario("reencode-video.yaml");
     let tmp = tempfile::tempdir().unwrap();
-    let run_dir = tmp.path().join("run");
-    let child = chaos
-        .run_for_duration(
-            &chaos.upstream_scenario("reencode-video.yaml"),
-            &run_dir,
-            "3s",
-            "1x",
-        )
+    let run_dir = tmp.path().canonicalize().unwrap().join("run");
+    // File existence does not order the seeder's delayed byte read before a
+    // timed mutation. Finish a zero-event baseline before publishing identity.
+    let output = chaos
+        .run_for_duration(&scenario, &run_dir, "1ms", "1x")
+        .unwrap()
+        .wait_with_output()
         .unwrap();
-    let db = VoomTestDb::init().await.unwrap();
-    let library_path = run_dir.join("library");
-    wait_for_file_with_extension(&library_path, "mkv");
-    let root_id = db.configure_local_root(&library_path).await.unwrap();
-
-    // The first seeding publishes the original bytes' identity at the live
-    // rooted address.
-    let cp = db.control_plane().await.unwrap();
-    let walk = LibraryWalk::discover(&library_path);
-    let seeds = walk.seed_files(&library_path);
-    seed_scanned_files(&cp, &db.url, root_id, &seeds)
-        .await
-        .unwrap();
-
-    let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "chaos-librarian run failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let baseline: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(baseline["applied_events"], 0);
+    let db = VoomTestDb::init().await.unwrap();
+    let library_path = run_dir.join("library");
+    let root_id = db.configure_local_root(&library_path).await.unwrap();
+    let cp = db.control_plane().await.unwrap();
+    let walk = LibraryWalk::discover(&library_path);
+    assert_eq!(walk.primary_paths.len(), 1);
+    let seeds = walk.seed_files(&library_path);
+    let original_bytes = std::fs::read(&walk.primary_paths[0]).unwrap();
+    seed_scanned_files(&cp, &db.url, root_id, &seeds)
+        .await
+        .unwrap();
+
+    // Generate the upstream mutation separately, then replace the same rooted
+    // address only after its original identity has committed.
+    let mutated = chaos.materialize(&scenario).unwrap();
+    let replay: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(mutated.run_dir.join("replay.json")).unwrap())
+            .unwrap();
+    assert_eq!(replay["applied_events"], 1);
+    let mutated_bytes = std::fs::read(mutated.scan_root().join(seeds[0].locator)).unwrap();
+    assert!(
+        original_bytes != mutated_bytes,
+        "the reencode must change bytes"
+    );
+    std::fs::write(&walk.primary_paths[0], mutated_bytes).unwrap();
+    let rescanned = LibraryWalk::discover(&library_path);
+    let rescan_seeds = rescanned.seed_files(&library_path);
 
     // A rescan that observes different bytes at the same address must refuse
     // to overwrite the recorded identity during completion.
-    let conflict = seed_scanned_files(&cp, &db.url, root_id, &seeds).await;
+    let conflict = seed_scanned_files(&cp, &db.url, root_id, &rescan_seeds).await;
     let error = conflict
         .err()
         .unwrap_or_else(|| unreachable!("rescanning changed bytes must conflict"));
@@ -708,40 +721,6 @@ async fn symlinked_media_scan_request_is_accepted() {
     assert_eq!(request.status_code, Some(0), "stderr: {}", request.stderr);
     assert_eq!(request.json["status"], "ok");
     assert!(request.json["data"]["scan_session_id"].as_u64().unwrap() > 0);
-}
-
-fn first_file_with_extension(dir: &std::path::Path, extension: &str) -> Option<std::path::PathBuf> {
-    let mut entries = std::fs::read_dir(dir)
-        .ok()?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            if let Some(found) = first_file_with_extension(&path, extension) {
-                return Some(found);
-            }
-        } else if path.extension().and_then(|value| value.to_str()) == Some(extension) {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn wait_for_file_with_extension(dir: &std::path::Path, extension: &str) {
-    let started = std::time::Instant::now();
-    loop {
-        if first_file_with_extension(dir, extension).is_some() {
-            return;
-        }
-        assert!(
-            started.elapsed() <= std::time::Duration::from_secs(10),
-            "timed out waiting for .{extension} under {}",
-            dir.display()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
 }
 
 fn ready_chaos() -> ChaosLibrarian {
