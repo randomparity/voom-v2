@@ -39,23 +39,33 @@ async fn second_init_against_same_disk_db_is_noop() {
     let first = init(&url).await.unwrap();
     assert!(!first.already_initialized);
 
-    // The second call starts strictly after the first fully committed, so it
-    // never contends for the migration write lock — a direct assertion that
-    // no calls into sqlx's internal `apply()` happen on this path. `apply()`
-    // itself is sqlx-internal and unobservable through voom-store's public
-    // API, so migrations_applied == 0 plus this wall-clock bound (generous
-    // relative to a single no-op probe) stand in for it.
-    let start = std::time::Instant::now();
-    let second = init(&url).await.unwrap();
-    let elapsed = start.elapsed();
+    let pool = connect(&url).await.unwrap();
+    let before = initialization_rows(&pool).await;
+    assert_eq!(
+        u32::try_from(before.migrations.len()).unwrap(),
+        expected_migrations()
+    );
+    assert!(
+        before
+            .metadata
+            .iter()
+            .any(|(key, _)| key == "schema_init_at")
+    );
+    assert_eq!(before.events.len(), 1);
 
+    let second = init(&url).await.unwrap();
     assert!(second.already_initialized);
     assert_eq!(second.migrations_applied, 0);
     assert_eq!(first.schema_init_at, second.schema_init_at);
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "sequential no-op init must not poll or sleep: took {elapsed:?}"
+
+    // Idempotence is a durable-state contract. Comparing complete rows catches
+    // hidden rewrites without treating parallel disk activity as polling.
+    let after = initialization_rows(&pool).await;
+    assert_eq!(
+        before, after,
+        "second init must preserve durable initialization rows"
     );
+    pool.close().await;
 }
 
 /// Regression: two concurrent `init()` calls against the same on-disk
@@ -200,5 +210,49 @@ async fn concurrent_init_stress() {
                 panic!("iteration {iteration}: post-race state must be Current, got {other:?}")
             }
         }
+    }
+}
+
+type InitializationEventRow = (
+    i64,
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    String,
+);
+
+#[derive(Debug, PartialEq, Eq)]
+struct InitializationRows {
+    migrations: Vec<(i64, String, String, i64, Vec<u8>, i64)>,
+    metadata: Vec<(String, String)>,
+    events: Vec<InitializationEventRow>,
+}
+
+async fn initialization_rows(pool: &sqlx::SqlitePool) -> InitializationRows {
+    let migrations = sqlx::query_as(
+        "SELECT version, description, installed_on, success, checksum, execution_time \
+         FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let metadata = sqlx::query_as("SELECT key, value FROM schema_meta ORDER BY key")
+        .fetch_all(pool)
+        .await
+        .unwrap();
+    let events = sqlx::query_as(
+        "SELECT event_id, occurred_at, kind, subject_type, subject_id, trace_id, payload \
+         FROM events WHERE kind = ? ORDER BY event_id",
+    )
+    .bind(voom_events::EventKind::SchemaInitialized.as_str())
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    InitializationRows {
+        migrations,
+        metadata,
+        events,
     }
 }

@@ -215,9 +215,77 @@ fn probed_media(
         "duration_seconds": duration_seconds,
         "size_bytes": size_bytes,
         "streams": streams,
-        // Production extraction of persisted raw probe tags is owned by #742.
-        "format_tags": null,
+        "format_tags": persisted_format_tags(&snapshot)?,
     })))
+}
+
+// The pinned oracle casefolds title/year only. These supported ASCII words
+// have no additional Unicode casefold aliases. Other format tags are ignored.
+fn persisted_format_tags(snapshot: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    let Some(format) = snapshot.pointer("/raw/ffprobe_json/format") else {
+        return Ok(Value::Null);
+    };
+    let format = format
+        .as_object()
+        .ok_or_else(|| io::Error::other("persisted raw format must be an object"))?;
+    let mut out = serde_json::Map::new();
+    if let Some(tags) = format.get("tags") {
+        let tags = tags
+            .as_object()
+            .ok_or_else(|| io::Error::other("persisted format tags must be an object"))?;
+        for (key, value) in tags {
+            let key = key.to_ascii_lowercase();
+            if !matches!(key.as_str(), "title" | "year") {
+                continue;
+            }
+            let value = value
+                .as_str()
+                .ok_or_else(|| io::Error::other("persisted title/year must be strings"))?;
+            if value.len() > 4096 || out.contains_key(&key) {
+                return Err(io::Error::other(
+                    "persisted title/year must be unique and at most 4096 UTF-8 bytes",
+                )
+                .into());
+            }
+            out.insert(key, Value::String(value.to_owned()));
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+pub fn format_tags_for_test(snapshot: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    persisted_format_tags(snapshot)
+}
+
+/// A permissive oracle comparison is not proof that these evidence families
+/// were reported. Require coverage separately before claiming this fixture.
+pub fn require_probe_evidence(probed: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    if !probed.get("format_tags").is_some_and(Value::is_object) {
+        return Err(io::Error::other("format tag evidence was not reported").into());
+    }
+    let streams = probed
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("stream evidence was not reported"))?;
+    for kind in ["audio", "subtitle"] {
+        let matching: Vec<_> = streams
+            .iter()
+            .filter(|stream| stream["kind"] == kind)
+            .collect();
+        if matching.is_empty()
+            || matching.iter().any(|stream| {
+                ["default", "forced"]
+                    .iter()
+                    .any(|flag| !stream.get(flag).is_some_and(Value::is_boolean))
+            })
+        {
+            return Err(
+                io::Error::other(format!("{kind} disposition evidence was not reported")).into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 // Exports the probe-fact subset the current chaos fixtures exercise. Known
