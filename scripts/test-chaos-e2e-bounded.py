@@ -39,6 +39,32 @@ class BoundedTests(unittest.TestCase):
         self.assertEqual(child.returncode, expected, (out, err))
         return json.loads((self.work / "bundle/runner.json").read_text())
 
+    def test_visualization_cannot_reintroduce_an_omitted_linked_manifest(self):
+        spec = importlib.util.spec_from_file_location("bounded", RUNNER)
+        bounded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bounded)
+        run = self.work / "run"
+        run.mkdir(parents=True)
+        (run / "replay.json").write_text('{"resolved_seed":248,"applied_events":0}')
+        outside = Path(self.temp.name) / "linked.json"
+        outside.write_text('{"title":"OMITTED_LINK_MARKER"}')
+        (run / "manifest.current.json").symlink_to(outside)
+
+        def renderer(command, *_args, **_kwargs):
+            source = Path(command[command.index("scripts/visualize_run.py") + 1])
+            manifest = source / "manifest.current.json"
+            text = manifest.read_text() if manifest.exists() else "no probed overlay"
+            Path(command[command.index("--output") + 1]).write_text(text)
+            return {"exit_code": 0}
+
+        receipt = {"mode": "local", "exit_code": 17}
+        with patch.object(bounded, "execute", side_effect=renderer):
+            bounded.collect(self.work, receipt, bounded.MIB, {}, [0])
+        published = b"".join(p.read_bytes() for p in (self.work / "bundle").rglob("*")
+                             if p.is_file())
+        self.assertNotIn(b"OMITTED_LINK_MARKER", published)
+        self.assertTrue(receipt["omitted"])
+
     def test_late_interrupts_preserve_failures_and_cancel_success(self):
         fake_bin = Path(self.temp.name) / "bin"
         fake_bin.mkdir()
@@ -181,6 +207,7 @@ raise SystemExit(17)
         for secret in (b"PRIVATE_DB", b"PRIVATE_CONFIG", b"NEVER_RETAIN", b"Bearer SECRET"):
             self.assertNotIn(secret, contents)
         self.assertTrue(receipt["omitted"])
+        self.assertTrue(receipt["raw_retained"], "local raw workdirs stay private for inspection")
         self.assertLessEqual(sum(p.stat().st_size for p in bundle.rglob("*") if p.is_file()),
                              1024 * 1024)
         self.assertNotEqual(receipt["visualizations"][0]["exit_code"], 0)

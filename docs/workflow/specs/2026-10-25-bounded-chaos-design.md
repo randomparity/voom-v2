@@ -38,7 +38,7 @@ validation.json, per-asset reports, observed-state/comparison JSON and owned pro
 Use exact basename/pattern allowlisting, reject symlinks and special files, cap copied bytes,
 and record omitted files. Never upload databases, node config, credentials, media or the
 whole workdir. No environment dump. An offline upstream visualizer is attempted from a
-retained run using uv run --offline python scripts/visualize_run.py RUN --output PATH, with its own short deadline and process cleanup. Its failure
+validated bundle copy of a retained run using uv run --offline python scripts/visualize_run.py RUN --output PATH, with its own short deadline and process cleanup. Its failure
 is diagnostic only; retain the original command status. Generated HTML shares the bundle
 budget. CI uploads only that directory on failure, with short retention and a pinned action.
 

@@ -229,7 +229,7 @@ def collect(work, receipt, budget, env, interrupted):
         try:
             output = directory / "visualize.html"
             status = execute(["uv", "run", "--offline", "--no-sync", "python",
-                              "scripts/visualize_run.py", str(work / run["path"]),
+                              "scripts/visualize_run.py", str(bundle / run["path"]),
                               "--output", str(output)], directory,
                              {"seconds": max(.01, deadline - time.monotonic()),
                               "bytes": remaining, "processes": 8}, env, interrupted,
@@ -251,7 +251,7 @@ def collect(work, receipt, budget, env, interrupted):
             receipt["visualizations"].append({"run": run["path"], "error": type(error).__name__})
         finally:
             shutil.rmtree(directory)
-    receipt["raw_retained"] = receipt.get("mode") == "heavy" and (
+    receipt["raw_retained"] = receipt.get("mode") != "heavy" or (
         not receipt["runs"] or bool(receipt["omitted"]))
     if receipt.get("mode") == "heavy" and receipt.get("exit_code") == 0 and not receipt["runs"]:
         receipt.update(exit_code=125, reason="missing-replay-evidence")

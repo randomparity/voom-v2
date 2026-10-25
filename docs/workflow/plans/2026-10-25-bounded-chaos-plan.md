@@ -1,10 +1,12 @@
 # Bounded chaos implementation plan
 
 Branch feat/bounded-chaos-soak-747; BASE_BRANCH main. Frozen scope q747-7668b66b.
-Expected implementation size: 750–950 changed lines (M). The original 450–650 estimate
+Expected implementation size: 750–1050 changed lines (M). The original 450–650 estimate
 under-counted the regular-file/parent-link/content publication checks, bounded diagnostics,
 resource/interrupt failure tests and private DB/credential ownership adapters. The current
 file inventory measures about 800 implementation changes; each maps to the approved criteria.
+Review-stage finalization and linked-renderer regressions add roughly 90 lines after the
+882-line build-complete snapshot; these address existing lifecycle/publication criteria.
 The frozen denominator stays 250; this corrects planning evidence, not scope or complexity.
 Execution is Cast: tasks share the supervisor lifecycle, environment and evidence contract.
 
@@ -19,7 +21,8 @@ caps; new selftest subprocess cases; expected red missing supervisor, then green
 just chaos-e2e-bounded-selftest (exit 0). Use subprocess.Popen(start_new_session=True),
 monotonic polling, os.killpg, file-backed logs and bounded finalization; copy only regular
 allowlisted files under the owned workdir. Never follow symlinks. Record metadata and omissions.
-Grace TERM 2s then KILL and reap. Visualizer runs offline with a 10s deadline and separate group;
+Grace TERM 2s then KILL and reap. Visualizer reads only the validated bundle copy,
+with an offline 10s deadline and separate group;
 its status cannot replace original result. JSON status metadata is written even without replay.
 
 ## Task 2 — reuse entrypoints and retain test evidence

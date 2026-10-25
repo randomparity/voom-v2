@@ -158,7 +158,8 @@ CHAOS_MAX_SECONDS=600 python3 scripts/chaos-e2e-bounded.py local -- bash -c '
 
 Use the same reviewed pin and equipped tools. Replay regenerates media; tool-version changes
 can change encoded bytes. Compare semantic observations using the heavy acceptance case.
-The collector attempts `uv run --offline --no-sync python scripts/visualize_run.py RUN
+The collector renders only the validated bundle copy, so omitted inputs cannot return through
+HTML. It attempts `uv run --offline --no-sync python scripts/visualize_run.py RUN
 --output PATH` with a total ten-second diagnostic deadline. It needs the existing synced
 upstream environment; unavailable dependencies or malformed partial evidence are reported,
 and visualization cannot replace an original failure. Version probes have their own two-second
