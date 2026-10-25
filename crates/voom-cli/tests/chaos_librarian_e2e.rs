@@ -339,105 +339,205 @@ async fn policy_seed_creates_durable_ids_from_seeded_source() {
     assert!(ids.input_set_id > 0);
 }
 
-/// ADR 0075 routes every byte-touching media ticket through its storage
-/// owner's agent: the bundled executor never leases such a ticket, so a bare
-/// `register_worker` worker can neither satisfy tool preflight nor execute the
-/// transcode. The owner-node emulator stands in for that agent — the same path
-/// `operator_execution_e2e` and `multi_phase_flow` already use.
+/// Only this chaos case uses the real authenticated owner stack. The other
+/// cases retain emulation to isolate their durable orchestration assertions.
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn transcode_required_settles_through_owner_node_and_commits_hevc_mkv() {
+async fn transcode_required_executes_real_owner_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
-    let SeededChaosRun { run, db, seeded } = seed_materialized_scenario(
-        &chaos,
-        &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
-    )
-    .await;
-
-    // Storage-owner stand-ins: fenced commit-intent driver + media settlement.
-    // Its activated manifest is what makes the owner node's ffmpeg worker
-    // visible to the software-transcode hardware preflight.
-    let _emulator = owner_node::OwnerNodeEmulator::spawn(&db.url);
-    owner_node::wait_for_owner_tooling(&db.url).await.unwrap();
-
-    let cp = db.control_plane().await.unwrap();
-    let ids = seed_transcode_policy(
-        &cp,
-        "chaos-h264",
-        "mp4",
-        "h264",
-        seeded[0].file_version_id,
-        Some(seeded[0].media_snapshot_id),
-    )
-    .await
-    .unwrap();
-    let plan = run_voom(
-        &db.url,
-        [
-            "plan",
-            "show",
-            "--policy-version-id",
-            &ids.policy_version_id.to_string(),
-            "--input-set-id",
-            &ids.input_set_id.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(plan.status_code, Some(0), "stderr: {}", plan.stderr);
+    let run = chaos
+        .materialize(&chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"))
+        .unwrap();
+    let evidence = run_real_owner_encode(&chaos, &run).await.unwrap();
     assert!(
-        plan.json["data"]["plan"]["nodes"]
+        evidence["plan"]["nodes"]
             .as_array()
             .unwrap()
             .iter()
             .any(|node| node["operation_kind"] == "transcode_video")
     );
-
-    // ADR 0097: the staging path must be a registered root that some root names
-    // as `default_staging_root_id`; no nesting relative to the output directory
-    // is required. `configure_local_root` makes the scan root its own staging
-    // default, so the scan root conforms. The CLI does not reject other paths
-    // itself, so assert the layout here to keep an unregistered sibling out.
-    let stage = run.scan_root();
-    assert!(
-        db.is_registered_staging_root(&stage).await.unwrap(),
-        "staging path {} names no registered default_staging_root_id root",
-        stage.display()
-    );
-    let out = stage.join("voom-output");
-    let execute = run_voom(
-        &db.url,
-        [
-            "compliance",
-            "execute",
-            "--policy-version-id",
-            &ids.policy_version_id.to_string(),
-            "--input-set-id",
-            &ids.input_set_id.to_string(),
-            "--staging-root",
-            stage.to_str().unwrap(),
-            "--output-dir",
-            out.to_str().unwrap(),
-        ],
-    )
-    .unwrap();
-
-    assert_eq!(
-        execute.status_code,
-        Some(0),
-        "envelope: {} stderr: {}",
-        execute.json,
-        execute.stderr
-    );
-    let transcode_summary = &execute.json["data"]["summary"]["per_operation"]["transcode_video"];
+    let execute = &evidence["execution"];
+    let transcode_summary = &execute["summary"]["per_operation"]["transcode_video"];
     assert_eq!(transcode_summary["success_count"], 1);
     assert_eq!(transcode_summary["failure_count"], 0);
-    let file_phase = &execute.json["data"]["file_phases"][0];
+    let file_phase = &execute["file_phases"][0];
     assert_eq!(file_phase["outcome"], "committed");
     assert!(!file_phase["ticket_ids"].as_array().unwrap().is_empty());
     assert!(file_phase["produced_file_version_id"].as_u64().unwrap() > 0);
     assert!(file_phase["reprobe_snapshot_id"].as_u64().unwrap() > 0);
-    let produced = first_file_with_extension(&out, "mkv").unwrap();
-    assert!(produced.is_file());
+    assert!(is_hevc_matroska_probe(&evidence["probe"]));
+}
+
+async fn run_real_owner_encode(
+    chaos: &ChaosLibrarian,
+    run: &ChaosRun,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use std::time::Duration;
+
+    let work = tempfile::tempdir().unwrap();
+    let stdout = work.path().join("stdout.json");
+    let stderr = work.path().join("stderr.log");
+    let binary = voom_test_support::worker::target_debug_binary("voom");
+    // Files avoid undrained pipe deadlocks while the bounded wait supervises
+    // Python; Bootstrap owns authenticated activation and descendant shutdown.
+    let mut child = tokio::process::Command::new("python3")
+        .arg(
+            chaos
+                .workspace_root
+                .join("crates/voom-cli/tests/support/real_owner_encode.py"),
+        )
+        .args(["serve", "--workdir"])
+        .arg(work.path().join("stack"))
+        .arg("--input")
+        .arg(run.scan_root())
+        .arg("--bin-dir")
+        .arg(binary.parent().unwrap())
+        .stdout(std::fs::File::create(&stdout).unwrap())
+        .stderr(std::fs::File::create(&stderr).unwrap())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let status =
+        if let Ok(status) = tokio::time::timeout(Duration::from_mins(15), child.wait()).await {
+            status.unwrap()
+        } else {
+            // Bootstrap observes SIGTERM between bounded CLI calls. Allow an
+            // in-flight 60s CLI plus its two bounded child-shutdown waits.
+            let terminated = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(child.id().unwrap().to_string())
+                .status()
+                .unwrap();
+            assert!(terminated.success());
+            if tokio::time::timeout(Duration::from_mins(3), child.wait())
+                .await
+                .is_err()
+            {
+                child.kill().await.unwrap();
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "real owner encode exceeded its deadline: {}",
+                    std::fs::read_to_string(stderr).unwrap()
+                ),
+            )
+            .into());
+        };
+    assert!(
+        status.success(),
+        "real owner encode failed: {}\nCLI errors: {}",
+        std::fs::read_to_string(stderr).unwrap(),
+        real_owner_cli_errors(work.path())
+    );
+    Ok(serde_json::from_slice(&std::fs::read(stdout).unwrap())?)
+}
+
+/// Bootstrap already sanitizes registration receipts. Project only CLI error
+/// fields here; never dump the agent config, credential files or whole receipts.
+fn real_owner_cli_errors(work: &Path) -> serde_json::Value {
+    let mut errors = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(work.join("stack/bootstrap-evidence")) {
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        for path in paths {
+            if !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("cli-"))
+                || path.extension().is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            let receipt = std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if let Some(receipt) = receipt.filter(|value| value["error"].is_object()) {
+                errors.push(serde_json::json!({
+                    "code": receipt["error"]["code"],
+                    "message": receipt["error"]["message"]
+                }));
+            }
+        }
+    }
+    serde_json::Value::Array(errors)
+}
+
+#[test]
+fn real_owner_failure_reports_cli_error_without_registration_or_configuration() {
+    let work = tempfile::tempdir().unwrap();
+    let evidence = work.path().join("stack/bootstrap-evidence");
+    std::fs::create_dir_all(&evidence).unwrap();
+    std::fs::write(
+        evidence.join("cli-0001.json"),
+        br#"{"status":"error","node_id":null}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        evidence.join("cli-0002.json"),
+        br#"{
+        "error":{"code":"CONFIG_INVALID","message":"policy slug mismatch","token":"hidden"},
+        "data":{"token":"hidden"},"local":{"config_path":"hidden"}}
+    "#,
+    )
+    .unwrap();
+    std::fs::write(evidence.join("node-agent.toml"), b"hidden").unwrap();
+    assert_eq!(
+        real_owner_cli_errors(work.path()),
+        serde_json::json!([
+            {"code":"CONFIG_INVALID","message":"policy slug mismatch"}
+        ])
+    );
+}
+
+fn is_hevc_matroska_probe(probe: &serde_json::Value) -> bool {
+    let matroska = probe["format"]["format_name"]
+        .as_str()
+        .is_some_and(|format| format.split(',').any(|name| name == "matroska"));
+    let duration = probe["format"]["duration"]
+        .as_str()
+        .and_then(|value| value.parse::<f64>().ok())
+        .is_some_and(|value| value.is_finite() && value > 0.0);
+    let hevc = probe["streams"].as_array().is_some_and(|streams| {
+        streams.iter().any(|stream| {
+            stream["codec_type"] == "video"
+                && stream["codec_name"] == "hevc"
+                && stream["width"].as_u64().is_some_and(|value| value > 0)
+                && stream["height"].as_u64().is_some_and(|value| value > 0)
+        })
+    });
+    matroska && duration && hevc
+}
+
+#[test]
+fn real_encode_probe_rejects_synthetic_bytes_wrong_codec_and_container() {
+    // A filename or a fabricated successful commit cannot establish media facts.
+    let synthetic: serde_json::Value =
+        serde_json::from_slice(b"synthetic output").unwrap_or_default();
+    assert!(!is_hevc_matroska_probe(&synthetic));
+    let valid = serde_json::json!({
+        "format": {"format_name": "matroska,webm", "duration": "1.0"},
+        "streams": [{"codec_type": "video", "codec_name": "hevc", "width": 32, "height": 32}]
+    });
+    assert!(is_hevc_matroska_probe(&valid));
+    for (pointer, invalid) in [
+        ("/streams/0/codec_name", serde_json::json!("h264")),
+        (
+            "/format/format_name",
+            serde_json::json!("mov,mp4,m4a,3gp,3g2,mj2"),
+        ),
+        ("/format/duration", serde_json::json!("0")),
+        ("/streams/0/width", serde_json::json!(0)),
+    ] {
+        let mut wrong = valid.clone();
+        *wrong.pointer_mut(pointer).unwrap() = invalid;
+        assert!(
+            !is_hevc_matroska_probe(&wrong),
+            "accepted invalid {pointer}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -489,42 +589,55 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
     let chaos = ready_chaos();
-
+    let scenario = chaos.upstream_scenario("reencode-video.yaml");
     let tmp = tempfile::tempdir().unwrap();
-    let run_dir = tmp.path().join("run");
-    let child = chaos
-        .run_for_duration(
-            &chaos.upstream_scenario("reencode-video.yaml"),
-            &run_dir,
-            "3s",
-            "1x",
-        )
+    let run_dir = tmp.path().canonicalize().unwrap().join("run");
+    // File existence does not order the seeder's delayed byte read before a
+    // timed mutation. Finish a zero-event baseline before publishing identity.
+    let output = chaos
+        .run_for_duration(&scenario, &run_dir, "1ms", "1x")
+        .unwrap()
+        .wait_with_output()
         .unwrap();
-    let db = VoomTestDb::init().await.unwrap();
-    let library_path = run_dir.join("library");
-    wait_for_file_with_extension(&library_path, "mkv");
-    let root_id = db.configure_local_root(&library_path).await.unwrap();
-
-    // The first seeding publishes the original bytes' identity at the live
-    // rooted address.
-    let cp = db.control_plane().await.unwrap();
-    let walk = LibraryWalk::discover(&library_path);
-    let seeds = walk.seed_files(&library_path);
-    seed_scanned_files(&cp, &db.url, root_id, &seeds)
-        .await
-        .unwrap();
-
-    let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "chaos-librarian run failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let baseline: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(baseline["applied_events"], 0);
+    let db = VoomTestDb::init().await.unwrap();
+    let library_path = run_dir.join("library");
+    let root_id = db.configure_local_root(&library_path).await.unwrap();
+    let cp = db.control_plane().await.unwrap();
+    let walk = LibraryWalk::discover(&library_path);
+    assert_eq!(walk.primary_paths.len(), 1);
+    let seeds = walk.seed_files(&library_path);
+    let original_bytes = std::fs::read(&walk.primary_paths[0]).unwrap();
+    seed_scanned_files(&cp, &db.url, root_id, &seeds)
+        .await
+        .unwrap();
+
+    // Generate the upstream mutation separately, then replace the same rooted
+    // address only after its original identity has committed.
+    let mutated = chaos.materialize(&scenario).unwrap();
+    let replay: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(mutated.run_dir.join("replay.json")).unwrap())
+            .unwrap();
+    assert_eq!(replay["applied_events"], 1);
+    let mutated_bytes = std::fs::read(mutated.scan_root().join(seeds[0].locator)).unwrap();
+    assert!(
+        original_bytes != mutated_bytes,
+        "the reencode must change bytes"
+    );
+    std::fs::write(&walk.primary_paths[0], mutated_bytes).unwrap();
+    let rescanned = LibraryWalk::discover(&library_path);
+    let rescan_seeds = rescanned.seed_files(&library_path);
 
     // A rescan that observes different bytes at the same address must refuse
     // to overwrite the recorded identity during completion.
-    let conflict = seed_scanned_files(&cp, &db.url, root_id, &seeds).await;
+    let conflict = seed_scanned_files(&cp, &db.url, root_id, &rescan_seeds).await;
     let error = conflict
         .err()
         .unwrap_or_else(|| unreachable!("rescanning changed bytes must conflict"));
@@ -608,40 +721,6 @@ async fn symlinked_media_scan_request_is_accepted() {
     assert_eq!(request.status_code, Some(0), "stderr: {}", request.stderr);
     assert_eq!(request.json["status"], "ok");
     assert!(request.json["data"]["scan_session_id"].as_u64().unwrap() > 0);
-}
-
-fn first_file_with_extension(dir: &std::path::Path, extension: &str) -> Option<std::path::PathBuf> {
-    let mut entries = std::fs::read_dir(dir)
-        .ok()?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            if let Some(found) = first_file_with_extension(&path, extension) {
-                return Some(found);
-            }
-        } else if path.extension().and_then(|value| value.to_str()) == Some(extension) {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn wait_for_file_with_extension(dir: &std::path::Path, extension: &str) {
-    let started = std::time::Instant::now();
-    loop {
-        if first_file_with_extension(dir, extension).is_some() {
-            return;
-        }
-        assert!(
-            started.elapsed() <= std::time::Duration::from_secs(10),
-            "timed out waiting for .{extension} under {}",
-            dir.display()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
 }
 
 fn ready_chaos() -> ChaosLibrarian {
