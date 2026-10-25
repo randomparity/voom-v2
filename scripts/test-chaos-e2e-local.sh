@@ -13,7 +13,7 @@ cat >"$fake_bin/git" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "$*" == *"submodule status third_party/chaos-librarian"* ]]; then
-  echo " 9f4c3bf7b7908484ad179d288dd59f3f85185053 third_party/chaos-librarian (heads/main)"
+  echo " 3b26eb9625babca61feaf1f56cb7ed8d36f1bd1a third_party/chaos-librarian (heads/main)"
 elif [[ "$*" == *"status --short --untracked-files=no"* ]]; then
   :
 else

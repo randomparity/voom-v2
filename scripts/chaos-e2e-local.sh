@@ -64,7 +64,7 @@ trap cleanup_run EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-git -C "$repo_root" submodule status third_party/chaos-librarian | grep -E '^ 9f4c3bf7b7908484ad179d288dd59f3f85185053 ' >/dev/null
+git -C "$repo_root" submodule status third_party/chaos-librarian | grep -E '^ 3b26eb9625babca61feaf1f56cb7ed8d36f1bd1a ' >/dev/null
 if [[ -n "$(git -C "$chaos_dir" status --short --untracked-files=no)" ]]; then
   echo "Chaos Librarian submodule has tracked modifications" >&2
   exit 1

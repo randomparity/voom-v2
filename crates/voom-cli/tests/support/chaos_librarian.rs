@@ -79,7 +79,48 @@ impl ChaosLibrarian {
         })
     }
 
+    pub fn validate_contract(
+        &self,
+        contract: &str,
+        value: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        command_output(Command::new("uv").current_dir(&self.submodule_dir).args([
+            "run",
+            "python",
+            "-c",
+            r#"
+import json, sys
+from pydantic import TypeAdapter
+from ruamel.yaml import YAML
+from chaos_librarian.contract.observed_state import ObservedState
+from chaos_librarian.contract.scenario import Scenario
+from chaos_librarian.contract.materialization import MaterializationReport
+from chaos_librarian.contract.replay_bundle import ReplayBundle
+from chaos_librarian.contract.reports import AssetReport
+from chaos_librarian.contract.divergence import DivergenceReport
+models = {"observed": ObservedState, "scenario": Scenario,
+          "materialization": MaterializationReport, "replay": ReplayBundle,
+          "asset": AssetReport, "divergence": DivergenceReport}
+value = json.loads(sys.argv[2])
+if sys.argv[1] == "scenario":
+    value = YAML(typ="safe").load(value)
+TypeAdapter(models[sys.argv[1]]).validate_python(value)
+"#,
+            contract,
+            &value.to_string(),
+        ]))?;
+        Ok(())
+    }
+
+    fn validate_scenario(&self, scenario: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        self.validate_contract(
+            "scenario",
+            &Value::String(std::fs::read_to_string(scenario)?),
+        )
+    }
+
     pub fn materialize(&self, scenario: &Path) -> Result<ChaosRun, Box<dyn std::error::Error>> {
+        self.validate_scenario(scenario)?;
         let tmp = TempDir::new()?;
         // Canonicalize so downstream staging/output paths do not traverse the
         // macOS /var -> /private/var symlink, which voom's staging guard rejects.
@@ -97,6 +138,20 @@ impl ChaosLibrarian {
                 .ok_or_else(|| io::Error::other("run dir path is not UTF-8"))?,
             "--json",
         ])?;
+        self.validate_contract("materialization", &report)?;
+        self.validate_contract(
+            "replay",
+            &serde_json::from_slice(&std::fs::read(run_dir.join("replay.json"))?)?,
+        )?;
+        for entry in std::fs::read_dir(run_dir.join("reports/assets"))? {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                self.validate_contract("asset", &serde_json::from_slice(&std::fs::read(path)?)?)?;
+            }
+        }
         Ok(ChaosRun {
             _tmp: tmp,
             run_dir,
@@ -111,6 +166,7 @@ impl ChaosLibrarian {
         duration: &str,
         speed: &str,
     ) -> Result<Child, Box<dyn std::error::Error>> {
+        self.validate_scenario(scenario)?;
         Ok(Command::new("uv")
             .current_dir(&self.submodule_dir)
             .args([
@@ -140,7 +196,11 @@ impl ChaosLibrarian {
         run_dir: &Path,
         observed_state: &Path,
     ) -> Result<Value, Box<dyn std::error::Error>> {
-        self.uv_json_with_args([
+        self.validate_contract(
+            "observed",
+            &serde_json::from_slice(&std::fs::read(observed_state)?)?,
+        )?;
+        let report = self.uv_json_with_args([
             "run",
             "chaos-librarian",
             "compare",
@@ -153,7 +213,9 @@ impl ChaosLibrarian {
             "--mode",
             "final-state",
             "--json",
-        ])
+        ])?;
+        self.validate_contract("divergence", &report)?;
+        Ok(report)
     }
 
     pub fn upstream_scenario(&self, name: &str) -> PathBuf {
