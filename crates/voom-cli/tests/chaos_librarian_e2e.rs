@@ -152,6 +152,82 @@ fn observed_state_v6_does_not_invent_disposition_evidence() {
 }
 
 #[test]
+fn observed_state_projects_only_supported_persisted_format_tags() {
+    let project = support::observed_state::format_tags_for_test;
+    assert_eq!(
+        project(&serde_json::json!({})).unwrap(),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        project(&serde_json::json!({"raw": {"ffprobe_json": {"format": {}}}})).unwrap(),
+        serde_json::json!({})
+    );
+    let snapshot = serde_json::json!({"raw": {"ffprobe_json": {"format": {"tags": {
+        "TITLE": "Évidence", "YeAr": "", "encoder": "excluded"
+    }}}}});
+    assert_eq!(
+        project(&snapshot).unwrap(),
+        serde_json::json!({"title": "Évidence", "year": ""})
+    );
+    for tags in [
+        serde_json::json!({"title": "one", "TITLE": "two"}),
+        serde_json::json!({"year": 2026}),
+        serde_json::json!({"title": "é".repeat(2049)}),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+    ] {
+        let snapshot = serde_json::json!({"raw": {"ffprobe_json": {"format": {"tags": tags}}}});
+        assert!(
+            project(&snapshot).is_err(),
+            "invalid persisted tag evidence: {tags}"
+        );
+    }
+    let boundary = serde_json::json!({"raw": {"ffprobe_json": {"format": {"tags": {"title": "é".repeat(2048)}}}}});
+    assert!(project(&boundary).is_ok());
+}
+
+#[test]
+fn observed_state_coverage_rejects_unreported_tags_and_each_stream_flag() {
+    let complete = serde_json::json!({
+        "format_tags": {"title": "", "year": "2026"},
+        "streams": [
+            {"kind": "audio", "default": false, "forced": true},
+            {"kind": "subtitle", "default": true, "forced": false}
+        ]
+    });
+    let covered = support::observed_state::require_probe_evidence;
+    assert!(covered(&complete).is_ok());
+    for replacement in [serde_json::Value::Null, serde_json::json!([])] {
+        let mut missing = complete.clone();
+        missing["format_tags"] = replacement;
+        assert!(covered(&missing).is_err());
+    }
+    let mut missing = complete.clone();
+    missing.as_object_mut().unwrap().remove("format_tags");
+    assert!(covered(&missing).is_err());
+    // An observed empty map proves tag inspection; no absent key becomes an empty value.
+    let mut empty = complete.clone();
+    empty["format_tags"] = serde_json::json!({});
+    assert!(covered(&empty).is_ok());
+    for index in [0, 1] {
+        for flag in ["default", "forced"] {
+            let mut missing = complete.clone();
+            missing["streams"][index]
+                .as_object_mut()
+                .unwrap()
+                .remove(flag);
+            assert!(covered(&missing).is_err(), "stream {index} missing {flag}");
+        }
+        let mut missing = complete.clone();
+        missing["streams"].as_array_mut().unwrap().remove(index);
+        assert!(
+            covered(&missing).is_err(),
+            "missing required stream kind {index}"
+        );
+    }
+}
+
+#[test]
 fn chaos_run_scan_root_uses_fixture_library_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let run = support::chaos_librarian::ChaosRun {
@@ -368,15 +444,132 @@ async fn transcode_required_executes_real_owner_and_commits_hevc_mkv() {
     assert!(is_hevc_matroska_probe(&evidence["probe"]));
 }
 
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires real owner workers and media tools"]
+async fn production_scan_persists_probe_evidence_and_isolates_invalid_file() {
+    let chaos = ready_chaos();
+    let work = tempfile::tempdir().unwrap();
+    let run_dir = work.path().join("run");
+    let library = run_dir.join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(
+        run_dir.join("replay.json"),
+        br#"{"run_id":"74200000-0000-4000-8000-000000000001"}"#,
+    )
+    .unwrap();
+    let evidence = run_real_owner_process(&chaos, &library, work.path(), "real_owner_scan.py")
+        .await
+        .unwrap();
+    assert_eq!(evidence["scan"]["status"], "succeeded");
+    assert_eq!(evidence["scan"]["observation_count"], 2);
+    assert_eq!(evidence["completion"]["failed_content_count"], 1);
+    assert_eq!(evidence["completion"]["degraded_evidence_count"], 0);
+    // Observe the real worker's tool invocation, independently of the absence
+    // of a snapshot. An evidence-less observation alone has several causes.
+    let invocations = evidence["probe_invocations"].as_array().unwrap();
+    for (name, success) in [("healthy.mkv", true), ("invalid.mp4", false)] {
+        let calls: Vec<_> = invocations
+            .iter()
+            .filter(|call| {
+                call["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg.as_str().is_some_and(|arg| arg.ends_with(name)))
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "one actual worker probe for {name}");
+        let exit_code = calls[0]["exit_code"].as_i64().unwrap();
+        assert_eq!(exit_code == 0, success, "{name}");
+    }
+    let url = format!("sqlite://{}", work.path().join("stack/voom.db").display());
+    let pool = voom_store::connect(&url).await.unwrap();
+    let observations: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT provider_relative_locator, evidence_json FROM scan_observations ORDER BY provider_relative_locator"
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations[0].0, "healthy.mkv");
+    let healthy: serde_json::Value =
+        serde_json::from_str(observations[0].1.as_ref().unwrap()).unwrap();
+    assert!(
+        healthy["content_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("blake3:")
+    );
+    assert_eq!(
+        healthy["probe_snapshot"]["raw"]["ffprobe_json"]["format"]["tags"]["title"],
+        "Persisted Évidence"
+    );
+    assert_eq!(observations[1], ("invalid.mp4".to_owned(), None));
+    let snapshot_count: i64 = sqlx::query_scalar("SELECT count(*) FROM media_snapshots")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot_count, 1,
+        "failed probe must not invent a published snapshot"
+    );
+    pool.close().await;
+
+    let observed = export_observed_state(
+        &url,
+        &run_dir,
+        &run_dir.join("observed-state.json"),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    .unwrap();
+    chaos.validate_contract("observed", &observed).unwrap();
+    let assets = observed["assets"].as_array().unwrap();
+    assert_eq!(
+        assets.len(),
+        1,
+        "only successful identity evidence publishes an asset"
+    );
+    assert_eq!(assets[0]["current_path"], "healthy.mkv");
+    let probed = &assets[0]["probed"];
+    support::observed_state::require_probe_evidence(probed).unwrap();
+    assert_eq!(
+        probed["format_tags"],
+        serde_json::json!({"title": "Persisted Évidence", "year": "2026"})
+    );
+    for (kind, default, forced) in [("audio", true, false), ("subtitle", false, true)] {
+        let stream = probed["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["kind"] == kind)
+            .unwrap();
+        assert_eq!(stream["default"], default);
+        assert_eq!(stream["forced"], forced);
+    }
+    let mut missing = probed.clone();
+    missing["format_tags"] = serde_json::Value::Null;
+    assert!(
+        support::observed_state::require_probe_evidence(&missing).is_err(),
+        "upstream null permissiveness must not create a coverage claim"
+    );
+}
+
 async fn run_real_owner_encode(
     chaos: &ChaosLibrarian,
     run: &ChaosRun,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let work = tempfile::tempdir().unwrap();
+    run_real_owner_process(chaos, &run.scan_root(), work.path(), "real_owner_encode.py").await
+}
+
+async fn run_real_owner_process(
+    chaos: &ChaosLibrarian,
+    input_root: &Path,
+    work: &Path,
+    script: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::time::Duration;
 
-    let work = tempfile::tempdir().unwrap();
-    let stdout = work.path().join("stdout.json");
-    let stderr = work.path().join("stderr.log");
+    let stdout = work.join("stdout.json");
+    let stderr = work.join("stderr.log");
     let binary = voom_test_support::worker::target_debug_binary("voom");
     // Files avoid undrained pipe deadlocks while the bounded wait supervises
     // Python; Bootstrap owns authenticated activation and descendant shutdown.
@@ -384,12 +577,13 @@ async fn run_real_owner_encode(
         .arg(
             chaos
                 .workspace_root
-                .join("crates/voom-cli/tests/support/real_owner_encode.py"),
+                .join("crates/voom-cli/tests/support")
+                .join(script),
         )
         .args(["serve", "--workdir"])
-        .arg(work.path().join("stack"))
+        .arg(work.join("stack"))
         .arg("--input")
-        .arg(run.scan_root())
+        .arg(input_root)
         .arg("--bin-dir")
         .arg(binary.parent().unwrap())
         .stdout(std::fs::File::create(&stdout).unwrap())
@@ -418,7 +612,7 @@ async fn run_real_owner_encode(
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
-                    "real owner encode exceeded its deadline: {}",
+                    "real owner process exceeded its deadline: {}",
                     std::fs::read_to_string(stderr).unwrap()
                 ),
             )
@@ -426,9 +620,9 @@ async fn run_real_owner_encode(
         };
     assert!(
         status.success(),
-        "real owner encode failed: {}\nCLI errors: {}",
+        "real owner process failed: {}\nCLI errors: {}",
         std::fs::read_to_string(stderr).unwrap(),
-        real_owner_cli_errors(work.path())
+        real_owner_cli_errors(work)
     );
     Ok(serde_json::from_slice(&std::fs::read(stdout).unwrap())?)
 }
