@@ -150,7 +150,9 @@ class Bootstrap:
         if not isinstance(token, str) or not token:
             raise RuntimeError("registration returned no usable node credential")
         self.credential_directory = tempfile.TemporaryDirectory(
-            prefix=".voom-acceptance-secret-", dir=self.workdir.parent
+            prefix=".voom-acceptance-secret-",
+            dir=self.workdir if os.environ.get("VOOM_ACCEPTANCE_PROCESS_GROUP") == "inherit"
+            else self.workdir.parent
         )
         path = Path(self.credential_directory.name) / "node-token"
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -304,7 +306,7 @@ class Bootstrap:
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
-                start_new_session=True,
+                start_new_session=os.environ.get("VOOM_ACCEPTANCE_PROCESS_GROUP") != "inherit",
             )
         self.children.append((name, process))
         return process

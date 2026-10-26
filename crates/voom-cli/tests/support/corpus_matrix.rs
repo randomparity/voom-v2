@@ -6,7 +6,7 @@ use std::path::Path;
 
 pub async fn run() {
     let chaos = ready_chaos();
-    let work = tempfile::tempdir().unwrap();
+    let work = crate::support::chaos_librarian::retained_tempdir().unwrap();
     let directory = work.path().canonicalize().unwrap().join("corpus");
     let generated = helper(&chaos, "generate", &directory, None).await;
     assert_eq!(generated["seed"], 248);
