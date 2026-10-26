@@ -46,9 +46,11 @@ class BootstrapTests(unittest.TestCase):
                 self.assertNotIn(TOKEN.encode(), path.read_bytes(), str(path))
 
     def test_supervised_children_inherit_group_and_credentials_stay_owned(self):
+        expected_workdir = Path(self.temp.name) / "workdir-alias"
+        expected_workdir.symlink_to(self.workdir, target_is_directory=True)
         with patch.dict(os.environ, {"VOOM_ACCEPTANCE_PROCESS_GROUP": "inherit"}):
             credential = self.stack.write_credential(TOKEN)
-            self.assertTrue(credential.is_relative_to(self.workdir))
+            self.assertTrue(credential.resolve().is_relative_to(expected_workdir.resolve()))
             with patch.object(bootstrap.subprocess, "Popen") as launch:
                 self.stack.launch("voom-api", [])
                 self.assertFalse(launch.call_args.kwargs["start_new_session"])
@@ -98,7 +100,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_credential_is_private_outside_evidence_and_removed_at_shutdown(self):
         credential = self.stack.write_credential(TOKEN)
-        self.assertFalse(credential.is_relative_to(self.workdir))
+        self.assertFalse(credential.resolve().is_relative_to(self.workdir.resolve()))
         self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
         self.assertEqual(credential.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(credential.read_text(), TOKEN)
