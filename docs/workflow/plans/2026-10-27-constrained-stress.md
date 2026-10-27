@@ -1,8 +1,11 @@
 # Implementation plan — #756
 
-Expected implementation size: 180–260 changed lines (M).
-File map: remote_runner.rs sending loop/envelope metadata (45–65), sibling HTTP
-regressions and their small server fixture (135–195). Design denominator remains
+Expected implementation size: 360–450 changed lines (M).
+File map: remote_runner.rs sending loop/envelope metadata (105 including existing
+lines indented into the loop), sibling HTTP regressions and server fixture (212).
+The first estimate missed reindentation and the formatted fixture. The approved
+database-unavailable expansion adds about 70–110 lines of budget tests and sender
+logic within the unchanged four-file surface. Design denominator remains
 250 from the live assessment in WORK:SCOPE q756-a8b62e91.
 Branch `feat/constrained-stress-756`; base `main`.
 
@@ -26,7 +29,18 @@ Verification inventory:
   then conflict and checks two requests and the original terminal API code.
 - Mode: focused-test. `ordinary_post_does_not_replay_completion_window` returns a
   valid window to ordinary post and checks one request plus REQUEST_TIMEOUT error.
-Green command: `cargo test -p voom-fakes --lib completion_window`.
+- Mode: focused-test. `database_unavailable_replays_frozen_request` serves a
+  heartbeat DB_UNREACHABLE server error then success; asserts identical body/key.
+- Mode: focused-test. `database_unavailable_budget_survives_completion_windows`
+  interleaves two database errors and valid windows before a third database error;
+  asserts final original error and exact request count.
+- Mode: focused-test. `database_unavailable_requires_server_status` proves the code
+  on a non-5xx response stays terminal and unrelated 5xx domain errors stay strict.
+- Mode: focused-test. `database_unavailable_rejects_inconsistent_envelopes` varies
+  status and non-null data, requires a terminal error after one request; replay
+  requires status error, absent/null data and the valid error object.
+Green command: `cargo test -p voom-fakes --lib replay_contract` (rename the five existing
+completion/ordinary tests to include replay_contract; new tests share that filter).
 
 Steps:
 1. Add the focused HTTP cases using an axum ephemeral listener, captured requests
@@ -38,8 +52,10 @@ Steps:
    body once with serde_json::to_vec, set JSON content type, preserve auth/key.
    Decode the existing API envelope with optional schema_version/command metadata.
    For opted-in HTTP408 require the spec's exact window fields before continuing;
-   yield once between windows. For other responses retain existing result/error
-   branch. No other caller changes or generic retry abstraction.
+   yield once between windows. Count structured 5xx DB_UNREACHABLE errors
+   cumulatively per logical call; sleep 100ms after the first two and return the
+   third original error. Healthy windows neither consume nor reset that counter.
+   Other responses retain existing handling. No caller changes or retry abstraction.
 3. Run focused command green and original `just stress` green. Run the constrained
    baseline/disk stress recipes where local resource-controller prerequisites permit.
    Compare failures with the original symptom before correction; no guessed fixes.
