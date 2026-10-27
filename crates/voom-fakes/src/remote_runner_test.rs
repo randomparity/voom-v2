@@ -880,3 +880,327 @@ async fn runner_acquire_key_replays_identically_without_second_execution() {
         TicketState::Succeeded
     );
 }
+
+#[derive(Clone)]
+struct CompletionWindowState {
+    responses: std::sync::Arc<tokio::sync::Mutex<Vec<(axum::http::StatusCode, serde_json::Value)>>>,
+    requests: std::sync::Arc<tokio::sync::Mutex<Vec<(axum::http::HeaderMap, axum::body::Bytes)>>>,
+}
+
+struct CompletionWindowServer {
+    runner: RemoteSyntheticRunner,
+    state: CompletionWindowState,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl CompletionWindowServer {
+    async fn new(responses: Vec<(axum::http::StatusCode, serde_json::Value)>) -> Self {
+        async fn respond(
+            axum::extract::State(state): axum::extract::State<CompletionWindowState>,
+            headers: axum::http::HeaderMap,
+            body: axum::body::Bytes,
+        ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+            state.requests.lock().await.push((headers, body));
+            let mut responses = state.responses.lock().await;
+            if responses.is_empty() {
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({})),
+                );
+            }
+            let (status, body) = responses.remove(0);
+            (status, axum::Json(body))
+        }
+        let state = CompletionWindowState {
+            responses: std::sync::Arc::new(tokio::sync::Mutex::new(responses)),
+            requests: std::sync::Arc::default(),
+        };
+        let app = axum::Router::new()
+            .route("/{*path}", axum::routing::post(respond))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let runner = RemoteSyntheticRunner::new(RemoteRunnerConfig {
+            base_url,
+            node_id: NodeId(1),
+            token: "completion-window-test".to_owned().into(),
+            worker_logical_name: "completion-window".to_owned(),
+            operations: vec![OperationKind::TranscodeVideo],
+            artifact_access: vec![],
+            max_parallel: 1,
+            max_polls: 1,
+            idle_timeout: std::time::Duration::from_secs(1),
+            lease_heartbeat_interval: std::time::Duration::from_millis(10),
+            lease_ttl_seconds: 60,
+            healthy_heartbeat_ttl_seconds: 60,
+        });
+        Self {
+            runner,
+            state,
+            server,
+        }
+    }
+
+    async fn complete(&self) -> Result<(), super::RemoteRunnerError> {
+        let worker = super::ActiveWorker {
+            incarnation_id: voom_core::NodeIncarnationId::generate().unwrap(),
+            worker_id: voom_core::WorkerId(2),
+            worker_epoch: 1,
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.runner.complete(
+                &worker,
+                LeaseId(3),
+                json!({"output": "frozen"}),
+                "same-completion".to_owned(),
+            ),
+        )
+        .await
+        .unwrap()
+    }
+}
+
+impl Drop for CompletionWindowServer {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+fn completion_window_envelope() -> serde_json::Value {
+    json!({
+        "schema_version": "0", "command": "execution.complete", "status": "error",
+        "data": null, "error": {"code": "REQUEST_TIMEOUT", "message": "outcome remains unknown"}
+    })
+}
+
+#[tokio::test]
+async fn replay_contract_completion_window_replays_frozen_request() {
+    let mut generic_window = completion_window_envelope();
+    generic_window["command"] = json!("api.request");
+    generic_window.as_object_mut().unwrap().remove("data");
+    let server = CompletionWindowServer::new(vec![
+        (
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            completion_window_envelope(),
+        ),
+        (axum::http::StatusCode::REQUEST_TIMEOUT, generic_window),
+        (
+            axum::http::StatusCode::OK,
+            json!({"status": "ok", "data": {}}),
+        ),
+    ])
+    .await;
+
+    server.complete().await.unwrap();
+
+    let requests = server.state.requests.lock().await;
+    assert_eq!(
+        requests.len(),
+        3,
+        "windows are pending completion, not a new dispatch"
+    );
+    for (headers, body) in requests.iter() {
+        assert_eq!(headers["x-voom-idempotency-key"], "same-completion");
+        assert_eq!(headers["authorization"], requests[0].0["authorization"]);
+        assert_eq!(
+            body, &requests[0].1,
+            "replay must retain the exact mutation bytes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_contract_completion_window_rejects_inconsistent_envelopes() {
+    let mut invalid = Vec::new();
+    for (field, value) in [
+        ("schema_version", json!("1")),
+        ("command", json!("execution.fail")),
+        ("status", json!("ok")),
+        ("data", json!({"unexpected": true})),
+        ("error", json!({"code": "CONFLICT", "message": "terminal"})),
+        ("error", serde_json::Value::Null),
+    ] {
+        let mut envelope = completion_window_envelope();
+        envelope[field] = value;
+        invalid.push(envelope);
+    }
+    for field in ["schema_version", "command"] {
+        let mut envelope = completion_window_envelope();
+        envelope.as_object_mut().unwrap().remove(field);
+        invalid.push(envelope);
+    }
+    for envelope in invalid {
+        let server =
+            CompletionWindowServer::new(vec![(axum::http::StatusCode::REQUEST_TIMEOUT, envelope)])
+                .await;
+        assert!(
+            server.complete().await.is_err(),
+            "an inconsistent window must fail closed"
+        );
+        assert_eq!(server.state.requests.lock().await.len(), 1);
+    }
+    let server = CompletionWindowServer::new(vec![(
+        axum::http::StatusCode::BAD_REQUEST,
+        completion_window_envelope(),
+    )])
+    .await;
+    assert!(
+        server.complete().await.is_err(),
+        "the HTTP status is part of the window proof"
+    );
+    assert_eq!(server.state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn replay_contract_completion_window_stops_on_terminal_error() {
+    let server = CompletionWindowServer::new(vec![
+        (
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            completion_window_envelope(),
+        ),
+        (
+            axum::http::StatusCode::CONFLICT,
+            json!({"status": "error", "error": {"code": "CONFLICT", "message": "terminal"}}),
+        ),
+    ])
+    .await;
+    let error = server.complete().await.unwrap_err();
+    assert!(matches!(error, super::RemoteRunnerError::Api { code, .. } if code == "CONFLICT"));
+    assert_eq!(server.state.requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn replay_contract_ordinary_post_does_not_replay_completion_window() {
+    let server = CompletionWindowServer::new(vec![(
+        axum::http::StatusCode::REQUEST_TIMEOUT,
+        completion_window_envelope(),
+    )])
+    .await;
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        server
+            .runner
+            .post::<super::RemoteTerminalData>("/ordinary", "ordinary-key", json!({})),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(error, super::RemoteRunnerError::Api { code, .. } if code == "REQUEST_TIMEOUT")
+    );
+    assert_eq!(server.state.requests.lock().await.len(), 1);
+}
+
+#[test]
+fn replay_contract_completion_window_metadata_is_opaque_for_ordinary_envelopes() {
+    // Ordinary callers previously ignored these fields entirely; only the new
+    // replay decision may interpret their types and values.
+    let envelope: super::ApiEnvelope<serde_json::Value> = serde_json::from_value(json!({
+        "schema_version": 7, "command": {}, "status": "error",
+        "error": {"code": "CONFLICT", "message": "terminal"}
+    }))
+    .unwrap();
+    assert_eq!(envelope.error.unwrap().code, "CONFLICT");
+}
+
+fn database_unavailable_response() -> (axum::http::StatusCode, serde_json::Value) {
+    let mut envelope = completion_window_envelope();
+    envelope["error"]["code"] = json!("DB_UNREACHABLE");
+    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, envelope)
+}
+
+#[tokio::test]
+async fn replay_contract_database_unavailable_replays_frozen_request() {
+    let server = CompletionWindowServer::new(vec![
+        database_unavailable_response(),
+        (
+            axum::http::StatusCode::OK,
+            json!({"status": "ok", "data": {}}),
+        ),
+    ])
+    .await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        server.runner.post::<super::RemoteNodeHeartbeatData>(
+            "/v1/execution/node/1/heartbeat",
+            "same-heartbeat",
+            json!({"incarnation_id": "frozen"}),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let requests = server.state.requests.lock().await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "transient storage contention must not kill the session"
+    );
+    assert_eq!(
+        requests[0], requests[1],
+        "replay retains authentication, key and exact bytes"
+    );
+}
+
+#[tokio::test]
+async fn replay_contract_database_unavailable_budget_survives_completion_windows() {
+    let window = (
+        axum::http::StatusCode::REQUEST_TIMEOUT,
+        completion_window_envelope(),
+    );
+    let server = CompletionWindowServer::new(vec![
+        database_unavailable_response(),
+        window.clone(),
+        database_unavailable_response(),
+        window,
+        database_unavailable_response(),
+    ])
+    .await;
+    let error = server.complete().await.unwrap_err();
+    assert!(
+        matches!(error, super::RemoteRunnerError::Api { code, .. } if code == "DB_UNREACHABLE")
+    );
+    assert_eq!(
+        server.state.requests.lock().await.len(),
+        5,
+        "healthy windows neither spend nor reset the three-error budget"
+    );
+}
+
+#[tokio::test]
+async fn replay_contract_database_unavailable_requires_server_status() {
+    let (_, envelope) = database_unavailable_response();
+    let mut terminal = envelope.clone();
+    terminal["error"]["code"] = json!("INTERNAL");
+    for response in [
+        (axum::http::StatusCode::BAD_REQUEST, envelope),
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, terminal),
+    ] {
+        let server = CompletionWindowServer::new(vec![response]).await;
+        assert!(matches!(
+            server.complete().await.unwrap_err(),
+            super::RemoteRunnerError::Api { .. }
+        ));
+        assert_eq!(server.state.requests.lock().await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn replay_contract_database_unavailable_rejects_inconsistent_envelopes() {
+    for (field, value) in [
+        ("status", json!("unknown")),
+        ("status", json!("ok")),
+        ("data", json!({"unexpected": true})),
+    ] {
+        let (status, mut envelope) = database_unavailable_response();
+        envelope[field] = value;
+        let server = CompletionWindowServer::new(vec![(status, envelope)]).await;
+        assert!(
+            server.complete().await.is_err(),
+            "an inconsistent error cannot authorize another mutation request"
+        );
+        assert_eq!(server.state.requests.lock().await.len(), 1);
+    }
+}

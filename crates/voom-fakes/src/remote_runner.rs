@@ -819,7 +819,7 @@ impl RemoteSyntheticRunner {
         idempotency_key: String,
     ) -> Result<(), RemoteRunnerError> {
         let _: RemoteTerminalData = self
-            .post(
+            .post_request(
                 &format!("/v1/execution/lease/{}/complete", lease_id.0),
                 &idempotency_key,
                 serde_json::json!({
@@ -828,6 +828,7 @@ impl RemoteSyntheticRunner {
                     "worker_id": active_worker.worker_id.0,
                     "result": result,
                 }),
+                true,
             )
             .await?;
         Ok(())
@@ -868,39 +869,97 @@ impl RemoteSyntheticRunner {
     where
         T: for<'de> Deserialize<'de>,
     {
+        self.post_request(path, idempotency_key, body, false).await
+    }
+
+    async fn post_request<T>(
+        &self,
+        path: &str,
+        idempotency_key: &str,
+        body: JsonValue,
+        completion_windows: bool,
+    ) -> Result<T, RemoteRunnerError>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let body = serde_json::to_vec(&body)
+            .map_err(|error| RemoteRunnerError::Protocol(error.to_string()))?;
         let url = format!("{}{}", self.config.base_url, path);
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(self.config.token.expose_secret())
-            .header("x-voom-idempotency-key", idempotency_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| RemoteRunnerError::Http(e.to_string()))?;
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| RemoteRunnerError::Http(e.to_string()))?;
-        let envelope: ApiEnvelope<T> = serde_json::from_slice(&body).map_err(|error| {
-            RemoteRunnerError::Http(format!(
-                "decode {status} response from {url}: {error}; body={}",
-                String::from_utf8_lossy(&body)
-            ))
-        })?;
-        if envelope.status == "ok" {
-            return envelope.data.ok_or_else(|| {
-                RemoteRunnerError::MalformedResponse("ok envelope missing data".to_owned())
+        let mut database_errors = 0;
+        loop {
+            let response = self
+                .client
+                .post(&url)
+                .bearer_auth(self.config.token.expose_secret())
+                .header("x-voom-idempotency-key", idempotency_key)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .map_err(|e| RemoteRunnerError::Http(e.to_string()))?;
+            let status = response.status();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|e| RemoteRunnerError::Http(e.to_string()))?;
+            let envelope: ApiEnvelope<T> = serde_json::from_slice(&body).map_err(|error| {
+                RemoteRunnerError::Http(format!(
+                    "decode {status} response from {url}: {error}; body={}",
+                    String::from_utf8_lossy(&body)
+                ))
+            })?;
+            if completion_windows && status == reqwest::StatusCode::REQUEST_TIMEOUT {
+                if envelope.schema_version.as_ref().and_then(JsonValue::as_str) != Some("0")
+                    || !matches!(
+                        envelope.command.as_ref().and_then(JsonValue::as_str),
+                        Some("execution.complete" | "api.request")
+                    )
+                    || envelope.status != "error"
+                    || envelope.data.is_some()
+                    || envelope
+                        .error
+                        .as_ref()
+                        .is_none_or(|error| error.code != "REQUEST_TIMEOUT")
+                {
+                    return Err(RemoteRunnerError::MalformedResponse(
+                        "inconsistent completion timeout envelope".to_owned(),
+                    ));
+                }
+                // A response window leaves the mutation outcome unknown (ADR0109).
+                // Reuse its exact wire body and key rather than dispatching again.
+                tokio::task::yield_now().await;
+                continue;
+            }
+            if status.is_server_error()
+                && envelope
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.code == "DB_UNREACHABLE")
+            {
+                if envelope.status != "error" || envelope.data.is_some() {
+                    return Err(RemoteRunnerError::MalformedResponse(
+                        "inconsistent database-unavailable envelope".to_owned(),
+                    ));
+                }
+                database_errors += 1;
+                if database_errors < 3 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+            if envelope.status == "ok" {
+                return envelope.data.ok_or_else(|| {
+                    RemoteRunnerError::MalformedResponse("ok envelope missing data".to_owned())
+                });
+            }
+            let err = envelope.error.ok_or_else(|| {
+                RemoteRunnerError::MalformedResponse("error envelope missing error".to_owned())
+            })?;
+            return Err(RemoteRunnerError::Api {
+                code: err.code,
+                message: err.message,
             });
         }
-        let err = envelope.error.ok_or_else(|| {
-            RemoteRunnerError::MalformedResponse("error envelope missing error".to_owned())
-        })?;
-        Err(RemoteRunnerError::Api {
-            code: err.code,
-            message: err.message,
-        })
     }
 
     fn dispatch(
@@ -1026,6 +1085,8 @@ fn new_run_id() -> String {
 
 #[derive(Debug, Deserialize)]
 struct ApiEnvelope<T> {
+    schema_version: Option<JsonValue>,
+    command: Option<JsonValue>,
     status: String,
     data: Option<T>,
     error: Option<ApiError>,
