@@ -113,15 +113,20 @@ extension; no existing responsibility moves and no unrelated path is removed.
 
 Ensure uses the existing `TranscodeAudio` plan/capability and synthesis ledger,
 with a distinct payload type and optional strict compatibility settings. The
-payload pins selected source ID/index, resolved target and one stable derived
-ID. Runtime selection recomputes those values against the pinned snapshot and
+payload pins selected source ID/index, resolved target, one stable derived
+ID and the complete retained stream identity/index inventory in provider order.
+Runtime selection recomputes those values against the pinned snapshot and
 rejects disagreement. Ordinary synthesis remains strictly downmix/non-default.
 The worker independently checks actual source channels/layout and resolved
 settings before encoding, copies originals, appends exactly one non-default
 companion, and verifies actual output target facts before reporting success.
 
-Preserve the source stream ID on copied source metadata and the derived ID on
-the new companion. Associate the derived stream explicitly with its source;
+Preserve the complete retained identity inventory on copied stream metadata and
+the derived ID on the new companion. Use a compatibility-specific identity tag;
+ordinary preexisting `SNAPSHOT_STREAM_ID` tags retain their previous probe
+normalization behavior. This prevents an observed stable source ID from
+colliding with another reordered stream's index-based fallback. Associate the
+derived stream explicitly with its source;
 normalize these observed tags into snapshots, with checked/unique structural
 validation. Existing synthesis lineage records source version/snapshot/stream
 and result version/snapshot/stream. Companion reuse requires a valid explicit
@@ -175,7 +180,9 @@ The existing ledger needs no schema migration; reservation
   one valid compatibility identity, ordinary synthesis defaults, explicit
   placement, typed identity, owner-owned bytes, exact claims and publication
   transaction/event order. Malformed input and corrupt persisted association
-  must fail explicitly before mutation; retries must not multiply companions.
+  must fail explicitly before the corresponding ensure/place mutation; earlier
+  explicit retention phases may already have committed. Retries must not
+  multiply companions.
 - Accepted classes: unsupported layouts/counts are diagnosed rather than
   converted; lossy compatibility encoding does not promise decoded equality to
   originals; encoder-tool absence fails through existing readiness/execution

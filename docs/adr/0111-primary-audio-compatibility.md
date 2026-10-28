@@ -25,8 +25,8 @@ resolved compatibility identity first within the audio group and makes it the
 sole audio default. An additive audio-group head contract preserves the
 existing global-head remux behavior and non-audio ordering.
 
-Carry source and companion stream identities through pinned payloads, observed
-media tags, snapshots and existing durable synthesis lineage. Tags are
+Carry source, companion and retained stream identities through pinned payloads,
+namespaced observed media tags, snapshots and existing durable synthesis lineage. Tags are
 untrusted facts: validate structure, unique identities, association and target
 facts before reuse. Do not identify companions merely by codec or language.
 Existing operation claims, generations, publication transactions and owner-node
