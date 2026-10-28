@@ -108,3 +108,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0109](0109-owner-media-publication-and-group-completion.md) | Owner media publication and grouped completion |
 | [0110](0110-synthesized-audio-companions-are-non-default.md) | Synthesized audio companions are non-default |
 | [0111](0111-primary-audio-compatibility.md) | Primary audio compatibility is ensured before placement |
+| [0112](0112-bounded-http-request-ingestion.md) | Bound worker HTTP request ingestion before append |

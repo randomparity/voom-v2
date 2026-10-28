@@ -409,21 +409,27 @@ fn parse_credentials(headers: &hyper::HeaderMap) -> Result<PresentedCredentials,
     })
 }
 
-async fn read_body(body: Incoming) -> Result<Bytes, ProtocolError> {
-    let collected = body
-        .collect()
-        .await
-        .map_err(|e| ProtocolError::InvalidPayload {
+async fn read_body<B>(mut body: B) -> Result<Bytes, ProtocolError>
+where
+    B: http_body::Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    let mut bytes = bytes::BytesMut::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| ProtocolError::InvalidPayload {
             detail: format!("body collect: {e}"),
         })?;
-    let bytes = collected.to_bytes();
-    if bytes.len() > MAX_BODY_BYTES {
-        return Err(ProtocolError::FrameTooLarge {
-            bytes: bytes.len() as u64,
-            max: MAX_BODY_BYTES as u64,
-        });
+        if let Ok(data) = frame.into_data() {
+            if data.len() > MAX_BODY_BYTES - bytes.len() {
+                return Err(ProtocolError::FrameTooLarge {
+                    bytes: bytes.len() as u64 + data.len() as u64,
+                    max: MAX_BODY_BYTES as u64,
+                });
+            }
+            bytes.extend_from_slice(&data);
+        }
     }
-    Ok(bytes)
+    Ok(bytes.freeze())
 }
 
 fn decode_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtocolError> {
