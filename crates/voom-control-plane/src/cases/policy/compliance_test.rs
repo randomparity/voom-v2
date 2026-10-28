@@ -2610,29 +2610,42 @@ async fn compatibility_mixed_compliance_apply_waits_for_writer_before_reading() 
     compliant.issue_action_hint = voom_plan::IssueActionHint::ResolveMatching;
     report.report.checks.insert(0, compliant);
 
-    // A compliant retention check reads before the later planned issue writes.
-    // Holding another writer makes an unsafe deferred upgrade fail immediately.
+    // Connection-local zero busy budgets make the acquisition boundary observable:
+    // immediate BEGIN fails here; deferred BEGIN reads, then fails at issues insert.
+    let mut connections = Vec::new();
+    for _ in 0..cp.pool_for_test().options().get_max_connections() {
+        let mut connection = cp.pool_for_test().acquire().await.unwrap();
+        sqlx::query("PRAGMA busy_timeout = 0")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        connections.push(connection);
+    }
+    drop(connections);
     let writer = cp
         .pool_for_test()
         .begin_with("BEGIN IMMEDIATE")
         .await
         .unwrap();
-    let apply_cp = cp.clone();
-    let mut apply = tokio::spawn(async move {
-        apply_cp
-            .apply_generated_compliance_report(&report, version)
-            .await
-    });
-    let while_locked = tokio::time::timeout(Duration::from_millis(250), &mut apply).await;
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        cp.apply_generated_compliance_report(&report, version),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
     assert!(
-        while_locked.is_err(),
-        "mixed apply must queue before taking a read snapshot: {while_locked:?}"
+        error
+            .to_string()
+            .contains("compliance: apply_generated_compliance_report"),
+        "contention must occur before any read: {error}"
     );
+    assert!(!error.to_string().contains("issues insert"), "{error}");
     writer.rollback().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), apply)
+    // Anti-vacuity: the same report creates its planned issue after the lock clears.
+    let result = cp
+        .apply_generated_compliance_report(&report, version)
         .await
-        .unwrap()
-        .unwrap()
         .unwrap();
     assert!(result.issues.created_count > 0);
     assert!(result.issues.skipped_count > 0);
