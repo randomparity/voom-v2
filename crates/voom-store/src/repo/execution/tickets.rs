@@ -834,8 +834,9 @@ impl SqliteTicketRepo {
     ) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(&format!(
             "SELECT {TICKET_RETURNING_COLS} FROM tickets \
-             WHERE state = 'failed' AND json_extract(payload, '$.workflow_id') = 'scan-run' \
-             AND NOT COALESCE((id >= 0 AND kind = 'synthetic.workflow.operation.scan_library' \
+             WHERE state = 'failed' AND kind = 'synthetic.workflow.operation.scan_library' \
+             AND json_extract(payload, '$.workflow_id') = 'scan-run' \
+             AND NOT COALESCE((id >= 0 \
                AND json_type(payload, '$.rendered_payload.scan_session_id') = 'text' \
                AND json_type(payload, '$.plan_id') = 'text' \
                AND json_type(payload, '$.branch_id') = 'text' \

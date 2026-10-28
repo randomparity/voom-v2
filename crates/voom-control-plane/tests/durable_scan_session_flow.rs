@@ -1067,3 +1067,28 @@ async fn scan_recovery_drains_multiple_live_batches() {
         1001
     );
 }
+
+#[tokio::test]
+async fn scan_recovery_preserves_unrelated_workflow_named_scan_run() {
+    let fixture = fixture().await;
+    let ticket = fixture
+        .cp
+        .create_ticket(voom_store::repo::execution::tickets::NewTicket {
+            job_id: None,
+            kind: voom_core::TicketOperation::new("custom.worker.echo").unwrap(),
+            priority: 0,
+            payload: json!({"workflow_id": "scan-run", "value": "ordinary opaque work"}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    expired_scan_lease(&fixture, ticket.id).await;
+    let result = fixture.cp.remote_recover(T0 + Duration::seconds(2)).await;
+    assert!(
+        result.is_ok(),
+        "generic ticket metadata must not opt into scan linkage: {result:?}"
+    );
+    assert_eq!(result.unwrap().failed_tickets, vec![ticket.id]);
+    assert_eq!(scan_event_count(&fixture, "scan_session.failed").await, 0);
+}

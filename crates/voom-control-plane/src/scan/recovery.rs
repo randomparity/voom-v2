@@ -21,7 +21,11 @@ impl ControlPlane {
         ticket: &Ticket,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        if ticket.state != TicketState::Failed || ticket.payload["workflow_id"] != "scan-run" {
+        // Workflow names alone are opaque metadata on unrelated ticket kinds.
+        if ticket.state != TicketState::Failed
+            || ticket.kind.as_str() != "synthetic.workflow.operation.scan_library"
+            || ticket.payload["workflow_id"] != "scan-run"
+        {
             return Ok(());
         }
         let context = format!("scan routing ticket {}", ticket.id);

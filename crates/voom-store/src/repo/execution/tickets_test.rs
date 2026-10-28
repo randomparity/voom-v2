@@ -1237,6 +1237,20 @@ async fn scan_recovery_skips_terminal_history_before_candidate_cap() {
         .bind(i64::try_from(ticket.id.0).unwrap()).execute(&pool).await.unwrap();
     // A missing association must survive selection for the caller to diagnose.
     sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.rendered_payload.scan_session_id', '999999') WHERE id = (SELECT MAX(id) FROM tickets)").execute(&pool).await.unwrap();
+    // Opaque workflow metadata cannot opt another operation into scan recovery.
+    let generic = repo
+        .create(NewTicket {
+            kind: ticket_op("custom.worker.echo"),
+            payload: serde_json::json!({"workflow_id": "scan-run"}),
+            ..sample_new_ticket()
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET state = 'failed' WHERE id = ?")
+        .bind(i64::try_from(generic.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
     let mut tx = crate::tx::begin_read_only(&pool, "scan recovery test")
         .await
         .unwrap();
