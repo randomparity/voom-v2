@@ -69,6 +69,10 @@ Verification inventory (each item Mode: focused-test):
   absent checked association or partial mutation; green cargo test -p voom-store
   scan_recovery and CP filter above. Protect generic scan-library payloads.
 - Inject an event failure and prove expiry/ticket/scan rollback as one unit.
+- Mode: focused-test, scan_recovery_skips_terminal_history_before_candidate_cap:
+  seed more than a batch of old terminal-session tickets before an active orphan;
+  expected red is starvation, green same store/CP scan_recovery filters. Assert
+  candidate cap and multiple live-batch progress with scan_recovery_drains_multiple_live_batches.
 
 ## Task 2 — API-owned periodic recovery
 
