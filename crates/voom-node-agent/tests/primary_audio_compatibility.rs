@@ -23,7 +23,7 @@ use voom_node_agent::config::{
     AgentConfig, LoadedAgentConfig, StorageRootBinding, TokenSource, WorkerConfig,
 };
 use voom_node_agent::runtime::AgentRuntime;
-use voom_store::repo::media::identity::FileLocationRepo;
+use voom_store::repo::media::identity::{FileLocationRepo, MediaSnapshotRepo};
 use voom_test_support::TempDatabase;
 
 const HANG_GUARD: Duration = Duration::from_mins(2);
@@ -906,4 +906,131 @@ async fn assert_exact_generation(fixture: &CompatibilityFixture) {
     assert!(matches!(error, voom_core::VoomError::Database { .. }));
     assert_eq!(canonical.generation, record.operation.dispatch_generation);
     transaction.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_synthesis_preserves_compatibility_identities() {
+    let tracks = [
+        media::AudioFixtureTrack {
+            title: "Unknown",
+            language: None,
+            channels: 2,
+            layout: "stereo",
+            frequency: 330,
+            commentary: false,
+            codec: "wavpack",
+        },
+        media::AudioFixtureTrack {
+            title: "Primary",
+            language: Some("eng"),
+            channels: 6,
+            layout: "5.1",
+            frequency: 880,
+            commentary: false,
+            codec: "wavpack",
+        },
+    ];
+    let mut fixture = CompatibilityFixture::start(&tracks).await;
+    let compatible = fixture
+        .execute(POLICY, "compatibility-before-ordinary")
+        .await;
+    let compatible_path = fixture.final_path(&compatible).await;
+    let before = media::probe(&compatible_path);
+    let associations = before["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|stream| stream["codec_type"] == "audio")
+        .map(|stream| {
+            (
+                media::tag(stream, "voom_compatibility_stream_id").unwrap(),
+                media::tag(stream, "voom_compatibility_source_stream_id"),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let packets = media::packet_hashes(&compatible_path);
+    let ordinary = fixture.execute("policy \"ordinary-after-compatibility\" { phase downmix { synthesize audio from channels >= 6 { codec aac channels 2 } } }", "ordinary-after-compatibility").await;
+    let output = fixture.final_path(&ordinary).await;
+    let actual = media::probe(&output);
+    let snapshot_id = ordinary
+        .file_phases
+        .iter()
+        .rev()
+        .find_map(|phase| phase.reprobe_snapshot_id)
+        .unwrap();
+    let published = fixture
+        .cp
+        .identity()
+        .get_media_snapshot(voom_core::MediaSnapshotId(snapshot_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_published_ordinary_audio(&published, &actual, &associations);
+    let after_packets = media::packet_hashes(&output);
+    for (name, packet_hashes) in packets {
+        assert_eq!(
+            after_packets.get(&name),
+            Some(&packet_hashes),
+            "copied {name}"
+        );
+    }
+    assert_eq!(synthesis_state(&fixture).await, (2, 3, 3, 2));
+    fixture.pause_owner().await;
+    fixture
+        .reseed_output(&output, "ordinary-compatibility-reprobe")
+        .await;
+    let reapplied = fixture
+        .execute(POLICY, "compatibility-after-ordinary")
+        .await;
+    assert_eq!(fixture.final_path(&reapplied).await, output);
+    assert_eq!(
+        synthesis_state(&fixture).await,
+        (2, 3, 3, 2),
+        "compatibility reapply cannot add another companion after ordinary synthesis"
+    );
+    fixture.shutdown().await;
+}
+
+fn assert_published_ordinary_audio(
+    published: &voom_store::repo::media::identity::MediaSnapshot,
+    actual: &serde_json::Value,
+    associations: &std::collections::BTreeMap<String, Option<String>>,
+) {
+    let streams = actual["streams"].as_array().unwrap();
+    let ids = published.payload["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stream| stream["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids.len(),
+        streams.len(),
+        "ordinary companions need distinct observed IDs before publication"
+    );
+    for stream in streams
+        .iter()
+        .filter(|stream| stream["codec_type"] == "audio")
+    {
+        let id = media::tag(stream, "voom_compatibility_stream_id").unwrap();
+        assert!(
+            ids.contains(id.as_str()),
+            "actual audio identity must match the published owner probe"
+        );
+        let association = media::tag(stream, "voom_compatibility_source_stream_id");
+        if let Some(original) = associations.get(&id) {
+            assert_eq!(&association, original, "copied original association");
+        } else {
+            assert_eq!(stream["codec_name"], "aac");
+            assert_eq!(stream["channels"], 2);
+            assert_eq!(
+                stream["disposition"]["default"], 0,
+                "ordinary synthesis remains non-default"
+            );
+            assert!(
+                association.is_none(),
+                "ordinary companions cannot inherit compatibility ancestry"
+            );
+        }
+    }
 }

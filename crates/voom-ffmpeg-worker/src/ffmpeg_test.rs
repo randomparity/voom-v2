@@ -60,10 +60,8 @@ async fn compatibility_validates_actual_source_before_encoding() {
     );
 }
 
-#[tokio::test]
-async fn compatibility_encoding_preserves_originals_and_identity() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("input.mkv");
+fn generated_compatibility_source(dir: &Path) -> PathBuf {
+    let input = dir.join("input.mkv");
     let generated = std::process::Command::new("ffmpeg")
         .args([
             "-v",
@@ -97,6 +95,13 @@ async fn compatibility_encoding_preserves_originals_and_identity() {
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
+    input
+}
+
+#[tokio::test]
+async fn compatibility_encoding_preserves_originals_and_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = generated_compatibility_source(dir.path());
     let config = FfmpegConfig::new(
         PathBuf::from("ffmpeg"),
         PathBuf::from("ffprobe"),
@@ -2236,4 +2241,54 @@ async fn vaapi_output_verification_expects_the_file_format_not_the_surface_forma
     .await
     .unwrap_err();
     assert!(err.to_string().contains("yuv420p"), "{err}");
+}
+
+#[tokio::test]
+async fn ordinary_companion_does_not_inherit_compatibility_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = generated_compatibility_source(dir.path());
+    let config = FfmpegConfig::new(
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("ffprobe"),
+        "8".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let mut compatibility = synthesize_audio_request(dir.path());
+    compatibility.audio.compatibility = Some(compatibility_settings());
+    let compatible = dir.path().join("compatible.mkv");
+    run_ffmpeg_transcode_audio(&config, &input, &compatible, &compatibility)
+        .await
+        .unwrap();
+    let mut ordinary = synthesize_audio_request(dir.path());
+    ordinary.audio.target_channels = Some(1);
+    ordinary.selection.selected_streams = vec![AudioStreamRef {
+        snapshot_stream_id: "ordinary-1".to_owned(),
+        provider_stream_index: 2,
+    }];
+    let output = dir.path().join("ordinary.mkv");
+    run_ffmpeg_transcode_audio(&config, &compatible, &output, &ordinary)
+        .await
+        .unwrap();
+    let actual = probe_json(&config, &output).await.unwrap();
+    let streams = actual["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 4);
+    assert_eq!(
+        stream_tag(&streams[2], "voom_compatibility_stream_id").as_deref(),
+        Some("synth-1")
+    );
+    assert_eq!(
+        stream_tag(&streams[2], "voom_compatibility_source_stream_id").as_deref(),
+        Some("stream-1")
+    );
+    assert_eq!(
+        stream_tag(&streams[3], "voom_compatibility_stream_id").as_deref(),
+        Some("ordinary-1"),
+        "a new ordinary companion cannot reuse the source identity"
+    );
+    assert!(
+        stream_tag(&streams[3], "voom_compatibility_source_stream_id").is_none(),
+        "ordinary companions cannot impersonate the existing compatibility companion"
+    );
+    assert_eq!(streams[3]["disposition"]["default"], 0);
+    assert_eq!(streams[3]["channels"], 1);
 }

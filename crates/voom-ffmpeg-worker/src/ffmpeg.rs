@@ -1078,20 +1078,6 @@ async fn run_ffmpeg_synthesize_audio(
         ));
     }
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
-    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
-        &request.audio.target_codec,
-        &request.audio.profile,
-    )
-    .ok_or_else(|| {
-        FfmpegError::OutputFactsMismatch(format!(
-            "no audio bitrate defined for codec `{}` profile `{}`",
-            request.audio.target_codec, request.audio.profile
-        ))
-    })?;
-    // Companions are appended after the copied originals, so their output audio
-    // ordinal starts at the original audio-stream count.
-    let original_audio_count = source_streams.len();
-
     let mut command = Command::new(&config.ffmpeg_path);
     command
         .arg("-hide_banner")
@@ -1120,9 +1106,8 @@ async fn run_ffmpeg_synthesize_audio(
         &mut command,
         request,
         &selected,
-        original_audio_count,
+        &source_streams,
         target_channels,
-        bitrate_kbps_per_channel,
     )?;
     if let Some(compatibility) = &request.audio.compatibility {
         append_compatibility_identities(&mut command, &input_probe, compatibility, request)?;
@@ -1158,11 +1143,31 @@ fn append_synthesis_tracks(
     command: &mut Command,
     request: &TranscodeAudioRequest,
     selected: &[SourceAudioFact],
-    original_audio_count: usize,
+    source_streams: &[SourceAudioFact],
     target_channels: u64,
-    bitrate_kbps_per_channel: u32,
 ) -> Result<(), FfmpegError> {
-    for (offset, source) in selected.iter().enumerate() {
+    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
+        &request.audio.target_codec,
+        &request.audio.profile,
+    )
+    .ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!(
+            "no audio bitrate defined for codec `{}` profile `{}`",
+            request.audio.target_codec, request.audio.profile
+        ))
+    })?;
+    // Companions are appended after the copied originals, so their output audio
+    // ordinal starts at the original audio-stream count.
+    let original_audio_count = source_streams.len();
+
+    let preserve_observed_ids = source_streams
+        .iter()
+        .any(|source| source.snapshot_stream_id.is_some());
+    for (offset, (source, selected_ref)) in selected
+        .iter()
+        .zip(&request.selection.selected_streams)
+        .enumerate()
+    {
         let out_ordinal = original_audio_count + offset;
         command
             .arg("-map")
@@ -1192,6 +1197,17 @@ fn append_synthesis_tracks(
                     "snapshot_stream_id={}",
                     compatibility.source_snapshot_stream_id
                 ));
+        } else if preserve_observed_ids {
+            // Tagged inputs carry observed identities. A new ordinary companion
+            // must neither duplicate its source ID nor impersonate its association.
+            command
+                .arg(format!("-metadata:s:a:{out_ordinal}"))
+                .arg(format!(
+                    "voom_compatibility_stream_id={}",
+                    selected_ref.snapshot_stream_id
+                ))
+                .arg(format!("-metadata:s:a:{out_ordinal}"))
+                .arg("voom_compatibility_source_stream_id=");
         }
         // A companion inherits metadata, but must not compete with the source's
         // default selection. Keep ordinary transcode metadata handling unchanged.
