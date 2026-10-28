@@ -464,6 +464,7 @@ async fn audio_envelope(
                 ))
             })?;
             let settings = voom_worker_protocol::TranscodeAudioSettings {
+                lossless: None,
                 compatibility: plan.compatibility.clone(),
                 target_codec: plan.target_codec.clone(),
                 profile: "default".to_owned(),

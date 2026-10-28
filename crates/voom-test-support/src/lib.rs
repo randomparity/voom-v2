@@ -13,3 +13,5 @@ pub mod staging_seed;
 pub mod worker;
 
 pub mod executable;
+
+pub mod audio_samples;

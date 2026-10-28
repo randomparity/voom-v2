@@ -1006,6 +1006,7 @@ async fn eac3_transcode_preserves_5_1_channels() {
             }],
         },
         audio: TranscodeAudioSettings {
+            lossless: None,
             compatibility: None,
             target_codec: "eac3".to_owned(),
             profile: AUDIO_PROFILE_DEFAULT.to_owned(),
@@ -1028,6 +1029,34 @@ async fn eac3_transcode_preserves_5_1_channels() {
         stream.channels,
         Some(6),
         "eac3 output must preserve the 5.1 (6-channel) layout"
+    );
+    let independent = Command::new(&preflight.ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_streams",
+            "-of",
+            "json",
+        ])
+        .arg(&output)
+        .output()
+        .expect("independent output probe must start");
+    assert!(independent.status.success());
+    let raw: serde_json::Value = serde_json::from_slice(&independent.stdout).unwrap();
+    let actual = &raw["streams"][0];
+    assert_eq!(
+        stream.sample_rate,
+        Some(actual["sample_rate"].as_str().unwrap().parse().unwrap())
+    );
+    assert_eq!(
+        stream.sample_format.as_deref(),
+        actual["sample_fmt"].as_str()
+    );
+    assert_eq!(
+        stream.bits_per_sample, None,
+        "lossy float output carries no integer precision claim"
     );
 }
 
@@ -1086,6 +1115,7 @@ async fn add_track_synthesis_preserves_surround_and_appends_stereo_companion() {
                 }],
             },
             audio: TranscodeAudioSettings {
+                lossless: None,
                 compatibility: None,
                 target_codec: "aac".to_owned(),
                 profile: AUDIO_PROFILE_DEFAULT.to_owned(),
@@ -1318,6 +1348,7 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
                 }],
             },
             audio: TranscodeAudioSettings {
+                lossless: None,
                 compatibility: None,
                 target_codec: "ac3".to_owned(),
                 profile: AUDIO_PROFILE_DEFAULT.to_owned(),

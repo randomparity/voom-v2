@@ -242,6 +242,9 @@ fn fake_transcode_audio_result(
         .iter()
         .enumerate()
         .map(|(ordinal, stream)| AudioOutputStreamFact {
+            sample_rate: None,
+            sample_format: None,
+            bits_per_sample: None,
             channel_layout: None,
             snapshot_stream_id: stream.snapshot_stream_id.clone(),
             output_provider_stream_index: u32::try_from(ordinal).unwrap_or(0),

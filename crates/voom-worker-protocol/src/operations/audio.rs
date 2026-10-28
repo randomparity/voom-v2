@@ -96,6 +96,12 @@ pub struct AudioDispositionFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioOutputStreamFact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bits_per_sample: Option<u8>,
     pub snapshot_stream_id: String,
     pub output_provider_stream_index: u32,
     pub codec: String,
@@ -133,6 +139,9 @@ pub struct TranscodeAudioSelection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscodeAudioSettings {
+    /// Per-stream archival precision preference; codec support is separately gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lossless: Option<crate::LosslessAudioSettings>,
     pub target_codec: String,
     pub profile: String,
     /// When true, the operation *adds* a downmixed companion track derived from

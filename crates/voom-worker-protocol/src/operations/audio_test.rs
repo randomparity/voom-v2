@@ -48,6 +48,7 @@ fn transcode_audio_settings_default_add_track_and_omit_target_channels() {
 #[test]
 fn synthesize_audio_settings_round_trip_add_track_and_channels() {
     let settings = TranscodeAudioSettings {
+        lossless: None,
         compatibility: None,
         target_codec: "aac".to_owned(),
         profile: "default".to_owned(),
@@ -92,6 +93,7 @@ fn transcode_audio_request_serializes_selected_streams_wire_shape() {
             ],
         },
         audio: TranscodeAudioSettings {
+            lossless: None,
             compatibility: None,
             target_codec: "opus".to_owned(),
             profile: "default-opus".to_owned(),
@@ -142,6 +144,38 @@ fn transcode_audio_request_serializes_selected_streams_wire_shape() {
 
 #[test]
 fn transcode_audio_result_serializes_selected_output_streams_in_request_order() {
+    let main = AudioOutputStreamFact {
+        sample_rate: None,
+        sample_format: None,
+        bits_per_sample: None,
+        channel_layout: None,
+        snapshot_stream_id: "stream-1".to_owned(),
+        output_provider_stream_index: 1,
+        codec: "opus".to_owned(),
+        language: Some("eng".to_owned()),
+        title: Some("Main".to_owned()),
+        default: Some(true),
+        disposition: Some(AudioDispositionFact {
+            default: Some(true),
+            forced: Some(false),
+            commentary: Some(false),
+        }),
+        channels: Some(6),
+    };
+    let commentary = AudioOutputStreamFact {
+        snapshot_stream_id: "stream-3".to_owned(),
+        output_provider_stream_index: 3,
+        language: None,
+        title: None,
+        default: Some(false),
+        disposition: Some(AudioDispositionFact {
+            default: Some(false),
+            forced: Some(false),
+            commentary: Some(true),
+        }),
+        channels: None,
+        ..main.clone()
+    };
     let result = TranscodeAudioResult {
         status: TranscodeAudioStatus::Transcoded,
         provider: "ffmpeg".to_owned(),
@@ -152,38 +186,7 @@ fn transcode_audio_result_serializes_selected_output_streams_in_request_order() 
         output_container: "mkv".to_owned(),
         selected_snapshot_stream_ids: vec!["stream-1".to_owned(), "stream-3".to_owned()],
         output_audio_codecs: vec!["opus".to_owned(), "opus".to_owned()],
-        selected_output_streams: vec![
-            AudioOutputStreamFact {
-                channel_layout: None,
-                snapshot_stream_id: "stream-1".to_owned(),
-                output_provider_stream_index: 1,
-                codec: "opus".to_owned(),
-                language: Some("eng".to_owned()),
-                title: Some("Main".to_owned()),
-                default: Some(true),
-                disposition: Some(AudioDispositionFact {
-                    default: Some(true),
-                    forced: Some(false),
-                    commentary: Some(false),
-                }),
-                channels: Some(6),
-            },
-            AudioOutputStreamFact {
-                channel_layout: None,
-                snapshot_stream_id: "stream-3".to_owned(),
-                output_provider_stream_index: 3,
-                codec: "opus".to_owned(),
-                language: None,
-                title: None,
-                default: Some(false),
-                disposition: Some(AudioDispositionFact {
-                    default: Some(false),
-                    forced: Some(false),
-                    commentary: Some(true),
-                }),
-                channels: None,
-            },
-        ],
+        selected_output_streams: vec![main, commentary],
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -966,4 +969,38 @@ fn ac3_default_profile_has_valid_channel_scaled_bitrates() {
         Some(96)
     );
     assert_eq!(audio_target_bitrate_kbps_per_channel("ac3", "other"), None);
+}
+
+#[test]
+fn legacy_audio_shapes_default_new_fields() {
+    let settings: TranscodeAudioSettings = serde_json::from_value(serde_json::json!({
+        "target_codec":"aac", "profile":"default"
+    }))
+    .unwrap();
+    assert!(settings.lossless.is_none());
+    assert_eq!(
+        serde_json::to_value(settings).unwrap(),
+        serde_json::json!({
+            "target_codec":"aac", "profile":"default"
+        })
+    );
+    let legacy = serde_json::json!({
+        "snapshot_stream_id":"source", "output_provider_stream_index":0,
+        "codec":"aac", "language":null, "title":null, "default":null,
+        "disposition":null, "channels":2
+    });
+    let facts: AudioOutputStreamFact = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(facts.sample_rate.is_none());
+    assert!(facts.sample_format.is_none());
+    assert!(facts.bits_per_sample.is_none());
+    assert_eq!(serde_json::to_value(facts).unwrap(), legacy);
+}
+
+#[test]
+fn lossless_settings_reject_unknown_fields() {
+    let valid = serde_json::json!({"target_codec":"aac", "profile":"default", "lossless":{}});
+    assert!(serde_json::from_value::<TranscodeAudioSettings>(valid.clone()).is_ok());
+    let mut invalid = valid;
+    invalid["lossless"]["bitrate"] = serde_json::json!(128);
+    assert!(serde_json::from_value::<TranscodeAudioSettings>(invalid).is_err());
 }

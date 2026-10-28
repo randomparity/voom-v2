@@ -623,7 +623,7 @@ async fn schema_mismatch_fails_before_child_dispatch() {
 
     assert!(matches!(outcome,
         super::LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, reason, _)
-            if reason.contains("media dispatch schema 3 does not match protocol version 4")
+            if reason.contains("media dispatch schema 3 does not match protocol version 5")
     ));
     assert!(recorded_requests(&worker).await.is_empty());
 }

@@ -735,6 +735,7 @@ fn staging_envelopes_round_trip_with_overwrite_false_outputs() {
         }],
     };
     let settings = TranscodeAudioSettings {
+        lossless: None,
         compatibility: None,
         target_codec: "aac".to_owned(),
         profile: "default".to_owned(),

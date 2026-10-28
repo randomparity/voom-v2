@@ -123,6 +123,16 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
             insert_f64_string(input, &mut output, "duration", "duration_seconds")?;
             insert_string(input, &mut output, "avg_frame_rate");
             insert_u64_string(input, &mut output, "sample_rate", "sample_rate")?;
+            if input.get("codec_type").and_then(Value::as_str) == Some("audio") {
+                let facts = voom_worker_protocol::AudioSampleFacts::from_ffprobe(stream)
+                    .map_err(|error| malformed(error.to_string()))?;
+                if let Some(format) = facts.sample_format {
+                    output.insert("sample_format".to_owned(), Value::String(format));
+                }
+                if let Some(bits) = facts.bits_per_sample {
+                    output.insert("bits_per_sample".to_owned(), Value::Number(bits.into()));
+                }
+            }
             insert_u64_value(input, &mut output, "channels", "channels")?;
             insert_string(input, &mut output, "channel_layout");
             insert_string_as(input, &mut output, "pix_fmt", "pixel_format");

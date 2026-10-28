@@ -3468,6 +3468,7 @@ dependencies = [
  "voom-control-plane",
  "voom-core",
  "voom-store",
+ "voom-worker-protocol",
 ]
 
 [[package]]

@@ -78,6 +78,7 @@ fn compatibility_admission_binds_exact_settings() {
         compatibility: Some(settings()),
     };
     let wire = voom_worker_protocol::TranscodeAudioSettings {
+        lossless: None,
         target_codec: "aac".to_owned(),
         profile: "default".to_owned(),
         add_track: true,
@@ -100,5 +101,48 @@ fn compatibility_admission_binds_exact_settings() {
     assert!(
         require_synthesis_settings(&selection, &wire).is_err(),
         "ordinary synthesis cannot acquire compatibility mode"
+    );
+}
+
+#[test]
+fn normalized_audio_facts_preserve_checked_optional_observations() {
+    let observed = json!({"sample_rate":48000,"sample_format":"s32","bits_per_sample":24});
+    assert_eq!(
+        optional_audio_output_fact::<u32>(&observed, "sample_rate").unwrap(),
+        Some(48_000)
+    );
+    assert_eq!(
+        optional_audio_output_fact::<String>(&observed, "sample_format")
+            .unwrap()
+            .as_deref(),
+        Some("s32")
+    );
+    assert_eq!(
+        optional_audio_output_fact::<u8>(&observed, "bits_per_sample").unwrap(),
+        Some(24)
+    );
+    assert_eq!(
+        optional_audio_output_fact::<u32>(&json!({}), "sample_rate").unwrap(),
+        None
+    );
+    assert_eq!(
+        optional_audio_output_fact::<u32>(&json!({"sample_rate":null}), "sample_rate").unwrap(),
+        None
+    );
+    for invalid in [
+        json!({"sample_rate":-1}),
+        json!({"sample_rate":4_294_967_296_u64}),
+        json!({"sample_rate":"48000"}),
+    ] {
+        let error = optional_audio_output_fact::<u32>(&invalid, "sample_rate").unwrap_err();
+        assert!(error.to_string().contains("normalized audio sample_rate"));
+    }
+    assert!(
+        optional_audio_output_fact::<u8>(&json!({"bits_per_sample":256}), "bits_per_sample")
+            .is_err()
+    );
+    assert!(
+        optional_audio_output_fact::<String>(&json!({"sample_format":32}), "sample_format")
+            .is_err()
     );
 }

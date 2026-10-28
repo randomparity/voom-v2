@@ -38,6 +38,7 @@ crates/voom-core/src/taxonomy/artifact_access_declaration.rs
 crates/voom-core/src/taxonomy/owner_access_evidence.rs
 crates/voom-core/src/taxonomy/scan_evidence.rs
 crates/voom-worker-protocol/src/operations/audio.rs
+crates/voom-worker-protocol/src/audio_facts.rs
 # Strict compatibility descriptors carried in durable rendered audio plans (ADR 0111).
 crates/voom-plan/src/planner/audio/payload.rs
 crates/voom-worker-protocol/src/operations/remux.rs
