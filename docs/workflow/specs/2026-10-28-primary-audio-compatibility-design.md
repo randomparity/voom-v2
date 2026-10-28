@@ -84,9 +84,18 @@ Supported `(channels, layout)` pairs: `(1, mono)`, `(2, stereo)`,
 `quad(side)`, `4 channels (FL+FR+LFE+BC)`; 5-channel `4.1`, `5.0`,
 `5.0(side)`; 6-channel `5.1`, `5.1(side)`; 8-channel `7.1`.
 EAC3 encoder support was observed with `ffmpeg -hide_banner -h encoder=eac3`
-on FFmpeg 8.0.1. Preserve the selected layout for same-channel transforms;
-7.1 explicitly targets `5.1`. Other layouts/counts and inconsistent pairs
+on FFmpeg 8.0.1. Generated MKV encode/probe experiments on that version showed
+EAC3 canonicalizes `quad`, `5.0` and `5.1` to their `(side)` forms. Resolve those
+three targets to the observed `(side)` form, and 7.1 to `5.1(side)`; the other
+listed pairs retain their layout name. Compare already-compatible sources
+using these explicit equivalents. The requirement preserves channel count and
+retained originals, not a noncanonical lossy bitstream layout label.
+Other layouts/counts and inconsistent pairs
 block rather than relying on FFmpeg's implicit layout guesses.
+The layout experiment used `ffmpeg -f lavfi -i anullsrc=r=48000:cl=5.1
+-t 0.1 -c:a eac3 -channel_layout 5.1 output.mkv`, then
+`ffprobe -v error -show_entries stream=codec_name,channels,channel_layout
+-of json output.mkv`; repeating with each listed layout verified the table.
 
 Resolve the compatibility track to the selected source if codec/channels/layout
 already match. Otherwise look for exactly one companion explicitly associated
