@@ -61,6 +61,8 @@ fn preflight_with(
         libaom_encoder: "libaom-av1".to_owned(),
         aac_encoder: "aac".to_owned(),
         opus_encoder: "libopus".to_owned(),
+        ac3_encoder: "ac3".to_owned(),
+        eac3_encoder: "eac3".to_owned(),
         matroska_muxer: "matroska".to_owned(),
         mp4_muxer: "mp4".to_owned(),
         ogg_muxer: "ogg".to_owned(),
@@ -173,6 +175,8 @@ fn videotoolbox_preflight_becomes_tagged_readiness_descriptor() {
         libaom_encoder: "libaom-av1".to_owned(),
         aac_encoder: "aac".to_owned(),
         opus_encoder: "libopus".to_owned(),
+        ac3_encoder: "ac3".to_owned(),
+        eac3_encoder: "eac3".to_owned(),
         matroska_muxer: "matroska".to_owned(),
         mp4_muxer: "mp4".to_owned(),
         ogg_muxer: "ogg".to_owned(),
@@ -208,4 +212,16 @@ fn videotoolbox_preflight_becomes_tagged_readiness_descriptor() {
         assert_eq!(descriptor.resource_id, "0123456789abcdef");
         assert_eq!(descriptor.max_sessions, 4);
     }
+}
+
+#[test]
+fn audio_encoder_availability_comes_from_preflight() {
+    let mut preflight = preflight_with(None, None);
+    preflight.ac3_encoder.clear();
+    preflight.opus_encoder.clear();
+    let config = ffmpeg_config_from_preflight(preflight, None);
+    assert!(!config.has_audio_encoder("ac3"));
+    assert!(!config.has_audio_encoder("libopus"));
+    assert!(config.has_audio_encoder("aac"));
+    assert!(config.has_audio_encoder("eac3"));
 }

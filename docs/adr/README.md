@@ -109,3 +109,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0110](0110-synthesized-audio-companions-are-non-default.md) | Synthesized audio companions are non-default |
 | [0111](0111-primary-audio-compatibility.md) | Primary audio compatibility is ensured before placement |
 | [0112](0112-bounded-http-request-ingestion.md) | Bound worker HTTP request ingestion before append |
+| [0113](0113-ac3-audio-constraints.md) | Bound AC-3 settings and check encoder availability per operation |

@@ -13,6 +13,7 @@
     )
 )]
 
+use voom_ffmpeg_worker::ffmpeg::ALL_AUDIO_ENCODERS;
 use voom_ffmpeg_worker::{
     ALL_VIDEO_ENCODERS, AcceleratorBinding, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig,
     VaapiDeviceBinding, operation_handler, preflight, preflight_from_process_env,
@@ -201,13 +202,19 @@ fn ffmpeg_config_from_preflight(
         .filter(|encoder| preflight.has_encoder(encoder))
         .map(|encoder| (*encoder).to_owned())
         .collect();
+    let available_audio_encoders: Vec<String> = ALL_AUDIO_ENCODERS
+        .iter()
+        .filter(|encoder| preflight.has_encoder(encoder))
+        .map(|encoder| (*encoder).to_owned())
+        .collect();
     let config = FfmpegConfig::new(
         preflight.ffmpeg_path,
         preflight.ffprobe_path,
         preflight.ffmpeg_version,
         DEFAULT_PROCESS_TIMEOUT,
     )
-    .with_available_video_encoders(available_video_encoders);
+    .with_available_video_encoders(available_video_encoders)
+    .with_available_audio_encoders(available_audio_encoders);
     match binding {
         Some(AcceleratorBinding::Nvidia(nvidia)) => config.with_accelerator(nvidia),
         Some(AcceleratorBinding::Vaapi(vaapi)) => config.with_vaapi_device(vaapi),

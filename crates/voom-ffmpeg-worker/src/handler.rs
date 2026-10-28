@@ -551,6 +551,7 @@ pub async fn handle_transcode_audio(
         ));
     }
     validate_transcode_audio_contract(request)?;
+    validate_audio_encoder_available(&request.audio.target_codec, config)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
     let input_pre = prepare_audio_operation(
@@ -589,6 +590,7 @@ pub async fn handle_extract_audio(
     config: &FfmpegConfig,
 ) -> Result<ExtractAudioResult, ExtractAudioError> {
     validate_extract_audio_contract(request)?;
+    validate_audio_encoder_available("opus", config)?;
     let input_path = PathBuf::from(&request.input.path);
     let targets = extract_audio_targets(request);
     let input_pre = prepare_extract_audio_operation(&input_path, &targets, request).await?;
@@ -732,6 +734,23 @@ fn validate_encoder_available(
     Err(config_invalid(
         "transcode_video",
         format!("encoder `{encoder}` is not available in this ffmpeg build"),
+    ))
+}
+
+fn validate_audio_encoder_available(
+    codec: &str,
+    config: &FfmpegConfig,
+) -> Result<(), TranscodeVideoError> {
+    let encoder = crate::ffmpeg::audio_encoder(codec)?;
+    if config.has_audio_encoder(encoder) {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "audio_encoder",
+        format!(
+            "encoder `{encoder}` is not available in this ffmpeg build; \
+                 use a worker with an FFmpeg build providing `{encoder}`"
+        ),
     ))
 }
 
@@ -1074,7 +1093,7 @@ fn validate_transcode_audio_contract(
     if !voom_worker_protocol::is_supported_transcode_audio_codec(&request.audio.target_codec) {
         return Err(config_invalid(
             "request",
-            "transcode_audio target codec must be aac, opus, or eac3".to_owned(),
+            "transcode_audio target codec must be aac, opus, eac3, or ac3".to_owned(),
         ));
     }
     if voom_worker_protocol::audio_target_bitrate_kbps_per_channel(

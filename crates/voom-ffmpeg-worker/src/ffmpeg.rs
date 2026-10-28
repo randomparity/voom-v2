@@ -24,6 +24,9 @@ pub const ALL_VIDEO_ENCODERS: [&str; 7] = [
     "hevc_videotoolbox",
 ];
 
+/// Audio encoders recognized by the worker; availability is checked per operation.
+pub const ALL_AUDIO_ENCODERS: [&str; 4] = ["aac", "libopus", "eac3", "ac3"];
+
 const VAAPI_HEVC_ENCODER: &str = "hevc_vaapi";
 
 /// The VAAPI device this worker bound itself to.
@@ -60,14 +63,16 @@ pub struct FfmpegConfig {
     pub process_timeout: Duration,
     accelerator: Option<AcceleratorBinding>,
     available_video_encoders: BTreeSet<String>,
+    available_audio_encoders: BTreeSet<String>,
 }
 
 impl FfmpegConfig {
-    /// Builds a config that assumes every supported video encoder is available.
+    /// Builds a config that assumes the supported audio/video encoders are available.
     ///
     /// Callers wiring a real ffmpeg build (e.g. `main`) must narrow this with
     /// [`FfmpegConfig::with_available_video_encoders`] using the preflight
-    /// capabilities so a request naming an absent encoder fails loud.
+    /// capabilities, and narrow audio encoders with
+    /// [`FfmpegConfig::with_available_audio_encoders`], so absent encoders fail loud.
     #[must_use]
     pub fn new(
         ffmpeg_path: PathBuf,
@@ -81,6 +86,10 @@ impl FfmpegConfig {
             provider_version,
             process_timeout,
             accelerator: None,
+            available_audio_encoders: ALL_AUDIO_ENCODERS
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect(),
             available_video_encoders: ALL_VIDEO_ENCODERS
                 .iter()
                 .map(|encoder| (*encoder).to_owned())
@@ -102,6 +111,22 @@ impl FfmpegConfig {
     #[must_use]
     pub fn has_video_encoder(&self, encoder: &str) -> bool {
         self.available_video_encoders.contains(encoder)
+    }
+
+    /// Restricts audio encoding to the build's observed encoder set.
+    #[must_use]
+    pub fn with_available_audio_encoders(
+        mut self,
+        encoders: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.available_audio_encoders = encoders.into_iter().collect();
+        self
+    }
+
+    /// Returns whether the build provides the requested audio encoder.
+    #[must_use]
+    pub fn has_audio_encoder(&self, encoder: &str) -> bool {
+        self.available_audio_encoders.contains(encoder)
     }
 
     /// Binds this worker configuration to one accelerator descriptor.
@@ -980,6 +1005,7 @@ pub async fn run_ffmpeg_transcode_audio(
     }
     let source_streams = probe_audio_streams(config, input).await?;
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
+    validate_ac3_source_facts(request, &selected)?;
     let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
         &request.audio.target_codec,
         &request.audio.profile,
@@ -1054,6 +1080,11 @@ async fn run_ffmpeg_synthesize_audio(
     let target_channels = request.audio.target_channels.ok_or_else(|| {
         FfmpegError::OutputFactsMismatch("synthesize audio requires target_channels".to_owned())
     })?;
+    if request.audio.target_codec == "ac3" && !matches!(target_channels, 1 | 2 | 6) {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "AC-3 synthesis supports only mono/1, stereo/2 or 5.1/6 target channels".to_owned(),
+        ));
+    }
     let input_probe = probe_json(config, input).await?;
     let source_streams = audio_facts_from_probe(&input_probe);
     if request.audio.compatibility.is_some() {
@@ -1078,6 +1109,7 @@ async fn run_ffmpeg_synthesize_audio(
         ));
     }
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
+    validate_ac3_source_facts(request, &selected)?;
     let mut command = Command::new(&config.ffmpeg_path);
     command
         .arg("-hide_banner")
@@ -2039,11 +2071,38 @@ fn audio_disposition_arg(source: &SourceAudioFact) -> Option<String> {
     })
 }
 
-fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
+fn validate_ac3_source_facts(
+    request: &TranscodeAudioRequest,
+    sources: &[SourceAudioFact],
+) -> Result<(), FfmpegError> {
+    if request.audio.target_codec == "ac3"
+        && sources.iter().any(|source| {
+            !(valid_ac3_layout(source.channels, source.channel_layout.as_deref())
+                || (request.audio.add_track
+                    && source.channels == Some(8)
+                    && source.channel_layout.as_deref() == Some("7.1")))
+        })
+    {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "AC-3 requires known mono/1, stereo/2 or 5.1/6 source facts; 7.1/8 requires explicit synthesis for downmix".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_ac3_layout(channels: Option<u64>, layout: Option<&str>) -> bool {
+    matches!(
+        (channels, layout),
+        (Some(1), Some("mono")) | (Some(2), Some("stereo")) | (Some(6), Some("5.1" | "5.1(side)"))
+    )
+}
+
+pub(crate) fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
     match codec {
         "aac" => Ok("aac"),
         "opus" => Ok("libopus"),
         "eac3" => Ok("eac3"),
+        "ac3" => Ok("ac3"),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unsupported audio codec: {other}"
         ))),
@@ -2107,6 +2166,13 @@ fn verify_transcode_audio_probe(
                 "selected audio codec mismatch".to_owned(),
             ));
         }
+        if request.audio.target_codec == "ac3"
+            && !valid_ac3_layout(output.channels, output.channel_layout.as_deref())
+        {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "AC-3 output channel/layout facts mismatch".to_owned(),
+            ));
+        }
         verify_preserved_audio_metadata(source, output)?;
     }
     Ok(())
@@ -2157,6 +2223,13 @@ fn verify_synthesize_audio_probe(
         if output.channels != Some(target_channels) {
             return Err(FfmpegError::OutputFactsMismatch(
                 "synthesized audio channel count is not the requested downmix".to_owned(),
+            ));
+        }
+        if request.audio.target_codec == "ac3"
+            && !valid_ac3_layout(output.channels, output.channel_layout.as_deref())
+        {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "AC-3 output channel/layout facts mismatch".to_owned(),
             ));
         }
         if let Some(compatibility) = &request.audio.compatibility

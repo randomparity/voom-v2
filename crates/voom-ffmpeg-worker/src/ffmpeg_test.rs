@@ -2292,3 +2292,150 @@ async fn ordinary_companion_does_not_inherit_compatibility_identity() {
     assert_eq!(streams[3]["disposition"]["default"], 0);
     assert_eq!(streams[3]["channels"], 1);
 }
+
+#[tokio::test]
+async fn ac3_rejects_unsupported_source_facts_before_creating_output() {
+    for (channels, layout) in [
+        (None, Some("stereo")),
+        (Some(2), None),
+        (Some(0), Some("stereo")),
+        (Some(2), Some("mono")),
+        (Some(3), Some("3.0")),
+        (Some(8), Some("7.1")),
+        (Some(6), Some("6.0")),
+        (Some(6), Some("unknown")),
+        (Some(8), None),
+        (Some(8), Some("unknown")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = serde_json::json!({"format":{"format_name":"matroska"},"streams":[
+            {"index":1,"codec_type":"audio","codec_name":"flac","channels":channels,"channel_layout":layout}
+        ]});
+        let ffprobe = stub_bin(
+            dir.path(),
+            "ffprobe",
+            &format!("#!/bin/sh\ncat <<'JSON'\n{source}\nJSON\n"),
+        );
+        let ffmpeg = stub_bin(
+            dir.path(),
+            "ffmpeg",
+            "#!/bin/sh\nfor last; do :; done\nprintf output > \"$last\"\n",
+        );
+        let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+        for synthesis in [false, true] {
+            if synthesis && channels == Some(8) && layout == Some("7.1") {
+                continue;
+            }
+            let mut request = transcode_audio_request(dir.path(), &[1], "ac3");
+            request.audio.add_track = synthesis;
+            request.audio.target_channels = synthesis.then_some(1);
+            let output = dir.path().join("out.mkv");
+            let result = run_ffmpeg_transcode_audio(
+                &config,
+                &dir.path().join("input.mkv"),
+                &output,
+                &request,
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "{channels:?}/{layout:?}, synthesis={synthesis}"
+            );
+            assert!(
+                !output.exists(),
+                "invalid {channels:?}/{layout:?} must fail before output creation"
+            );
+        }
+    }
+}
+
+#[test]
+fn ac3_output_verifiers_reject_missing_or_inconsistent_layouts() {
+    let dir = tempfile::tempdir().unwrap();
+    let sources = audio_facts_from_probe(&serde_json::json!({"streams":[
+        {"index":1,"codec_type":"audio","codec_name":"flac","channels":6,
+         "channel_layout":"5.1","disposition":{"default":0}}
+    ]}));
+    let request = transcode_audio_request(dir.path(), &[1], "ac3");
+    let mut probe = AudioOutputProbe {
+        container: "mkv".to_owned(),
+        audio_codecs: vec!["ac3".to_owned()],
+        output_language: None,
+        output_title: None,
+        selected_output_streams: vec![AudioOutputStreamFact {
+            snapshot_stream_id: "stream-1".to_owned(),
+            output_provider_stream_index: 1,
+            codec: "ac3".to_owned(),
+            language: None,
+            title: None,
+            default: Some(false),
+            disposition: sources[0].disposition.clone(),
+            channels: Some(6),
+            channel_layout: Some("5.1(side)".to_owned()),
+        }],
+    };
+    assert!(
+        verify_transcode_audio_probe(
+            &sources,
+            &request.selection.selected_streams,
+            &request,
+            &probe
+        )
+        .is_ok()
+    );
+    assert!(verify_synthesize_audio_probe(&sources, &request, 6, &probe).is_ok());
+    for layout in [None, Some("6.0"), Some("stereo")] {
+        probe.selected_output_streams[0].channel_layout = layout.map(str::to_owned);
+        assert!(
+            verify_transcode_audio_probe(
+                &sources,
+                &request.selection.selected_streams,
+                &request,
+                &probe
+            )
+            .is_err()
+        );
+        assert!(verify_synthesize_audio_probe(&sources, &request, 6, &probe).is_err());
+    }
+    probe.selected_output_streams[0].channels = Some(2);
+    probe.selected_output_streams[0].channel_layout = Some("stereo".to_owned());
+    assert!(
+        verify_transcode_audio_probe(
+            &sources,
+            &request.selection.selected_streams,
+            &request,
+            &probe
+        )
+        .is_err()
+    );
+    assert!(verify_synthesize_audio_probe(&sources, &request, 6, &probe).is_err());
+}
+
+#[tokio::test]
+async fn ac3_synthesis_rejects_unsupported_target_before_probing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = FfmpegConfig::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused"),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    for count in [0, 3, 8, u64::MAX] {
+        let mut request = synthesize_audio_request(dir.path());
+        request.audio.target_codec = "ac3".to_owned();
+        request.audio.target_channels = Some(count);
+        let error = run_ffmpeg_transcode_audio(
+            &config,
+            &dir.path().join("missing"),
+            &dir.path().join("out"),
+            &request,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("AC-3 synthesis supports"),
+            "{error}"
+        );
+        assert!(!dir.path().join("out").exists());
+    }
+}

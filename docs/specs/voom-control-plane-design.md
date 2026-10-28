@@ -680,7 +680,7 @@ The V1 media operations are:
 ```text
 container mkv
 transcode video to hevc [using profile <quoted-name>]
-transcode audio to aac|opus|eac3 [where <track-filter>]
+transcode audio to aac|opus|eac3|ac3 [where <track-filter>]
 keep audio|subtitle|attachment [where <track-filter>]
 remove audio|subtitle|attachment [where <track-filter>]
 order tracks [<track-target>, ...]
@@ -688,6 +688,14 @@ defaults audio|subtitle first|best|none|preserve
 extract audio [where <track-filter>]
 verify artifact
 ```
+
+AC-3 (`ac3`) accepts known mono, stereo and 5.1 source layouts for ordinary
+transcodes, at 96/192/576 kbps respectively; unsupported or unknown layouts
+(including ordinary 7.1) fail before output creation. Explicit synthesis may
+downmix 7.1 to 5.1 while retaining originals and a non-default companion.
+Six-channel AC-3 output uses 5.1(side). Audio encoder availability is checked
+per requested operation; deploy new binaries before policies naming ac3.
+See [ADR 0113](../adr/0113-ac3-audio-constraints.md).
 
 The V1 condition and track-filter vocabulary is intentionally finite:
 
@@ -783,7 +791,7 @@ The `transcode audio` operation accepts a third target codec, `eac3`
 (E-AC-3 / Dolby Digital Plus), so the grammar production is:
 
 ```text
-transcode audio to aac|opus|eac3 [where <track-filter>]
+transcode audio to aac|opus|eac3|ac3 [where <track-filter>]
 ```
 
 This is additive: `aac` and `opus` are unchanged, and no other production is
@@ -877,7 +885,7 @@ Audio can be *added* as a new track derived from an existing one, not only
 re-encoded in place. One additive production; every existing form is unchanged:
 
 ```text
-synthesize audio from <track-filter> { codec aac|opus|eac3  channels <number> }
+synthesize audio from <track-filter> { codec aac|opus|eac3|ac3  channels <number> }
 ```
 
 - The `from <track-filter>` clause selects the **source** audio stream(s); the
@@ -890,7 +898,7 @@ synthesize audio from <track-filter> { codec aac|opus|eac3  channels <number> }
   is appended. `channels` is a positive integer (typically `2` for stereo, `1`
   for mono); it must be **fewer** than the source stream's channel count (a
   downmix), else the file is blocked at plan time.
-- The compiler validates only the *shape* (codec ∈ {aac, opus, eac3}, positive
+- The compiler validates only the *shape* (codec ∈ {aac, opus, eac3, ac3}, positive
   integer channels, valid source filter). Filter resolution to a concrete source
   stream and the downmix-direction check are planner concerns, resolved against
   snapshot facts.
