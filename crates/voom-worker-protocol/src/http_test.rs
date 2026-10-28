@@ -949,3 +949,159 @@ async fn handshake_rejects_legacy_protocol_three_offer_on_current_http_server() 
 fn status_code_dependency_stays_used() {
     assert_eq!(StatusCode::OK.as_u16(), 200);
 }
+
+#[tokio::test]
+async fn oversized_chunked_body_rejects_before_request_eof() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (addr, running) = running_server(operation_handler(calls.clone(), None)).await;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            b"POST /v1/handshake HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+    for _ in 0..16 {
+        write_chunk(&mut stream, &chunk).await.unwrap();
+    }
+    stream.write_all(b"1\r\nx\r\n").await.unwrap();
+    // Keep the sender open and deliberately omit the terminating zero chunk.
+    // Waiting for collection/EOF must fail this bounded wait, not hang the suite.
+    let response = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut response = Vec::new();
+        loop {
+            let mut buf = [0_u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_ne!(n, 0, "connection ended without a complete JSON error");
+            response.extend_from_slice(&buf[..n]);
+            if let Some(split) = response.windows(4).position(|w| w == b"\r\n\r\n")
+                && let Ok(error) = serde_json::from_slice::<ProtocolError>(&response[split + 4..])
+            {
+                assert!(response.starts_with(b"HTTP/1.1 400 "));
+                return error;
+            }
+            assert!(response.len() < 4096, "unexpectedly large error response");
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(response, ProtocolError::FrameTooLarge { bytes, max }
+        if max == 1 << 20 && bytes > max && bytes == max + 1)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(stream);
+    let _ = running.shutdown.send(());
+    running.joined.await.unwrap();
+}
+
+fn worker_post(client: &reqwest::Client, addr: SocketAddr, route: &str) -> reqwest::RequestBuilder {
+    client
+        .post(format!("http://{addr}{route}"))
+        .header(PROTOCOL_VERSION_HEADER, voom_core::PROTOCOL_VERSION)
+        .header(WORKER_ID_HEADER, 7)
+        .header(WORKER_EPOCH_HEADER, 3)
+        .bearer_auth("secret")
+        .header(IDEMPOTENCY_KEY_HEADER, "bounded-body")
+}
+
+#[tokio::test]
+async fn body_limit_preserves_routes_validation_and_idempotency() {
+    const LIMIT: usize = 1 << 20;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (addr, running) = running_server(operation_handler(calls.clone(), None)).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let oversized = vec![b' '; LIMIT + 1];
+    for route in ["/v1/handshake", "/v1/identity", "/v1/operations"] {
+        let response = worker_post(&client, addr, route)
+            .body(oversized.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: ProtocolError = response.json().await.unwrap();
+        assert!(matches!(error, ProtocolError::FrameTooLarge { bytes, max }
+            if bytes == LIMIT as u64 + 1 && max == LIMIT as u64));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    // Earlier route/version/auth guards keep precedence over oversized bodies.
+    for (route, version, secret, status, code) in [
+        (
+            "/unknown",
+            voom_core::PROTOCOL_VERSION,
+            "secret",
+            StatusCode::NOT_FOUND,
+            None,
+        ),
+        (
+            "/v1/operations",
+            voom_core::PROTOCOL_VERSION + 1,
+            "secret",
+            StatusCode::BAD_REQUEST,
+            Some("UNSUPPORTED_PROTOCOL_VERSION"),
+        ),
+        (
+            "/v1/operations",
+            voom_core::PROTOCOL_VERSION,
+            "wrong",
+            StatusCode::UNAUTHORIZED,
+            Some("UNAUTHORIZED_BEARER"),
+        ),
+    ] {
+        let response = client
+            .post(format!("http://{addr}{route}"))
+            .header(PROTOCOL_VERSION_HEADER, version)
+            .header(WORKER_ID_HEADER, 7)
+            .header(WORKER_EPOCH_HEADER, 3)
+            .bearer_auth(secret)
+            .body(oversized.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        if let Some(code) = code {
+            let error: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(error["code"], code);
+        }
+    }
+    let operation = serde_json::to_vec(&request(LeaseId(1), serde_json::json!({}))).unwrap();
+    for (route, mut body) in [
+        (
+            "/v1/handshake",
+            serde_json::to_vec(&crate::HandshakeRequest {
+                offered: voom_core::PROTOCOL_VERSION,
+            })
+            .unwrap(),
+        ),
+        (
+            "/v1/identity",
+            serde_json::to_vec(&crate::WorkerIdentityRequest {
+                offered: voom_core::PROTOCOL_VERSION,
+                challenge: "00".repeat(16),
+            })
+            .unwrap(),
+        ),
+        ("/v1/operations", operation),
+    ] {
+        body.resize(LIMIT, b' ');
+        let response = worker_post(&client, addr, route)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "exact-limit valid JSON on {route}"
+        );
+        let _ = response.bytes().await.unwrap();
+    }
+    // The successful same-key operation proves rejected bodies never reserved it.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _ = running.shutdown.send(());
+    running.joined.await.unwrap();
+}
