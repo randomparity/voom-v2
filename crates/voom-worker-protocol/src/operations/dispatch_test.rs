@@ -73,6 +73,7 @@ fn decode_rejects_unknown_fields_on_content_struct() {
         output_container: "mkv".to_owned(),
         output: planned(8, "staging/a.mkv"),
         selection: crate::operations::remux::RemuxSelection {
+            audio_head_stream: None,
             keep_streams: vec![],
             default_streams: vec![],
             clear_default_streams: vec![],
@@ -134,6 +135,7 @@ fn transcode_audio_additive_settings_round_trip() {
             selected_streams: vec![],
         },
         settings: TranscodeAudioSettings {
+            compatibility: None,
             target_codec: "eac3".to_owned(),
             profile: "default".to_owned(),
             add_track: true,

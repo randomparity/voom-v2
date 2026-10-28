@@ -6,6 +6,44 @@ use voom_worker_protocol::{
 use super::*;
 
 #[test]
+fn audio_head_reorders_only_audio_slots() {
+    let mapping = track_mapping_from_identify(&serde_json::json!({"tracks": [
+        {"id": 0, "type": "video", "properties": {"number": 1}},
+        {"id": 1, "type": "audio", "properties": {"number": 2}},
+        {"id": 2, "type": "subtitles", "properties": {"number": 3}},
+        {"id": 3, "type": "audio", "properties": {"number": 4}}
+    ]}))
+    .unwrap();
+    let mut selection = base_selection((0..4).map(stream).collect());
+    selection.audio_head_stream = Some(stream(3));
+    let order = ordered_keep_streams(&selection, &mapping).unwrap();
+    assert_eq!(
+        order
+            .iter()
+            .map(|s| s.provider_stream_index)
+            .collect::<Vec<_>>(),
+        [0, 3, 2, 1]
+    );
+    selection.head_streams = vec![stream(3)];
+    assert!(
+        ordered_keep_streams(&selection, &mapping).is_err(),
+        "head modes cannot silently override each other"
+    );
+    selection.audio_head_stream = None;
+    assert_eq!(
+        ordered_keep_streams(&selection, &mapping).unwrap()[0].provider_stream_index,
+        3,
+        "global heads retain their ordinary behavior"
+    );
+    selection.head_streams.clear();
+    selection.audio_head_stream = Some(stream(0));
+    assert!(
+        ordered_keep_streams(&selection, &mapping).is_err(),
+        "audio placement cannot move a video track"
+    );
+}
+
+#[test]
 fn maps_snapshot_provider_indexes_to_mkvmerge_track_ids() {
     let identify = serde_json::json!({
         "tracks": [
@@ -258,6 +296,7 @@ fn build_args_rejects_missing_track_mapping() {
             overwrite: false,
         },
         selection: RemuxSelection {
+            audio_head_stream: None,
             keep_streams: vec![RemuxStreamRef {
                 snapshot_stream_id: "stream-0".to_owned(),
                 provider_stream_index: 0,
@@ -296,6 +335,7 @@ fn build_args_disable_unselected_audio_subtitles_and_attachments() {
             overwrite: false,
         },
         selection: RemuxSelection {
+            audio_head_stream: None,
             keep_streams: vec![RemuxStreamRef {
                 snapshot_stream_id: "stream-0".to_owned(),
                 provider_stream_index: 0,
@@ -437,6 +477,7 @@ fn remux_request(selection: RemuxSelection) -> RemuxRequest {
 
 fn base_selection(keep: Vec<RemuxStreamRef>) -> RemuxSelection {
     RemuxSelection {
+        audio_head_stream: None,
         keep_streams: keep,
         default_streams: vec![],
         clear_default_streams: vec![],

@@ -838,11 +838,22 @@ fn validate_original_probe(
         &[voom_store::repo::media::audio_synthesis_operations::AudioSynthesisCompanion],
     >,
     raw: &Value,
+    compatibility: Option<&voom_worker_protocol::AudioCompatibilitySettings>,
 ) -> Result<(), VoomError> {
     let mut original = output
         .probe
         .clone()
         .ok_or_else(|| VoomError::database("original owner probe missing".to_owned()))?;
+    if let Some(compatibility) = compatibility {
+        let worker_result = owner_worker_result(raw)
+            .ok_or_else(|| VoomError::database("original owner result is not object".to_owned()))?;
+        audio::validate_compatibility_snapshot(
+            &original.result.snapshot,
+            compatibility,
+            &worker_result,
+        )
+        .map_err(|error| VoomError::database(format!("original compatibility probe: {error}")))?;
+    }
     original.result.snapshot = normalized_snapshot(original.result.snapshot)
         .map_err(|error| VoomError::database(format!("original owner probe snapshot: {error}")))?;
     if let Some(companions) = companions {
@@ -864,6 +875,26 @@ fn validate_original_probe(
         ));
     }
     Ok(())
+}
+
+fn stored_compatibility_settings(
+    rendered: &Value,
+) -> Result<Option<voom_worker_protocol::AudioCompatibilitySettings>, VoomError> {
+    let Some(dispatch) = rendered.get("media_dispatch") else {
+        return Ok(None);
+    };
+    if dispatch.get("operation").and_then(Value::as_str) != Some("transcode_audio") {
+        return Ok(None);
+    }
+    dispatch
+        .get("settings")
+        .and_then(|settings| settings.get("compatibility"))
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| {
+                VoomError::database_context("persisted compatibility settings", error)
+            })
+        })
+        .transpose()
 }
 
 async fn guard_context_in_tx(
@@ -1464,6 +1495,11 @@ async fn validate_outputs_in_tx(
                 "staged probe does not describe the observed output",
             ));
         }
+        if let MediaDispatch::TranscodeAudio(dispatch) = dispatch
+            && let Some(compatibility) = &dispatch.settings.compatibility
+        {
+            audio::validate_compatibility_snapshot(&probe.result.snapshot, compatibility, raw)?;
+        }
         let mut snapshot = normalized_snapshot(probe.result.snapshot.clone())?;
         if let Some(audio) = publication.audio {
             audio.normalize_snapshot(raw, &mut snapshot)?;
@@ -1564,6 +1600,7 @@ async fn validate_stored_completion_in_tx(
         ));
     }
     let synthesis = voom_store::repo::media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo::for_verification_in_tx(tx, verification.id).await?;
+    let compatibility = stored_compatibility_settings(&payload.rendered_payload)?;
     validate_original_probe(
         original,
         probe,
@@ -1571,6 +1608,7 @@ async fn validate_stored_completion_in_tx(
             .as_ref()
             .map(|record| record.companions.as_slice()),
         &context.result,
+        compatibility.as_ref(),
     )?;
     let raw = owner_worker_result(&context.result)
         .ok_or_else(|| VoomError::database("persisted owner result is not object".to_owned()))?;

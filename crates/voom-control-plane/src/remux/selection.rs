@@ -71,8 +71,16 @@ pub fn selection_from_payload_and_snapshot(
         &facts,
         &keep_ids,
     )?;
+    let audio_head_stream = payload
+        .audio_head_snapshot_stream_id
+        .as_deref()
+        .map(|id| {
+            resolved_kept_stream(id, Some(TrackTarget::Audio), &facts, &keep_ids).map(stream_ref)
+        })
+        .transpose()?;
 
     Ok(RemuxSelection {
+        audio_head_stream,
         keep_streams,
         default_streams,
         clear_default_streams,

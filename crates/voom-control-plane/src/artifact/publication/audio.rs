@@ -25,6 +25,10 @@ use crate::audio::selection::{
     extract_selection_from_payload_and_snapshot, transcode_selection_from_payload_and_snapshot,
 };
 
+#[cfg(test)]
+#[path = "audio_test.rs"]
+mod tests;
+
 pub(crate) enum AudioAdmission {
     Dispatch(Value),
     Committed(Value),
@@ -243,6 +247,7 @@ async fn admit_synthesis_in_tx(
             "synthesis selection differs from dispatch".to_owned(),
         ));
     }
+    require_synthesis_settings(&selection, &dispatch.settings)?;
     let (operation, root) =
         plan_synthesis_in_tx(cp, tx, admission, audio, dispatch, selection, now).await?;
     let key = operation.operation.operation_key.clone();
@@ -311,6 +316,24 @@ async fn admit_synthesis_in_tx(
     )
     .await?;
     Ok(AdmissionDecision::Dispatched)
+}
+
+fn require_synthesis_settings(
+    selection: &crate::audio::selection::TranscodeAudioSelectionPlan,
+    settings: &voom_worker_protocol::TranscodeAudioSettings,
+) -> Result<(), VoomError> {
+    if selection.compatibility != settings.compatibility
+        || (selection.compatibility.is_some()
+            && (selection.target_codec != settings.target_codec
+                || selection.target_channels != settings.target_channels
+                || !settings.add_track
+                || settings.profile != "default"))
+    {
+        return Err(VoomError::database(
+            "compatibility dispatch differs from exact admitted settings".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn generation_output(output: &mut MediaPlannedOutput, directory: &str) -> Result<(), VoomError> {
@@ -500,6 +523,129 @@ pub(super) fn normalize_synthesis_snapshot(
             );
     }
     Ok(())
+}
+
+pub(super) fn validate_compatibility_snapshot(
+    snapshot: &Value,
+    settings: &voom_worker_protocol::AudioCompatibilitySettings,
+    raw: &Value,
+) -> Result<(), VoomError> {
+    let invalid = || {
+        super::malformed(
+            "compatibility observed source, retained identities or companion facts disagree",
+        )
+    };
+    let result: voom_worker_protocol::TranscodeAudioResult =
+        serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
+    let [reported] = result.selected_output_streams.as_slice() else {
+        return Err(invalid());
+    };
+    let streams = compatibility_observed_streams(snapshot, settings, &reported.snapshot_stream_id)?;
+    let source = streams
+        .iter()
+        .find(|stream| {
+            stream.get("id").and_then(Value::as_str)
+                == Some(settings.source_snapshot_stream_id.as_str())
+        })
+        .ok_or_else(invalid)?;
+    let derived = streams
+        .iter()
+        .find(|stream| {
+            stream.get("id").and_then(Value::as_str) == Some(reported.snapshot_stream_id.as_str())
+        })
+        .ok_or_else(invalid)?;
+    let target_channels = if settings.source_channels == 8 {
+        6
+    } else {
+        settings.source_channels
+    };
+    let target_codec = if settings.source_channels <= 2 {
+        "aac"
+    } else {
+        "eac3"
+    };
+    if source.get("kind").and_then(Value::as_str) != Some("audio")
+        || source.get("channels").and_then(Value::as_u64)
+            != Some(u64::from(settings.source_channels))
+        || source.get("channel_layout").and_then(Value::as_str)
+            != Some(settings.source_channel_layout.as_str())
+        || derived.get("kind").and_then(Value::as_str) != Some("audio")
+        || derived
+            .get("compatibility_source_snapshot_stream_id")
+            .and_then(Value::as_str)
+            != Some(settings.source_snapshot_stream_id.as_str())
+        || derived.get("codec_name").and_then(Value::as_str) != Some(target_codec)
+        || derived.get("channels").and_then(Value::as_u64) != Some(u64::from(target_channels))
+        || derived.get("channel_layout").and_then(Value::as_str)
+            != Some(settings.target_channel_layout.as_str())
+        || derived
+            .pointer("/disposition/default")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || derived.get("index").and_then(Value::as_u64)
+            != Some(u64::from(reported.output_provider_stream_index))
+        || reported.codec != target_codec
+        || reported.channels != Some(u64::from(target_channels))
+        || reported.channel_layout.as_deref() != Some(settings.target_channel_layout.as_str())
+        || reported.default != Some(false)
+        || result.selected_snapshot_stream_ids != [reported.snapshot_stream_id.clone()]
+    {
+        return Err(invalid());
+    }
+    for key in ["language", "title"] {
+        if source.get(key) != derived.get(key) {
+            return Err(invalid());
+        }
+    }
+    for key in ["forced", "commentary"] {
+        if source.get("disposition").and_then(|d| d.get(key))
+            != derived.get("disposition").and_then(|d| d.get(key))
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn compatibility_observed_streams<'a>(
+    snapshot: &'a Value,
+    settings: &voom_worker_protocol::AudioCompatibilitySettings,
+    result_id: &str,
+) -> Result<&'a [Value], VoomError> {
+    let invalid = || super::malformed("compatibility retained identity inventory disagrees");
+    let streams = snapshot
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    let mut expected = settings
+        .retained_streams
+        .iter()
+        .map(|s| s.snapshot_stream_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if expected.len() != settings.retained_streams.len() || !expected.insert(result_id) {
+        return Err(invalid());
+    }
+    let mut observed = std::collections::BTreeSet::new();
+    let mut indexes = std::collections::BTreeSet::new();
+    for stream in streams {
+        let id = stream
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(invalid)?;
+        let index = stream
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|index| u32::try_from(index).ok())
+            .ok_or_else(invalid)?;
+        if !observed.insert(id) || !indexes.insert(index) {
+            return Err(invalid());
+        }
+    }
+    if observed != expected {
+        return Err(invalid());
+    }
+    Ok(streams)
 }
 
 pub(super) struct AudioStage {
@@ -1150,6 +1296,10 @@ fn observed_synthesis_companions(
         let forced = flag("forced")?;
         let commentary = flag("commentary")?;
         let facts = voom_worker_protocol::AudioOutputStreamFact {
+            channel_layout: stream
+                .get("channel_layout")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             snapshot_stream_id: companion.result_snapshot_stream_id.clone(),
             output_provider_stream_index: index,
             codec: codec.clone(),

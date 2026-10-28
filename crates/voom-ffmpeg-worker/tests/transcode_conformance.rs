@@ -1006,6 +1006,7 @@ async fn eac3_transcode_preserves_5_1_channels() {
             }],
         },
         audio: TranscodeAudioSettings {
+            compatibility: None,
             target_codec: "eac3".to_owned(),
             profile: AUDIO_PROFILE_DEFAULT.to_owned(),
             add_track: false,
@@ -1085,6 +1086,7 @@ async fn add_track_synthesis_preserves_surround_and_appends_stereo_companion() {
                 }],
             },
             audio: TranscodeAudioSettings {
+                compatibility: None,
                 target_codec: "aac".to_owned(),
                 profile: AUDIO_PROFILE_DEFAULT.to_owned(),
                 add_track: true,

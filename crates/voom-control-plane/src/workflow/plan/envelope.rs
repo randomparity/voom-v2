@@ -451,7 +451,9 @@ async fn audio_envelope(
                 destination,
             ))
         }
-        AudioOperationType::TranscodeAudio | AudioOperationType::SynthesizeAudio => {
+        AudioOperationType::TranscodeAudio
+        | AudioOperationType::SynthesizeAudio
+        | AudioOperationType::EnsureAudioCompatibility => {
             let plan = crate::audio::selection::transcode_selection_from_payload_and_snapshot(
                 operation_payload,
                 &snapshot,
@@ -462,6 +464,7 @@ async fn audio_envelope(
                 ))
             })?;
             let settings = voom_worker_protocol::TranscodeAudioSettings {
+                compatibility: plan.compatibility.clone(),
                 target_codec: plan.target_codec.clone(),
                 profile: "default".to_owned(),
                 add_track: plan.add_track,

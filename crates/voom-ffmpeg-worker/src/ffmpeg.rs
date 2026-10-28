@@ -267,6 +267,7 @@ pub struct SourceAudioFact {
     pub default: Option<bool>,
     pub disposition: Option<AudioDispositionFact>,
     pub channels: Option<u64>,
+    pub channel_layout: Option<String>,
 }
 
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
@@ -1053,22 +1054,30 @@ async fn run_ffmpeg_synthesize_audio(
     let target_channels = request.audio.target_channels.ok_or_else(|| {
         FfmpegError::OutputFactsMismatch("synthesize audio requires target_channels".to_owned())
     })?;
-    let source_streams = probe_audio_streams(config, input).await?;
+    let input_probe = probe_json(config, input).await?;
+    let source_streams = audio_facts_from_probe(&input_probe);
+    if request.audio.compatibility.is_some() {
+        validate_compatibility_source(request, &source_streams)?;
+    } else if source_streams
+        .iter()
+        .filter(|source| {
+            request
+                .selection
+                .selected_streams
+                .iter()
+                .any(|selected| selected.provider_stream_index == source.provider_stream_index)
+        })
+        .any(|source| {
+            source
+                .channels
+                .is_none_or(|channels| target_channels >= channels)
+        })
+    {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "ordinary synthesis requires a strict downmix".to_owned(),
+        ));
+    }
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
-    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
-        &request.audio.target_codec,
-        &request.audio.profile,
-    )
-    .ok_or_else(|| {
-        FfmpegError::OutputFactsMismatch(format!(
-            "no audio bitrate defined for codec `{}` profile `{}`",
-            request.audio.target_codec, request.audio.profile
-        ))
-    })?;
-    // Companions are appended after the copied originals, so their output audio
-    // ordinal starts at the original audio-stream count.
-    let original_audio_count = source_streams.len();
-
     let mut command = Command::new(&config.ffmpeg_path);
     command
         .arg("-hide_banner")
@@ -1093,26 +1102,15 @@ async fn run_ffmpeg_synthesize_audio(
                 "-default"
             });
     }
-    for (offset, source) in selected.iter().enumerate() {
-        let out_ordinal = original_audio_count + offset;
-        command
-            .arg("-map")
-            .arg(format!("0:{}", source.provider_stream_index))
-            .arg(format!("-c:a:{out_ordinal}"))
-            .arg(audio_encoder(&request.audio.target_codec)?)
-            .arg(format!("-ac:a:{out_ordinal}"))
-            .arg(target_channels.to_string())
-            .arg(format!("-b:a:{out_ordinal}"))
-            .arg(format!(
-                "{}k",
-                u64::from(bitrate_kbps_per_channel) * target_channels
-            ));
-        append_audio_metadata(&mut command, out_ordinal, source);
-        // A companion inherits metadata, but must not compete with the source's
-        // default selection. Keep ordinary transcode metadata handling unchanged.
-        command
-            .arg(format!("-disposition:a:{out_ordinal}"))
-            .arg("-default");
+    append_synthesis_tracks(
+        &mut command,
+        request,
+        &selected,
+        &source_streams,
+        target_channels,
+    )?;
+    if let Some(compatibility) = &request.audio.compatibility {
+        append_compatibility_identities(&mut command, &input_probe, compatibility, request)?;
     }
     command
         .arg("-map")
@@ -1134,7 +1132,332 @@ async fn run_ffmpeg_synthesize_audio(
     )
     .await?;
     verify_synthesize_audio_probe(&selected, request, target_channels, &probe)?;
+    if let Some(compatibility) = &request.audio.compatibility {
+        let actual = probe_json(config, output).await?;
+        verify_compatibility_identities(&input_probe, &actual, compatibility, request)?;
+    }
     Ok(probe)
+}
+
+fn append_synthesis_tracks(
+    command: &mut Command,
+    request: &TranscodeAudioRequest,
+    selected: &[SourceAudioFact],
+    source_streams: &[SourceAudioFact],
+    target_channels: u64,
+) -> Result<(), FfmpegError> {
+    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
+        &request.audio.target_codec,
+        &request.audio.profile,
+    )
+    .ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!(
+            "no audio bitrate defined for codec `{}` profile `{}`",
+            request.audio.target_codec, request.audio.profile
+        ))
+    })?;
+    // Companions are appended after the copied originals, so their output audio
+    // ordinal starts at the original audio-stream count.
+    let original_audio_count = source_streams.len();
+
+    let preserve_observed_ids = source_streams
+        .iter()
+        .any(|source| source.snapshot_stream_id.is_some());
+    for (offset, (source, selected_ref)) in selected
+        .iter()
+        .zip(&request.selection.selected_streams)
+        .enumerate()
+    {
+        let out_ordinal = original_audio_count + offset;
+        command
+            .arg("-map")
+            .arg(format!("0:{}", source.provider_stream_index))
+            .arg(format!("-c:a:{out_ordinal}"))
+            .arg(audio_encoder(&request.audio.target_codec)?)
+            .arg(format!("-ac:a:{out_ordinal}"))
+            .arg(target_channels.to_string())
+            .arg(format!("-b:a:{out_ordinal}"))
+            .arg(format!(
+                "{}k",
+                u64::from(bitrate_kbps_per_channel) * target_channels
+            ));
+        append_audio_metadata(command, out_ordinal, source);
+        if let Some(compatibility) = &request.audio.compatibility {
+            command
+                .arg(format!("-channel_layout:a:{out_ordinal}"))
+                .arg(&compatibility.target_channel_layout)
+                .arg(format!("-metadata:s:a:{out_ordinal}"))
+                .arg(format!(
+                    "voom_compatibility_source_stream_id={}",
+                    compatibility.source_snapshot_stream_id
+                ));
+            command
+                .arg(format!("-metadata:s:a:{}", source.audio_ordinal))
+                .arg(format!(
+                    "snapshot_stream_id={}",
+                    compatibility.source_snapshot_stream_id
+                ));
+        } else if preserve_observed_ids {
+            // Tagged inputs carry observed identities. A new ordinary companion
+            // must neither duplicate its source ID nor impersonate its association.
+            command
+                .arg(format!("-metadata:s:a:{out_ordinal}"))
+                .arg(format!(
+                    "voom_compatibility_stream_id={}",
+                    selected_ref.snapshot_stream_id
+                ))
+                .arg(format!("-metadata:s:a:{out_ordinal}"))
+                .arg("voom_compatibility_source_stream_id=");
+        }
+        // A companion inherits metadata, but must not compete with the source's
+        // default selection. Keep ordinary transcode metadata handling unchanged.
+        command
+            .arg(format!("-disposition:a:{out_ordinal}"))
+            .arg("-default");
+    }
+    Ok(())
+}
+
+fn validate_compatibility_source(
+    request: &TranscodeAudioRequest,
+    sources: &[SourceAudioFact],
+) -> Result<(), FfmpegError> {
+    let Some(settings) = &request.audio.compatibility else {
+        return Ok(());
+    };
+    let [selected] = request.selection.selected_streams.as_slice() else {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "compatibility requires one selected source".to_owned(),
+        ));
+    };
+    let source = sources
+        .iter()
+        .find(|source| source.provider_stream_index == selected.provider_stream_index)
+        .ok_or_else(|| {
+            FfmpegError::OutputFactsMismatch(
+                "compatibility source absent from actual probe".to_owned(),
+            )
+        })?;
+    let layout = settings.source_channel_layout.as_str();
+    let channels = settings.source_channels;
+    let supported = matches!(
+        (channels, layout),
+        (1, "mono")
+            | (2, "stereo")
+            | (3, "2.1" | "3.0" | "3.0(back)")
+            | (
+                4,
+                "3.1" | "4.0" | "quad" | "quad(side)" | "4 channels (FL+FR+LFE+BC)"
+            )
+            | (5, "4.1" | "5.0" | "5.0(side)")
+            | (6, "5.1" | "5.1(side)")
+            | (8, "7.1")
+    );
+    let target_layout = match layout {
+        "quad" => "quad(side)",
+        "5.0" => "5.0(side)",
+        "5.1" | "7.1" => "5.1(side)",
+        other => other,
+    };
+    if !supported
+        || !request.audio.add_track
+        || source.channels != Some(u64::from(channels))
+        || source.channel_layout.as_deref() != Some(layout)
+        || source
+            .snapshot_stream_id
+            .as_deref()
+            .is_some_and(|id| id != settings.source_snapshot_stream_id)
+        || settings.source_snapshot_stream_id == selected.snapshot_stream_id
+        || request.audio.target_codec != if channels <= 2 { "aac" } else { "eac3" }
+        || request.audio.target_channels
+            != Some(u64::from(if channels == 8 { 6 } else { channels }))
+        || settings.target_channel_layout != target_layout
+    {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "compatibility source or target differs from actual supported source facts".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn retained_compatibility_streams<'a>(
+    probe: &'a Value,
+    settings: &'a voom_worker_protocol::AudioCompatibilitySettings,
+) -> Result<
+    Vec<(
+        &'a Value,
+        &'a voom_worker_protocol::CompatibilityStreamIdentity,
+    )>,
+    FfmpegError,
+> {
+    let invalid = || {
+        FfmpegError::OutputFactsMismatch(
+            "compatibility retained inventory differs from actual input".to_owned(),
+        )
+    };
+    let streams = probe
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if streams.len() != settings.retained_streams.len() {
+        return Err(invalid());
+    }
+    let mut pairs = Vec::with_capacity(streams.len());
+    let mut ids = std::collections::BTreeSet::new();
+    let mut previous = None;
+    for identity in &settings.retained_streams {
+        if identity.snapshot_stream_id.trim().is_empty()
+            || !ids.insert(&identity.snapshot_stream_id)
+            || previous.is_some_and(|index| index >= identity.provider_stream_index)
+        {
+            return Err(invalid());
+        }
+        let mut matches = streams.iter().filter(|stream| {
+            stream.get("index").and_then(Value::as_u64)
+                == Some(u64::from(identity.provider_stream_index))
+        });
+        let stream = matches.next().ok_or_else(invalid)?;
+        if matches.next().is_some()
+            || stream_tag(stream, "voom_compatibility_stream_id")
+                .is_some_and(|id| id != identity.snapshot_stream_id)
+        {
+            return Err(invalid());
+        }
+        pairs.push((stream, identity));
+        previous = Some(identity.provider_stream_index);
+    }
+    // Synthesis maps non-attachments, appends one companion, then attachments.
+    pairs.sort_by_key(|(stream, identity)| {
+        (
+            stream.get("codec_type").and_then(Value::as_str) == Some("attachment"),
+            identity.provider_stream_index,
+        )
+    });
+    Ok(pairs)
+}
+
+fn append_compatibility_identities(
+    command: &mut Command,
+    probe: &Value,
+    settings: &voom_worker_protocol::AudioCompatibilitySettings,
+    request: &TranscodeAudioRequest,
+) -> Result<(), FfmpegError> {
+    let retained = retained_compatibility_streams(probe, settings)?;
+    let companion_index = retained
+        .iter()
+        .filter(|(stream, _)| {
+            stream.get("codec_type").and_then(Value::as_str) != Some("attachment")
+        })
+        .count();
+    for (ordinal, (stream, identity)) in retained.iter().enumerate() {
+        let output_index = ordinal + usize::from(ordinal >= companion_index);
+        command
+            .arg(format!("-metadata:s:{output_index}"))
+            .arg(format!(
+                "voom_compatibility_stream_id={}",
+                identity.snapshot_stream_id
+            ));
+        command.arg(format!("-disposition:{output_index}")).arg(
+            if disposition_bool(stream, "default") == Some(true) {
+                "+default"
+            } else {
+                "-default"
+            },
+        );
+    }
+    let [selected] = request.selection.selected_streams.as_slice() else {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "compatibility requires one companion".to_owned(),
+        ));
+    };
+    if retained
+        .iter()
+        .any(|(_, identity)| identity.snapshot_stream_id == selected.snapshot_stream_id)
+        || !retained.iter().any(|(_, identity)| {
+            identity.snapshot_stream_id == settings.source_snapshot_stream_id
+                && identity.provider_stream_index == selected.provider_stream_index
+        })
+    {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "compatibility source/result inventory disagrees".to_owned(),
+        ));
+    }
+    command
+        .arg(format!("-metadata:s:{companion_index}"))
+        .arg(format!(
+            "voom_compatibility_stream_id={}",
+            selected.snapshot_stream_id
+        ));
+    Ok(())
+}
+
+fn verify_compatibility_identities(
+    input: &Value,
+    actual: &Value,
+    settings: &voom_worker_protocol::AudioCompatibilitySettings,
+    request: &TranscodeAudioRequest,
+) -> Result<(), FfmpegError> {
+    let retained = retained_compatibility_streams(input, settings)?;
+    let invalid = || {
+        FfmpegError::OutputFactsMismatch(
+            "compatibility output lost retained identity or facts".to_owned(),
+        )
+    };
+    let streams = actual
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if streams.len() != retained.len() + 1 {
+        return Err(invalid());
+    }
+    for (source, identity) in retained {
+        let matches = streams
+            .iter()
+            .filter(|stream| {
+                stream_tag(stream, "voom_compatibility_stream_id").as_deref()
+                    == Some(identity.snapshot_stream_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        let [observed] = matches.as_slice() else {
+            return Err(invalid());
+        };
+        for key in ["codec_type", "codec_name", "channels", "channel_layout"] {
+            if source.get(key) != observed.get(key) {
+                return Err(invalid());
+            }
+        }
+        for key in ["language", "title", "filename", "mimetype"] {
+            if stream_tag(source, key) != stream_tag(observed, key) {
+                return Err(invalid());
+            }
+        }
+        for key in ["default", "forced", "comment"] {
+            if disposition_bool(source, key) != disposition_bool(observed, key) {
+                return Err(invalid());
+            }
+        }
+    }
+    let [selected] = request.selection.selected_streams.as_slice() else {
+        return Err(invalid());
+    };
+    let matches = streams
+        .iter()
+        .filter(|stream| {
+            stream_tag(stream, "voom_compatibility_stream_id").as_deref()
+                == Some(selected.snapshot_stream_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    let [derived] = matches.as_slice() else {
+        return Err(invalid());
+    };
+    if stream_tag(derived, "snapshot_stream_id").as_deref()
+        != Some(selected.snapshot_stream_id.as_str())
+        || stream_tag(derived, "voom_compatibility_source_stream_id").as_deref()
+            != Some(settings.source_snapshot_stream_id.as_str())
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 pub async fn run_ffmpeg_extract_audio(
@@ -1472,11 +1795,15 @@ async fn probe_audio_streams(
     path: &Path,
 ) -> Result<Vec<SourceAudioFact>, FfmpegError> {
     let json = probe_json(config, path).await?;
-    Ok(audio_stream_values(&json)
+    Ok(audio_facts_from_probe(&json))
+}
+
+fn audio_facts_from_probe(json: &Value) -> Vec<SourceAudioFact> {
+    audio_stream_values(json)
         .enumerate()
         .filter_map(|(audio_ordinal, stream)| {
             Some(SourceAudioFact {
-                snapshot_stream_id: None,
+                snapshot_stream_id: stream_tag(stream, "voom_compatibility_stream_id"),
                 provider_stream_index: u32::try_from(stream.get("index")?.as_u64()?).ok()?,
                 audio_ordinal,
                 codec: stream
@@ -1493,9 +1820,13 @@ async fn probe_audio_streams(
                     commentary: disposition_bool(stream, "comment"),
                 }),
                 channels: stream.get("channels").and_then(Value::as_u64),
+                channel_layout: stream
+                    .get("channel_layout")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
         })
-        .collect())
+        .collect()
 }
 
 async fn probe_audio_output(
@@ -1610,6 +1941,10 @@ fn audio_output_stream_fact(
         return None;
     }
     Some(AudioOutputStreamFact {
+        channel_layout: stream
+            .get("channel_layout")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         snapshot_stream_id,
         output_provider_stream_index: stream
             .get("index")
@@ -1822,6 +2157,14 @@ fn verify_synthesize_audio_probe(
         if output.channels != Some(target_channels) {
             return Err(FfmpegError::OutputFactsMismatch(
                 "synthesized audio channel count is not the requested downmix".to_owned(),
+            ));
+        }
+        if let Some(compatibility) = &request.audio.compatibility
+            && output.channel_layout.as_deref()
+                != Some(compatibility.target_channel_layout.as_str())
+        {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "compatibility output layout mismatch".to_owned(),
             ));
         }
         if source.language != output.language {

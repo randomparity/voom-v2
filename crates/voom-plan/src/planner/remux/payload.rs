@@ -14,6 +14,7 @@ pub struct RemuxOperationPayload {
     pub track_order: Vec<RemuxTrackGroup>,
     /// Snapshot stream pinned to the head of the requested output order.
     pub head_snapshot_stream_id: Option<String>,
+    pub audio_head_snapshot_stream_id: Option<String>,
     pub defaults: Vec<RemuxDefaultAction>,
 }
 
@@ -81,6 +82,15 @@ impl RemuxOperationPayload {
             }
             None => Vec::new(),
         };
+        let audio_head_snapshot_stream_id =
+            parse_optional_stream_id(object.get("audio_head_snapshot_stream_id"), || {
+                "remux payload audio_head_snapshot_stream_id must be a non-empty string".to_owned()
+            })?;
+        if head_snapshot_stream_id.is_some() && audio_head_snapshot_stream_id.is_some() {
+            return Err(RemuxPayloadError::new(
+                "global head and audio head cannot be combined",
+            ));
+        }
 
         Ok(Self {
             container: container.to_owned(),
@@ -88,6 +98,7 @@ impl RemuxOperationPayload {
             track_actions,
             track_order,
             head_snapshot_stream_id,
+            audio_head_snapshot_stream_id,
             defaults,
         })
     }
@@ -139,6 +150,12 @@ impl RemuxOperationPayload {
         );
         if let Some(id) = self.head_snapshot_stream_id {
             object.insert("head_snapshot_stream_id".to_owned(), Value::String(id));
+        }
+        if let Some(id) = self.audio_head_snapshot_stream_id {
+            object.insert(
+                "audio_head_snapshot_stream_id".to_owned(),
+                Value::String(id),
+            );
         }
         if let Some(id) = self.source_media_snapshot_id {
             object.insert("source_media_snapshot_id".to_owned(), Value::from(id));

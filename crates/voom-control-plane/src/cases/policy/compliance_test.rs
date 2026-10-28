@@ -2592,3 +2592,61 @@ async fn backup_evidence_for_plan_surfaces_seeded_backups() {
     assert_eq!(evidence[0].status, "verified");
     assert_eq!(evidence[0].checksum.as_deref(), Some("blake3:source"));
 }
+
+#[tokio::test]
+async fn compatibility_mixed_compliance_apply_waits_for_writer_before_reading() {
+    let (cp, _tmp) = cp().await;
+    let (version, input, _) = seed_noncompliant(&cp).await;
+    let mut report = cp.generate_compliance_report(version, input).await.unwrap();
+    let mut compliant = report
+        .report
+        .checks
+        .iter()
+        .find(|check| check.issue_action_hint == voom_plan::IssueActionHint::CreateOrUpdatePlanned)
+        .unwrap()
+        .clone();
+    compliant.check_id = "already-retained".to_owned();
+    compliant.node_id = "already-retained".to_owned();
+    compliant.issue_action_hint = voom_plan::IssueActionHint::ResolveMatching;
+    report.report.checks.insert(0, compliant);
+
+    // Connection-local zero busy budgets make the acquisition boundary observable:
+    // immediate BEGIN fails here; deferred BEGIN reads, then fails at issues insert.
+    let mut connections = Vec::new();
+    for _ in 0..cp.pool_for_test().options().get_max_connections() {
+        let mut connection = cp.pool_for_test().acquire().await.unwrap();
+        sqlx::query("PRAGMA busy_timeout = 0")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        connections.push(connection);
+    }
+    drop(connections);
+    let writer = cp
+        .pool_for_test()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        cp.apply_generated_compliance_report(&report, version),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("compliance: apply_generated_compliance_report"),
+        "contention must occur before any read: {error}"
+    );
+    assert!(!error.to_string().contains("issues insert"), "{error}");
+    writer.rollback().await.unwrap();
+    // Anti-vacuity: the same report creates its planned issue after the lock clears.
+    let result = cp
+        .apply_generated_compliance_report(&report, version)
+        .await
+        .unwrap();
+    assert!(result.issues.created_count > 0);
+    assert!(result.issues.skipped_count > 0);
+}

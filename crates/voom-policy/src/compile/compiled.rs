@@ -411,6 +411,8 @@ pub enum CompiledOperation {
     TranscodeAudio(CompiledTranscodeAudioOperation),
     ExtractAudio(CompiledExtractAudioOperation),
     SynthesizeAudio(CompiledSynthesizeAudioOperation),
+    EnsureAudioCompatibility(CompiledEnsureAudioCompatibilityOperation),
+    PlaceAudioCompatibility(CompiledPlaceAudioCompatibilityOperation),
     VerifyArtifact(CompiledVerifyArtifactOperation),
     Conditional(CompiledConditionalOperation),
     Rules(CompiledRulesOperation),
@@ -522,6 +524,14 @@ pub struct CompiledSynthesizeAudioOperation {
     pub target_channels: u64,
     pub filter: Option<TrackFilter>,
 }
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledEnsureAudioCompatibilityOperation {}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledPlaceAudioCompatibilityOperation {}
 
 /// `verify artifact` takes no arguments; the plan node identifies the target.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

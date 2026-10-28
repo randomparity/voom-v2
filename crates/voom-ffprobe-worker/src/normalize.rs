@@ -130,7 +130,7 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
             // ffprobe may emit `level` as a JSON number (e.g. 153); normalize to string
             // for stable downstream comparison regardless of the ffprobe version.
             insert_u64_as_string(input, &mut output, "level");
-            insert_stream_tags(input, &mut output);
+            insert_stream_tags(input, &mut output)?;
             insert_disposition(input, &mut output)?;
 
             Ok(Value::Object(output))
@@ -138,9 +138,12 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
         .collect()
 }
 
-fn insert_stream_tags(input: &Map<String, Value>, output: &mut Map<String, Value>) {
+fn insert_stream_tags(
+    input: &Map<String, Value>,
+    output: &mut Map<String, Value>,
+) -> Result<(), WorkerError> {
     let Some(tags) = input.get("tags").and_then(Value::as_object) else {
-        return;
+        return Ok(());
     };
     // Match by folded key: ffprobe passes Matroska custom tags such as ROLE and
     // HANDLER_NAME through uppercase, and Matroska tag names are case-insensitive
@@ -171,6 +174,71 @@ fn insert_stream_tags(input: &Map<String, Value>, output: &mut Map<String, Value
             output.insert(output_key.to_owned(), Value::String(value.to_owned()));
         }
     }
+    for (tag, field) in [
+        ("voom_compatibility_stream_id", "id"),
+        (
+            "voom_compatibility_source_stream_id",
+            "compatibility_source_snapshot_stream_id",
+        ),
+    ] {
+        if let Some(value) = observed_identity_tag(tags, tag)? {
+            output.insert(field.to_owned(), Value::String(value));
+        }
+    }
+    if invalid_language_tags(tags) {
+        output.insert(
+            "compatibility_invalid_language".to_owned(),
+            Value::Bool(true),
+        );
+    }
+    Ok(())
+}
+
+fn observed_identity_tag(
+    tags: &Map<String, Value>,
+    name: &str,
+) -> Result<Option<String>, WorkerError> {
+    let mut observed: Option<String> = None;
+    for (key, value) in tags
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+    {
+        let value = value
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| malformed(format!("{key} must be a non-empty string")))?;
+        if observed
+            .as_deref()
+            .is_some_and(|previous| previous != value)
+        {
+            return Err(malformed(format!("conflicting {name} tags")));
+        }
+        observed = Some(value.to_owned());
+    }
+    Ok(observed)
+}
+
+fn invalid_language_tags(tags: &Map<String, Value>) -> bool {
+    let mut observed = None;
+    for (_, value) in tags
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("language"))
+    {
+        match value {
+            Value::Null => {}
+            Value::String(value) if is_unknown_value(value) => {}
+            Value::String(value)
+                if value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_lowercase()) =>
+            {
+                if observed.is_some_and(|previous| previous != value) {
+                    return true;
+                }
+                observed = Some(value);
+            }
+            _ => return true,
+        }
+    }
+    false
 }
 
 fn insert_disposition(

@@ -3,8 +3,50 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn compatibility_payload_requires_pinned_descriptor() {
+    let companion = synthesis_companion_id("operation", "source");
+    let wire = json!({
+        "type": "ensure_audio_compatibility", "operation_id": "operation",
+        "target_codec": "aac", "container": "mkv", "target_channels": 2,
+        "source_media_snapshot_id": 7,
+        "compatibility": {
+            "source_snapshot_stream_id": "source", "source_provider_stream_index": 1,
+            "source_channels": 2, "source_channel_layout": "stereo",
+            "target_channel_layout": "stereo", "result_snapshot_stream_id": companion,
+            "retained_streams": [
+                {"snapshot_stream_id": "video", "provider_stream_index": 0},
+                {"snapshot_stream_id": "source", "provider_stream_index": 1}
+            ]
+        },
+        "companions": [{
+            "companion_id": companion, "source_snapshot_stream_id": "source",
+            "source_provider_stream_index": 1, "result_snapshot_stream_id": companion
+        }]
+    });
+    let parsed = AudioOperationPayload::try_from_execution_value(&wire).unwrap();
+    assert_eq!(parsed.into_value(), wire);
+    for field in [
+        "compatibility",
+        "operation_id",
+        "target_channels",
+        "companions",
+    ] {
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            AudioOperationPayload::try_from_execution_value(&missing).is_err(),
+            "missing {field}"
+        );
+    }
+    let mut wrong = wire;
+    wrong["compatibility"]["retained_streams"][1]["provider_stream_index"] = json!(0);
+    assert!(AudioOperationPayload::try_from_execution_value(&wrong).is_err());
+}
+
+#[test]
 fn synthesize_payload_round_trips_target_channels() {
     let payload = AudioOperationPayload {
+        compatibility: None,
         operation_type: AudioOperationType::SynthesizeAudio,
         operation_id: Some("node-1".to_owned()),
         target_codec: "aac".to_owned(),
@@ -58,6 +100,7 @@ fn synthesize_payload_requires_operation_and_companion_descriptors() {
 #[test]
 fn transcode_payload_omits_target_channels() {
     let value = AudioOperationPayload {
+        compatibility: None,
         operation_type: AudioOperationType::TranscodeAudio,
         operation_id: None,
         target_codec: "aac".to_owned(),
@@ -134,6 +177,7 @@ fn extract_payload_round_trips_outputs_and_reads_legacy_singleton() {
     assert_eq!(parsed.outputs, None);
 
     let value = AudioOperationPayload {
+        compatibility: None,
         operation_type: AudioOperationType::ExtractAudio,
         operation_id: Some("node_0123456789abcdef".to_owned()),
         target_codec: "opus".to_owned(),

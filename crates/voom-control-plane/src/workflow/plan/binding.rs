@@ -306,7 +306,10 @@ fn render_policy_audio_payload(
         .map_err(|err| BindingError::new(err.to_string()))?;
     let type_matches = audio_payload.operation_type == expected_type
         || (expected_type == AudioOperationType::TranscodeAudio
-            && audio_payload.operation_type == AudioOperationType::SynthesizeAudio);
+            && matches!(
+                audio_payload.operation_type,
+                AudioOperationType::SynthesizeAudio | AudioOperationType::EnsureAudioCompatibility
+            ));
     if !type_matches {
         return Err(BindingError::new(format!(
             "{operation} payload has mismatched type"

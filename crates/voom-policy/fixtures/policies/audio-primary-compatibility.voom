@@ -1,0 +1,24 @@
+policy "primary audio compatibility" {
+  metadata {
+    requires_tools: [ffmpeg, ffprobe, mkvtoolnix]
+  }
+
+  phase retain {
+    keep audio where language in ["eng", "und"]
+  }
+
+  phase compatibility {
+    depends_on: [retain]
+    ensure audio compatibility
+  }
+
+  phase placement {
+    depends_on: [compatibility]
+    place audio compatibility
+  }
+
+  phase verify {
+    depends_on: [placement]
+    verify artifact
+  }
+}

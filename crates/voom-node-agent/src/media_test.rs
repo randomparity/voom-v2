@@ -972,3 +972,48 @@ async fn output_fact_mismatch_fails_with_evidence() {
     // The mismatching bytes stay put for control-plane recovery inspection.
     assert_eq!(std::fs::read(&output).unwrap(), OUTPUT_BYTES);
 }
+
+#[tokio::test]
+async fn compatibility_fields_reach_child_request() {
+    let root = TempDir::new().unwrap();
+    write_source(&root);
+    let output = ensure_output_parent(&root);
+    let output = output
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap()
+        .join("out.mkv");
+    let mut envelope = transcode_audio_envelope(SOURCE_BYTES.len() as u64, &hash_of(SOURCE_BYTES));
+    let compatibility = json!({
+        "source_snapshot_stream_id": "original-source", "source_channels": 2,
+        "source_channel_layout": "stereo", "target_channel_layout": "stereo",
+        "retained_streams": [{"snapshot_stream_id": "original-source", "provider_stream_index": 1}]
+    });
+    envelope["settings"] = json!({"target_codec": "aac", "profile": "default", "add_track": true,
+        "target_channels": 2, "compatibility": compatibility});
+    let worker = ScriptedMediaWorker::new(transcode_script(output));
+    let outcome = run(
+        &root,
+        worker.clone(),
+        registry_with(Some(ScriptedMediaWorker::new(probe_script()))),
+        media_payload(&envelope),
+    )
+    .await;
+    assert!(
+        matches!(outcome, super::LeaseOutcome::Complete(_)),
+        "{outcome:?}"
+    );
+    let requests = recorded_requests(&worker).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].1["audio"], envelope["settings"]);
+    assert_eq!(requests[0].1["selection"], envelope["selection"]);
+    assert_eq!(
+        requests[0].1["audio"]["compatibility"]["source_snapshot_stream_id"],
+        "original-source"
+    );
+    assert_eq!(
+        requests[0].1["selection"]["selected_streams"][0]["snapshot_stream_id"], "s1",
+        "source and result identities must not be conflated"
+    );
+}

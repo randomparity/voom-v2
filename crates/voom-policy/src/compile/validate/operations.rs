@@ -70,11 +70,28 @@ impl Validator<'_> {
             "extract" => self.validate_extract_statement(statement),
             "verify" => self.validate_verify_statement(statement),
             "synthesize" => self.validate_synthesize_statement(statement),
+            "ensure" | "place" => self.validate_audio_compatibility_statement(statement),
             _ => self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
                 "unknown nested operation",
             ),
+        }
+    }
+
+    pub(super) fn validate_audio_compatibility_statement(&mut self, statement: &StatementAst) {
+        let text = statement_text(statement);
+        let tokens = words(text.as_ref());
+        if !matches!(
+            tokens.as_slice(),
+            ["ensure" | "place", "audio", "compatibility"]
+        ) || !matches!(statement, StatementAst::Raw { .. })
+        {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "compatibility operation must be exactly `ensure audio compatibility` or `place audio compatibility`",
+            );
         }
     }
 

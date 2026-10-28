@@ -581,6 +581,30 @@ single-directory run (no shared subtree) promotes flat, as before.
 
 ## Known limitations
 
+The executable primary-audio example is
+[`audio-primary-compatibility.voom`](../../crates/voom-policy/fixtures/policies/audio-primary-compatibility.voom).
+Its dependent phases retain English and unknown/untagged audio, ensure a compatibility
+track, place that track first among audio with the sole audio default, then verify the
+artifact. Video, retained originals, commentary, subtitles, and attachments remain present.
+Source ranking uses the first English non-commentary original by provider index, with
+unknown/untagged originals as fallback. An existing compatible ranked original or associated
+companion avoids another encode. Audio placement preserves non-audio positions and order.
+
+The sample requires the existing FFmpeg, ffprobe, and MKVToolNix workers. AAC preserves
+mono/stereo. EAC3 preserves supported three-through-six-channel layouts; 7.1 produces
+5.1(side). The exact admitted layouts are recorded in [ADR 0111](../adr/0111-primary-audio-compatibility.md).
+Missing source facts, no eligible original, unsupported channel/layout pairs, and invalid
+companion associations produce explicit compatibility diagnostics rather than guessed
+conversions. An ensure failure prevents dependent placement; retention in an earlier phase
+may already have committed. Ordinary synthesis keeps its existing non-default behavior.
+
+Install supporting policy, planner, control-plane, agent, probe, and media-worker binaries
+before admitting policies with the new operations. Old readers cannot parse the new durable
+variants. Before rollback, stop admission of these policies and drain or quarantine affected
+work through existing authority; preserve canonical lineage. Reapplication to re-probed
+outputs reuses the compatibility identity. This sample does not perform a real-library run
+or produce library-wide before/after reports.
+
 - Same-stem, different-extension siblings in one directory can still collide at
   output promotion if their final operation renders the same destination
   basename. Scope the run to one sibling or choose an output directory that does

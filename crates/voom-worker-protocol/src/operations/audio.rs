@@ -99,6 +99,8 @@ pub struct AudioOutputStreamFact {
     pub default: Option<bool>,
     pub disposition: Option<AudioDispositionFact>,
     pub channels: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_layout: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +141,26 @@ pub struct TranscodeAudioSettings {
     /// when `add_track` is true; ignored otherwise. Additive since ADR 0026.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_channels: Option<u64>,
+    /// Bounded same-channel compatibility companion mode (ADR 0111).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<AudioCompatibilitySettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityStreamIdentity {
+    pub snapshot_stream_id: String,
+    pub provider_stream_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioCompatibilitySettings {
+    pub retained_streams: Vec<CompatibilityStreamIdentity>,
+    pub source_snapshot_stream_id: String,
+    pub source_channels: u32,
+    pub source_channel_layout: String,
+    pub target_channel_layout: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

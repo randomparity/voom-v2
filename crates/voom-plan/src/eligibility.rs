@@ -131,6 +131,8 @@ fn operations_use_stream_facts(operations: &[CompiledOperation]) -> bool {
                 target_channels: _,
                 filter: _,
             })
+            | CompiledOperation::EnsureAudioCompatibility(_)
+            | CompiledOperation::PlaceAudioCompatibility(_)
             | CompiledOperation::VerifyArtifact(CompiledVerifyArtifactOperation {}) => {}
         }
     }
@@ -256,6 +258,8 @@ fn visit_operations(
                 target_channels: _,
                 filter: _,
             })
+            | CompiledOperation::EnsureAudioCompatibility(_)
+            | CompiledOperation::PlaceAudioCompatibility(_)
             | CompiledOperation::VerifyArtifact(CompiledVerifyArtifactOperation {}) => {}
         }
     }

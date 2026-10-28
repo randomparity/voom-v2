@@ -3380,6 +3380,7 @@ dependencies = [
  "voom-api",
  "voom-control-plane",
  "voom-core",
+ "voom-ffprobe-worker",
  "voom-store",
  "voom-test-support",
  "voom-worker-protocol",

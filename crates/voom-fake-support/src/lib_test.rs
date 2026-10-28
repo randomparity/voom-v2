@@ -190,6 +190,7 @@ fn fake_transcoder_returns_typed_audio_result_for_protocol_payload() {
             }],
         },
         audio: TranscodeAudioSettings {
+            compatibility: None,
             target_codec: "opus".to_owned(),
             profile: "default-opus".to_owned(),
             add_track: false,

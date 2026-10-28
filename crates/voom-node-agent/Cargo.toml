@@ -42,6 +42,7 @@ voom-api = { workspace = true, features = ["test"] }
 voom-control-plane = { workspace = true, features = ["test"] }
 voom-store = { workspace = true, features = ["test"] }
 voom-test-support.workspace = true
+voom-ffprobe-worker.workspace = true
 
 [lints]
 workspace = true

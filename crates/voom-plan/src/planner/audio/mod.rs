@@ -1,13 +1,20 @@
 use serde_json::json;
 use voom_policy::{MediaSnapshotInput, TrackFilter};
 
+mod compatibility;
 mod payload;
 mod selection;
 
+pub use compatibility::{
+    AudioCompatibilityError, AudioCompatibilityResolution, AudioCompatibilityTarget,
+    compatibility_target, resolve_audio_compatibility,
+};
+
 pub use payload::{
-    AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioOperationPayload,
-    AudioOperationType, AudioPayloadError, ExtractAudioOutputDescriptor,
-    SynthesizeAudioCompanionDescriptor, extract_output_id, synthesis_companion_id,
+    AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER,
+    AudioCompatibilityDescriptor, AudioOperationPayload, AudioOperationType, AudioPayloadError,
+    CompatibilityStreamIdentity, ExtractAudioOutputDescriptor, SynthesizeAudioCompanionDescriptor,
+    extract_output_id, synthesis_companion_id,
 };
 pub use selection::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
@@ -20,6 +27,98 @@ use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosti
 
 use super::OperationPlan;
 
+pub(super) fn plan_ensure_compatibility(
+    phase_name: &str,
+    snapshot: &MediaSnapshotInput,
+    operation_id: &str,
+) -> OperationPlan {
+    let kind = PlanOperationKind::TranscodeAudio;
+    let resolution = match resolve_audio_compatibility(snapshot) {
+        Ok(resolution) => resolution,
+        Err(error) => return blocked_compatibility_plan(phase_name, snapshot, kind, error),
+    };
+    let resolved = resolution.resolved_snapshot_stream_id;
+    let result_id = resolved.clone().unwrap_or_else(|| {
+        synthesis_companion_id(operation_id, &resolution.source_snapshot_stream_id)
+    });
+    let companions = resolved.is_none().then(|| {
+        vec![SynthesizeAudioCompanionDescriptor {
+            companion_id: result_id.clone(),
+            source_snapshot_stream_id: resolution.source_snapshot_stream_id.clone(),
+            source_provider_stream_index: resolution.source_provider_stream_index,
+            result_snapshot_stream_id: result_id.clone(),
+        }]
+    });
+    let payload = AudioOperationPayload {
+        operation_type: AudioOperationType::EnsureAudioCompatibility,
+        operation_id: Some(operation_id.to_owned()),
+        target_codec: resolution.target.codec,
+        container: AUDIO_TRANSCODE_CONTAINER.to_owned(),
+        source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
+        filter: None,
+        outputs: None,
+        companions,
+        target_channels: Some(u64::from(resolution.target.channels)),
+        compatibility: Some(AudioCompatibilityDescriptor {
+            retained_streams: resolution.retained_streams,
+            source_snapshot_stream_id: resolution.source_snapshot_stream_id,
+            source_provider_stream_index: resolution.source_provider_stream_index,
+            source_channels: resolution.source_channels,
+            source_channel_layout: resolution.source_channel_layout,
+            target_channel_layout: resolution.target.channel_layout,
+            result_snapshot_stream_id: result_id,
+        }),
+    }
+    .into_value();
+    OperationPlan::new(
+        kind,
+        payload,
+        None,
+        if resolved.is_some() {
+            NodeStatus::NoOp
+        } else {
+            NodeStatus::Planned
+        },
+        if resolved.is_some() {
+            "compatibility audio already exists"
+        } else {
+            "one non-default compatibility companion will be synthesized"
+        }
+        .to_owned(),
+        resolved.is_none().then(|| "transcode_audio".to_owned()),
+    )
+}
+
+pub(super) fn blocked_compatibility_plan(
+    phase_name: &str,
+    snapshot: &MediaSnapshotInput,
+    kind: PlanOperationKind,
+    error: AudioCompatibilityError,
+) -> OperationPlan {
+    let (code, message) = match error {
+        AudioCompatibilityError::InvalidFacts(detail) => (PlanningDiagnosticCode::InsufficientSnapshotFacts, detail),
+        AudioCompatibilityError::NoEligibleSource => (PlanningDiagnosticCode::AudioCompatibilitySourceMissing,
+            "compatibility audio requires an English or unknown-language non-commentary original source".to_owned()),
+        AudioCompatibilityError::UnsupportedLayout { channels, layout } => (PlanningDiagnosticCode::UnsupportedAudioCompatibilityLayout,
+            format!("unsupported compatibility audio layout {layout} with {channels} channels")),
+        AudioCompatibilityError::InvalidAssociation(detail) => (PlanningDiagnosticCode::InvalidAudioCompatibilityAssociation, detail),
+    };
+    OperationPlan::new(
+        kind,
+        json!({"type": kind.as_str()}),
+        None,
+        NodeStatus::Blocked,
+        message.clone(),
+        None,
+    )
+    .with_diagnostic(
+        PlanningDiagnostic::error(code, message)
+            .with_phase(phase_name)
+            .with_target(snapshot.target.clone())
+            .with_operation_kind(kind.as_str()),
+    )
+}
+
 pub(super) fn plan_transcode(
     phase_name: &str,
     snapshot: &MediaSnapshotInput,
@@ -29,6 +128,7 @@ pub(super) fn plan_transcode(
 ) -> OperationPlan {
     let operation_kind = PlanOperationKind::TranscodeAudio;
     let payload = AudioOperationPayload {
+        compatibility: None,
         operation_type: AudioOperationType::TranscodeAudio,
         operation_id: None,
         target_codec: target_codec.to_owned(),
@@ -103,6 +203,7 @@ pub(super) fn plan_extract(
             }
         };
     let payload = AudioOperationPayload {
+        compatibility: None,
         operation_type: AudioOperationType::ExtractAudio,
         operation_id: Some(operation_id.to_owned()),
         target_codec: target_codec.to_owned(),
@@ -142,6 +243,7 @@ pub(super) fn plan_synthesize(
     let operation_kind = PlanOperationKind::TranscodeAudio;
     let companions = synthesize_audio_companions(snapshot, filter, operation_id).ok();
     let payload = AudioOperationPayload {
+        compatibility: None,
         operation_type: AudioOperationType::SynthesizeAudio,
         operation_id: Some(operation_id.to_owned()),
         target_codec: target_codec.to_owned(),

@@ -16,6 +16,89 @@ use crate::{
 
 use super::{ConditionEval, evaluate_condition};
 
+fn compatibility_snapshot() -> MediaSnapshotInput {
+    let mut source = audio_stream(2, "flac", "eng", Some(false));
+    source["channels"] = serde_json::json!(2);
+    source["channel_layout"] = serde_json::json!("stereo");
+    let mut snapshot = snapshot_with_audio_streams(Some("mkv"), &[source]);
+    snapshot.existing_media_snapshot_id = Some(MediaSnapshotId(77));
+    snapshot
+}
+
+#[test]
+fn ensure_compatibility_plans_one_companion() {
+    let op = CompiledOperation::EnsureAudioCompatibility(
+        voom_policy::compiled::CompiledEnsureAudioCompatibilityOperation {},
+    );
+    let plan = generate_plan(request(policy(op.clone()), compatibility_snapshot())).unwrap();
+    let node = &plan.nodes[0];
+    assert_eq!(node.status, NodeStatus::Planned);
+    assert_eq!(node.operation_payload["type"], "ensure_audio_compatibility");
+    assert_eq!(node.operation_payload["target_channels"], 2);
+    assert_eq!(
+        node.operation_payload["compatibility"]["retained_streams"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        node.operation_payload["companions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        crate::planner::audio::AudioOperationPayload::try_from_execution_value(
+            &node.operation_payload
+        )
+        .is_ok()
+    );
+    let mut compatible = compatibility_snapshot();
+    compatible.stream_summary["streams"][1]["codec_name"] = serde_json::json!("aac");
+    assert_eq!(
+        generate_plan(request(policy(op), compatible))
+            .unwrap()
+            .nodes[0]
+            .status,
+        NodeStatus::NoOp
+    );
+}
+
+#[test]
+fn place_compatibility_requires_and_places_resolved_identity() {
+    let op = CompiledOperation::PlaceAudioCompatibility(
+        voom_policy::compiled::CompiledPlaceAudioCompatibilityOperation {},
+    );
+    let missing = generate_plan(request(policy(op.clone()), compatibility_snapshot())).unwrap();
+    assert_eq!(missing.nodes[0].status, NodeStatus::Blocked);
+    let mut snapshot = compatibility_snapshot();
+    let source_id = snapshot.stream_summary["streams"][1]["id"].clone();
+    snapshot.stream_summary["streams"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "derived", "index": 3, "kind": "audio", "codec_name": "aac",
+            "language": "eng", "channels": 2, "channel_layout": "stereo",
+            "compatibility_source_snapshot_stream_id": source_id,
+            "disposition": {"commentary": false, "default": false, "forced": false}
+        }));
+    let plan = generate_plan(request(policy(op.clone()), snapshot.clone())).unwrap();
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    let payload = &plan.nodes[0].operation_payload;
+    assert_eq!(payload["audio_head_snapshot_stream_id"], "derived");
+    assert!(payload.get("head_snapshot_stream_id").is_none());
+    assert_eq!(payload["track_order"], serde_json::json!([]));
+    snapshot.stream_summary["streams"][1]["index"] = serde_json::json!(3);
+    snapshot.stream_summary["streams"][2]["index"] = serde_json::json!(2);
+    snapshot.stream_summary["streams"][2]["disposition"]["default"] = serde_json::json!(true);
+    assert_eq!(
+        generate_plan(request(policy(op), snapshot)).unwrap().nodes[0].status,
+        NodeStatus::NoOp
+    );
+}
+
 fn policy(operation: CompiledOperation) -> CompiledPolicy {
     compiled_policy_with_ops(vec![operation])
 }
