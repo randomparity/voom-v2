@@ -6,6 +6,10 @@ deciders: [VOOM core]
 
 # 0020 — E-AC-3 audio transcode target and deterministic audio bitrate
 
+## Status
+
+> Availability assumptions superseded by [0113](0113-ac3-audio-constraints.md) (2026-10-28).
+
 ## Context
 
 The V1 DSL grammar advertises `transcode audio to aac|opus [where …]`
