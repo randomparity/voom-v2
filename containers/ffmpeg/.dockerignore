@@ -1,3 +1,6 @@
 **
 !Dockerfile
 !pcm-wavex.patch
+!source-sha256
+!sources/
+!sources/**

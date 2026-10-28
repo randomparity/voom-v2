@@ -17,15 +17,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsvtav1enc-dev=2.3.0+dfsg-1 libopus-dev=1.5.2-2 \
     libaom-dev=3.12.1-1+deb13u1 zlib1g-dev=1:1.3.dfsg+really1.3.1-1+b1
 WORKDIR /build
-COPY pcm-wavex.patch Dockerfile ./
-RUN curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz && \
-    curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc && \
-    curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/ffmpeg-devel.asc && \
-    printf '%s\n' \
-    '8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e  ffmpeg-9.0.2.tar.xz' \
-    'd617fd94ea354dadd2a8bb16243d37c44e1e9729b06b6ad58fe30bfb0fa943f2  ffmpeg-9.0.2.tar.xz.asc' \
-    '397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5  ffmpeg-devel.asc' \
-    > source-sha256 && sha256sum --check source-sha256 && \
+COPY pcm-wavex.patch Dockerfile source-sha256 ./
+COPY sources/ ./source-inputs/
+RUN if [ -f source-inputs/ffmpeg-9.0.2.tar.xz ]; then \
+        cp source-inputs/ffmpeg-9.0.2.tar.xz source-inputs/ffmpeg-9.0.2.tar.xz.asc \
+           source-inputs/ffmpeg-devel.asc .; \
+    else \
+        curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz && \
+        curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc && \
+        curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/ffmpeg-devel.asc; \
+    fi && \
+    sha256sum --check source-sha256 && \
     mkdir -m 700 /build/gnupg && \
     gpg --homedir /build/gnupg --batch --import ffmpeg-devel.asc 2> key-import.log && \
     gpg --homedir /build/gnupg --batch --status-fd 1 --verify \
