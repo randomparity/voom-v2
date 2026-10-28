@@ -111,6 +111,7 @@ async fn handler_rejects_no_video_selection() {
     let fixture = remux_fixture().await;
     let mut request = fixture.request;
     request.selection = RemuxSelection {
+        audio_head_stream: None,
         keep_streams: vec![audio_ref("stream-1", 1)],
         default_streams: vec![],
         clear_default_streams: vec![],
@@ -1018,6 +1019,7 @@ async fn request_for_paths(
             overwrite: false,
         },
         selection: RemuxSelection {
+            audio_head_stream: None,
             keep_streams: vec![video_ref("stream-0", 0), audio_ref("stream-1", 1)],
             default_streams: vec![audio_ref("stream-1", 1)],
             clear_default_streams: vec![video_ref("stream-0", 0)],
@@ -1499,4 +1501,46 @@ fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     voom_test_support::executable::write_executable(&path, body).unwrap();
     path
+}
+
+#[tokio::test]
+async fn compatibility_remux_checks_actual_order_and_defaults() {
+    for output in [
+        vec![
+            output_track("video", false),
+            output_track_with_language("audio", false, "und"),
+            output_track("subtitles", false),
+            output_track_with_language("audio", true, "eng"),
+        ],
+        vec![
+            output_track("video", false),
+            output_track_with_language("audio", false, "eng"),
+            output_track("subtitles", false),
+            output_track_with_language("audio", true, "und"),
+        ],
+    ] {
+        let fixture = remux_fixture_with_input_specs_and_output_specs(
+            vec![
+                input_track("video"),
+                input_track_with_language("audio", "und"),
+                input_track("subtitles"),
+                input_track_with_language("audio", "eng"),
+            ],
+            output,
+        )
+        .await;
+        let mut request = fixture.request;
+        let selected = audio_ref("stream-3", 3);
+        request.selection.keep_streams = vec![
+            video_ref("stream-0", 0),
+            audio_ref("stream-1", 1),
+            subtitle_ref("stream-2", 2),
+            selected.clone(),
+        ];
+        request.selection.audio_head_stream = Some(selected.clone());
+        request.selection.default_streams = vec![selected];
+        request.selection.clear_default_streams = vec![audio_ref("stream-1", 1)];
+        let error = handle_remux(&request, &fixture.config).await.unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::MalformedWorkerResult);
+    }
 }

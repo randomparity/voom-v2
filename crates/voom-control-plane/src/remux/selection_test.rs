@@ -8,6 +8,26 @@ use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId};
 use voom_store::repo::media::identity::MediaSnapshot;
 
 #[test]
+fn compatibility_head_binds_retained_audio() {
+    let snapshot = snapshot_with_video_audio_languages(["eng", "und"]);
+    let payload = json!({"type": "remux", "container": "mkv", "source_media_snapshot_id": 1,
+        "audio_head_snapshot_stream_id": "stream-2", "track_order": []});
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+    assert_eq!(
+        serde_json::to_value(selection).unwrap()["audio_head_stream"]["snapshot_stream_id"],
+        "stream-2"
+    );
+    for id in ["stream-0", "absent"] {
+        let mut forged = payload.clone();
+        forged["audio_head_snapshot_stream_id"] = json!(id);
+        assert!(selection_from_payload_and_snapshot(&forged, &snapshot).is_err());
+    }
+    let mut mixed = payload;
+    mixed["head_snapshot_stream_id"] = json!("stream-1");
+    assert!(selection_from_payload_and_snapshot(&mixed, &snapshot).is_err());
+}
+
+#[test]
 fn selection_preserves_video_and_applies_audio_keep() {
     let payload = json!({
         "type": "remux",

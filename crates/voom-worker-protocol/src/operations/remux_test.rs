@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn audio_head_is_additive_and_strict() {
+    let old = serde_json::json!({
+        "keep_streams": [], "default_streams": [], "clear_default_streams": [],
+        "track_order": []
+    });
+    let parsed: RemuxSelection = serde_json::from_value(old.clone()).unwrap();
+    assert!(
+        serde_json::to_value(parsed)
+            .unwrap()
+            .get("audio_head_stream")
+            .is_none()
+    );
+    let mut wire = old;
+    wire["audio_head_stream"] = serde_json::json!({
+        "snapshot_stream_id": "compatibility", "provider_stream_index": 7
+    });
+    let parsed: RemuxSelection = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap()["audio_head_stream"],
+        wire["audio_head_stream"]
+    );
+    wire["audio_head_stream"]["future"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<RemuxSelection>(wire).is_err());
+}
+
+#[test]
 fn remux_request_serializes_wire_shape() {
     let request = RemuxRequest {
         input: RemuxInput {
@@ -19,6 +45,7 @@ fn remux_request_serializes_wire_shape() {
             overwrite: false,
         },
         selection: RemuxSelection {
+            audio_head_stream: None,
             keep_streams: vec![RemuxStreamRef {
                 snapshot_stream_id: "stream-0".to_owned(),
                 provider_stream_index: 0,

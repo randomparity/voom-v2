@@ -437,6 +437,14 @@ impl<'a> PlanBuilder<'a> {
                     Err(error) => self.record_fatal(error),
                 }
             }
+            CompiledOperation::EnsureAudioCompatibility(_) => {
+                self.push_audio_compatibility_plan(phase_name, snapshot);
+            }
+            CompiledOperation::PlaceAudioCompatibility(_) => self.push_operation_plan(
+                phase_name,
+                snapshot,
+                remux::plan_place_compatibility(phase_name, snapshot),
+            ),
             CompiledOperation::TranscodeAudio(CompiledTranscodeAudioOperation {
                 target_codec,
                 container,
@@ -503,6 +511,20 @@ impl<'a> PlanBuilder<'a> {
                 );
             }
         }
+    }
+
+    fn push_audio_compatibility_plan(&mut self, phase_name: &str, snapshot: &MediaSnapshotInput) {
+        let operation_id = next_operation_id(
+            self.nodes.len(),
+            phase_name,
+            snapshot,
+            PlanOperationKind::TranscodeAudio,
+        );
+        self.push_operation_plan(
+            phase_name,
+            snapshot,
+            audio::plan_ensure_compatibility(phase_name, snapshot, &operation_id),
+        );
     }
 
     fn push_extract_audio_plan(
@@ -1249,6 +1271,8 @@ fn plan_verify_artifact(snapshot: &MediaSnapshotInput) -> OperationPlan {
 
 fn operation_kind(operation: &CompiledOperation) -> PlanOperationKind {
     match operation {
+        CompiledOperation::EnsureAudioCompatibility(_) => PlanOperationKind::TranscodeAudio,
+        CompiledOperation::PlaceAudioCompatibility(_) => PlanOperationKind::Remux,
         CompiledOperation::SetContainer(CompiledSetContainerOperation { .. }) => {
             PlanOperationKind::SetContainer
         }

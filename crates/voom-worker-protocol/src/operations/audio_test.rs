@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn compatibility_settings_are_additive_and_strict() {
+    let wire = serde_json::json!({
+        "target_codec": "aac", "profile": "default", "add_track": true,
+        "target_channels": 2,
+        "compatibility": {
+            "source_snapshot_stream_id": "original", "source_channels": 2,
+            "source_channel_layout": "stereo", "target_channel_layout": "stereo",
+            "retained_streams": [
+                {"snapshot_stream_id": "video", "provider_stream_index": 0},
+                {"snapshot_stream_id": "original", "provider_stream_index": 1}
+            ]
+        }
+    });
+    let settings: TranscodeAudioSettings = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(settings).unwrap(), wire);
+    let mut unknown = wire.clone();
+    unknown["compatibility"]["future"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<TranscodeAudioSettings>(unknown).is_err());
+    let mut unknown_stream = wire;
+    unknown_stream["compatibility"]["retained_streams"][0]["future"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<TranscodeAudioSettings>(unknown_stream).is_err());
+    let old = serde_json::json!({"target_codec": "aac", "profile": "default"});
+    let parsed: TranscodeAudioSettings = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), old);
+}
+
+#[test]
 fn transcode_audio_settings_default_add_track_and_omit_target_channels() {
     // A transcode request (no synthesize fields) still deserializes: add_track
     // defaults false and target_channels absent (ADR 0013 additive evolution).
@@ -21,6 +48,7 @@ fn transcode_audio_settings_default_add_track_and_omit_target_channels() {
 #[test]
 fn synthesize_audio_settings_round_trip_add_track_and_channels() {
     let settings = TranscodeAudioSettings {
+        compatibility: None,
         target_codec: "aac".to_owned(),
         profile: "default".to_owned(),
         add_track: true,
@@ -64,6 +92,7 @@ fn transcode_audio_request_serializes_selected_streams_wire_shape() {
             ],
         },
         audio: TranscodeAudioSettings {
+            compatibility: None,
             target_codec: "opus".to_owned(),
             profile: "default-opus".to_owned(),
             add_track: false,
@@ -125,6 +154,7 @@ fn transcode_audio_result_serializes_selected_output_streams_in_request_order() 
         output_audio_codecs: vec!["opus".to_owned(), "opus".to_owned()],
         selected_output_streams: vec![
             AudioOutputStreamFact {
+                channel_layout: None,
                 snapshot_stream_id: "stream-1".to_owned(),
                 output_provider_stream_index: 1,
                 codec: "opus".to_owned(),
@@ -139,6 +169,7 @@ fn transcode_audio_result_serializes_selected_output_streams_in_request_order() 
                 channels: Some(6),
             },
             AudioOutputStreamFact {
+                channel_layout: None,
                 snapshot_stream_id: "stream-3".to_owned(),
                 output_provider_stream_index: 3,
                 codec: "opus".to_owned(),

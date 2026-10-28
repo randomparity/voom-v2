@@ -1,5 +1,88 @@
 use super::*;
 
+fn compatibility_tag_probe(tags: &Value) -> Result<Value, WorkerError> {
+    normalize_ffprobe_json(
+        serde_json::json!({
+            "format": {"format_name": "matroska,webm"},
+            "streams": [{"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": tags}]
+        }),
+        "8.0.1",
+        "2026-10-28T00:00:00Z",
+    )
+}
+
+fn compatibility_observed(tags: &Value) -> Value {
+    let result = compatibility_tag_probe(tags);
+    assert!(result.is_ok(), "valid observed tags: {result:?}");
+    let Ok(snapshot) = result else {
+        return Value::Null;
+    };
+    snapshot
+}
+
+#[test]
+fn compatibility_tags_are_observed_strictly() {
+    let snapshot = compatibility_observed(&serde_json::json!({
+        "VOOM_COMPATIBILITY_STREAM_ID": "derived",
+        "voom_compatibility_source_stream_id": "original"
+    }));
+    assert_eq!(snapshot["streams"][0]["id"], "derived");
+    assert_eq!(
+        snapshot["streams"][0]["compatibility_source_snapshot_stream_id"],
+        "original"
+    );
+    for tags in [
+        serde_json::json!({"VOOM_COMPATIBILITY_STREAM_ID": " "}),
+        serde_json::json!({"VOOM_COMPATIBILITY_STREAM_ID": 42}),
+        serde_json::json!({"VOOM_COMPATIBILITY_SOURCE_STREAM_ID": null}),
+        serde_json::json!({"VOOM_COMPATIBILITY_STREAM_ID": "a", "voom_compatibility_stream_id": "b"}),
+    ] {
+        assert!(compatibility_tag_probe(&tags).is_err());
+    }
+}
+
+#[test]
+fn compatibility_normalization_leaves_ordinary_snapshot_tags_opaque() {
+    let snapshot =
+        compatibility_observed(&serde_json::json!({"SNAPSHOT_STREAM_ID": "old-operation"}));
+    assert!(
+        snapshot["streams"][0].get("id").is_none(),
+        "ordinary existing remux uses its existing index fallback"
+    );
+}
+
+#[test]
+fn compatibility_language_marker_preserves_ordinary_semantics() {
+    for language in [serde_json::json!(42), serde_json::json!("EN")] {
+        let snapshot = compatibility_observed(&serde_json::json!({"language": language}));
+        assert_eq!(
+            snapshot["streams"][0]["compatibility_invalid_language"],
+            true
+        );
+    }
+    for language in [
+        Value::Null,
+        serde_json::json!(""),
+        serde_json::json!("unknown"),
+        serde_json::json!("N/A"),
+    ] {
+        let snapshot = compatibility_observed(&serde_json::json!({"language": language}));
+        assert!(snapshot["streams"][0].get("language").is_none());
+        assert!(
+            snapshot["streams"][0]
+                .get("compatibility_invalid_language")
+                .is_none()
+        );
+    }
+    let snapshot = compatibility_observed(&serde_json::json!({"language": "eng"}));
+    assert_eq!(snapshot["streams"][0]["language"], "eng");
+    assert!(
+        snapshot["streams"][0]
+            .get("compatibility_invalid_language")
+            .is_none()
+    );
+}
+
 #[test]
 fn normalizes_ffprobe_json_into_sprint10_snapshot() {
     let raw_result = serde_json::from_str(include_str!("../fixtures/ffprobe/basic-mp4.json"));

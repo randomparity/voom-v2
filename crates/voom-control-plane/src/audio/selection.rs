@@ -24,6 +24,7 @@ pub struct TranscodeAudioSelectionPlan {
     pub operation_id: Option<String>,
     pub add_track: bool,
     pub target_channels: Option<u64>,
+    pub compatibility: Option<voom_worker_protocol::AudioCompatibilitySettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +56,9 @@ pub fn transcode_selection_from_payload_and_snapshot(
     let payload = parse_payload(payload)?;
     if !matches!(
         payload.operation_type,
-        AudioOperationType::TranscodeAudio | AudioOperationType::SynthesizeAudio
+        AudioOperationType::TranscodeAudio
+            | AudioOperationType::SynthesizeAudio
+            | AudioOperationType::EnsureAudioCompatibility
     ) {
         return Err(VoomError::Config(
             "audio transcode payload type must be transcode_audio or synthesize_audio".to_owned(),
@@ -68,6 +71,14 @@ pub fn transcode_selection_from_payload_and_snapshot(
         )));
     }
     let snapshot_input = crate::media_snapshot::planning_input(1, snapshot);
+    if payload.operation_type == AudioOperationType::EnsureAudioCompatibility {
+        if payload.source_media_snapshot_id != Some(snapshot.id.0) {
+            return Err(VoomError::Config(
+                "compatibility payload pins a different snapshot".to_owned(),
+            ));
+        }
+        return compatibility_selection(payload, &snapshot_input);
+    }
     let selected = selected_audio_streams(&snapshot_input, payload.filter.as_ref())
         .map_err(audio_block_error)?;
     if selected.is_empty() {
@@ -96,6 +107,7 @@ pub fn transcode_selection_from_payload_and_snapshot(
         operation_id: None,
         add_track: false,
         target_channels: None,
+        compatibility: None,
     })
 }
 
@@ -140,6 +152,89 @@ fn synthesis_selection(
         operation_id: Some(operation_id.to_owned()),
         add_track: true,
         target_channels: Some(target_channels),
+        compatibility: None,
+    })
+}
+
+fn compatibility_selection(
+    payload: AudioOperationPayload,
+    snapshot: &voom_policy::MediaSnapshotInput,
+) -> Result<TranscodeAudioSelectionPlan, VoomError> {
+    use voom_plan::planner::audio::{
+        AudioCompatibilityDescriptor, AudioCompatibilityError, resolve_audio_compatibility,
+        synthesis_companion_id,
+    };
+    let resolution = resolve_audio_compatibility(snapshot).map_err(|error| match error {
+        AudioCompatibilityError::InvalidFacts(reason)
+        | AudioCompatibilityError::InvalidAssociation(reason) => {
+            VoomError::database(format!("persisted compatibility audio facts: {reason}"))
+        }
+        other => VoomError::Config(format!("compatibility audio facts: {other:?}")),
+    })?;
+    if resolution.resolved_snapshot_stream_id.is_some() {
+        return Err(VoomError::Config(
+            "compatibility audio already exists; regenerate the plan".to_owned(),
+        ));
+    }
+    let operation_id = payload
+        .operation_id
+        .as_deref()
+        .ok_or_else(|| VoomError::Config("compatibility operation id missing".to_owned()))?;
+    let result_id = synthesis_companion_id(operation_id, &resolution.source_snapshot_stream_id);
+    let expected = AudioCompatibilityDescriptor {
+        retained_streams: resolution.retained_streams,
+        source_snapshot_stream_id: resolution.source_snapshot_stream_id,
+        source_provider_stream_index: resolution.source_provider_stream_index,
+        source_channels: resolution.source_channels,
+        source_channel_layout: resolution.source_channel_layout,
+        target_channel_layout: resolution.target.channel_layout,
+        result_snapshot_stream_id: result_id.clone(),
+    };
+    if payload.compatibility.as_ref() != Some(&expected)
+        || payload.target_codec != resolution.target.codec
+        || payload.target_channels != Some(u64::from(resolution.target.channels))
+    {
+        return Err(VoomError::Config(
+            "compatibility pins differ from the pinned snapshot resolution".to_owned(),
+        ));
+    }
+    let source = voom_plan::planner::audio::stream_facts(snapshot)
+        .map_err(audio_block_error)?
+        .into_iter()
+        .find(|source| {
+            source.snapshot_stream_id == expected.source_snapshot_stream_id
+                && source.provider_stream_index == expected.source_provider_stream_index
+        })
+        .ok_or_else(|| VoomError::Config("compatibility source disappeared".to_owned()))?;
+    let stream = AudioStreamRef {
+        snapshot_stream_id: result_id,
+        provider_stream_index: expected.source_provider_stream_index,
+    };
+    let settings = voom_worker_protocol::AudioCompatibilitySettings {
+        retained_streams: expected
+            .retained_streams
+            .into_iter()
+            .map(|stream| voom_worker_protocol::CompatibilityStreamIdentity {
+                snapshot_stream_id: stream.snapshot_stream_id,
+                provider_stream_index: stream.provider_stream_index,
+            })
+            .collect(),
+        source_snapshot_stream_id: expected.source_snapshot_stream_id,
+        source_channels: expected.source_channels,
+        source_channel_layout: expected.source_channel_layout,
+        target_channel_layout: expected.target_channel_layout,
+    };
+    Ok(TranscodeAudioSelectionPlan {
+        selection: TranscodeAudioSelection {
+            selected_streams: vec![stream.clone()],
+        },
+        selected_streams: vec![SelectedAudioStream { stream, source }],
+        target_codec: payload.target_codec,
+        container: payload.container,
+        operation_id: payload.operation_id,
+        add_track: true,
+        target_channels: payload.target_channels,
+        compatibility: Some(settings),
     })
 }
 

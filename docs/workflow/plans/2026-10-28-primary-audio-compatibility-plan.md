@@ -4,9 +4,9 @@ Goal: retain English and unknown audio, ensure one deterministically selected co
 
 Architecture: `voom-policy` owns the two parameter-free operations; `voom-plan` resolves source, target, companion identity and placement. The existing synthesis ledger publishes one owner-node FFmpeg result, and a dependent owner-node MKVToolNix remux places it against refreshed committed facts. Observed media tags retain identities across probes; they do not grant authorization or replace canonical publication lineage.
 
-Stack: existing Rust workspace, serde/serde_json, Tokio, sqlx/SQLite, axum, out-of-process FFmpeg, MKVToolNix and ffprobe. No dependency or tool-version change.
+Stack: existing Rust workspace, serde/serde_json, Tokio, sqlx/SQLite, axum, out-of-process FFmpeg, MKVToolNix and ffprobe. No third-party dependency or tool-version change. The node-agent acceptance test adds one internal dev-only edge to `voom-ffprobe-worker` to reuse authoritative normalization of actual generated/re-probed media; normal Cargo dependencies remain unchanged. `Cargo.lock` records only that internal edge.
 
-Expected implementation size: 2050–3150 changed lines (L) — 300–400 policy/protocol, 450–650 planner, 200–300 normalization/publication, 300–450 workers, 100–150 binding and 700–1200 focused/generated-media tests and sample updates
+Expected implementation size: 3900–4600 changed lines (L). The formatted build measured 3995 before final verification: strict retained-stream/publication checks and the complete authenticated owner acceptance fixture exceeded the original 2050–3150 estimate. This is required task-coverage correction under unchanged scope; it includes the demonstrated mixed compliance-apply transaction fix. The fixed design denominator remains 1000. No line trimming is used to meet an estimate.
 
 Authority: [frozen scope](https://github.com/randomparity/voom-v2/issues/765#issuecomment-6457264164), token `q765-dd13d5e5`; [design](../specs/2026-10-28-primary-audio-compatibility-design.md); [ADR 0111](../../adr/0111-primary-audio-compatibility.md). Full-spec lane; fixed L denominator **1000**, grounded by the live cross-crate assessment in that scope comment. The implementation estimate includes several hundred lines of real-owner acceptance scaffolding; it does not change that denominator or expand scope.
 
@@ -45,6 +45,7 @@ Paths below are repository-relative. Nothing is moved or removed.
 | `crates/voom-control-plane/src/audio/{selection.rs,selection_test.rs}`, `crates/voom-control-plane/src/workflow/plan/{binding.rs,binding_test.rs,envelope.rs,envelope_test.rs}` | Recompute pinned ensure selection, carry settings through existing dispatch envelope. | C2,C4 |
 | `crates/voom-control-plane/src/remux/{selection.rs,selection_test.rs}` | Validate and bind the new audio-only head to a retained audio stream. | C3,C4 |
 | `crates/voom-control-plane/src/artifact/publication/{audio.rs,mod.rs,mod_test.rs}`, **new** `crates/voom-control-plane/src/artifact/publication/audio_test.rs` | Reuse synthesis admission, claim, staged receipt, validation and finalization; validate source/result tags rather than overwrite contradictory observations. | C2,C4 |
+| `crates/voom-control-plane/src/cases/policy/{compliance.rs,compliance_test.rs}` | Existing mixed apply transaction must acquire the write lock before a compliant-check read; bounded contention regression preserves issue/event ordering. | C4 |
 | `crates/voom-store/src/repo/media/audio_synthesis_operations_test.rs` | Regress canonical retry/lineage and corruption behavior of existing repository; no schema change or new lookup. | C4 |
 | `crates/voom-ffmpeg-worker/src/{ffmpeg.rs,ffmpeg_test.rs,handler.rs,handler_test.rs}` | Compatibility-specific same-channel validation, explicit layout/identity metadata and actual-output validation; ordinary synthesis strict/downmix/non-default. | C2,C4 |
 | `crates/voom-mkvtoolnix-worker/src/{mkvmerge.rs,mkvmerge_test.rs,handler_test.rs}` | Permute audio slots after existing ordering; existing handler verifies actual output against the shared order helper. | C3 |
@@ -157,7 +158,7 @@ Every new optional serde field has `#[serde(default, skip_serializing_if = "Opti
 ```text
 policy "primary audio compatibility" {
   metadata {
-    requires_tools: ["ffmpeg", "ffprobe", "mkvtoolnix"]
+    requires_tools: [ffmpeg, ffprobe, mkvtoolnix]
   }
   phase retain {
     keep audio where language in ["eng", "und"]
@@ -199,6 +200,7 @@ New module `planner/audio/compatibility.rs` is public through `planner/audio/mod
 | Compatible selected original and its exact associated companion reuse; arbitrary codec peer does not | Mode: focused-test; `compatibility_reuses_only_resolved_identity` | Redundant encoding or unrelated track reused | `cargo test -p voom-plan compatibility_reuses_only_resolved_identity` |
 | Ensure payload pins one original/target/derived identity and diagnostics | Mode: focused-test; `planner_test.rs::ensure_compatibility_plans_one_companion` | Unsupported operation or multiple companion descriptors | `cargo test -p voom-plan ensure_compatibility_plans_one_companion` |
 | Place requires committed companion and becomes NoOp after correct placement | Mode: focused-test; `planner_test.rs::place_compatibility_requires_and_places_resolved_identity` | Place encodes, silently waits, chooses a codec peer, or rewrites an already placed file | `cargo test -p voom-plan place_compatibility_requires_and_places_resolved_identity` |
+| Compatibility diagnostic code vocabulary is stable | Mode: focused-test; `diagnostic_test.rs::compatibility_diagnostic_codes_are_stable` | Public serialized codes and as_str disagree | `cargo test -p voom-plan compatibility_diagnostic_codes_are_stable` |
 
 1. Write focused table-driven tests for each inventory entry. Include distinct sentinel IDs and scrambled input vector order; use provider indexes as the ordering fact. Include malformed/overflow present channels on an otherwise ineligible stream combined with no eligible source, proving corruption is diagnosed before source absence; missing irrelevant codec/layout remains permissible. Verify error codes/messages contain the offending ID or `(channels, layout)`.
 2. Add the following complete target/resolution types and helpers. The resolver uses its own strict fact reader so ordinary filter behavior is untouched:
@@ -541,6 +543,16 @@ Acceptance: the optional mode cannot turn ordinary synthesis into same-channel/d
 
 ## Cast 5 — Pinned binding, publication and retry recovery
 
+Build checkpoint: generated unknown-language owner acceptance exposed an existing mixed
+compliance-apply transaction: a compliant retention check reads through `ResolveMatching`
+before the compatibility check inserts an issue. `cases/policy/compliance.rs` must use
+`begin_read_then_write` for that existing transaction, preserving its owner and mutation/event
+order. The focused contention regression
+`compatibility_mixed_compliance_apply_waits_for_writer_before_reading` holds another writer,
+proves the old deferred upgrade fails, then verifies the corrected apply queues and succeeds.
+This is a direct C4 acceptance dependency within the frozen workflow sequencing surface;
+the campaign controller confirmed that interpretation. No other transaction cleanup is included.
+
 This connects the pure resolution and actual workers to existing durable authority. No new table, ancestry lookup, publication path or retry loop.
 
 **Interfaces**
@@ -559,8 +571,9 @@ This connects the pure resolution and actual workers to existing durable authori
 | Wire envelope/node forwarding preserves settings exactly | Mode: focused-test; binding `binding_test.rs::compatibility_dispatch_preserves_pins`, node-agent `media_test.rs::compatibility_fields_reach_child_request` | Fields dropped/defaulted or source ID replaced by result ID | `cargo test -p voom-control-plane compatibility_dispatch_preserves_pins`; `cargo test -p voom-node-agent compatibility_fields_reach_child_request` |
 | Remux audio-head must be retained audio, global-head conflict explicit | Mode: focused-test; remux `selection_test.rs::compatibility_head_binds_retained_audio` | Unknown/dropped/nonaudio head accepted | `cargo test -p voom-control-plane compatibility_head_binds_retained_audio` |
 | Admission exact dispatch/claim matching includes compatibility settings | Mode: focused-test; publication `audio_test.rs::compatibility_admission_binds_exact_settings` | Forged settings sent under a valid selection/claim | `cargo test -p voom-control-plane compatibility_admission_binds_exact_settings` |
-| Retry reuses canonical committed result with unchanged lineage and exact generation | Mode: focused-test; publication `audio_test.rs::compatibility_retry_reuses_committed_result` | A second operation/companion/lineage appears or stale claim succeeds | `cargo test -p voom-control-plane compatibility_retry_reuses_committed_result` |
+| Retry reuses canonical committed result with unchanged lineage and exact generation | Mode: focused-test; node-agent real owner acceptance `primary_audio_compatibility.rs::compatibility_retry_reuses_committed_result` | A second operation/companion/lineage/dispatch attempt appears or stale generation succeeds | `cargo test -p voom-node-agent --test primary_audio_compatibility compatibility_retry_reuses_committed_result -- --nocapture` |
 | Corrupt stored lineage/attempt facts are decoded before conflict/absence | Mode: focused-test; store `audio_synthesis_operations_test.rs::compatibility_reuse_rejects_corrupt_canonical_lineage` | Corruption becomes NotFound/Config/re-encode instead of database error | `cargo test -p voom-store compatibility_reuse_rejects_corrupt_canonical_lineage` |
+| Compliant retention read before a planned issue write waits safely for a writer | Mode: focused-test; `compliance_test.rs::compatibility_mixed_compliance_apply_waits_for_writer_before_reading` | Deferred read snapshot upgrades fail with SQLite busy | `cargo test -p voom-control-plane compatibility_mixed_compliance_apply_waits_for_writer_before_reading` |
 
 1. Write named cases first using existing DB fixtures and real time. Preserve exact mutation/event/claim ordering assertions; use synchronization/durable rows rather than sleeps to drive retry handoffs.
 2. Implement `compatibility_selection`: call resolver on `planning_input`, require it still needs an encode for a dispatched ensure, reconstruct source descriptor from source ID/index, target fields and the complete sorted retained snapshot ID/index inventory, reconstruct expected derived ID via `synthesis_companion_id`, and compare payload descriptor and sole companion descriptor exactly. Snapshot ID must equal loaded `snapshot.id` before deriving worker selection. Output `TranscodeAudioSelectionPlan` has exactly one `SelectedAudioStream`: `.source` is the original fact, `.stream.snapshot_stream_id` is derived, `.stream.provider_stream_index` is original. `add_track=true`; target fields and compatibility settings come from recomputed resolution. A resolved original/companion is a planner NoOp and must not be admitted as a fresh encoding.
@@ -615,9 +628,9 @@ Implement only this test's narrow subprocess helpers. Existing `voom-cli/tests/s
 
 `packet_hashes` runs ffprobe `-show_packets -show_data_hash sha256 -show_streams -of json`, groups packet `data_hash` values by stream identity, and compares retained original sequences. Attachment extraction uses mkvextract with its actual attachment ID and compares bytes. Both operations run in test code, never the production control plane.
 
-3. `compatibility_generated_target_matrix` covers every supported pair in the design table using the real handler/runtime path, including mono, stereo, each admitted 3/4/5/6-channel layout, and 7.1 → EAC3 5.1(side). Use FLAC/PCM originals where needed to force encoding; retain originals and verify target layout independently. Include AAC mono/stereo and EAC3 5.1 selected originals: ensure is NoOp, companion/ledger count stays zero, placement still makes them first/default when needed. Include unknown/untagged fallback with no eligible English source. Unsupported layout/count and absent eligible source cases belong in focused resolver tests and at least one real workflow blocked-before-mutation fixture. Do not infer actual encoder support solely from `-h encoder=eac3`.
+3. `compatibility_generated_target_matrix` covers every supported pair in the design table using the real handler/runtime path, including mono, stereo, each admitted 3/4/5/6-channel layout, and 7.1 → EAC3 5.1(side). Use generated WavPack originals to force encoding while preserving every admitted observed layout in MKV; controlled probes established that PCM/FLAC do not preserve every required layout. This is test-source generation only, not a production target or readiness expansion. Retain originals and verify target layout independently. Include AAC mono/stereo and EAC3 5.1 selected originals: ensure is NoOp, companion/ledger count stays zero, placement still makes them first/default when needed. Include unknown/untagged fallback with no eligible English source. Unsupported layout/count and absent eligible source cases belong in focused resolver tests and real workflow `compatibility_blocked_source_does_not_mutate_media` (`cargo test -p voom-node-agent --test primary_audio_compatibility compatibility_blocked_source_does_not_mutate_media -- --nocapture`). Do not infer actual encoder support solely from `-h encoder=eac3`.
 
-4. Model interruption without a sleep race: execute a policy ending at ensure; wait for its committed operation and canonical lineage; stop the owner cleanly; re-probe/reseed that actual result as a later application input; restart an owner and execute the full policy. Ensure must be NoOp and placement must reuse exactly that derived ID. Execute full policy once more on final committed input: ensure and place NoOp, one derived track total, stable identity and unchanged synthesis ledger count. Separately the publication focused test in Cast 5 retries the same exact dispatch/claim operation; these are distinct recovery contracts.
+4. Model interruption without a sleep race: execute a policy ending at ensure; wait for its committed operation and canonical lineage; stop the owner cleanly; re-probe/reseed that actual result as a later application input; restart an owner and execute the full policy. Ensure must be NoOp and placement must reuse exactly that derived ID. Execute full policy once more on final committed input: ensure and place NoOp, one derived track total, stable identity and unchanged synthesis ledger count. Separately Cast 5's real-owner retry test creates a new ticket with the original pinned operation payload, proving canonical admission reuse before another worker dispatch, unchanged attempt/generation/lineage, and stale-generation rejection. Reapplying a policy alone refreshes to the latest snapshot and tests NoOp, so cannot substitute for exact-operation retry.
 
 5. Update `docs/runbooks/operator-real-media-execution.md` with the sample path, required phase dependencies, layout bounds, explicit failure messages, and binary-before-policy rollout. No output-shape claim substitutes for byte assertions. No library report or real-library execution is included.
 

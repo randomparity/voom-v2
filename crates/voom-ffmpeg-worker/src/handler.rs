@@ -1108,6 +1108,50 @@ fn validate_transcode_audio_contract(
             "synthesize audio (add_track) requires a positive target_channels".to_owned(),
         ));
     }
+    validate_compatibility_contract(request)
+}
+
+fn validate_compatibility_contract(
+    request: &TranscodeAudioRequest,
+) -> Result<(), TranscodeAudioError> {
+    let Some(settings) = &request.audio.compatibility else {
+        return Ok(());
+    };
+    let invalid = || {
+        config_invalid(
+            "request",
+            "invalid bounded compatibility companion settings".to_owned(),
+        )
+    };
+    let [selected] = request.selection.selected_streams.as_slice() else {
+        return Err(invalid());
+    };
+    if !request.audio.add_track
+        || settings.source_channels == 0
+        || settings.source_snapshot_stream_id.trim().is_empty()
+        || settings.source_channel_layout.trim().is_empty()
+        || settings.target_channel_layout.trim().is_empty()
+        || settings.retained_streams.is_empty()
+    {
+        return Err(invalid());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut previous = None;
+    let mut source_present = false;
+    for identity in &settings.retained_streams {
+        if identity.snapshot_stream_id.trim().is_empty()
+            || !ids.insert(identity.snapshot_stream_id.as_str())
+            || previous.is_some_and(|index| index >= identity.provider_stream_index)
+        {
+            return Err(invalid());
+        }
+        source_present |= identity.snapshot_stream_id == settings.source_snapshot_stream_id
+            && identity.provider_stream_index == selected.provider_stream_index;
+        previous = Some(identity.provider_stream_index);
+    }
+    if !source_present || ids.contains(selected.snapshot_stream_id.as_str()) {
+        return Err(invalid());
+    }
     Ok(())
 }
 

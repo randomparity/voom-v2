@@ -1,0 +1,90 @@
+{
+  "policy_name": "primary audio compatibility",
+  "slug": "primary-audio-compatibility",
+  "source_hash": "b2f00c7ba74c0b9a06a814727ee5f6be215cd598207f7fbd431ea148b68e3a37",
+  "schema_version": 2,
+  "metadata": {
+    "requires_tools": [
+      "ffmpeg",
+      "ffprobe",
+      "mkvtoolnix"
+    ]
+  },
+  "config": {},
+  "phases": [
+    {
+      "name": "retain",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "audio",
+          "filter": {
+            "type": "language_in",
+            "values": [
+              "eng",
+              "und"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "compatibility",
+      "depends_on": [
+        "retain"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "ensure_audio_compatibility"
+        }
+      ]
+    },
+    {
+      "name": "placement",
+      "depends_on": [
+        "compatibility"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "place_audio_compatibility"
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "depends_on": [
+        "placement"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "verify_artifact"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "retain",
+    "compatibility",
+    "placement",
+    "verify"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

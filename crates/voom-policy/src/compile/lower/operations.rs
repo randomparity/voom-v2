@@ -70,6 +70,16 @@ fn lower_text_operation(
         "transcode" | "extract" | "verify" => {
             lower_media_operation(source, statement, text, tokens)
         }
+        "ensure" if tokens == ["ensure", "audio", "compatibility"] => {
+            Ok(CompiledOperation::EnsureAudioCompatibility(
+                crate::compiled::CompiledEnsureAudioCompatibilityOperation {},
+            ))
+        }
+        "place" if tokens == ["place", "audio", "compatibility"] => {
+            Ok(CompiledOperation::PlaceAudioCompatibility(
+                crate::compiled::CompiledPlaceAudioCompatibilityOperation {},
+            ))
+        }
         "when" | "rules" => lower_control_operation(source, statement, text, tokens),
         _ => Err(vec![unknown_operation(source, statement.span())]),
     }

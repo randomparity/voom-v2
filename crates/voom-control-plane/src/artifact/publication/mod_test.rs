@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn stored_compatibility_corruption_is_database_error() {
+    let payload = json!({"media_dispatch": {"operation": "transcode_audio", "settings": {
+        "compatibility": {"source_channels": -1}
+    }}});
+    let error = stored_compatibility_settings(&payload).unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(
+        stored_compatibility_settings(&json!({"media_dispatch": {"operation": "remux"}}))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn required_reprobe_rejects_unusable_media_facts() {
     for snapshot in [
         json!({"streams": [{"index": 0, "kind": "video", "codec_name": "hevc"}]}),
@@ -84,10 +98,11 @@ fn synthesis_probe_comparison_uses_exact_admitted_companion_projection() {
         &probe,
         Some(&companions),
         &fixture["worker_result"],
+        None,
     )
     .unwrap();
     assert!(
-        validate_original_probe(&output, &probe, None, &fixture["worker_result"]).is_err(),
+        validate_original_probe(&output, &probe, None, &fixture["worker_result"], None).is_err(),
         "a stable companion ID requires the exact admitted operation anchor"
     );
     let mut wrong_worker = probe.clone();
@@ -97,7 +112,8 @@ fn synthesis_probe_comparison_uses_exact_admitted_companion_projection() {
             &output,
             &wrong_worker,
             Some(&companions),
-            &fixture["worker_result"]
+            &fixture["worker_result"],
+            None,
         )
         .is_err()
     );
@@ -108,7 +124,8 @@ fn synthesis_probe_comparison_uses_exact_admitted_companion_projection() {
             &output,
             &wrong_stream,
             Some(&companions),
-            &fixture["worker_result"]
+            &fixture["worker_result"],
+            None,
         )
         .is_err()
     );
@@ -119,7 +136,8 @@ fn synthesis_probe_comparison_uses_exact_admitted_companion_projection() {
             &output,
             &wrong_facts,
             Some(&companions),
-            &fixture["worker_result"]
+            &fixture["worker_result"],
+            None,
         )
         .is_err()
     );
@@ -130,7 +148,8 @@ fn synthesis_probe_comparison_uses_exact_admitted_companion_projection() {
             &output,
             &probe,
             Some(&wrong_companions),
-            &fixture["worker_result"]
+            &fixture["worker_result"],
+            None,
         )
         .is_err()
     );

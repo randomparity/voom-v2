@@ -10,6 +10,32 @@ use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId, StorageRootId};
 
 #[test]
+fn compatibility_dispatch_preserves_pins() {
+    let companion = voom_plan::planner::audio::synthesis_companion_id("compat", "audio-1");
+    let payload = serde_json::json!({
+        "type": "ensure_audio_compatibility", "operation_id": "compat", "target_codec": "aac",
+        "container": "mkv", "target_channels": 2, "source_media_snapshot_id": 99,
+        "compatibility": {"source_snapshot_stream_id": "audio-1", "source_provider_stream_index": 1,
+            "source_channels": 2, "source_channel_layout": "stereo", "target_channel_layout": "stereo",
+            "result_snapshot_stream_id": companion,
+            "retained_streams": [{"snapshot_stream_id": "audio-1", "provider_stream_index": 1}]},
+        "companions": [{"companion_id": companion, "source_snapshot_stream_id": "audio-1",
+            "source_provider_stream_index": 1, "result_snapshot_stream_id": companion}]
+    });
+    let rendered = render_policy_transcode_audio_payload(
+        PolicyFileSource {
+            file_version_id: FileVersionId(42),
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
+        },
+        &payload,
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+    assert_eq!(rendered["audio"], payload);
+}
+
+#[test]
 fn default_payload_rendering_preserves_static_fields_then_applies_bindings() {
     let rendered = render_default_payload(
         OperationKind::ScoreQuality,
@@ -709,6 +735,7 @@ fn staging_envelopes_round_trip_with_overwrite_false_outputs() {
         }],
     };
     let settings = TranscodeAudioSettings {
+        compatibility: None,
         target_codec: "aac".to_owned(),
         profile: "default".to_owned(),
         add_track: false,
@@ -833,6 +860,7 @@ fn staging_envelopes_round_trip_with_overwrite_false_outputs() {
     assert!(!decoded.output.overwrite);
 
     let remux_selection = RemuxSelection {
+        audio_head_stream: None,
         keep_streams: vec![],
         default_streams: vec![],
         clear_default_streams: vec![],

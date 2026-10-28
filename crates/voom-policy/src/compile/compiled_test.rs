@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn compatibility_compiled_units_are_strict() {
+    assert_tagged_wire_contract::<CompiledOperation>(&[
+        serde_json::json!({"type": "ensure_audio_compatibility"}),
+        serde_json::json!({"type": "place_audio_compatibility"}),
+    ]);
+}
+
+#[test]
 fn source_hash_uses_exact_bytes() {
     let a = source_hash("policy \"p\" { phase a {} }");
     let b = source_hash("policy \"p\" {\n phase a {}\n}");

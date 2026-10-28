@@ -5,6 +5,63 @@ use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId};
 use voom_store::repo::media::identity::MediaSnapshot;
 
+fn compatibility_fixture() -> (MediaSnapshot, Value) {
+    let mut source = audio("source", 1, "flac", Some("eng"), Some("Main"), Some(false));
+    source["channel_layout"] = json!("stereo");
+    let snapshot = snapshot_with_streams(vec![source]);
+    let id = voom_plan::planner::audio::synthesis_companion_id("compatibility", "source");
+    let payload = json!({
+        "type": "ensure_audio_compatibility", "operation_id": "compatibility",
+        "target_codec": "aac", "container": "mkv", "target_channels": 2,
+        "source_media_snapshot_id": 1,
+        "compatibility": {"source_snapshot_stream_id": "source", "source_provider_stream_index": 1,
+            "source_channels": 2, "source_channel_layout": "stereo", "target_channel_layout": "stereo",
+            "result_snapshot_stream_id": id,
+            "retained_streams": [{"snapshot_stream_id": "v-1", "provider_stream_index": 0}, {"snapshot_stream_id": "source", "provider_stream_index": 1}]},
+        "companions": [{"companion_id": id, "source_snapshot_stream_id": "source", "source_provider_stream_index": 1, "result_snapshot_stream_id": id}]
+    });
+    (snapshot, payload)
+}
+
+#[test]
+fn compatibility_selection_revalidates_pinned_snapshot() {
+    let (snapshot, payload) = compatibility_fixture();
+    let id = voom_plan::planner::audio::synthesis_companion_id("compatibility", "source");
+    let selection = transcode_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+    assert!(selection.add_track);
+    assert_eq!(
+        selection.selected_streams[0].source.snapshot_stream_id,
+        "source"
+    );
+    assert_eq!(
+        selection.selection.selected_streams[0].snapshot_stream_id,
+        id
+    );
+    for (field, invalid) in [
+        ("source_channels", json!(6)),
+        ("target_channel_layout", json!("mono")),
+    ] {
+        let mut forged = payload.clone();
+        forged["compatibility"][field] = invalid;
+        assert!(
+            transcode_selection_from_payload_and_snapshot(&forged, &snapshot).is_err(),
+            "forged {field}"
+        );
+    }
+    let mut forged = payload.clone();
+    forged["source_media_snapshot_id"] = json!(2);
+    assert!(transcode_selection_from_payload_and_snapshot(&forged, &snapshot).is_err());
+    let mut forged = payload.clone();
+    forged["target_codec"] = json!("eac3");
+    assert!(transcode_selection_from_payload_and_snapshot(&forged, &snapshot).is_err());
+    let mut forged = payload;
+    forged["compatibility"]["retained_streams"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    assert!(transcode_selection_from_payload_and_snapshot(&forged, &snapshot).is_err());
+}
+
 #[test]
 fn transcode_selection_returns_selected_audio_refs_in_request_order() {
     let payload = transcode_payload(&json!({
@@ -364,4 +421,23 @@ fn audio(
         stream["title"] = json!(title);
     }
     stream
+}
+
+#[test]
+fn compatibility_corrupt_snapshot_is_database_error() {
+    let (mut snapshot, payload) = compatibility_fixture();
+    snapshot.payload["streams"][1]["channels"] = json!(-1);
+    snapshot.payload["streams"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("channel_layout");
+    let error = transcode_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+    assert!(
+        matches!(error, voom_core::VoomError::Database { .. }),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("channels"),
+        "corrupt present data takes precedence over missing layout: {error}"
+    );
 }

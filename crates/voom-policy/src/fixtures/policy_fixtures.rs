@@ -41,6 +41,10 @@ impl Error for PolicyFixtureError {
 
 const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
     PolicyFixture {
+        source_path: "fixtures/policies/audio-primary-compatibility.voom",
+        expected_json_path: "fixtures/compiled/audio-primary-compatibility.json",
+    },
+    PolicyFixture {
         source_path: "fixtures/policies/minimal.voom",
         expected_json_path: "fixtures/compiled/minimal.json",
     },

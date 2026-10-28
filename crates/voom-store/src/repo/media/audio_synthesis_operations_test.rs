@@ -603,3 +603,45 @@ async fn audio_synthesis_dispatch_attempt_status_rejects_unknown_durable_value()
     );
     assert!(error.to_string().contains("impossible"));
 }
+
+#[tokio::test]
+async fn compatibility_reuse_rejects_corrupt_canonical_lineage() {
+    let fixture = fixture().await;
+    let record = fixture
+        .repo
+        .create_planned(
+            fixture.operation(),
+            &companions()[..1],
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    let companion_id = i64::try_from(record.companions[0].id).unwrap();
+    with_check_constraints_disabled(&fixture.pool, move |connection| {
+        Box::pin(async move {
+            // A corrupt present result index must be decoded before the missing
+            // canonical lineage could be classified as absent or retried.
+            sqlx::query("UPDATE audio_synthesis_companions SET result_provider_stream_index = -1 WHERE id = ?")
+                .bind(companion_id).execute(&mut *connection).await?;
+            Ok(())
+        })
+    }).await.unwrap();
+    let error = fixture
+        .repo
+        .get_by_key(&record.operation.operation_key)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, voom_core::VoomError::Database { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("u32 conv from -1"), "{error}");
+    let operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audio_synthesis_operations")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        operations, 1,
+        "corrupt canonical evidence cannot create another operation"
+    );
+}

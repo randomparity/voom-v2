@@ -448,6 +448,7 @@ impl<'a> Validator<'a> {
                 "extract" => self.validate_extract_statement(operation),
                 "verify" => self.validate_verify_statement(operation),
                 "synthesize" => self.validate_synthesize_statement(operation),
+                "ensure" | "place" => self.validate_audio_compatibility_statement(operation),
                 _ => self.error(
                     DiagnosticCode::UnknownPhaseStatementOrOperation,
                     operation.span(),

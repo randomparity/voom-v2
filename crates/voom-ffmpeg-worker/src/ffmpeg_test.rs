@@ -10,6 +10,131 @@ use voom_worker_protocol::{
 
 use super::*;
 
+fn compatibility_settings() -> voom_worker_protocol::AudioCompatibilitySettings {
+    voom_worker_protocol::AudioCompatibilitySettings {
+        retained_streams: vec![
+            voom_worker_protocol::CompatibilityStreamIdentity {
+                snapshot_stream_id: "stream-0".to_owned(),
+                provider_stream_index: 0,
+            },
+            voom_worker_protocol::CompatibilityStreamIdentity {
+                snapshot_stream_id: "stream-1".to_owned(),
+                provider_stream_index: 1,
+            },
+        ],
+        source_snapshot_stream_id: "stream-1".to_owned(),
+        source_channels: 2,
+        source_channel_layout: "stereo".to_owned(),
+        target_channel_layout: "stereo".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn compatibility_validates_actual_source_before_encoding() {
+    // The stub reports a six-channel source while the request pins stereo.
+    // A rejected source must never reach the output-writing FFmpeg stub.
+    let dir = tempfile::tempdir().unwrap();
+    let ffmpeg = stub_bin(
+        dir.path(),
+        "ffmpeg",
+        "#!/bin/sh\nfor last; do :; done\nprintf output > \"$last\"\n",
+    );
+    let config = FfmpegConfig::new(
+        ffmpeg,
+        ffprobe_synthesize_stub(dir.path()),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let mut request = synthesize_audio_request(dir.path());
+    request.audio.compatibility = Some(compatibility_settings());
+    let output = dir.path().join("out.mkv");
+    let result =
+        run_ffmpeg_transcode_audio(&config, &dir.path().join("input.mkv"), &output, &request).await;
+    assert!(
+        result.is_err(),
+        "actual source facts must match pinned compatibility settings"
+    );
+    assert!(
+        !output.exists(),
+        "bad source facts must fail before encoding"
+    );
+}
+
+#[tokio::test]
+async fn compatibility_encoding_preserves_originals_and_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let generated = std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=16x16:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-t",
+            "0.2",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "ffv1",
+            "-c:a",
+            "flac",
+            "-metadata:s:a:0",
+            "language=eng",
+        ])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let config = FfmpegConfig::new(
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("ffprobe"),
+        "8".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let mut request = synthesize_audio_request(dir.path());
+    request.audio.compatibility = Some(compatibility_settings());
+    let output = dir.path().join("out.mkv");
+    let result = run_ffmpeg_transcode_audio(&config, &input, &output, &request)
+        .await
+        .unwrap();
+    assert_eq!(result.selected_output_streams[0].channels, Some(2));
+    let actual = probe_json(&config, &output).await.unwrap();
+    let streams = actual["streams"].as_array().unwrap();
+    assert_eq!(
+        streams.len(),
+        3,
+        "one companion, copied original video and audio"
+    );
+    assert_eq!(streams[1]["codec_name"], "flac");
+    assert_eq!(
+        stream_tag(&streams[1], "voom_compatibility_stream_id").as_deref(),
+        Some("stream-1")
+    );
+    assert_eq!(
+        stream_tag(&streams[2], "voom_compatibility_stream_id").as_deref(),
+        Some("synth-1")
+    );
+    assert_eq!(
+        stream_tag(&streams[2], "voom_compatibility_source_stream_id").as_deref(),
+        Some("stream-1")
+    );
+    assert_eq!(streams[2]["codec_name"], "aac");
+    assert_eq!(streams[2]["channel_layout"], "stereo");
+    assert_eq!(streams[2]["disposition"]["default"], 0);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers for the arg-capture seam
 // ---------------------------------------------------------------------------
@@ -1484,6 +1609,7 @@ fn transcode_audio_request(
                 .collect(),
         },
         audio: TranscodeAudioSettings {
+            compatibility: None,
             target_codec: target_codec.to_owned(),
             profile: voom_worker_protocol::AUDIO_PROFILE_DEFAULT.to_owned(),
             add_track: false,

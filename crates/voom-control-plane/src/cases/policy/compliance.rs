@@ -24,7 +24,7 @@ use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::coordinator::{PhaseBarrierRunInputs, PreparedResumeRunInputs};
 use crate::workflow::execution::executor::{WorkflowExecutorOptions, WorkflowQueueOptions};
 use crate::workflow::ticket_results::{OrderedTicketResult, ordered_ticket_result};
-use voom_store::tx::begin_write_first;
+use voom_store::tx::begin_read_then_write;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {
@@ -888,7 +888,8 @@ impl ControlPlane {
         let prefix = dedupe_prefix(policy_document_id, input_set_id);
         let now = self.clock().now();
         let mut tx =
-            begin_write_first(&self.pool, "compliance: apply_generated_compliance_report").await?;
+            begin_read_then_write(&self.pool, "compliance: apply_generated_compliance_report")
+                .await?;
         let mut summary = IssueApplicationSummary::default();
         let mut emitted_keys = BTreeSet::new();
 

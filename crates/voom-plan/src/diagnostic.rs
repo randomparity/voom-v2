@@ -20,6 +20,9 @@ pub enum PlanningDiagnosticCode {
     InvalidPlanningRequest,
     DeterministicSerializationFailure,
     UntaggedTrackLanguageDefaulted,
+    AudioCompatibilitySourceMissing,
+    UnsupportedAudioCompatibilityLayout,
+    InvalidAudioCompatibilityAssociation,
 }
 
 impl PlanningDiagnosticCode {
@@ -38,6 +41,9 @@ impl PlanningDiagnosticCode {
             Self::InvalidPlanningRequest => "invalid_planning_request",
             Self::DeterministicSerializationFailure => "deterministic_serialization_failure",
             Self::UntaggedTrackLanguageDefaulted => "untagged_track_language_defaulted",
+            Self::AudioCompatibilitySourceMissing => "audio_compatibility_source_missing",
+            Self::UnsupportedAudioCompatibilityLayout => "unsupported_audio_compatibility_layout",
+            Self::InvalidAudioCompatibilityAssociation => "invalid_audio_compatibility_association",
         }
     }
 }

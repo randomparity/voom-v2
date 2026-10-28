@@ -20,6 +20,55 @@ use crate::DEFAULT_PROCESS_TIMEOUT;
 use super::*;
 
 #[test]
+fn compatibility_request_mode_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = transcode_audio_request(
+        dir.path(),
+        &dir.path().join("input.mkv"),
+        AudioExpectedFacts {
+            size_bytes: 1,
+            content_hash: "blake3:input".to_owned(),
+            modified_at: None,
+            local_file_key: None,
+        },
+        "aac",
+    );
+    request.audio.target_channels = Some(2);
+    request.selection.selected_streams[0].snapshot_stream_id = "derived".to_owned();
+    request.audio.compatibility = Some(
+        serde_json::from_value(serde_json::json!({
+            "source_snapshot_stream_id": "source", "source_channels": 2,
+            "source_channel_layout": "stereo", "target_channel_layout": "stereo",
+            "retained_streams": [{"snapshot_stream_id": "source", "provider_stream_index": 1}]
+        }))
+        .unwrap(),
+    );
+    assert!(
+        validate_transcode_audio_contract(&request).is_err(),
+        "replace mode cannot carry compatibility settings"
+    );
+    request.audio.add_track = true;
+    assert!(validate_transcode_audio_contract(&request).is_ok());
+    let mut forged = request.clone();
+    forged.selection.selected_streams[0].snapshot_stream_id = "source".to_owned();
+    assert!(validate_transcode_audio_contract(&forged).is_err());
+    let mut forged = request.clone();
+    forged
+        .audio
+        .compatibility
+        .as_mut()
+        .unwrap()
+        .retained_streams
+        .clear();
+    assert!(validate_transcode_audio_contract(&forged).is_err());
+    request
+        .selection
+        .selected_streams
+        .push(request.selection.selected_streams[0].clone());
+    assert!(validate_transcode_audio_contract(&request).is_err());
+}
+
+#[test]
 fn ffmpeg_malformed_media_maps_to_non_retriable_malformed_media() {
     // The transient tool failures stay ExternalSystemUnavailable...
     let transient: TranscodeVideoError = FfmpegError::FfmpegFailed("boom".to_owned()).into();
@@ -1354,6 +1403,7 @@ fn transcode_audio_request(
             }],
         },
         audio: TranscodeAudioSettings {
+            compatibility: None,
             target_codec: target_codec.to_owned(),
             profile: AUDIO_PROFILE_DEFAULT.to_owned(),
             add_track: false,

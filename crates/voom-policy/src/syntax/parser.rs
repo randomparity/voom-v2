@@ -563,6 +563,8 @@ impl<'a> Parser<'a> {
                 | "extend"
                 | "transcode"
                 | "synthesize"
+                | "ensure"
+                | "place"
                 | "verify"
         )
     }

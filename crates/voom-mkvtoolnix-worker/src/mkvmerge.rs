@@ -585,6 +585,39 @@ pub(crate) fn ordered_keep_streams<'a>(
         });
     }
     push_matching_stream(&source, &mut ordered, &mut used, |_| true);
+    if let Some(head) = &selection.audio_head_stream {
+        if !selection.head_streams.is_empty() {
+            return Err(MkvtoolnixError::ConfigInvalid(
+                "global heads and audio head cannot be combined".to_owned(),
+            ));
+        }
+        let is_audio = |stream: &&RemuxStreamRef| {
+            mapping
+                .track_for_provider_index(stream.provider_stream_index)
+                .is_some_and(|track| track.kind == MkvmergeTrackKind::Audio)
+        };
+        let mut audio = ordered.iter().copied().filter(is_audio).collect::<Vec<_>>();
+        let position = audio
+            .iter()
+            .position(|stream| **stream == *head)
+            .ok_or_else(|| {
+                MkvtoolnixError::ConfigInvalid(
+                    "audio head must select an exact retained audio stream".to_owned(),
+                )
+            })?;
+        let selected = audio.remove(position);
+        audio.insert(0, selected);
+        let mut replacements = audio.into_iter();
+        for stream in &mut ordered {
+            if is_audio(stream) {
+                *stream = replacements.next().ok_or_else(|| {
+                    MkvtoolnixError::ConfigInvalid(
+                        "audio head permutation lost a stream".to_owned(),
+                    )
+                })?;
+            }
+        }
+    }
     Ok(ordered)
 }
 

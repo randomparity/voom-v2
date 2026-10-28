@@ -3,6 +3,34 @@ use crate::{CompiledCondition, CompiledOperation, TrackFilter};
 use super::*;
 
 #[test]
+fn compatibility_operations_are_strict() {
+    for source in [
+        "policy \"p\" { phase a { ensure audio compatibility } }",
+        "policy \"p\" { phase a { place audio compatibility } }",
+        "policy \"p\" { phase a { ensure audio compatibility place audio compatibility } }",
+        "policy \"p\" { phase a { when media.container == mkv { ensure audio compatibility } } }",
+    ] {
+        assert!(
+            compile_policy(source).is_ok(),
+            "valid compatibility policy: {source}"
+        );
+    }
+    for operation in [
+        "ensure audio compatibility extra",
+        "place audio compatibility where commentary",
+        "ensure video compatibility",
+        "place audio",
+        "ensure audio compatibility { codec aac }",
+    ] {
+        let source = format!("policy \"p\" {{ phase a {{ {operation} }} }}");
+        assert!(
+            compile_policy(&source).is_err(),
+            "invalid bounded operation: {operation}"
+        );
+    }
+}
+
+#[test]
 fn compile_policy_preserves_sprint12_video_hevc_transcode() {
     let out = compile_policy("policy \"p\" { phase a { transcode video to hevc } }").unwrap();
 

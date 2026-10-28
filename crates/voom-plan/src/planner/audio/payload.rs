@@ -29,6 +29,25 @@ pub struct SynthesizeAudioCompanionDescriptor {
     pub result_snapshot_stream_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityStreamIdentity {
+    pub snapshot_stream_id: String,
+    pub provider_stream_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioCompatibilityDescriptor {
+    pub retained_streams: Vec<CompatibilityStreamIdentity>,
+    pub source_snapshot_stream_id: String,
+    pub source_provider_stream_index: u32,
+    pub source_channels: u32,
+    pub source_channel_layout: String,
+    pub target_channel_layout: String,
+    pub result_snapshot_stream_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioOperationPayload {
     pub operation_type: AudioOperationType,
@@ -42,6 +61,7 @@ pub struct AudioOperationPayload {
     /// Target channel count for a `synthesize_audio` downmix (ADR 0026, #276).
     /// `None` for transcode/extract, which preserve the source channel count.
     pub target_channels: Option<u64>,
+    pub compatibility: Option<AudioCompatibilityDescriptor>,
 }
 
 impl AudioOperationPayload {
@@ -84,6 +104,12 @@ impl AudioOperationPayload {
                 serde_json::to_value(companions).unwrap_or(Value::Null),
             );
         }
+        if let Some(compatibility) = self.compatibility {
+            object.insert(
+                "compatibility".to_owned(),
+                serde_json::to_value(compatibility).unwrap_or(Value::Null),
+            );
+        }
         Value::Object(object)
     }
 
@@ -95,6 +121,7 @@ impl AudioOperationPayload {
             Some("transcode_audio") => AudioOperationType::TranscodeAudio,
             Some("extract_audio") => AudioOperationType::ExtractAudio,
             Some("synthesize_audio") => AudioOperationType::SynthesizeAudio,
+            Some("ensure_audio_compatibility") => AudioOperationType::EnsureAudioCompatibility,
             Some(other) => {
                 return Err(AudioPayloadError::new(format!(
                     "audio payload type `{other}` is unsupported"
@@ -148,7 +175,12 @@ impl AudioOperationPayload {
             }
         };
         let companions = parse_companions(object.get("companions"))?;
-        if operation_type == AudioOperationType::SynthesizeAudio && target_channels.is_none() {
+        let compatibility = parse_compatibility(object.get("compatibility"))?;
+        if matches!(
+            operation_type,
+            AudioOperationType::SynthesizeAudio | AudioOperationType::EnsureAudioCompatibility
+        ) && target_channels.is_none()
+        {
             return Err(AudioPayloadError::new(
                 "synthesize_audio payload requires `target_channels`",
             ));
@@ -159,7 +191,7 @@ impl AudioOperationPayload {
             companions.as_deref(),
         )?;
 
-        Ok(Self {
+        let payload = Self {
             operation_type,
             operation_id,
             target_codec: target_codec.to_owned(),
@@ -169,8 +201,49 @@ impl AudioOperationPayload {
             outputs,
             companions,
             target_channels,
-        })
+            compatibility,
+        };
+        payload.validate_compatibility_fields(object.contains_key("filter"))?;
+        Ok(payload)
     }
+
+    fn validate_compatibility_fields(&self, filter_present: bool) -> Result<(), AudioPayloadError> {
+        if self.operation_type == AudioOperationType::EnsureAudioCompatibility {
+            let descriptor = self.compatibility.as_ref().ok_or_else(|| {
+                AudioPayloadError::new(
+                    "ensure_audio_compatibility requires compatibility descriptor",
+                )
+            })?;
+            validate_compatibility_descriptor(descriptor, self.companions.as_deref())?;
+            if filter_present
+                || self.outputs.is_some()
+                || self.container != "mkv"
+                || !matches!(self.target_codec.as_str(), "aac" | "eac3")
+            {
+                return Err(AudioPayloadError::new(
+                    "invalid compatibility target or selector",
+                ));
+            }
+        } else if self.compatibility.is_some() {
+            return Err(AudioPayloadError::new(
+                "compatibility is valid only for ensure_audio_compatibility",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn parse_compatibility(
+    value: Option<&Value>,
+) -> Result<Option<AudioCompatibilityDescriptor>, AudioPayloadError> {
+    value
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|err| {
+                AudioPayloadError::new(format!("audio payload compatibility is invalid: {err}"))
+            })
+        })
+        .transpose()
 }
 
 #[must_use]
@@ -208,7 +281,10 @@ fn validate_synthesis_fields(
     operation_id: Option<&str>,
     companions: Option<&[SynthesizeAudioCompanionDescriptor]>,
 ) -> Result<(), AudioPayloadError> {
-    if operation_type != AudioOperationType::SynthesizeAudio {
+    if !matches!(
+        operation_type,
+        AudioOperationType::SynthesizeAudio | AudioOperationType::EnsureAudioCompatibility
+    ) {
         if companions.is_some() {
             return Err(AudioPayloadError::new(
                 "audio payload `companions` is valid only for synthesize_audio",
@@ -227,6 +303,48 @@ fn validate_synthesis_fields(
         ));
     }
     validate_companions(operation_id, companions)
+}
+
+fn validate_compatibility_descriptor(
+    descriptor: &AudioCompatibilityDescriptor,
+    companions: Option<&[SynthesizeAudioCompanionDescriptor]>,
+) -> Result<(), AudioPayloadError> {
+    let mut ids = std::collections::HashSet::new();
+    let mut previous = None;
+    for stream in &descriptor.retained_streams {
+        if stream.snapshot_stream_id.trim().is_empty()
+            || !ids.insert(stream.snapshot_stream_id.as_str())
+            || previous.is_some_and(|index| index >= stream.provider_stream_index)
+        {
+            return Err(AudioPayloadError::new(
+                "invalid ordered compatibility retained inventory",
+            ));
+        }
+        previous = Some(stream.provider_stream_index);
+    }
+    let source_present = descriptor.retained_streams.iter().any(|stream| {
+        stream.snapshot_stream_id == descriptor.source_snapshot_stream_id
+            && stream.provider_stream_index == descriptor.source_provider_stream_index
+    });
+    let Some([companion]) = companions else {
+        return Err(AudioPayloadError::new(
+            "compatibility requires exactly one companion",
+        ));
+    };
+    if !source_present
+        || descriptor.source_channels == 0
+        || descriptor.source_channel_layout.trim().is_empty()
+        || descriptor.target_channel_layout.trim().is_empty()
+        || ids.contains(descriptor.result_snapshot_stream_id.as_str())
+        || descriptor.source_snapshot_stream_id != companion.source_snapshot_stream_id
+        || descriptor.source_provider_stream_index != companion.source_provider_stream_index
+        || descriptor.result_snapshot_stream_id != companion.result_snapshot_stream_id
+    {
+        return Err(AudioPayloadError::new(
+            "compatibility descriptor and companion disagree",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_companions(
@@ -276,6 +394,7 @@ pub enum AudioOperationType {
     ExtractAudio,
     /// Add a downmixed companion track derived from the source (ADR 0026, #276).
     SynthesizeAudio,
+    EnsureAudioCompatibility,
 }
 
 impl AudioOperationType {
@@ -284,6 +403,7 @@ impl AudioOperationType {
             Self::TranscodeAudio => "transcode_audio",
             Self::ExtractAudio => "extract_audio",
             Self::SynthesizeAudio => "synthesize_audio",
+            Self::EnsureAudioCompatibility => "ensure_audio_compatibility",
         }
     }
 }

@@ -57,6 +57,10 @@ pub struct RemuxSelection {
     /// older payloads and defaults empty.
     #[serde(default)]
     pub head_streams: Vec<RemuxStreamRef>,
+    /// Move one retained audio stream to the first audio slot, preserving
+    /// non-audio positions. Cannot be combined with global heads (ADR 0111).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_head_stream: Option<RemuxStreamRef>,
     /// Streams to mark with the forced flag (`--forced-display-flag id:1`).
     /// Additive since ADR 0023 (#277); defaults empty.
     #[serde(default)]

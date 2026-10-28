@@ -25,6 +25,89 @@ pub(super) enum CandidateSupport {
     Unsupported(&'static str),
 }
 
+pub(super) fn plan_place_compatibility(
+    phase_name: &str,
+    snapshot: &MediaSnapshotInput,
+) -> OperationPlan {
+    use super::audio::{
+        AudioCompatibilityError, blocked_compatibility_plan, resolve_audio_compatibility,
+    };
+    let kind = PlanOperationKind::Remux;
+    let resolution = match resolve_audio_compatibility(snapshot) {
+        Ok(resolution) => resolution,
+        Err(error) => return blocked_compatibility_plan(phase_name, snapshot, kind, error),
+    };
+    let Some(selected_id) = resolution.resolved_snapshot_stream_id else {
+        return blocked_compatibility_plan(
+            phase_name,
+            snapshot,
+            kind,
+            AudioCompatibilityError::InvalidAssociation(
+                "ensure audio compatibility has not published the required companion".to_owned(),
+            ),
+        );
+    };
+    let Ok(facts) = stream_facts(snapshot) else {
+        return blocked_compatibility_plan(
+            phase_name,
+            snapshot,
+            kind,
+            AudioCompatibilityError::InvalidFacts(
+                "compatibility placement has invalid stream facts".to_owned(),
+            ),
+        );
+    };
+    let mut audio = facts
+        .iter()
+        .filter(|stream| stream.kind == TrackTarget::Audio)
+        .collect::<Vec<_>>();
+    audio.sort_by_key(|stream| stream.provider_stream_index);
+    let mut unchanged = audio
+        .first()
+        .is_some_and(|stream| stream.snapshot_stream_id == selected_id)
+        && snapshot.container.as_deref() == Some("mkv");
+    for stream in &audio {
+        let SnapshotFact::Value(default) = stream.is_default else {
+            return blocked_compatibility_plan(
+                phase_name,
+                snapshot,
+                kind,
+                AudioCompatibilityError::InvalidFacts(format!(
+                    "invalid default disposition on {}",
+                    stream.snapshot_stream_id
+                )),
+            );
+        };
+        unchanged &= default == (stream.snapshot_stream_id == selected_id);
+    }
+    let payload = RemuxOperationPayload {
+        container: "mkv".to_owned(),
+        source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
+        track_actions: Vec::new(),
+        track_order: Vec::new(),
+        head_snapshot_stream_id: None,
+        audio_head_snapshot_stream_id: Some(selected_id.clone()),
+        defaults: vec![RemuxDefaultAction {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            selected_snapshot_stream_id: Some(selected_id),
+        }],
+    }
+    .into_value();
+    OperationPlan::new(
+        kind,
+        payload,
+        None,
+        if unchanged {
+            NodeStatus::NoOp
+        } else {
+            NodeStatus::Planned
+        },
+        "compatibility audio must be first among audio and the sole audio default".to_owned(),
+        (!unchanged).then(|| "remux".to_owned()),
+    )
+}
+
 pub(super) fn candidate_kind(operation: &CompiledOperation) -> Option<PlanOperationKind> {
     match operation {
         CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
@@ -521,6 +604,7 @@ fn base_remux_payload(
         .collect::<Vec<_>>();
 
     RemuxOperationPayload {
+        audio_head_snapshot_stream_id: None,
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         track_actions,
