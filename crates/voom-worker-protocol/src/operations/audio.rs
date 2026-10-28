@@ -14,8 +14,6 @@ pub const AUDIO_PROFILE_DEFAULT: &str = "default";
 pub const EXTRACT_AUDIO_CONTAINER: &str = "ogg";
 pub const EXTRACT_AUDIO_CODEC: &str = "opus";
 
-/// Returns true when `codec` is an audio codec the `transcode audio` operation
-/// supports (aac, opus, or eac3).
 #[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde skip_serializing_if requires a &T predicate signature"
@@ -24,6 +22,8 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Returns true when `codec` is an audio codec the `transcode audio` operation
+/// supports (aac, opus, or eac3).
 #[must_use]
 pub fn is_supported_transcode_audio_codec(codec: &str) -> bool {
     matches!(
