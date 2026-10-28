@@ -425,6 +425,19 @@ impl ControlPlane {
         for &(lease_id, ticket_id) in &report.pairs {
             self.emit_expire_pair(&mut tx, lease_id, ticket_id, &report, now)
                 .await?;
+            if !report.requeued_tickets.contains(&ticket_id) {
+                let ticket = self
+                    .tickets
+                    .get_in_tx(&mut tx, ticket_id)
+                    .await?
+                    .ok_or_else(|| {
+                        VoomError::database(format!(
+                            "expired routing ticket {ticket_id} disappeared"
+                        ))
+                    })?;
+                self.fail_scan_for_failed_ticket_in_tx(&mut tx, &ticket, now)
+                    .await?;
+            }
         }
         commit_tx(tx).await?;
         Ok(report)

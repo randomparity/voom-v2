@@ -30,6 +30,7 @@ impl ControlPlane {
         let stale_nodes = self.mark_stale_nodes(now).await?;
         let stale_scan_sessions = self.recover_expired_scan_sessions(now).await?;
         let expired = self.expire_due(now).await?;
+        self.recover_failed_scan_runs(now).await?;
         Ok(RemoteRecoverReport {
             stale_nodes: stale_nodes.iter().map(|node| node.id).collect(),
             stale_scan_sessions,
