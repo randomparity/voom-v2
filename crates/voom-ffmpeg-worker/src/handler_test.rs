@@ -1588,6 +1588,7 @@ async fn missing_audio_encoder_fails_before_input_access() {
         ("eac3", "eac3"),
         ("ac3", "ac3"),
         ("flac", "flac"),
+        ("alac", "alac"),
     ] {
         let request = transcode_audio_request(
             dir.path(),

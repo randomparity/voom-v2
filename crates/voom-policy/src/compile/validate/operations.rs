@@ -374,7 +374,7 @@ impl Validator<'_> {
                     "transcode",
                     "audio",
                     "to",
-                    "aac" | "opus" | "eac3" | "ac3" | "flac"
+                    "aac" | "opus" | "eac3" | "ac3" | "flac" | "alac"
                 ]
             )
         }) {
@@ -972,11 +972,11 @@ impl Validator<'_> {
             ExprAst::Identifier(value) | ExprAst::String(value) => value.value.as_str(),
             _ => "",
         };
-        if !matches!(value, "aac" | "opus" | "eac3" | "ac3" | "flac") {
+        if !matches!(value, "aac" | "opus" | "eac3" | "ac3" | "flac" | "alac") {
             self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 span,
-                "synthesize codec must be aac, opus, eac3, ac3, or flac",
+                "synthesize codec must be aac, opus, eac3, ac3, flac, or alac",
             );
         }
     }

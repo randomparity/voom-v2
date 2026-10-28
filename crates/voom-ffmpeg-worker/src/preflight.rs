@@ -48,6 +48,7 @@ pub struct FfmpegPreflight {
     pub ac3_encoder: String,
     pub eac3_encoder: String,
     pub flac_encoder: String,
+    pub alac_encoder: String,
     pub matroska_muxer: String,
     pub mp4_muxer: String,
     pub ogg_muxer: String,
@@ -69,6 +70,7 @@ impl FfmpegPreflight {
             "ac3" => !self.ac3_encoder.is_empty(),
             "eac3" => !self.eac3_encoder.is_empty(),
             "flac" => !self.flac_encoder.is_empty(),
+            "alac" => !self.alac_encoder.is_empty(),
             _ => self.has_hardware_encoder(encoder),
         }
     }
@@ -281,6 +283,7 @@ pub fn preflight_with_paths(
     let ac3_encoder = parse_token(&encoders, "ac3").unwrap_or_default();
     let eac3_encoder = parse_token(&encoders, "eac3").unwrap_or_default();
     let flac_encoder = parse_token(&encoders, "flac").unwrap_or_default();
+    let alac_encoder = parse_token(&encoders, "alac").unwrap_or_default();
     let muxers = command_text(
         "ffmpeg -hide_banner -muxers",
         command_output(Command::new(ffmpeg_path).arg("-hide_banner").arg("-muxers")),
@@ -308,6 +311,7 @@ pub fn preflight_with_paths(
         ac3_encoder,
         eac3_encoder,
         flac_encoder,
+        alac_encoder,
         matroska_muxer,
         mp4_muxer,
         ogg_muxer,

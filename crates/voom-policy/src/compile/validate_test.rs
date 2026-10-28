@@ -974,11 +974,13 @@ fn ac3_transcode_and_downmix_synthesis_compile() {
 }
 
 #[test]
-fn flac_transcode_and_downmix_synthesis_compile() {
+fn flac_and_alac_transcode_and_downmix_synthesis_compile() {
     for source in [
         "policy \"p\" { phase a { transcode audio to flac } }",
         "policy \"p\" { phase a { synthesize audio from channels >= 8 { codec flac channels 6 } } }",
     ] {
         assert!(compile_policy(source).is_ok(), "{source}");
+        let alac = source.replace("flac", "alac");
+        assert!(compile_policy(&alac).is_ok(), "{alac}");
     }
 }

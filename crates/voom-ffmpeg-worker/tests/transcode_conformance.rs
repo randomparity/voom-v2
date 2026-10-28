@@ -1534,7 +1534,8 @@ async fn generate_flac_source(
     .await;
 }
 
-async fn flac_request(
+async fn lossless_request(
+    codec: &str,
     input: &Path,
     output: &Path,
     synthesis: Option<u64>,
@@ -1559,7 +1560,7 @@ async fn flac_request(
         audio: TranscodeAudioSettings {
             lossless: None,
             compatibility: None,
-            target_codec: "flac".to_owned(),
+            target_codec: codec.to_owned(),
             profile: AUDIO_PROFILE_DEFAULT.to_owned(),
             add_track: synthesis.is_some(),
             target_channels: synthesis,
@@ -1587,7 +1588,8 @@ async fn flac_physical_probe(ffprobe: &Path, path: &Path) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn assert_flac_preservation(
+fn assert_lossless_preservation(
+    codec: &str,
     before: &serde_json::Value,
     after: &serde_json::Value,
     synthesis: bool,
@@ -1595,7 +1597,7 @@ fn assert_flac_preservation(
     let streams = after["streams"].as_array().unwrap();
     let target = &streams[if synthesis { 3 } else { 1 }];
     assert_eq!(after["format"]["tags"]["title"], "FLAC source");
-    assert_eq!(target["codec_name"], "flac");
+    assert_eq!(target["codec_name"], codec);
     assert_eq!(target["tags"]["language"], "eng");
     assert_eq!(target["tags"]["title"], "Main");
     assert_eq!(target["disposition"]["default"], u8::from(!synthesis));
@@ -1632,17 +1634,28 @@ fn assert_flac_preservation(
 }
 
 #[tokio::test]
-async fn flac_real_worker_preserves_integer_samples_and_streams() {
+async fn lossless_real_worker_preserves_integer_samples_and_streams() {
+    for codec in ["flac", "alac"] {
+        verify_lossless_integer_samples(codec).await;
+    }
+}
+
+async fn verify_lossless_integer_samples(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
-    for layout in ["mono", "stereo", "5.1", "5.1(side)", "7.1"] {
+    let layouts = if codec == "flac" {
+        &["mono", "stereo", "5.1", "5.1(side)", "7.1"][..]
+    } else {
+        &["mono", "stereo", "5.1"][..]
+    };
+    for layout in layouts.iter().copied() {
         for bits in [16, 24] {
             for rate in [44_100, 96_000] {
                 let dir = tempfile::tempdir().unwrap();
                 let input = dir.path().join("source.mkv");
                 let output = dir.path().join("encoded.mkv");
                 generate_flac_source(&preflight, &input, layout, bits, rate).await;
-                let request = flac_request(&input, &output, None).await;
+                let request = lossless_request(codec, &input, &output, None).await;
                 let result = synthesize_through_worker(&request).await;
                 assert_eq!(
                     audio_expected(&input).await,
@@ -1679,14 +1692,20 @@ async fn flac_real_worker_preserves_integer_samples_and_streams() {
                 );
                 let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
                 let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
-                assert_flac_preservation(&before, &after, false);
+                assert_lossless_preservation(codec, &before, &after, false);
             }
         }
     }
 }
 
 #[tokio::test]
-async fn flac_real_worker_downmix_preserves_originals() {
+async fn lossless_real_worker_downmix_preserves_originals() {
+    for codec in ["flac", "alac"] {
+        verify_lossless_downmix(codec).await;
+    }
+}
+
+async fn verify_lossless_downmix(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
     for (layout, bits, target) in [("7.1", 24, 6), ("5.1(side)", 16, 2), ("stereo", 24, 1)] {
@@ -1695,7 +1714,7 @@ async fn flac_real_worker_downmix_preserves_originals() {
         let output = dir.path().join("downmix.mkv");
         let reference = dir.path().join("reference.mkv");
         generate_flac_source(&preflight, &input, layout, bits, 48_000).await;
-        let request = flac_request(&input, &output, Some(target)).await;
+        let request = lossless_request(codec, &input, &output, Some(target)).await;
         let result = synthesize_through_worker(&request).await;
         assert_eq!(audio_expected(&input).await, request.input.expected);
         assert_eq!(result.selected_snapshot_stream_ids, ["flac-selected"]);
@@ -1714,9 +1733,14 @@ async fn flac_real_worker_downmix_preserves_originals() {
                     "-ac",
                     &target.to_string(),
                     "-c:a",
-                    "flac",
+                    codec,
                     "-sample_fmt",
-                    if bits == 16 { "s16" } else { "s32" },
+                    match (codec, bits) {
+                        ("alac", 16) => "s16p",
+                        ("alac", _) => "s32p",
+                        (_, 16) => "s16",
+                        _ => "s32",
+                    },
                     "-bits_per_raw_sample",
                     &bits.to_string(),
                 ])
@@ -1753,10 +1777,15 @@ async fn flac_real_worker_downmix_preserves_originals() {
         );
         let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
         let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
-        assert_flac_preservation(&before, &after, true);
+        assert_lossless_preservation(codec, &before, &after, true);
         for target in [0, 3, 8] {
-            let mut invalid =
-                flac_request(&input, &dir.path().join("rejected.mkv"), Some(target)).await;
+            let mut invalid = lossless_request(
+                codec,
+                &input,
+                &dir.path().join("rejected.mkv"),
+                Some(target),
+            )
+            .await;
             invalid.audio.target_channels = Some(target);
             assert!(
                 handle_transcode_audio(&invalid, &ffmpeg_config(&preflight))
@@ -1769,7 +1798,13 @@ async fn flac_real_worker_downmix_preserves_originals() {
 }
 
 #[tokio::test]
-async fn flac_integer_wave_converts_to_mkv() {
+async fn lossless_integer_wave_converts_to_mkv() {
+    for codec in ["flac", "alac"] {
+        verify_lossless_wave(codec).await;
+    }
+}
+
+async fn verify_lossless_wave(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -1807,10 +1842,10 @@ async fn flac_integer_wave_converts_to_mkv() {
         wave.extend(u32::try_from(body.len()).unwrap().to_le_bytes());
         wave.extend(body);
         tokio::fs::write(&input, wave).await.unwrap();
-        let mut request = flac_request(&input, &output, None).await;
+        let mut request = lossless_request(codec, &input, &output, None).await;
         request.selection.selected_streams[0].provider_stream_index = 0;
         let result = synthesize_through_worker(&request).await;
-        assert_eq!(result.selected_output_streams[0].codec, "flac");
+        assert_eq!(result.selected_output_streams[0].codec, codec);
         assert_eq!(audio_expected(&input).await, request.input.expected);
         let original =
             canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &input, 0)
@@ -1838,7 +1873,8 @@ async fn flac_integer_wave_converts_to_mkv() {
                 .arg(&floating),
         )
         .await;
-        let mut invalid = flac_request(&floating, &dir.path().join("rejected.mkv"), None).await;
+        let mut invalid =
+            lossless_request(codec, &floating, &dir.path().join("rejected.mkv"), None).await;
         invalid.selection.selected_streams[0].provider_stream_index = 0;
         let error = handle_transcode_audio(&invalid, &ffmpeg_config(&preflight))
             .await
@@ -1849,14 +1885,27 @@ async fn flac_integer_wave_converts_to_mkv() {
 }
 
 #[tokio::test]
-async fn flac_real_worker_resolves_each_selected_stream() {
+async fn lossless_real_worker_resolves_each_selected_stream() {
+    for codec in ["flac", "alac"] {
+        verify_lossless_selected_streams(codec).await;
+    }
+}
+
+async fn verify_lossless_selected_streams(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("flac.mkv");
-    generate_flac_source(&preflight, &input, "7.1", 24, 96_000).await;
-    let mut request = flac_request(&input, &output, None).await;
+    generate_flac_source(
+        &preflight,
+        &input,
+        if codec == "flac" { "7.1" } else { "5.1" },
+        24,
+        96_000,
+    )
+    .await;
+    let mut request = lossless_request(codec, &input, &output, None).await;
     request.selection.selected_streams.push(AudioStreamRef {
         snapshot_stream_id: "flac-second".to_owned(),
         provider_stream_index: 2,
@@ -1894,14 +1943,20 @@ async fn flac_real_worker_resolves_each_selected_stream() {
 }
 
 #[tokio::test]
-async fn flac_real_worker_explicit_precision_widening_preserves_samples() {
+async fn lossless_real_worker_explicit_precision_widening_preserves_samples() {
+    for codec in ["flac", "alac"] {
+        verify_lossless_widening(codec).await;
+    }
+}
+
+async fn verify_lossless_widening(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("wide.mkv");
     generate_flac_source(&preflight, &input, "stereo", 16, 48_000).await;
-    let mut request = flac_request(&input, &output, None).await;
+    let mut request = lossless_request(codec, &input, &output, None).await;
     request.audio.lossless = Some(voom_worker_protocol::LosslessAudioSettings {
         bits_per_sample: Some(24),
     });
@@ -1922,7 +1977,13 @@ async fn flac_real_worker_explicit_precision_widening_preserves_samples() {
 }
 
 #[tokio::test]
-async fn flac_preserves_accessibility_flags_without_default_forced_or_comment() {
+async fn lossless_preserves_accessibility_flags_without_default_forced_or_comment() {
+    for codec in ["flac", "alac"] {
+        verify_lossless_accessibility(codec).await;
+    }
+}
+
+async fn verify_lossless_accessibility(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -1949,12 +2010,12 @@ async fn flac_preserves_accessibility_flags_without_default_forced_or_comment() 
             .arg(&input),
     )
     .await;
-    let request = flac_request(&input, &output, None).await;
+    let request = lossless_request(codec, &input, &output, None).await;
     synthesize_through_worker(&request).await;
     let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
     let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
     assert_eq!(before["streams"][1]["codec_name"], "wavpack");
-    assert_eq!(after["streams"][1]["codec_name"], "flac");
+    assert_eq!(after["streams"][1]["codec_name"], codec);
     let expected = &before["streams"][1]["disposition"];
     for flag in ["default", "forced", "comment"] {
         assert_eq!(expected[flag], 0);
@@ -1973,4 +2034,22 @@ async fn flac_preserves_accessibility_flags_without_default_forced_or_comment() 
             .unwrap();
     source.compare_samples(&actual).unwrap();
     assert_eq!(audio_expected(&input).await, request.input.expected);
+}
+
+#[tokio::test]
+async fn alac_rejects_unsupported_archival_layouts_before_output() {
+    let preflight = preflight_from_process_env().unwrap();
+    for layout in ["5.1(side)", "7.1"] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("rejected.mkv");
+        generate_flac_source(&preflight, &input, layout, 24, 48_000).await;
+        let request = lossless_request("alac", &input, &output, None).await;
+        let error = handle_transcode_audio(&request, &ffmpeg_config(&preflight))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ALAC requires"), "{error}");
+        assert!(!output.exists());
+        assert_eq!(audio_expected(&input).await, request.input.expected);
+    }
 }

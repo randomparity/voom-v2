@@ -25,7 +25,7 @@ pub const ALL_VIDEO_ENCODERS: [&str; 7] = [
 ];
 
 /// Audio encoders recognized by the worker; availability is checked per operation.
-pub const ALL_AUDIO_ENCODERS: [&str; 5] = ["aac", "libopus", "eac3", "ac3", "flac"];
+pub const ALL_AUDIO_ENCODERS: [&str; 6] = ["aac", "libopus", "eac3", "ac3", "flac", "alac"];
 
 const VAAPI_HEVC_ENCODER: &str = "hevc_vaapi";
 
@@ -2060,13 +2060,13 @@ fn audio_disposition_arg(source: &SourceAudioFact) -> Option<String> {
     })
 }
 
-fn resolve_flac_audio(
+fn resolve_lossless_audio(
     source: &SourceAudioFact,
     request: &TranscodeAudioRequest,
 ) -> Result<voom_worker_protocol::ResolvedLosslessAudioSettings, FfmpegError> {
     if request.audio.profile != voom_worker_protocol::AUDIO_PROFILE_DEFAULT {
         return Err(FfmpegError::OutputFactsMismatch(
-            "FLAC requires the default profile".to_owned(),
+            "lossless audio requires the default profile".to_owned(),
         ));
     }
     let facts = voom_worker_protocol::AudioSampleFacts {
@@ -2083,7 +2083,7 @@ fn resolve_flac_audio(
         .unwrap_or_default()
         .resolve(&facts)
         .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))?;
-    if resolved.sample_rate > 655_350 {
+    if request.audio.target_codec == "flac" && resolved.sample_rate > 655_350 {
         return Err(FfmpegError::OutputFactsMismatch(
             "FLAC supports sample rates up to 655350 Hz".to_owned(),
         ));
@@ -2095,13 +2095,20 @@ fn resolve_flac_audio(
             Some(6) => (6, "5.1"),
             _ => {
                 return Err(FfmpegError::OutputFactsMismatch(
-                    "FLAC synthesis supports only mono/1, stereo/2 or 5.1/6 target channels"
+                    "lossless synthesis supports only mono/1, stereo/2 or 5.1/6 target channels"
                         .to_owned(),
                 ));
             }
         };
         layout.clone_into(&mut resolved.channel_layout);
         resolved.channels = channels;
+    }
+    if request.audio.target_codec == "alac"
+        && !matches!(resolved.channel_layout.as_str(), "mono" | "stereo" | "5.1")
+    {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "ALAC requires mono/1, stereo/2 or 5.1/6 output layout; use explicit synthesis to downmix other supported source layouts".to_owned(),
+        ));
     }
     Ok(resolved)
 }
@@ -2112,17 +2119,26 @@ fn append_audio_encoding(
     source: &SourceAudioFact,
     request: &TranscodeAudioRequest,
 ) -> Result<(), FfmpegError> {
-    if request.audio.target_codec == "flac" {
-        let resolved = resolve_flac_audio(source, request)?;
+    if matches!(request.audio.target_codec.as_str(), "flac" | "alac") {
+        let resolved = resolve_lossless_audio(source, request)?;
+        if request.audio.target_codec == "flac" {
+            command
+                .arg(format!("-compression_level:a:{ordinal}"))
+                .arg("5");
+        }
         command
-            .arg(format!("-compression_level:a:{ordinal}"))
-            .arg("5")
             .arg(format!("-sample_fmt:a:{ordinal}"))
-            .arg(if resolved.bits_per_sample == 16 {
-                "s16"
-            } else {
-                "s32"
-            })
+            .arg(
+                match (
+                    request.audio.target_codec.as_str(),
+                    resolved.bits_per_sample,
+                ) {
+                    ("alac", 16) => "s16p",
+                    ("alac", _) => "s32p",
+                    (_, 16) => "s16",
+                    _ => "s32",
+                },
+            )
             .arg(format!("-bits_per_raw_sample:a:{ordinal}"))
             .arg(resolved.bits_per_sample.to_string())
             .arg(format!("-ar:a:{ordinal}"))
@@ -2152,12 +2168,12 @@ fn append_audio_encoding(
     Ok(())
 }
 
-fn verify_flac_output(
+fn verify_lossless_output(
     source: &SourceAudioFact,
     request: &TranscodeAudioRequest,
     output: &AudioOutputStreamFact,
 ) -> Result<(), FfmpegError> {
-    if request.audio.target_codec == "flac" {
+    if matches!(request.audio.target_codec.as_str(), "flac" | "alac") {
         let actual = voom_worker_protocol::AudioSampleFacts {
             sample_rate: output.sample_rate,
             sample_format: output.sample_format.clone(),
@@ -2165,7 +2181,7 @@ fn verify_flac_output(
             channels: output.channels,
             channel_layout: output.channel_layout.clone(),
         };
-        resolve_flac_audio(source, request)?
+        resolve_lossless_audio(source, request)?
             .verify(&actual)
             .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))?;
     }
@@ -2205,6 +2221,7 @@ pub(crate) fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
         "eac3" => Ok("eac3"),
         "ac3" => Ok("ac3"),
         "flac" => Ok("flac"),
+        "alac" => Ok("alac"),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unsupported audio codec: {other}"
         ))),
@@ -2275,7 +2292,7 @@ fn verify_transcode_audio_probe(
                 "AC-3 output channel/layout facts mismatch".to_owned(),
             ));
         }
-        verify_flac_output(source, request, output)?;
+        verify_lossless_output(source, request, output)?;
         verify_preserved_audio_metadata(source, output)?;
     }
     Ok(())
@@ -2313,7 +2330,7 @@ fn verify_synthesize_audio_probe(
         ));
     }
     for (source, output) in selected_sources.iter().zip(&probe.selected_output_streams) {
-        verify_flac_output(source, request, output)?;
+        verify_lossless_output(source, request, output)?;
         if output.default != Some(false) {
             return Err(FfmpegError::OutputFactsMismatch(
                 "synthesized audio must be non-default".to_owned(),

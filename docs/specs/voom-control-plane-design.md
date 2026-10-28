@@ -680,7 +680,7 @@ The V1 media operations are:
 ```text
 container mkv
 transcode video to hevc [using profile <quoted-name>]
-transcode audio to aac|opus|eac3|ac3|flac [where <track-filter>]
+transcode audio to aac|opus|eac3|ac3|flac|alac [where <track-filter>]
 keep audio|subtitle|attachment [where <track-filter>]
 remove audio|subtitle|attachment [where <track-filter>]
 order tracks [<track-target>, ...]
@@ -800,7 +800,7 @@ The `transcode audio` operation accepts a third target codec, `eac3`
 (E-AC-3 / Dolby Digital Plus), so the grammar production is:
 
 ```text
-transcode audio to aac|opus|eac3|ac3|flac [where <track-filter>]
+transcode audio to aac|opus|eac3|ac3|flac|alac [where <track-filter>]
 ```
 
 This is additive: `aac` and `opus` are unchanged, and no other production is
@@ -894,7 +894,7 @@ Audio can be *added* as a new track derived from an existing one, not only
 re-encoded in place. One additive production; every existing form is unchanged:
 
 ```text
-synthesize audio from <track-filter> { codec aac|opus|eac3|ac3|flac  channels <number> }
+synthesize audio from <track-filter> { codec aac|opus|eac3|ac3|flac|alac  channels <number> }
 ```
 
 - The `from <track-filter>` clause selects the **source** audio stream(s); the
@@ -907,7 +907,7 @@ synthesize audio from <track-filter> { codec aac|opus|eac3|ac3|flac  channels <n
   is appended. `channels` is a positive integer (typically `2` for stereo, `1`
   for mono); it must be **fewer** than the source stream's channel count (a
   downmix), else the file is blocked at plan time.
-- The compiler validates only the *shape* (codec ∈ {aac, opus, eac3, ac3, flac}, positive
+- The compiler validates only the *shape* (codec ∈ {aac, opus, eac3, ac3, flac, alac}, positive
   integer channels, valid source filter). Filter resolution to a concrete source
   stream and the downmix-direction check are planner concerns, resolved against
   snapshot facts.

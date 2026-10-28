@@ -1001,7 +1001,13 @@ fn recorded_staged_output_addresses_feed_verification_only() {
 }
 
 #[test]
-fn flac_dispatch_preserves_target_and_selection() {
+fn lossless_dispatch_preserves_target_and_selection() {
+    for codec in ["flac", "alac"] {
+        verify_lossless_dispatch(codec);
+    }
+}
+
+fn verify_lossless_dispatch(codec: &str) {
     for synthesis in [false, true] {
         let selection = TranscodeAudioSelection {
             selected_streams: vec![AudioStreamRef {
@@ -1012,7 +1018,7 @@ fn flac_dispatch_preserves_target_and_selection() {
         let settings = TranscodeAudioSettings {
             lossless: None,
             compatibility: None,
-            target_codec: "flac".to_owned(),
+            target_codec: codec.to_owned(),
             profile: "default".to_owned(),
             add_track: synthesis,
             target_channels: synthesis.then_some(2),
@@ -1035,7 +1041,7 @@ fn flac_dispatch_preserves_target_and_selection() {
         assert_eq!(decoded.output_container, "mkv");
         assert_eq!(
             decoded.output.provider_relative_locator.as_str(),
-            "file-001/Movie.audio-flac.mkv"
+            format!("file-001/Movie.audio-{codec}.mkv")
         );
         assert!(!decoded.output.overwrite);
     }
