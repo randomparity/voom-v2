@@ -1006,6 +1006,18 @@ fn worker_post(client: &reqwest::Client, addr: SocketAddr, route: &str) -> reqwe
         .header(IDEMPOTENCY_KEY_HEADER, "bounded-body")
 }
 
+async fn header_only_response(addr: SocketAddr, head: &str) -> Vec<u8> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(head.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.take(4097).read_to_end(&mut response).await.unwrap();
+        response
+    })
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn body_limit_preserves_routes_validation_and_idempotency() {
     const LIMIT: usize = 1 << 20;
@@ -1052,20 +1064,25 @@ async fn body_limit_preserves_routes_validation_and_idempotency() {
             Some("UNAUTHORIZED_BEARER"),
         ),
     ] {
-        let response = client
-            .post(format!("http://{addr}{route}"))
-            .header(PROTOCOL_VERSION_HEADER, version)
-            .header(WORKER_ID_HEADER, 7)
-            .header(WORKER_EPOCH_HEADER, 3)
-            .bearer_auth(secret)
-            .body(oversized.clone())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), status);
+        // Send no body: an earlier guard must respond without awaiting its upload.
+        let head = format!(
+            "POST {route} HTTP/1.1\r\nHost: localhost\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\
+             {PROTOCOL_VERSION_HEADER}: {version}\r\n\
+             {WORKER_ID_HEADER}: 7\r\n{WORKER_EPOCH_HEADER}: 3\r\n\
+             Authorization: Bearer {secret}\r\n\r\n",
+            LIMIT + 1
+        );
+        let response = header_only_response(addr, &head).await;
+        assert!(response.len() <= 4096, "unexpectedly large guard response");
+        assert!(response.starts_with(format!("HTTP/1.1 {} ", status.as_u16()).as_bytes()));
+        let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let body = &response[split + 4..];
         if let Some(code) = code {
-            let error: serde_json::Value = response.json().await.unwrap();
+            let error: serde_json::Value = serde_json::from_slice(body).unwrap();
             assert_eq!(error["code"], code);
+        } else {
+            assert_eq!(body, b"not found");
         }
     }
     let operation = serde_json::to_vec(&request(LeaseId(1), serde_json::json!({}))).unwrap();
