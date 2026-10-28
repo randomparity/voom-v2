@@ -8,6 +8,7 @@ pub const TRANSCODE_AUDIO_CONTAINER: &str = "mkv";
 pub const TRANSCODE_AUDIO_CODEC_AAC: &str = "aac";
 pub const TRANSCODE_AUDIO_CODEC_OPUS: &str = "opus";
 pub const TRANSCODE_AUDIO_CODEC_EAC3: &str = "eac3";
+pub const TRANSCODE_AUDIO_CODEC_AC3: &str = "ac3";
 /// The only audio quality profile defined so far. The control plane emits this
 /// value for every transcode-audio request; see ADR 0020.
 pub const AUDIO_PROFILE_DEFAULT: &str = "default";
@@ -23,12 +24,15 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Returns true when `codec` is an audio codec the `transcode audio` operation
-/// supports (aac, opus, or eac3).
+/// supports (aac, opus, eac3, or ac3).
 #[must_use]
 pub fn is_supported_transcode_audio_codec(codec: &str) -> bool {
     matches!(
         codec,
-        TRANSCODE_AUDIO_CODEC_AAC | TRANSCODE_AUDIO_CODEC_OPUS | TRANSCODE_AUDIO_CODEC_EAC3
+        TRANSCODE_AUDIO_CODEC_AAC
+            | TRANSCODE_AUDIO_CODEC_OPUS
+            | TRANSCODE_AUDIO_CODEC_EAC3
+            | TRANSCODE_AUDIO_CODEC_AC3
     )
 }
 
@@ -39,7 +43,8 @@ pub fn is_supported_transcode_audio_codec(codec: &str) -> bool {
 /// emit a deterministic `-b:a`, so a 5.1 (6-channel) source is encoded at a
 /// surround-appropriate bitrate. Only the `default` profile is defined; the
 /// per-codec values reflect relative coding efficiency (opus < aac < eac3 for
-/// equal quality). See ADR 0020.
+/// equal quality). AC-3 is limited to mono/stereo/5.1, yielding valid 96/192/576
+/// kbps targets. See ADRs 0020 and 0113.
 #[must_use]
 pub fn audio_target_bitrate_kbps_per_channel(codec: &str, profile: &str) -> Option<u32> {
     if profile != AUDIO_PROFILE_DEFAULT {
@@ -48,7 +53,7 @@ pub fn audio_target_bitrate_kbps_per_channel(codec: &str, profile: &str) -> Opti
     match codec {
         TRANSCODE_AUDIO_CODEC_AAC => Some(64),
         TRANSCODE_AUDIO_CODEC_OPUS => Some(48),
-        TRANSCODE_AUDIO_CODEC_EAC3 => Some(96),
+        TRANSCODE_AUDIO_CODEC_EAC3 | TRANSCODE_AUDIO_CODEC_AC3 => Some(96),
         _ => None,
     }
 }

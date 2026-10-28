@@ -1233,3 +1233,188 @@ fn assert_synthesized_audio_file(
         "returned facts must match the physical file"
     );
 }
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one generated-media matrix keeps source and output preservation assertions together"
+)]
+async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
+    let preflight = preflight_from_process_env().unwrap();
+    for (layout, channels, synthesis, expected_channels, bitrate) in [
+        ("mono", 1, false, 1, "96000"),
+        ("stereo", 2, false, 2, "192000"),
+        ("5.1", 6, false, 6, "576000"),
+        ("7.1", 8, true, 6, "576000"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("ac3.mkv");
+        let generated = Command::new(&preflight.ffmpeg_path)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=16x16:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("anullsrc=r=48000:cl={layout}"),
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "0.2",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:v",
+                "ffv1",
+                "-c:a",
+                "flac",
+                "-metadata:s:a:0",
+                "language=eng",
+                "-metadata:s:a:0",
+                "title=Main",
+                "-disposition:a:0",
+                "default+forced+comment",
+                "-metadata",
+                "title=AC-3 source",
+                "-metadata:s:a:1",
+                "language=jpn",
+                "-disposition:a:1",
+                "0",
+            ])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let expected = audio_expected(&input).await;
+        let request = TranscodeAudioRequest {
+            input: TranscodeAudioInput {
+                path: input.to_string_lossy().into_owned(),
+                expected: expected.clone(),
+            },
+            output: TranscodeAudioOutput {
+                staging_root: dir.path().to_string_lossy().into_owned(),
+                path: output.to_string_lossy().into_owned(),
+                container: "mkv".to_owned(),
+                overwrite: false,
+            },
+            selection: TranscodeAudioSelection {
+                selected_streams: vec![AudioStreamRef {
+                    snapshot_stream_id: "ac3-selected".to_owned(),
+                    provider_stream_index: 1,
+                }],
+            },
+            audio: TranscodeAudioSettings {
+                compatibility: None,
+                target_codec: "ac3".to_owned(),
+                profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+                add_track: synthesis,
+                target_channels: synthesis.then_some(expected_channels),
+            },
+        };
+        if synthesis {
+            let mut ordinary = request.clone();
+            ordinary.audio.add_track = false;
+            ordinary.audio.target_channels = None;
+            ordinary.output.path = dir
+                .path()
+                .join("rejected.mkv")
+                .to_string_lossy()
+                .into_owned();
+            let error = handle_transcode_audio(&ordinary, &ffmpeg_config(&preflight))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("AC-3"), "{error}");
+            assert!(!Path::new(&ordinary.output.path).exists());
+        }
+        let result = synthesize_through_worker(&request).await;
+        assert_eq!(
+            audio_expected(&input).await,
+            expected,
+            "source must remain immutable"
+        );
+        assert_eq!(result.selected_snapshot_stream_ids, ["ac3-selected"]);
+        assert_eq!(
+            result.selected_output_streams[0].channels,
+            Some(expected_channels)
+        );
+        let physical: Vec<serde_json::Value> = [&input, &output].into_iter().map(|path| {
+            let probe = Command::new(&preflight.ffprobe_path).args(["-v", "error", "-show_entries",
+                "stream=index,codec_name,channels,channel_layout,bit_rate:stream_disposition:stream_tags:format_tags:packet=stream_index,data_hash",
+                "-show_packets", "-show_data_hash", "sha256", "-of", "json"])
+                .arg(path).output().unwrap();
+            assert!(probe.status.success());
+            serde_json::from_slice(&probe.stdout).unwrap()
+        }).collect();
+        let streams = physical[1]["streams"].as_array().unwrap();
+        let selected_index = if synthesis { 3 } else { 1 };
+        let selected = &streams[selected_index];
+        assert_eq!(
+            result.selected_output_streams[0].output_provider_stream_index,
+            u32::try_from(selected_index).unwrap()
+        );
+        assert_eq!(physical[1]["format"]["tags"]["title"], "AC-3 source");
+        assert_eq!(selected["codec_name"], "ac3");
+        assert_eq!(selected["channels"], expected_channels);
+        assert_eq!(selected["bit_rate"], bitrate);
+        assert_eq!(
+            selected["channel_layout"],
+            match expected_channels {
+                1 => "mono",
+                2 => "stereo",
+                _ => "5.1(side)",
+            }
+        );
+        assert_eq!(selected["tags"]["language"], "eng");
+        assert_eq!(selected["tags"]["title"], "Main");
+        assert_eq!(selected["disposition"]["forced"], 1);
+        assert_eq!(selected["disposition"]["comment"], 1);
+        assert_eq!(selected["disposition"]["default"], u8::from(!synthesis));
+        assert_eq!(streams.len(), if synthesis { 4 } else { 3 });
+        assert_eq!(streams[0]["codec_name"], "ffv1");
+        assert_eq!(streams[2]["codec_name"], "flac");
+        assert_eq!(streams[2]["tags"]["language"], "jpn");
+        assert_eq!(streams[2]["disposition"]["default"], 0);
+        if synthesis {
+            assert_eq!(streams[1]["codec_name"], "flac");
+            assert_eq!(streams[1]["channels"], channels);
+            assert_eq!(streams[1]["disposition"]["default"], 1);
+            assert_eq!(streams[1]["disposition"]["forced"], 1);
+            assert_eq!(streams[1]["disposition"]["comment"], 1);
+            assert_eq!(streams[1]["tags"]["language"], "eng");
+            assert_eq!(streams[1]["tags"]["title"], "Main");
+        }
+        for index in if synthesis { vec![0, 1, 2] } else { vec![0, 2] } {
+            let hashes: Vec<Vec<&serde_json::Value>> = physical
+                .iter()
+                .map(|probe| {
+                    probe["packets"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|packet| packet["stream_index"] == index)
+                        .map(|packet| &packet["data_hash"])
+                        .collect()
+                })
+                .collect();
+            assert!(!hashes[0].is_empty());
+            assert_eq!(
+                hashes[0], hashes[1],
+                "copied stream {index} payloads must survive"
+            );
+        }
+    }
+}

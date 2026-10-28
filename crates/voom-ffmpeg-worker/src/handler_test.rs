@@ -1577,3 +1577,54 @@ fn validate_copy_codec_rejects_mismatched_codec() {
     let err = validate_copy_codec("hevc", &probe).unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
 }
+
+#[tokio::test]
+async fn missing_audio_encoder_fails_before_input_access() {
+    let dir = tempfile::tempdir().unwrap();
+    for (codec, encoder) in [
+        ("aac", "aac"),
+        ("opus", "libopus"),
+        ("eac3", "eac3"),
+        ("ac3", "ac3"),
+    ] {
+        let request = transcode_audio_request(
+            dir.path(),
+            &dir.path().join("missing.mkv"),
+            AudioExpectedFacts {
+                size_bytes: 0,
+                content_hash: "unused".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+            codec,
+        );
+        let config = config(dir.path()).with_available_audio_encoders(Vec::new());
+        let error = handle_transcode_audio(&request, &config).await.unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+        assert!(
+            error.to_string().contains(&format!("encoder `{encoder}`")),
+            "{error}"
+        );
+        assert!(!Path::new(&request.output.path).exists());
+    }
+}
+
+#[tokio::test]
+async fn missing_audio_encoder_for_extraction_fails_before_input_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let request = extract_audio_request(
+        dir.path(),
+        &dir.path().join("missing.mkv"),
+        AudioExpectedFacts {
+            size_bytes: 0,
+            content_hash: "unused".to_owned(),
+            modified_at: None,
+            local_file_key: None,
+        },
+    );
+    let config = config(dir.path()).with_available_audio_encoders(Vec::new());
+    let error = handle_extract_audio(&request, &config).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+    assert!(error.to_string().contains("encoder `libopus`"), "{error}");
+    assert!(!Path::new(&request.output.path).exists());
+}

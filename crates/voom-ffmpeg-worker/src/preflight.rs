@@ -45,6 +45,8 @@ pub struct FfmpegPreflight {
     pub libaom_encoder: String,
     pub aac_encoder: String,
     pub opus_encoder: String,
+    pub ac3_encoder: String,
+    pub eac3_encoder: String,
     pub matroska_muxer: String,
     pub mp4_muxer: String,
     pub ogg_muxer: String,
@@ -54,7 +56,7 @@ pub struct FfmpegPreflight {
 }
 
 impl FfmpegPreflight {
-    /// Returns true when the named video encoder was detected during preflight.
+    /// Returns true when the named encoder was detected during preflight.
     #[must_use]
     pub fn has_encoder(&self, encoder: &str) -> bool {
         match encoder {
@@ -63,6 +65,8 @@ impl FfmpegPreflight {
             "libaom-av1" => !self.libaom_encoder.is_empty(),
             "aac" => !self.aac_encoder.is_empty(),
             "libopus" => !self.opus_encoder.is_empty(),
+            "ac3" => !self.ac3_encoder.is_empty(),
+            "eac3" => !self.eac3_encoder.is_empty(),
             _ => self.has_hardware_encoder(encoder),
         }
     }
@@ -270,14 +274,10 @@ pub fn preflight_with_paths(
         )
     })?;
     let libaom_encoder = parse_token(&encoders, "libaom-av1").unwrap_or_default();
-    let aac_encoder = parse_token(&encoders, "aac").ok_or_else(|| {
-        FfmpegPreflightError::Failed("ffmpeg does not advertise required aac encoder".to_owned())
-    })?;
-    let opus_encoder = parse_token(&encoders, "libopus").ok_or_else(|| {
-        FfmpegPreflightError::Failed(
-            "ffmpeg does not advertise required libopus encoder".to_owned(),
-        )
-    })?;
+    let aac_encoder = parse_token(&encoders, "aac").unwrap_or_default();
+    let opus_encoder = parse_token(&encoders, "libopus").unwrap_or_default();
+    let ac3_encoder = parse_token(&encoders, "ac3").unwrap_or_default();
+    let eac3_encoder = parse_token(&encoders, "eac3").unwrap_or_default();
     let muxers = command_text(
         "ffmpeg -hide_banner -muxers",
         command_output(Command::new(ffmpeg_path).arg("-hide_banner").arg("-muxers")),
@@ -302,6 +302,8 @@ pub fn preflight_with_paths(
         libaom_encoder,
         aac_encoder,
         opus_encoder,
+        ac3_encoder,
+        eac3_encoder,
         matroska_muxer,
         mp4_muxer,
         ogg_muxer,

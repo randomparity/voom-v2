@@ -962,3 +962,13 @@ fn accepts_in_range_numeric_literal() {
             .contains(&"numeric_literal_out_of_range".to_owned())
     );
 }
+
+#[test]
+fn ac3_transcode_and_downmix_synthesis_compile() {
+    for source in [
+        "policy \"p\" { phase a { transcode audio to ac3 } }",
+        "policy \"p\" { phase a { synthesize audio from channels >= 8 { codec ac3 channels 6 } } }",
+    ] {
+        assert!(compile_policy(source).is_ok(), "{source}");
+    }
+}
