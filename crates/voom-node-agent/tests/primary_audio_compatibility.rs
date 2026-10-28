@@ -391,56 +391,66 @@ impl Drop for CompatibilityFixture {
     }
 }
 
+const RANKING_TRACKS: [media::AudioFixtureTrack<'static>; 5] = [
+    media::AudioFixtureTrack {
+        title: "Unknown",
+        language: None,
+        channels: 2,
+        layout: "stereo",
+        frequency: 330,
+        commentary: false,
+        codec: "wavpack",
+    },
+    media::AudioFixtureTrack {
+        title: "Commentary",
+        language: Some("eng"),
+        channels: 2,
+        layout: "stereo",
+        frequency: 440,
+        commentary: true,
+        codec: "wavpack",
+    },
+    media::AudioFixtureTrack {
+        title: "Primary",
+        language: Some("eng"),
+        channels: 2,
+        layout: "stereo",
+        frequency: 880,
+        commentary: false,
+        codec: "wavpack",
+    },
+    media::AudioFixtureTrack {
+        title: "Secondary",
+        language: Some("eng"),
+        channels: 2,
+        layout: "stereo",
+        frequency: 1100,
+        commentary: false,
+        codec: "wavpack",
+    },
+    media::AudioFixtureTrack {
+        title: "Foreign",
+        language: Some("fra"),
+        channels: 2,
+        layout: "stereo",
+        frequency: 660,
+        commentary: false,
+        codec: "wavpack",
+    },
+];
+
 #[tokio::test]
 async fn primary_audio_compatibility_executes_on_owner() {
-    let tracks = [
-        media::AudioFixtureTrack {
-            title: "Unknown",
-            language: None,
-            channels: 2,
-            layout: "stereo",
-            frequency: 330,
-            commentary: false,
-            codec: "wavpack",
-        },
-        media::AudioFixtureTrack {
-            title: "Commentary",
-            language: Some("eng"),
-            channels: 2,
-            layout: "stereo",
-            frequency: 440,
-            commentary: true,
-            codec: "wavpack",
-        },
-        media::AudioFixtureTrack {
-            title: "Primary",
-            language: Some("eng"),
-            channels: 2,
-            layout: "stereo",
-            frequency: 880,
-            commentary: false,
-            codec: "wavpack",
-        },
-        media::AudioFixtureTrack {
-            title: "Secondary",
-            language: Some("eng"),
-            channels: 2,
-            layout: "stereo",
-            frequency: 1100,
-            commentary: false,
-            codec: "wavpack",
-        },
-        media::AudioFixtureTrack {
-            title: "Foreign",
-            language: Some("fra"),
-            channels: 2,
-            layout: "stereo",
-            frequency: 660,
-            commentary: false,
-            codec: "wavpack",
-        },
-    ];
-    let fixture = CompatibilityFixture::start(&tracks).await;
+    let fixture = CompatibilityFixture::start(&RANKING_TRACKS).await;
+    let initial_probe = media::probe(&fixture.root.join("source.mkv"));
+    assert_eq!(initial_probe["streams"][1]["codec_type"], "audio");
+    assert_eq!(initial_probe["streams"][2]["codec_type"], "subtitle");
+    assert_eq!(initial_probe["streams"][3]["codec_type"], "audio");
+    for index in [0, 2] {
+        assert_eq!(initial_probe["streams"][index]["disposition"]["default"], 1);
+        assert_eq!(initial_probe["streams"][index]["disposition"]["forced"], 1);
+    }
+    let non_audio = media::non_audio_state(&initial_probe);
     let original = media::packet_hashes(&fixture.root.join("source.mkv"));
     let result = fixture.execute(POLICY, "compatibility-full").await;
     let output = fixture.final_path(&result).await;
@@ -488,6 +498,11 @@ async fn primary_audio_compatibility_executes_on_owner() {
     assert_eq!(
         actual["streams"][0]["codec_type"], "video",
         "audio placement cannot take the video slot"
+    );
+    assert_eq!(
+        media::non_audio_state(&actual),
+        non_audio,
+        "non-audio slots, order and dispositions survive committed placement"
     );
     fixture.shutdown().await;
 }
@@ -667,6 +682,7 @@ async fn compatibility_recovers_between_ensure_and_place() {
     let before = synthesis_state(&fixture).await;
     assert_eq!(before, (1, 1, 1, 1));
     let ensured_probe = media::probe(&ensured_path);
+    let placement_non_audio = media::non_audio_state(&ensured_probe);
     let derived = ensured_probe["streams"]
         .as_array()
         .unwrap()
@@ -683,6 +699,11 @@ async fn compatibility_recovers_between_ensure_and_place() {
     let placed = fixture.execute(POLICY, "compatibility-resume").await;
     let output = fixture.final_path(&placed).await;
     let actual = media::probe(&output);
+    assert_eq!(
+        media::non_audio_state(&actual),
+        placement_non_audio,
+        "actual input to placement and committed output retain non-audio slots and dispositions"
+    );
     let audio = actual["streams"]
         .as_array()
         .unwrap()

@@ -59,20 +59,27 @@ pub fn generate_fixture(root: &Path, tracks: &[AudioFixtureTrack<'_>]) -> PathBu
         .args(["-t", "0.5", "-map", "0:v"]);
     for index in 0..tracks.len() {
         command.arg("-map").arg(format!("{}:a", index + 1));
+        if index == 0 {
+            command.arg("-map").arg(format!("{}:s", tracks.len() + 1));
+        }
     }
-    command
-        .arg("-map")
-        .arg(format!("{}:s", tracks.len() + 1))
-        .args([
-            "-c:v",
-            "ffv1",
-            "-c:s",
-            "srt",
-            "-metadata:s:v:0",
-            "title=Video",
-            "-metadata:s:s:0",
-            "title=Subtitle",
-        ]);
+    if tracks.is_empty() {
+        command.arg("-map").arg(format!("{}:s", tracks.len() + 1));
+    }
+    command.args([
+        "-c:v",
+        "ffv1",
+        "-c:s",
+        "srt",
+        "-metadata:s:v:0",
+        "title=Video",
+        "-metadata:s:s:0",
+        "title=Subtitle",
+        "-disposition:v:0",
+        "default+forced",
+        "-disposition:s:0",
+        "default+forced",
+    ]);
     for (index, track) in tracks.iter().enumerate() {
         command
             .arg(format!("-c:a:{index}"))
@@ -245,4 +252,13 @@ pub fn assert_attachment(path: &Path, root: &Path) {
         std::fs::read(output).unwrap(),
         b"Preserve this attachment\n"
     );
+}
+
+pub fn non_audio_state(probe: &Value) -> Vec<Value> {
+    probe["streams"].as_array().unwrap().iter().filter(|stream| stream["codec_type"] != "audio")
+        .map(|stream| serde_json::json!({
+            "index": stream["index"], "kind": stream["codec_type"], "codec": stream["codec_name"],
+            "disposition": stream["disposition"], "title": tag(stream, "title"),
+            "filename": tag(stream, "filename"), "mimetype": tag(stream, "mimetype"),
+        })).collect()
 }
