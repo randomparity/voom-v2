@@ -8,6 +8,8 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        # Unified-diff blank context lines contain one required prefix space.
+        exclude: ^containers/ffmpeg/pcm-wavex\.patch$
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
