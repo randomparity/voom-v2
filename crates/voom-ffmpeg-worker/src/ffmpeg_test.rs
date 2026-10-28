@@ -1360,7 +1360,7 @@ async fn audio_transcode_writes_metadata_and_disposition_for_selected_streams() 
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-metadata:s:a:0\nlanguage=eng\n"));
     assert!(args.contains("-metadata:s:a:0\ntitle=Main\n"));
-    assert!(args.contains("-disposition:a:0\ndefault\n"));
+    assert!(args.contains("-disposition:a:0\n+default\n"));
 }
 
 #[tokio::test]

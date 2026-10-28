@@ -2051,10 +2051,12 @@ fn audio_disposition_arg(source: &SourceAudioFact) -> Option<String> {
     if disposition.commentary == Some(true) {
         flags.push("comment");
     }
+    // Relative adjustments retain accessibility flags absent from the wire facts.
+    // An explicit default adjustment also prevents FFmpeg choosing a new default.
     Some(if flags.is_empty() {
-        "0".to_owned()
+        "-default".to_owned()
     } else {
-        flags.join("+")
+        format!("+{}", flags.join("+"))
     })
 }
 

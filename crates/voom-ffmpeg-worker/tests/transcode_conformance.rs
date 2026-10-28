@@ -1521,7 +1521,7 @@ async fn generate_flac_source(
                 "-metadata:s:a:0",
                 "title=Main",
                 "-disposition:a:0",
-                "default+forced+comment",
+                "default+forced+comment+hearing_impaired+visual_impaired",
                 "-metadata:s:a:1",
                 "language=jpn",
                 "-disposition:a:1",
@@ -1601,6 +1601,11 @@ fn assert_flac_preservation(
     assert_eq!(target["disposition"]["default"], u8::from(!synthesis));
     assert_eq!(target["disposition"]["forced"], 1);
     assert_eq!(target["disposition"]["comment"], 1);
+    let mut expected_disposition = before["streams"][1]["disposition"].clone();
+    assert_eq!(expected_disposition["hearing_impaired"], 1);
+    assert_eq!(expected_disposition["visual_impaired"], 1);
+    expected_disposition["default"] = serde_json::json!(u8::from(!synthesis));
+    assert_eq!(target["disposition"], expected_disposition);
     assert_eq!(streams.len(), if synthesis { 4 } else { 3 });
     for index in if synthesis { vec![0, 1, 2] } else { vec![0, 2] } {
         for field in ["codec_name", "tags", "disposition"] {
@@ -1912,6 +1917,60 @@ async fn flac_real_worker_explicit_precision_widening_preserves_samples() {
             .unwrap();
     assert_eq!(source.facts.bits_per_sample, 16);
     assert_eq!(actual.facts.bits_per_sample, 24);
+    source.compare_samples(&actual).unwrap();
+    assert_eq!(audio_expected(&input).await, request.input.expected);
+}
+
+#[tokio::test]
+async fn flac_preserves_accessibility_flags_without_default_forced_or_comment() {
+    use voom_test_support::audio_samples::canonical_decoded_audio;
+    let preflight = preflight_from_process_env().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let generated = dir.path().join("generated.mkv");
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("flac.mkv");
+    generate_flac_source(&preflight, &generated, "stereo", 16, 48_000).await;
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&generated)
+            .args([
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-c:a:0",
+                "wavpack",
+                "-sample_fmt:a:0",
+                "s16p",
+                "-disposition:a:0",
+                "hearing_impaired+visual_impaired",
+            ])
+            .arg(&input),
+    )
+    .await;
+    let request = flac_request(&input, &output, None).await;
+    synthesize_through_worker(&request).await;
+    let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+    let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
+    assert_eq!(before["streams"][1]["codec_name"], "wavpack");
+    assert_eq!(after["streams"][1]["codec_name"], "flac");
+    let expected = &before["streams"][1]["disposition"];
+    for flag in ["default", "forced", "comment"] {
+        assert_eq!(expected[flag], 0);
+    }
+    for flag in ["hearing_impaired", "visual_impaired"] {
+        assert_eq!(expected[flag], 1);
+    }
+    assert_eq!(&after["streams"][1]["disposition"], expected);
+    let source =
+        canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &input, 1)
+            .await
+            .unwrap();
+    let actual =
+        canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &output, 1)
+            .await
+            .unwrap();
     source.compare_samples(&actual).unwrap();
     assert_eq!(audio_expected(&input).await, request.input.expected);
 }
