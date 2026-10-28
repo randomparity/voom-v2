@@ -135,6 +135,7 @@ fn transcode_audio_additive_settings_round_trip() {
             selected_streams: vec![],
         },
         settings: TranscodeAudioSettings {
+            lossless: None,
             compatibility: None,
             target_codec: "eac3".to_owned(),
             profile: "default".to_owned(),
@@ -144,4 +145,18 @@ fn transcode_audio_additive_settings_round_trip() {
     });
     let decoded = decode_media_dispatch(&serde_json::to_value(&dispatch).unwrap()).unwrap();
     assert_eq!(decoded, dispatch);
+}
+
+#[test]
+fn decode_rejects_previous_persisted_schema() {
+    let dispatch = MediaDispatch::Probe(MediaProbeDispatch {
+        schema: 4,
+        source: source(7, "movies/a.mkv"),
+        expected: expected(),
+    });
+    let error = decode_media_dispatch(&serde_json::to_value(dispatch).unwrap()).unwrap_err();
+    assert!(
+        error.contains("schema 4 does not match protocol version 5"),
+        "{error}"
+    );
 }

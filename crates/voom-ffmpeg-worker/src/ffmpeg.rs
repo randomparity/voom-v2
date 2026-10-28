@@ -283,6 +283,9 @@ pub struct AudioOutputProbe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceAudioFact {
+    pub sample_rate: Option<u32>,
+    pub sample_format: Option<String>,
+    pub bits_per_sample: Option<u8>,
     pub snapshot_stream_id: Option<String>,
     pub provider_stream_index: u32,
     pub audio_ordinal: usize,
@@ -1086,7 +1089,7 @@ async fn run_ffmpeg_synthesize_audio(
         ));
     }
     let input_probe = probe_json(config, input).await?;
-    let source_streams = audio_facts_from_probe(&input_probe);
+    let source_streams = audio_facts_from_probe(&input_probe)?;
     if request.audio.compatibility.is_some() {
         validate_compatibility_source(request, &source_streams)?;
     } else if source_streams
@@ -1827,36 +1830,44 @@ async fn probe_audio_streams(
     path: &Path,
 ) -> Result<Vec<SourceAudioFact>, FfmpegError> {
     let json = probe_json(config, path).await?;
-    Ok(audio_facts_from_probe(&json))
+    audio_facts_from_probe(&json)
 }
 
-fn audio_facts_from_probe(json: &Value) -> Vec<SourceAudioFact> {
+fn audio_facts_from_probe(json: &Value) -> Result<Vec<SourceAudioFact>, FfmpegError> {
     audio_stream_values(json)
         .enumerate()
         .filter_map(|(audio_ordinal, stream)| {
-            Some(SourceAudioFact {
-                snapshot_stream_id: stream_tag(stream, "voom_compatibility_stream_id"),
-                provider_stream_index: u32::try_from(stream.get("index")?.as_u64()?).ok()?,
-                audio_ordinal,
-                codec: stream
-                    .get("codec_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                language: stream_tag(stream, "language"),
-                title: stream_tag(stream, "title"),
-                default: disposition_bool(stream, "default"),
-                disposition: Some(AudioDispositionFact {
-                    default: disposition_bool(stream, "default"),
-                    forced: disposition_bool(stream, "forced"),
-                    commentary: disposition_bool(stream, "comment"),
-                }),
-                channels: stream.get("channels").and_then(Value::as_u64),
-                channel_layout: stream
-                    .get("channel_layout")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            })
+            let provider_stream_index = u32::try_from(stream.get("index")?.as_u64()?).ok()?;
+            Some(
+                voom_worker_protocol::AudioSampleFacts::from_ffprobe(stream)
+                    .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))
+                    .map(|facts| SourceAudioFact {
+                        sample_rate: facts.sample_rate,
+                        sample_format: facts.sample_format,
+                        bits_per_sample: facts.bits_per_sample,
+                        snapshot_stream_id: stream_tag(stream, "voom_compatibility_stream_id"),
+                        provider_stream_index,
+                        audio_ordinal,
+                        codec: stream
+                            .get("codec_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        language: stream_tag(stream, "language"),
+                        title: stream_tag(stream, "title"),
+                        default: disposition_bool(stream, "default"),
+                        disposition: Some(AudioDispositionFact {
+                            default: disposition_bool(stream, "default"),
+                            forced: disposition_bool(stream, "forced"),
+                            commentary: disposition_bool(stream, "comment"),
+                        }),
+                        channels: stream.get("channels").and_then(Value::as_u64),
+                        channel_layout: stream
+                            .get("channel_layout")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    }),
+            )
         })
         .collect()
 }
@@ -1883,7 +1894,7 @@ async fn probe_audio_output(
     }
     let audio_streams: Vec<&Value> = audio_stream_values(&json).collect();
     let selected_output_streams =
-        selected_output_streams(&audio_streams, selected_refs, expected_codec);
+        selected_output_streams(&audio_streams, selected_refs, expected_codec)?;
     let audio_codecs = selected_output_streams
         .iter()
         .map(|stream| stream.codec.clone())
@@ -1925,7 +1936,7 @@ fn selected_output_streams(
     audio_streams: &[&Value],
     selected_refs: &[AudioStreamRef],
     expected_codec: Option<&str>,
-) -> Vec<AudioOutputStreamFact> {
+) -> Result<Vec<AudioOutputStreamFact>, FfmpegError> {
     let has_snapshot_tags = audio_streams
         .iter()
         .any(|stream| stream_tag(stream, "snapshot_stream_id").is_some());
@@ -1940,7 +1951,7 @@ fn selected_output_streams(
                 {
                     return None;
                 }
-                audio_output_stream_fact(stream, snapshot_stream_id, expected_codec)
+                audio_output_stream_fact(stream, snapshot_stream_id, expected_codec).transpose()
             })
             .collect();
     }
@@ -1955,6 +1966,7 @@ fn selected_output_streams(
                     == Some(selected.provider_stream_index)
             })?;
             audio_output_stream_fact(stream, selected.snapshot_stream_id.clone(), expected_codec)
+                .transpose()
         })
         .collect()
 }
@@ -1963,16 +1975,21 @@ fn audio_output_stream_fact(
     stream: &Value,
     snapshot_stream_id: String,
     expected_codec: Option<&str>,
-) -> Option<AudioOutputStreamFact> {
+) -> Result<Option<AudioOutputStreamFact>, FfmpegError> {
     let codec = stream
         .get("codec_name")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
     if expected_codec.is_some_and(|expected| codec != expected) {
-        return None;
+        return Ok(None);
     }
-    Some(AudioOutputStreamFact {
+    let facts = voom_worker_protocol::AudioSampleFacts::from_ffprobe(stream)
+        .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))?;
+    Ok(Some(AudioOutputStreamFact {
+        sample_rate: facts.sample_rate,
+        sample_format: facts.sample_format,
+        bits_per_sample: facts.bits_per_sample,
         channel_layout: stream
             .get("channel_layout")
             .and_then(Value::as_str)
@@ -1993,7 +2010,7 @@ fn audio_output_stream_fact(
             commentary: disposition_bool(stream, "comment"),
         }),
         channels: stream.get("channels").and_then(Value::as_u64),
-    })
+    }))
 }
 
 fn audio_stream_values(json: &Value) -> impl Iterator<Item = &Value> {

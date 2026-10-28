@@ -1403,6 +1403,7 @@ fn transcode_audio_request(
             }],
         },
         audio: TranscodeAudioSettings {
+            lossless: None,
             compatibility: None,
             target_codec: target_codec.to_owned(),
             profile: AUDIO_PROFILE_DEFAULT.to_owned(),
@@ -1627,4 +1628,29 @@ async fn missing_audio_encoder_for_extraction_fails_before_input_access() {
     assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
     assert!(error.to_string().contains("encoder `libopus`"), "{error}");
     assert!(!Path::new(&request.output.path).exists());
+}
+
+#[tokio::test]
+async fn lossless_settings_on_lossy_target_fail_before_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"original media").await.unwrap();
+    let mut request =
+        transcode_audio_request(dir.path(), &input, audio_expected(&input).await, "aac");
+    request.audio.lossless = Some(voom_worker_protocol::LosslessAudioSettings::default());
+    let output_parent = dir.path().join("not-created");
+    request.output.path = output_parent
+        .join("audio.mkv")
+        .to_string_lossy()
+        .into_owned();
+    let error = handle_transcode_audio(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        error.to_string().contains("lossless audio settings"),
+        "{error}"
+    );
+    assert!(!output_parent.exists());
+    assert_eq!(tokio::fs::read(&input).await.unwrap(), b"original media");
 }

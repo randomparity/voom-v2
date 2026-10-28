@@ -1614,6 +1614,7 @@ fn transcode_audio_request(
                 .collect(),
         },
         audio: TranscodeAudioSettings {
+            lossless: None,
             compatibility: None,
             target_codec: target_codec.to_owned(),
             profile: voom_worker_protocol::AUDIO_PROFILE_DEFAULT.to_owned(),
@@ -2355,7 +2356,8 @@ fn ac3_output_verifiers_reject_missing_or_inconsistent_layouts() {
     let sources = audio_facts_from_probe(&serde_json::json!({"streams":[
         {"index":1,"codec_type":"audio","codec_name":"flac","channels":6,
          "channel_layout":"5.1","disposition":{"default":0}}
-    ]}));
+    ]}))
+    .unwrap();
     let request = transcode_audio_request(dir.path(), &[1], "ac3");
     let mut probe = AudioOutputProbe {
         container: "mkv".to_owned(),
@@ -2363,6 +2365,9 @@ fn ac3_output_verifiers_reject_missing_or_inconsistent_layouts() {
         output_language: None,
         output_title: None,
         selected_output_streams: vec![AudioOutputStreamFact {
+            sample_rate: None,
+            sample_format: None,
+            bits_per_sample: None,
             snapshot_stream_id: "stream-1".to_owned(),
             output_provider_stream_index: 1,
             codec: "ac3".to_owned(),
@@ -2438,4 +2443,51 @@ async fn ac3_synthesis_rejects_unsupported_target_before_probing() {
         );
         assert!(!dir.path().join("out").exists());
     }
+}
+
+#[test]
+fn audio_probe_collects_integer_sample_facts() {
+    let json = serde_json::json!({"streams":[
+        {"index":0,"codec_type":"audio","codec_name":"pcm_s24le", "sample_rate":"48000",
+         "sample_fmt":"s32","bits_per_raw_sample":"24","bits_per_sample":24,
+         "channels":2,"channel_layout":"stereo"}
+    ]});
+    let sources = audio_facts_from_probe(&json).unwrap();
+    assert_eq!(sources[0].sample_rate, Some(48_000));
+    assert_eq!(sources[0].sample_format.as_deref(), Some("s32"));
+    assert_eq!(sources[0].bits_per_sample, Some(24));
+    let selected = [AudioStreamRef {
+        snapshot_stream_id: "source".to_owned(),
+        provider_stream_index: 0,
+    }];
+    let outputs = selected_output_streams(
+        &audio_stream_values(&json).collect::<Vec<_>>(),
+        &selected,
+        None,
+    )
+    .unwrap();
+    assert_eq!(outputs[0].sample_rate, Some(48_000));
+    assert_eq!(outputs[0].sample_format.as_deref(), Some("s32"));
+    assert_eq!(outputs[0].bits_per_sample, Some(24));
+    let mut legacy_unknown = json.clone();
+    legacy_unknown["streams"][0]["channels"] = serde_json::json!(0);
+    legacy_unknown["streams"][0]["channel_layout"] = serde_json::json!("unknown");
+    let legacy = audio_facts_from_probe(&legacy_unknown).unwrap();
+    assert_eq!(
+        legacy[0].channels,
+        Some(0),
+        "sample collection preserves existing lossy channel facts"
+    );
+    assert_eq!(legacy[0].channel_layout.as_deref(), Some("unknown"));
+    let mut malformed = json;
+    malformed["streams"][0]["bits_per_sample"] = serde_json::json!(40);
+    assert!(audio_facts_from_probe(&malformed).is_err());
+    assert!(
+        selected_output_streams(
+            &audio_stream_values(&malformed).collect::<Vec<_>>(),
+            &selected,
+            None
+        )
+        .is_err()
+    );
 }

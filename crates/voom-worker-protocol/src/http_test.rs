@@ -937,7 +937,7 @@ async fn handshake_rejects_legacy_protocol_three_offer_on_current_http_server() 
         error,
         ProtocolError::UnsupportedProtocolVersion {
             offered: 3,
-            expected: 4
+            expected: 5
         }
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);

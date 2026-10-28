@@ -64,6 +64,21 @@ rather than silently dropping a field:
   change requires restoring the pre-upgrade database snapshot
   (see `docs/runbooks/migration-rollback.md`).
 
+**Audio facts / protocol 5 (ADR 0114).** Optional lossless settings and observed
+sample rate/format/precision are additive: old settings/result JSON remains
+readable. Persisted `media_dispatch.schema` is separately exact and advances
+from 4 to 5 with the worker protocol. Before swapping binaries, quiesce workflow
+ticket creation and complete unfinished schema-4 media work, or explicitly
+operator-disposition it using the byte-touching drain procedure below. The
+stored envelope set includes probe, transcode audio/video, extract audio, remux,
+backup and artifact verification; none accepts a schema-4 execution envelope in
+protocol 5. Quiesce writers before the drain so they cannot replenish old work.
+This note authorizes no operational drain or database deletion by itself.
+Deploy the coordinated control-plane/node-agent/worker binaries before new
+settings/facts are written. Rollback after new writes requires restoring the
+pre-upgrade database snapshot. FLAC/ALAC/PCM encoding targets remain unimplemented
+by this prerequisite; see issues #761–#763.
+
 `tickets.payload` carries a breaking change under this contract (ADR 0069): a
 byte-touching workflow ticket now requires a `declared_artifact_access` declaration, and a
 row written before that binary no longer decodes. No backfill is possible — the

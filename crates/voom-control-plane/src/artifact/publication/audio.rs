@@ -1230,6 +1230,17 @@ async fn bind_synthesis_in_tx(
     .await
 }
 
+fn optional_audio_output_fact<T: serde::de::DeserializeOwned>(
+    stream: &Value,
+    field: &str,
+) -> Result<Option<T>, VoomError> {
+    match stream.get(field) {
+        None => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| VoomError::database(format!("normalized audio {field}: {error}"))),
+    }
+}
+
 fn observed_synthesis_companions(
     record: &voom_store::repo::media::audio_synthesis_operations::AudioSynthesisOperationRecord,
     stage: &AudioStage,
@@ -1296,6 +1307,9 @@ fn observed_synthesis_companions(
         let forced = flag("forced")?;
         let commentary = flag("commentary")?;
         let facts = voom_worker_protocol::AudioOutputStreamFact {
+            sample_rate: optional_audio_output_fact(stream, "sample_rate")?,
+            sample_format: optional_audio_output_fact(stream, "sample_format")?,
+            bits_per_sample: optional_audio_output_fact(stream, "bits_per_sample")?,
             channel_layout: stream
                 .get("channel_layout")
                 .and_then(Value::as_str)

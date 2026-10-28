@@ -530,3 +530,26 @@ fn rejects_malformed_top_level_sections() {
         ));
     }
 }
+
+#[test]
+fn normalizes_audio_sample_evidence_without_guessing() {
+    let raw = serde_json::json!({"streams":[
+        {"index":0,"codec_type":"audio","sample_rate":"48000","sample_fmt":"s32",
+         "bits_per_raw_sample":"24","bits_per_sample":0,"channels":2,"channel_layout":"stereo"},
+        {"index":1,"codec_type":"audio","sample_fmt":"fltp","bits_per_sample":0}
+    ]});
+    let result = normalize_ffprobe_json(raw.clone(), "8", "2026-10-28T00:00:00Z");
+    assert!(result.is_ok(), "{result:?}");
+    let Ok(snapshot) = result else {
+        return;
+    };
+    assert_eq!(snapshot["streams"][0]["sample_rate"], 48000);
+    assert_eq!(snapshot["streams"][0]["sample_format"], "s32");
+    assert_eq!(snapshot["streams"][0]["bits_per_sample"], 24);
+    assert_eq!(snapshot["streams"][1]["sample_format"], "fltp");
+    assert!(snapshot["streams"][1].get("bits_per_sample").is_none());
+    assert_eq!(snapshot["raw"]["ffprobe_json"], raw);
+    let mut malformed = raw;
+    malformed["streams"][0]["bits_per_sample"] = serde_json::json!(40);
+    assert!(normalize_ffprobe_json(malformed, "8", "now").is_err());
+}

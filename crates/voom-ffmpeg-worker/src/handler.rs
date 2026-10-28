@@ -1084,6 +1084,14 @@ fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), Tran
 fn validate_transcode_audio_contract(
     request: &TranscodeAudioRequest,
 ) -> Result<(), TranscodeAudioError> {
+    if request.audio.lossless.is_some() {
+        return Err(config_invalid(
+            "request",
+            "lossless audio settings require an implemented lossless target; \
+             currently supported targets are lossy"
+                .to_owned(),
+        ));
+    }
     if request.output.container != "mkv" {
         return Err(config_invalid(
             "request",

@@ -12,6 +12,7 @@
 //! capability descriptors shared across the process boundary. Worker execution
 //! and control-plane scheduling remain in their respective crates.
 
+mod audio_facts;
 pub mod encoder_caps;
 pub mod http;
 pub mod low_level;
@@ -20,6 +21,10 @@ pub mod startup;
 pub mod transport;
 pub mod video_acceleration;
 mod wire;
+
+pub use audio_facts::{
+    AudioSampleFacts, AudioSampleFactsError, LosslessAudioSettings, ResolvedLosslessAudioSettings,
+};
 
 pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
 pub use http::{
