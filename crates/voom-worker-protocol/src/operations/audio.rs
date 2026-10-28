@@ -10,6 +10,7 @@ pub const TRANSCODE_AUDIO_CODEC_OPUS: &str = "opus";
 pub const TRANSCODE_AUDIO_CODEC_EAC3: &str = "eac3";
 pub const TRANSCODE_AUDIO_CODEC_AC3: &str = "ac3";
 pub const TRANSCODE_AUDIO_CODEC_FLAC: &str = "flac";
+pub const TRANSCODE_AUDIO_CODEC_ALAC: &str = "alac";
 /// The only audio quality profile defined so far. The control plane emits this
 /// value for every transcode-audio request; see ADR 0020.
 pub const AUDIO_PROFILE_DEFAULT: &str = "default";
@@ -25,7 +26,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Returns true when `codec` is an audio codec the `transcode audio` operation
-/// supports (aac, opus, eac3, ac3, or flac).
+/// supports (aac, opus, eac3, ac3, flac, or alac).
 #[must_use]
 pub fn is_supported_transcode_audio_codec(codec: &str) -> bool {
     matches!(
@@ -35,6 +36,7 @@ pub fn is_supported_transcode_audio_codec(codec: &str) -> bool {
             | TRANSCODE_AUDIO_CODEC_EAC3
             | TRANSCODE_AUDIO_CODEC_AC3
             | TRANSCODE_AUDIO_CODEC_FLAC
+            | TRANSCODE_AUDIO_CODEC_ALAC
     )
 }
 
