@@ -1449,3 +1449,528 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
         }
     }
 }
+
+async fn flac_command(command: &mut tokio::process::Command) -> std::process::Output {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        command.kill_on_drop(true).output(),
+    )
+    .await
+    .expect("generated FLAC command timed out")
+    .expect("required media tool missing");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+async fn generate_flac_source(
+    preflight: &voom_ffmpeg_worker::FfmpegPreflight,
+    path: &Path,
+    layout: &str,
+    bits: u8,
+    rate: u32,
+) {
+    let channels = match layout {
+        "mono" => 1,
+        "stereo" => 2,
+        "7.1" => 8,
+        _ => 6,
+    };
+    let expression = (0..channels)
+        .map(|n| format!("0.05*sin(2*PI*{}*t)", 200 + n * 100))
+        .collect::<Vec<_>>()
+        .join("|");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=16x16:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("aevalsrc={expression}:s={rate}:c={layout}"),
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "0.1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:v",
+                "ffv1",
+                "-c:a",
+                "flac",
+                "-sample_fmt:a:0",
+                if bits == 16 { "s16" } else { "s32" },
+                "-bits_per_raw_sample:a:0",
+                &bits.to_string(),
+                "-metadata:s:a:0",
+                "language=eng",
+                "-metadata:s:a:0",
+                "title=Main",
+                "-disposition:a:0",
+                "default+forced+comment+hearing_impaired+visual_impaired",
+                "-metadata:s:a:1",
+                "language=jpn",
+                "-disposition:a:1",
+                "0",
+                "-metadata",
+                "title=FLAC source",
+            ])
+            .arg(path),
+    )
+    .await;
+}
+
+async fn flac_request(
+    input: &Path,
+    output: &Path,
+    synthesis: Option<u64>,
+) -> TranscodeAudioRequest {
+    TranscodeAudioRequest {
+        input: TranscodeAudioInput {
+            path: input.to_string_lossy().into_owned(),
+            expected: audio_expected(input).await,
+        },
+        output: TranscodeAudioOutput {
+            staging_root: output.parent().unwrap().to_string_lossy().into_owned(),
+            path: output.to_string_lossy().into_owned(),
+            container: "mkv".to_owned(),
+            overwrite: false,
+        },
+        selection: TranscodeAudioSelection {
+            selected_streams: vec![AudioStreamRef {
+                snapshot_stream_id: "flac-selected".to_owned(),
+                provider_stream_index: 1,
+            }],
+        },
+        audio: TranscodeAudioSettings {
+            lossless: None,
+            compatibility: None,
+            target_codec: "flac".to_owned(),
+            profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+            add_track: synthesis.is_some(),
+            target_channels: synthesis,
+        },
+    }
+}
+
+async fn flac_physical_probe(ffprobe: &Path, path: &Path) -> serde_json::Value {
+    let output = flac_command(
+        tokio::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-show_packets",
+                "-show_data_hash",
+                "sha256",
+                "-of",
+                "json",
+            ])
+            .arg(path),
+    )
+    .await;
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn assert_flac_preservation(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+    synthesis: bool,
+) {
+    let streams = after["streams"].as_array().unwrap();
+    let target = &streams[if synthesis { 3 } else { 1 }];
+    assert_eq!(after["format"]["tags"]["title"], "FLAC source");
+    assert_eq!(target["codec_name"], "flac");
+    assert_eq!(target["tags"]["language"], "eng");
+    assert_eq!(target["tags"]["title"], "Main");
+    assert_eq!(target["disposition"]["default"], u8::from(!synthesis));
+    assert_eq!(target["disposition"]["forced"], 1);
+    assert_eq!(target["disposition"]["comment"], 1);
+    let mut expected_disposition = before["streams"][1]["disposition"].clone();
+    assert_eq!(expected_disposition["hearing_impaired"], 1);
+    assert_eq!(expected_disposition["visual_impaired"], 1);
+    expected_disposition["default"] = serde_json::json!(u8::from(!synthesis));
+    assert_eq!(target["disposition"], expected_disposition);
+    assert_eq!(streams.len(), if synthesis { 4 } else { 3 });
+    for index in if synthesis { vec![0, 1, 2] } else { vec![0, 2] } {
+        for field in ["codec_name", "tags", "disposition"] {
+            assert_eq!(
+                before["streams"][index][field], streams[index][field],
+                "copied stream {index} {field}"
+            );
+        }
+        let hashes: Vec<Vec<_>> = [before, after]
+            .into_iter()
+            .map(|probe| {
+                probe["packets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|packet| packet["stream_index"] == index)
+                    .map(|packet| &packet["data_hash"])
+                    .collect()
+            })
+            .collect();
+        assert!(!hashes[0].is_empty());
+        assert_eq!(hashes[0], hashes[1], "copied packet payloads {index}");
+    }
+}
+
+#[tokio::test]
+async fn flac_real_worker_preserves_integer_samples_and_streams() {
+    use voom_test_support::audio_samples::canonical_decoded_audio;
+    let preflight = preflight_from_process_env().unwrap();
+    for layout in ["mono", "stereo", "5.1", "5.1(side)", "7.1"] {
+        for bits in [16, 24] {
+            for rate in [44_100, 96_000] {
+                let dir = tempfile::tempdir().unwrap();
+                let input = dir.path().join("source.mkv");
+                let output = dir.path().join("encoded.mkv");
+                generate_flac_source(&preflight, &input, layout, bits, rate).await;
+                let request = flac_request(&input, &output, None).await;
+                let result = synthesize_through_worker(&request).await;
+                assert_eq!(
+                    audio_expected(&input).await,
+                    request.input.expected,
+                    "source bytes immutable"
+                );
+                assert_eq!(result.selected_snapshot_stream_ids, ["flac-selected"]);
+                let reported = &result.selected_output_streams[0];
+                assert_eq!(reported.sample_rate, Some(rate));
+                assert_eq!(reported.bits_per_sample, Some(bits));
+                assert_eq!(reported.channel_layout.as_deref(), Some(layout));
+                assert_eq!(reported.output_provider_stream_index, 1);
+                let source = canonical_decoded_audio(
+                    &preflight.ffmpeg_path,
+                    &preflight.ffprobe_path,
+                    &input,
+                    1,
+                )
+                .await
+                .unwrap();
+                let actual = canonical_decoded_audio(
+                    &preflight.ffmpeg_path,
+                    &preflight.ffprobe_path,
+                    &output,
+                    1,
+                )
+                .await
+                .unwrap();
+                source.compare_samples(&actual).unwrap();
+                assert_eq!(source.facts, actual.facts);
+                assert!(
+                    source.samples.iter().any(|byte| *byte != 0),
+                    "fixture cannot be silence"
+                );
+                let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+                let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
+                assert_flac_preservation(&before, &after, false);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn flac_real_worker_downmix_preserves_originals() {
+    use voom_test_support::audio_samples::canonical_decoded_audio;
+    let preflight = preflight_from_process_env().unwrap();
+    for (layout, bits, target) in [("7.1", 24, 6), ("5.1(side)", 16, 2), ("stereo", 24, 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("downmix.mkv");
+        let reference = dir.path().join("reference.mkv");
+        generate_flac_source(&preflight, &input, layout, bits, 48_000).await;
+        let request = flac_request(&input, &output, Some(target)).await;
+        let result = synthesize_through_worker(&request).await;
+        assert_eq!(audio_expected(&input).await, request.input.expected);
+        assert_eq!(result.selected_snapshot_stream_ids, ["flac-selected"]);
+        assert_eq!(
+            result.selected_output_streams[0].output_provider_stream_index,
+            3
+        );
+        assert_eq!(result.selected_output_streams[0].default, Some(false));
+        flac_command(
+            tokio::process::Command::new(&preflight.ffmpeg_path)
+                .args(["-v", "error", "-i"])
+                .arg(&input)
+                .args([
+                    "-map",
+                    "0:1",
+                    "-ac",
+                    &target.to_string(),
+                    "-c:a",
+                    "flac",
+                    "-sample_fmt",
+                    if bits == 16 { "s16" } else { "s32" },
+                    "-bits_per_raw_sample",
+                    &bits.to_string(),
+                ])
+                .arg(&reference),
+        )
+        .await;
+        let expected = canonical_decoded_audio(
+            &preflight.ffmpeg_path,
+            &preflight.ffprobe_path,
+            &reference,
+            0,
+        )
+        .await
+        .unwrap();
+        let actual =
+            canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &output, 3)
+                .await
+                .unwrap();
+        expected.compare_samples(&actual).unwrap();
+        assert_eq!(actual.facts.channels, u32::try_from(target).unwrap());
+        assert_eq!(actual.facts.bits_per_sample, bits);
+        let source =
+            canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &input, 1)
+                .await
+                .unwrap();
+        let retained =
+            canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &output, 1)
+                .await
+                .unwrap();
+        source.compare_samples(&retained).unwrap();
+        assert!(
+            source.compare_samples(&actual).is_err(),
+            "downmix is a transform, not archival equality"
+        );
+        let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+        let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
+        assert_flac_preservation(&before, &after, true);
+        for target in [0, 3, 8] {
+            let mut invalid =
+                flac_request(&input, &dir.path().join("rejected.mkv"), Some(target)).await;
+            invalid.audio.target_channels = Some(target);
+            assert!(
+                handle_transcode_audio(&invalid, &ffmpeg_config(&preflight))
+                    .await
+                    .is_err()
+            );
+            assert!(!Path::new(&invalid.output.path).exists());
+        }
+    }
+}
+
+#[tokio::test]
+async fn flac_integer_wave_converts_to_mkv() {
+    use voom_test_support::audio_samples::canonical_decoded_audio;
+    let preflight = preflight_from_process_env().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for bits in [16_u16, 24] {
+        let input = dir.path().join(format!("source-{bits}.wav"));
+        let output = dir.path().join(format!("flac-{bits}.mkv"));
+        let limit = 1_i32 << (bits - 1);
+        let samples: Vec<_> = [-limit, limit - 1, -1, 1, 0, 123, -123, 3]
+            .into_iter()
+            .cycle()
+            .take(256)
+            .collect();
+        let data: Vec<_> = samples
+            .iter()
+            .flat_map(|value| value.to_le_bytes()[..usize::from(bits / 8)].to_vec())
+            .collect();
+        let mut fmt = Vec::new();
+        for value in [0xfffe_u16, 2] {
+            fmt.extend(value.to_le_bytes());
+        }
+        fmt.extend(48_000_u32.to_le_bytes());
+        fmt.extend((48_000_u32 * 2 * u32::from(bits / 8)).to_le_bytes());
+        for value in [2 * (bits / 8), bits, 22, bits] {
+            fmt.extend(value.to_le_bytes());
+        }
+        fmt.extend(3_u32.to_le_bytes());
+        fmt.extend([1, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113]);
+        let mut body = b"WAVEfmt ".to_vec();
+        body.extend(40_u32.to_le_bytes());
+        body.extend(fmt);
+        body.extend(b"data");
+        body.extend(u32::try_from(data.len()).unwrap().to_le_bytes());
+        body.extend(data);
+        let mut wave = b"RIFF".to_vec();
+        wave.extend(u32::try_from(body.len()).unwrap().to_le_bytes());
+        wave.extend(body);
+        tokio::fs::write(&input, wave).await.unwrap();
+        let mut request = flac_request(&input, &output, None).await;
+        request.selection.selected_streams[0].provider_stream_index = 0;
+        let result = synthesize_through_worker(&request).await;
+        assert_eq!(result.selected_output_streams[0].codec, "flac");
+        assert_eq!(audio_expected(&input).await, request.input.expected);
+        let original =
+            canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &input, 0)
+                .await
+                .unwrap();
+        let actual =
+            canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &output, 0)
+                .await
+                .unwrap();
+        let expected: Vec<_> = samples
+            .iter()
+            .flat_map(|v| (v << (32 - bits)).to_le_bytes())
+            .collect();
+        assert_eq!(
+            actual.samples, expected,
+            "integer extremes and low bits must survive encoding"
+        );
+        original.compare_samples(&actual).unwrap();
+        let floating = dir.path().join(format!("float-{bits}.wav"));
+        flac_command(
+            tokio::process::Command::new(&preflight.ffmpeg_path)
+                .args(["-nostdin", "-v", "error", "-i"])
+                .arg(&input)
+                .args(["-c:a", "pcm_f32le"])
+                .arg(&floating),
+        )
+        .await;
+        let mut invalid = flac_request(&floating, &dir.path().join("rejected.mkv"), None).await;
+        invalid.selection.selected_streams[0].provider_stream_index = 0;
+        let error = handle_transcode_audio(&invalid, &ffmpeg_config(&preflight))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("audio sample facts"), "{error}");
+        assert!(!Path::new(&invalid.output.path).exists());
+    }
+}
+
+#[tokio::test]
+async fn flac_real_worker_resolves_each_selected_stream() {
+    use voom_test_support::audio_samples::canonical_decoded_audio;
+    let preflight = preflight_from_process_env().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("flac.mkv");
+    generate_flac_source(&preflight, &input, "7.1", 24, 96_000).await;
+    let mut request = flac_request(&input, &output, None).await;
+    request.selection.selected_streams.push(AudioStreamRef {
+        snapshot_stream_id: "flac-second".to_owned(),
+        provider_stream_index: 2,
+    });
+    let result = synthesize_through_worker(&request).await;
+    assert_eq!(
+        result.selected_snapshot_stream_ids,
+        ["flac-selected", "flac-second"]
+    );
+    assert_eq!(result.selected_output_streams[0].sample_rate, Some(96_000));
+    assert_eq!(result.selected_output_streams[0].bits_per_sample, Some(24));
+    assert_eq!(result.selected_output_streams[1].sample_rate, Some(48_000));
+    assert_eq!(result.selected_output_streams[1].bits_per_sample, Some(16));
+    for index in [1, 2] {
+        let source = canonical_decoded_audio(
+            &preflight.ffmpeg_path,
+            &preflight.ffprobe_path,
+            &input,
+            index,
+        )
+        .await
+        .unwrap();
+        let actual = canonical_decoded_audio(
+            &preflight.ffmpeg_path,
+            &preflight.ffprobe_path,
+            &output,
+            index,
+        )
+        .await
+        .unwrap();
+        source.compare_samples(&actual).unwrap();
+        assert_eq!(source.facts, actual.facts);
+    }
+    assert_eq!(audio_expected(&input).await, request.input.expected);
+}
+
+#[tokio::test]
+async fn flac_real_worker_explicit_precision_widening_preserves_samples() {
+    use voom_test_support::audio_samples::canonical_decoded_audio;
+    let preflight = preflight_from_process_env().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("wide.mkv");
+    generate_flac_source(&preflight, &input, "stereo", 16, 48_000).await;
+    let mut request = flac_request(&input, &output, None).await;
+    request.audio.lossless = Some(voom_worker_protocol::LosslessAudioSettings {
+        bits_per_sample: Some(24),
+    });
+    let result = synthesize_through_worker(&request).await;
+    assert_eq!(result.selected_output_streams[0].bits_per_sample, Some(24));
+    let source =
+        canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &input, 1)
+            .await
+            .unwrap();
+    let actual =
+        canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &output, 1)
+            .await
+            .unwrap();
+    assert_eq!(source.facts.bits_per_sample, 16);
+    assert_eq!(actual.facts.bits_per_sample, 24);
+    source.compare_samples(&actual).unwrap();
+    assert_eq!(audio_expected(&input).await, request.input.expected);
+}
+
+#[tokio::test]
+async fn flac_preserves_accessibility_flags_without_default_forced_or_comment() {
+    use voom_test_support::audio_samples::canonical_decoded_audio;
+    let preflight = preflight_from_process_env().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let generated = dir.path().join("generated.mkv");
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("flac.mkv");
+    generate_flac_source(&preflight, &generated, "stereo", 16, 48_000).await;
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&generated)
+            .args([
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-c:a:0",
+                "wavpack",
+                "-sample_fmt:a:0",
+                "s16p",
+                "-disposition:a:0",
+                "hearing_impaired+visual_impaired",
+            ])
+            .arg(&input),
+    )
+    .await;
+    let request = flac_request(&input, &output, None).await;
+    synthesize_through_worker(&request).await;
+    let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+    let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
+    assert_eq!(before["streams"][1]["codec_name"], "wavpack");
+    assert_eq!(after["streams"][1]["codec_name"], "flac");
+    let expected = &before["streams"][1]["disposition"];
+    for flag in ["default", "forced", "comment"] {
+        assert_eq!(expected[flag], 0);
+    }
+    for flag in ["hearing_impaired", "visual_impaired"] {
+        assert_eq!(expected[flag], 1);
+    }
+    assert_eq!(&after["streams"][1]["disposition"], expected);
+    let source =
+        canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &input, 1)
+            .await
+            .unwrap();
+    let actual =
+        canonical_decoded_audio(&preflight.ffmpeg_path, &preflight.ffprobe_path, &output, 1)
+            .await
+            .unwrap();
+    source.compare_samples(&actual).unwrap();
+    assert_eq!(audio_expected(&input).await, request.input.expected);
+}

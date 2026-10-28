@@ -37,11 +37,12 @@ pub use operations::audio::{
     EXTRACT_AUDIO_CODEC, EXTRACT_AUDIO_CONTAINER, ExtractAudioContractError, ExtractAudioInput,
     ExtractAudioOutput, ExtractAudioOutputDescriptor, ExtractAudioOutputResult,
     ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus, TRANSCODE_AUDIO_CODEC_AAC,
-    TRANSCODE_AUDIO_CODEC_AC3, TRANSCODE_AUDIO_CODEC_EAC3, TRANSCODE_AUDIO_CODEC_OPUS,
-    TRANSCODE_AUDIO_CONTAINER, TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest,
-    TranscodeAudioResult, TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
-    audio_target_bitrate_kbps_per_channel, is_supported_transcode_audio_codec,
-    validate_extract_audio_request, validate_extract_audio_result,
+    TRANSCODE_AUDIO_CODEC_AC3, TRANSCODE_AUDIO_CODEC_EAC3, TRANSCODE_AUDIO_CODEC_FLAC,
+    TRANSCODE_AUDIO_CODEC_OPUS, TRANSCODE_AUDIO_CONTAINER, TranscodeAudioInput,
+    TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioSelection,
+    TranscodeAudioSettings, TranscodeAudioStatus, audio_target_bitrate_kbps_per_channel,
+    is_supported_transcode_audio_codec, validate_extract_audio_request,
+    validate_extract_audio_result,
 };
 pub use operations::backup::{BackUpFileRequest, BackUpFileResult, BackUpFileStatus};
 pub use operations::dispatch::{

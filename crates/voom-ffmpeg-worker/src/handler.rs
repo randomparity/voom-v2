@@ -1084,12 +1084,10 @@ fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), Tran
 fn validate_transcode_audio_contract(
     request: &TranscodeAudioRequest,
 ) -> Result<(), TranscodeAudioError> {
-    if request.audio.lossless.is_some() {
+    if request.audio.lossless.is_some() && request.audio.target_codec != "flac" {
         return Err(config_invalid(
             "request",
-            "lossless audio settings require an implemented lossless target; \
-             currently supported targets are lossy"
-                .to_owned(),
+            "lossless audio settings require the FLAC target".to_owned(),
         ));
     }
     if request.output.container != "mkv" {
@@ -1101,15 +1099,10 @@ fn validate_transcode_audio_contract(
     if !voom_worker_protocol::is_supported_transcode_audio_codec(&request.audio.target_codec) {
         return Err(config_invalid(
             "request",
-            "transcode_audio target codec must be aac, opus, eac3, or ac3".to_owned(),
+            "transcode_audio target codec must be aac, opus, eac3, ac3, or flac".to_owned(),
         ));
     }
-    if voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
-        &request.audio.target_codec,
-        &request.audio.profile,
-    )
-    .is_none()
-    {
+    if request.audio.profile != voom_worker_protocol::AUDIO_PROFILE_DEFAULT {
         return Err(config_invalid(
             "request",
             format!(

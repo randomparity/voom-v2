@@ -370,7 +370,12 @@ impl Validator<'_> {
         if tokens.get(0..4).is_some_and(|prefix| {
             matches!(
                 prefix,
-                ["transcode", "audio", "to", "aac" | "opus" | "eac3" | "ac3"]
+                [
+                    "transcode",
+                    "audio",
+                    "to",
+                    "aac" | "opus" | "eac3" | "ac3" | "flac"
+                ]
             )
         }) {
             self.validate_optional_track_filter(statement, text, 4);
@@ -967,11 +972,11 @@ impl Validator<'_> {
             ExprAst::Identifier(value) | ExprAst::String(value) => value.value.as_str(),
             _ => "",
         };
-        if !matches!(value, "aac" | "opus" | "eac3" | "ac3") {
+        if !matches!(value, "aac" | "opus" | "eac3" | "ac3" | "flac") {
             self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 span,
-                "synthesize codec must be aac, opus, eac3, or ac3",
+                "synthesize codec must be aac, opus, eac3, ac3, or flac",
             );
         }
     }

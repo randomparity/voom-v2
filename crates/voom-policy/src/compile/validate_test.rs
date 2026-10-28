@@ -283,7 +283,7 @@ fn rejects_unsupported_transcode_shapes() {
             .contains(&"unsupported_transcode_shape".to_owned())
     );
     assert!(
-        codes("policy \"p\" { phase a { transcode audio to flac where language in [\"eng\"] } }",)
+        codes("policy \"p\" { phase a { transcode audio to mp3 where language in [\"eng\"] } }",)
             .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
@@ -968,6 +968,16 @@ fn ac3_transcode_and_downmix_synthesis_compile() {
     for source in [
         "policy \"p\" { phase a { transcode audio to ac3 } }",
         "policy \"p\" { phase a { synthesize audio from channels >= 8 { codec ac3 channels 6 } } }",
+    ] {
+        assert!(compile_policy(source).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn flac_transcode_and_downmix_synthesis_compile() {
+    for source in [
+        "policy \"p\" { phase a { transcode audio to flac } }",
+        "policy \"p\" { phase a { synthesize audio from channels >= 8 { codec flac channels 6 } } }",
     ] {
         assert!(compile_policy(source).is_ok(), "{source}");
     }

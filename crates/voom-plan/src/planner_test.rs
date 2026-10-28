@@ -4389,3 +4389,37 @@ fn ac3_policy_plans_transcode_and_synthesis_with_stable_identity() {
         );
     }
 }
+
+#[test]
+fn flac_policy_plans_transcode_synthesis_and_noop() {
+    for (operation, source_codec, expected_status) in [
+        ("transcode audio to flac", "pcm_s24le", NodeStatus::Planned),
+        ("transcode audio to flac", "flac", NodeStatus::NoOp),
+        (
+            "synthesize audio from channels >= 8 { codec flac channels 6 }",
+            "flac",
+            NodeStatus::Planned,
+        ),
+    ] {
+        let compiled = voom_policy::compile_policy(&format!(
+            "policy \"flac\" {{ phase audio {{ {operation} }} }}"
+        ))
+        .unwrap();
+        let mut source = audio_stream(1, source_codec, "eng", Some(false));
+        source["channels"] = serde_json::json!(8);
+        let input = snapshot_with_audio_streams(Some("mkv"), &[source]);
+        let planning = request(compiled.policy, input);
+        let first = generate_plan(planning.clone()).unwrap();
+        let second = generate_plan(planning).unwrap();
+        assert_eq!(first.nodes[0].status, expected_status);
+        assert_eq!(first.nodes[0].operation_payload["target_codec"], "flac");
+        assert_eq!(
+            first.nodes[0].operation_payload["source_media_snapshot_id"],
+            42
+        );
+        assert_eq!(
+            first.nodes[0].operation_payload,
+            second.nodes[0].operation_payload
+        );
+    }
+}

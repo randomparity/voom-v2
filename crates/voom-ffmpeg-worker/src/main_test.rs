@@ -63,6 +63,7 @@ fn preflight_with(
         opus_encoder: "libopus".to_owned(),
         ac3_encoder: "ac3".to_owned(),
         eac3_encoder: "eac3".to_owned(),
+        flac_encoder: "flac".to_owned(),
         matroska_muxer: "matroska".to_owned(),
         mp4_muxer: "mp4".to_owned(),
         ogg_muxer: "ogg".to_owned(),
@@ -177,6 +178,7 @@ fn videotoolbox_preflight_becomes_tagged_readiness_descriptor() {
         opus_encoder: "libopus".to_owned(),
         ac3_encoder: "ac3".to_owned(),
         eac3_encoder: "eac3".to_owned(),
+        flac_encoder: "flac".to_owned(),
         matroska_muxer: "matroska".to_owned(),
         mp4_muxer: "mp4".to_owned(),
         ogg_muxer: "ogg".to_owned(),
@@ -224,4 +226,5 @@ fn audio_encoder_availability_comes_from_preflight() {
     assert!(!config.has_audio_encoder("libopus"));
     assert!(config.has_audio_encoder("aac"));
     assert!(config.has_audio_encoder("eac3"));
+    assert!(config.has_audio_encoder("flac"));
 }

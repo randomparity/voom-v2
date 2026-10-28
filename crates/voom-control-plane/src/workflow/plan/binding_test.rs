@@ -999,3 +999,44 @@ fn recorded_staged_output_addresses_feed_verification_only() {
         "{verify_err}"
     );
 }
+
+#[test]
+fn flac_dispatch_preserves_target_and_selection() {
+    for synthesis in [false, true] {
+        let selection = TranscodeAudioSelection {
+            selected_streams: vec![AudioStreamRef {
+                snapshot_stream_id: "flac-selected".to_owned(),
+                provider_stream_index: 3,
+            }],
+        };
+        let settings = TranscodeAudioSettings {
+            lossless: None,
+            compatibility: None,
+            target_codec: "flac".to_owned(),
+            profile: "default".to_owned(),
+            add_track: synthesis,
+            target_channels: synthesis.then_some(2),
+        };
+        let value = render_media_dispatch_transcode_audio(
+            "file-001",
+            &location_source(),
+            audio_facts(),
+            selection.clone(),
+            settings.clone(),
+            StorageRootId(5),
+        )
+        .unwrap();
+        let MediaDispatch::TranscodeAudio(decoded) = decode_media_dispatch(&value).unwrap() else {
+            panic!("expected audio dispatch");
+        };
+        assert_eq!(decoded.settings, settings);
+        assert_eq!(decoded.selection, selection);
+        assert_eq!(decoded.schema, PROTOCOL_VERSION);
+        assert_eq!(decoded.output_container, "mkv");
+        assert_eq!(
+            decoded.output.provider_relative_locator.as_str(),
+            "file-001/Movie.audio-flac.mkv"
+        );
+        assert!(!decoded.output.overwrite);
+    }
+}
