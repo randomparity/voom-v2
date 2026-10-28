@@ -76,6 +76,7 @@ async fn run() -> Result<(), StartupDiagnostic> {
         .await
         .map_err(|error| database_diagnostic("open_control_plane_database", &error))?;
     let termination = termination_signal()?;
+    let recovery = voom_api::recovery::run(control_plane.clone());
     let router = router_with_control_plane(health_plane, control_plane);
     let transport_label = server_config.transport().label();
     let server = RunningServer::start(server_config, router)
@@ -87,12 +88,32 @@ async fn run() -> Result<(), StartupDiagnostic> {
         transport = transport_label
     );
     let termination_result = server
-        .shutdown_on(termination)
+        .shutdown_on(termination_with_recovery(termination, recovery))
         .await
         .map_err(|error| server_diagnostic(&error))?;
     termination_result?;
     tracing::info!(event = "shutdown_complete");
     Ok(())
+}
+
+async fn termination_with_recovery<T, R>(
+    termination: T,
+    recovery: R,
+) -> Result<(), StartupDiagnostic>
+where
+    T: Future<Output = Result<(), StartupDiagnostic>>,
+    R: Future<Output = ()>,
+{
+    tokio::pin!(termination);
+    tokio::pin!(recovery);
+    tokio::select! {
+        result = &mut termination => result,
+        () = &mut recovery => Err(StartupDiagnostic::new(
+            "supervise_remote_recovery",
+            ErrorCode::Internal.as_str(),
+            "remote recovery stopped unexpectedly; restart the API process",
+        )),
+    }
 }
 
 fn parse_server_config() -> Result<ServerConfig, StartupDiagnostic> {

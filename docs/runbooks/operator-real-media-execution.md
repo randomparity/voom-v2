@@ -14,6 +14,22 @@ stack below. The local helper requires Python 3.13 or newer, `jq`, `ffmpeg`,
 and output directories must be separate and must not contain one another.
 Choose input media and output retention before starting; promotion is add-only.
 
+The bundled API automatically recovers remote authority while its listener runs.
+It starts a recovery pass immediately, then waits five seconds after each pass;
+passes run serially with a thirty-second deadline. Expired exhausted scan-routing
+tickets fail their linked active scan sessions even when the owner remains healthy
+and the scan idle deadline has not elapsed. Restarting the API also repairs active
+sessions left behind by already-failed routing tickets. Recovery does not resume
+expired work or weaken owner fencing.
+
+Warnings `remote_recovery_failed` and `remote_recovery_timeout` carry a public error
+code and retry on the next cadence. During storage failure or contention, recovery
+has no unconditional wall-clock completion guarantee; investigate the database
+when these warnings persist. API shutdown cancels its current recovery pass, and
+the next start safely repeats recovery. Library users of `ControlPlane::open` or
+router constructors remain passive: explicitly poll `voom_api::recovery::run`
+under their service lifetime or invoke `remote_recover` themselves.
+
 ## Procedure
 
 All commands emit a single JSON envelope on stdout; logs go to stderr.

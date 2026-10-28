@@ -513,3 +513,43 @@ async fn intentional_completion_timeout_keeps_its_truthful_window_message() -> T
     );
     Ok(())
 }
+
+struct RecoveryLifetimeDrop(Arc<Notify>);
+
+impl Drop for RecoveryLifetimeDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn recovery_lifetime_is_dropped_on_unexpected_listener_exit() -> TestResult {
+    let listener_stop = Arc::new(Notify::new());
+    let stop = listener_stop.clone();
+    let server = RunningServer {
+        local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        handle: axum_server::Handle::new(),
+        task: tokio::spawn(async move {
+            stop.notified().await;
+            Ok(())
+        }),
+        shutdown_grace: Duration::from_secs(1),
+    };
+    let entered = Notify::new();
+    let dropped = Arc::new(Notify::new());
+    let signal = async {
+        let _guard = RecoveryLifetimeDrop(dropped.clone());
+        entered.notify_one();
+        std::future::pending::<()>().await;
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(server.shutdown_on(signal), async {
+            entered.notified().await;
+            listener_stop.notify_one();
+            dropped.notified().await;
+        })
+    })
+    .await?;
+    assert!(matches!(result, Err(super::ServerError::Stopped)));
+    Ok(())
+}
