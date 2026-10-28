@@ -984,7 +984,7 @@ fn audio_encoder_maps_supported_codecs_and_rejects_others() {
     assert_eq!(audio_encoder("opus").unwrap(), "libopus");
     assert_eq!(audio_encoder("eac3").unwrap(), "eac3");
     assert!(matches!(
-        audio_encoder("flac").unwrap_err(),
+        audio_encoder("mp3").unwrap_err(),
         FfmpegError::OutputFactsMismatch(_)
     ));
 }
@@ -2490,4 +2490,180 @@ fn audio_probe_collects_integer_sample_facts() {
         )
         .is_err()
     );
+}
+
+fn flac_source_json() -> Value {
+    serde_json::json!({"index":1,"codec_type":"audio","codec_name":"flac",
+        "sample_rate":"48000","sample_fmt":"s32","bits_per_raw_sample":"24",
+        "channels":6,"channel_layout":"5.1","disposition":{"default":0,"forced":0,"comment":0}})
+}
+
+#[tokio::test]
+async fn flac_rejects_bad_facts_before_output() {
+    let mut invalid_sources = Vec::new();
+    for field in [
+        "sample_rate",
+        "sample_fmt",
+        "bits_per_raw_sample",
+        "channels",
+        "channel_layout",
+    ] {
+        let mut source = flac_source_json();
+        source.as_object_mut().unwrap().remove(field);
+        invalid_sources.push(source);
+    }
+    for (field, value) in [
+        ("sample_rate", serde_json::json!(655_351)),
+        ("sample_fmt", serde_json::json!("fltp")),
+        ("bits_per_raw_sample", serde_json::json!(32)),
+        ("channels", serde_json::json!(10)),
+        ("channel_layout", serde_json::json!("stereo")),
+    ] {
+        let mut source = flac_source_json();
+        source[field] = value;
+        invalid_sources.push(source);
+    }
+    for bad in invalid_sources {
+        for synthesis in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut first = flac_source_json();
+            first["index"] = serde_json::json!(0);
+            let json =
+                serde_json::json!({"format":{"format_name":"matroska"},"streams":[first,bad]});
+            let ffprobe = stub_bin(
+                dir.path(),
+                "ffprobe",
+                &format!("#!/bin/sh\ncat <<'JSON'\n{json}\nJSON\n"),
+            );
+            let ffmpeg = stub_bin(
+                dir.path(),
+                "ffmpeg",
+                "#!/bin/sh\nfor last; do :; done\nprintf output > \"$last\"\n",
+            );
+            let config =
+                FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+            let mut request = transcode_audio_request(dir.path(), &[0, 1], "flac");
+            request.audio.add_track = synthesis;
+            request.audio.target_channels = synthesis.then_some(1);
+            let output = dir.path().join("out.mkv");
+            let error =
+                run_ffmpeg_transcode_audio(&config, &dir.path().join("in"), &output, &request)
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("FLAC")
+                    || error.to_string().contains("audio sample facts")
+                    || (synthesis && error.to_string().contains("strict downmix")),
+                "{bad}: {error}"
+            );
+            assert!(
+                !output.exists(),
+                "a bad later selection must prevent encoder startup"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn flac_settings_emit_compression_without_bitrate() {
+    let dir = tempfile::tempdir().unwrap();
+    let args_path = dir.path().join("args");
+    let source = flac_source_json();
+    let json = serde_json::json!({"format":{"format_name":"matroska"},"streams":[source]});
+    let ffprobe = stub_bin(
+        dir.path(),
+        "ffprobe",
+        &format!("#!/bin/sh\ncat <<'JSON'\n{json}\nJSON\n"),
+    );
+    let ffmpeg = stub_bin(
+        dir.path(),
+        "ffmpeg",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nfor last; do :; done\nprintf output > \"$last\"\n",
+            args_path.display()
+        ),
+    );
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+    let mut request = transcode_audio_request(dir.path(), &[1], "flac");
+    let output = dir.path().join("out");
+    run_ffmpeg_transcode_audio(&config, &dir.path().join("in"), &output, &request)
+        .await
+        .unwrap();
+    let args = std::fs::read_to_string(&args_path).unwrap();
+    for setting in [
+        "-c:a:0\nflac\n",
+        "-compression_level:a:0\n5\n",
+        "-sample_fmt:a:0\ns32\n",
+        "-bits_per_raw_sample:a:0\n24\n",
+        "-ar:a:0\n48000\n",
+        "-channel_layout:a:0\n5.1\n",
+    ] {
+        assert!(args.contains(setting), "missing {setting}: {args}");
+    }
+    assert!(
+        !args.contains("-b:a:"),
+        "lossless encoding has no target bitrate"
+    );
+    request.audio.lossless = Some(voom_worker_protocol::LosslessAudioSettings {
+        bits_per_sample: Some(16),
+    });
+    std::fs::remove_file(&output).unwrap();
+    let error = run_ffmpeg_transcode_audio(&config, &dir.path().join("in"), &output, &request)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("without reduction"), "{error}");
+    assert!(!output.exists());
+}
+
+#[test]
+fn flac_output_facts_must_match_source_or_transform() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = flac_source_json();
+    let sources = audio_facts_from_probe(&serde_json::json!({"streams":[source.clone()]})).unwrap();
+    for synthesis in [false, true] {
+        let mut request = transcode_audio_request(dir.path(), &[1], "flac");
+        request.audio.add_track = synthesis;
+        request.audio.target_channels = synthesis.then_some(2);
+        let mut actual = source.clone();
+        if synthesis {
+            actual["channels"] = serde_json::json!(2);
+            actual["channel_layout"] = serde_json::json!("stereo");
+        }
+        let fact = audio_output_stream_fact(&actual, "stream-1".to_owned(), Some("flac"))
+            .unwrap()
+            .unwrap();
+        let mut probe = AudioOutputProbe {
+            container: "mkv".to_owned(),
+            audio_codecs: vec!["flac".to_owned()],
+            selected_output_streams: vec![fact],
+            output_language: None,
+            output_title: None,
+        };
+        let verify = |probe: &AudioOutputProbe| {
+            if synthesis {
+                verify_synthesize_audio_probe(&sources, &request, 2, probe)
+            } else {
+                verify_transcode_audio_probe(
+                    &sources,
+                    &request.selection.selected_streams,
+                    &request,
+                    probe,
+                )
+            }
+        };
+        verify(&probe).unwrap();
+        let expected = probe.selected_output_streams[0].clone();
+        for field in ["rate", "precision", "layout", "format", "channels"] {
+            let output = &mut probe.selected_output_streams[0];
+            *output = expected.clone();
+            match field {
+                "rate" => output.sample_rate = Some(44_100),
+                "precision" => output.bits_per_sample = Some(16),
+                "layout" => output.channel_layout = Some("5.1(side)".to_owned()),
+                "format" => output.sample_format = Some("flt".to_owned()),
+                _ => output.channels = None,
+            }
+            assert!(verify(&probe).is_err(), "{field}, synthesis={synthesis}");
+        }
+    }
 }

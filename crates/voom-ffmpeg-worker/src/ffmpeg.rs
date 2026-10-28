@@ -25,7 +25,7 @@ pub const ALL_VIDEO_ENCODERS: [&str; 7] = [
 ];
 
 /// Audio encoders recognized by the worker; availability is checked per operation.
-pub const ALL_AUDIO_ENCODERS: [&str; 4] = ["aac", "libopus", "eac3", "ac3"];
+pub const ALL_AUDIO_ENCODERS: [&str; 5] = ["aac", "libopus", "eac3", "ac3", "flac"];
 
 const VAAPI_HEVC_ENCODER: &str = "hevc_vaapi";
 
@@ -1009,16 +1009,6 @@ pub async fn run_ffmpeg_transcode_audio(
     let source_streams = probe_audio_streams(config, input).await?;
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
     validate_ac3_source_facts(request, &selected)?;
-    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
-        &request.audio.target_codec,
-        &request.audio.profile,
-    )
-    .ok_or_else(|| {
-        FfmpegError::OutputFactsMismatch(format!(
-            "no audio bitrate defined for codec `{}` profile `{}`",
-            request.audio.target_codec, request.audio.profile
-        ))
-    })?;
     let mut command = Command::new(&config.ffmpeg_path);
     command
         .arg("-hide_banner")
@@ -1035,13 +1025,7 @@ pub async fn run_ffmpeg_transcode_audio(
         command
             .arg(format!("-c:a:{}", source.audio_ordinal))
             .arg(audio_encoder(&request.audio.target_codec)?);
-        let channels = source.channels.unwrap_or(2);
-        command
-            .arg(format!("-b:a:{}", source.audio_ordinal))
-            .arg(format!(
-                "{}k",
-                u64::from(bitrate_kbps_per_channel) * channels
-            ));
+        append_audio_encoding(&mut command, source.audio_ordinal, source, request)?;
         append_audio_metadata(&mut command, source.audio_ordinal, source);
     }
     command
@@ -1181,16 +1165,6 @@ fn append_synthesis_tracks(
     source_streams: &[SourceAudioFact],
     target_channels: u64,
 ) -> Result<(), FfmpegError> {
-    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
-        &request.audio.target_codec,
-        &request.audio.profile,
-    )
-    .ok_or_else(|| {
-        FfmpegError::OutputFactsMismatch(format!(
-            "no audio bitrate defined for codec `{}` profile `{}`",
-            request.audio.target_codec, request.audio.profile
-        ))
-    })?;
     // Companions are appended after the copied originals, so their output audio
     // ordinal starts at the original audio-stream count.
     let original_audio_count = source_streams.len();
@@ -1210,12 +1184,8 @@ fn append_synthesis_tracks(
             .arg(format!("-c:a:{out_ordinal}"))
             .arg(audio_encoder(&request.audio.target_codec)?)
             .arg(format!("-ac:a:{out_ordinal}"))
-            .arg(target_channels.to_string())
-            .arg(format!("-b:a:{out_ordinal}"))
-            .arg(format!(
-                "{}k",
-                u64::from(bitrate_kbps_per_channel) * target_channels
-            ));
+            .arg(target_channels.to_string());
+        append_audio_encoding(command, out_ordinal, source, request)?;
         append_audio_metadata(command, out_ordinal, source);
         if let Some(compatibility) = &request.audio.compatibility {
             command
@@ -2088,6 +2058,118 @@ fn audio_disposition_arg(source: &SourceAudioFact) -> Option<String> {
     })
 }
 
+fn resolve_flac_audio(
+    source: &SourceAudioFact,
+    request: &TranscodeAudioRequest,
+) -> Result<voom_worker_protocol::ResolvedLosslessAudioSettings, FfmpegError> {
+    if request.audio.profile != voom_worker_protocol::AUDIO_PROFILE_DEFAULT {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "FLAC requires the default profile".to_owned(),
+        ));
+    }
+    let facts = voom_worker_protocol::AudioSampleFacts {
+        sample_rate: source.sample_rate,
+        sample_format: source.sample_format.clone(),
+        bits_per_sample: source.bits_per_sample,
+        channels: source.channels,
+        channel_layout: source.channel_layout.clone(),
+    };
+    let mut resolved = request
+        .audio
+        .lossless
+        .clone()
+        .unwrap_or_default()
+        .resolve(&facts)
+        .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))?;
+    if resolved.sample_rate > 655_350 {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "FLAC supports sample rates up to 655350 Hz".to_owned(),
+        ));
+    }
+    if request.audio.add_track {
+        let (channels, layout) = match request.audio.target_channels {
+            Some(1) => (1, "mono"),
+            Some(2) => (2, "stereo"),
+            Some(6) => (6, "5.1"),
+            _ => {
+                return Err(FfmpegError::OutputFactsMismatch(
+                    "FLAC synthesis supports only mono/1, stereo/2 or 5.1/6 target channels"
+                        .to_owned(),
+                ));
+            }
+        };
+        layout.clone_into(&mut resolved.channel_layout);
+        resolved.channels = channels;
+    }
+    Ok(resolved)
+}
+
+fn append_audio_encoding(
+    command: &mut Command,
+    ordinal: usize,
+    source: &SourceAudioFact,
+    request: &TranscodeAudioRequest,
+) -> Result<(), FfmpegError> {
+    if request.audio.target_codec == "flac" {
+        let resolved = resolve_flac_audio(source, request)?;
+        command
+            .arg(format!("-compression_level:a:{ordinal}"))
+            .arg("5")
+            .arg(format!("-sample_fmt:a:{ordinal}"))
+            .arg(if resolved.bits_per_sample == 16 {
+                "s16"
+            } else {
+                "s32"
+            })
+            .arg(format!("-bits_per_raw_sample:a:{ordinal}"))
+            .arg(resolved.bits_per_sample.to_string())
+            .arg(format!("-ar:a:{ordinal}"))
+            .arg(resolved.sample_rate.to_string())
+            .arg(format!("-channel_layout:a:{ordinal}"))
+            .arg(resolved.channel_layout);
+    } else {
+        let bitrate = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
+            &request.audio.target_codec,
+            &request.audio.profile,
+        )
+        .ok_or_else(|| {
+            FfmpegError::OutputFactsMismatch(format!(
+                "no audio bitrate defined for codec `{}` profile `{}`",
+                request.audio.target_codec, request.audio.profile,
+            ))
+        })?;
+        let channels = if request.audio.add_track {
+            request.audio.target_channels.unwrap_or_default()
+        } else {
+            source.channels.unwrap_or(2)
+        };
+        command
+            .arg(format!("-b:a:{ordinal}"))
+            .arg(format!("{}k", u64::from(bitrate) * channels));
+    }
+    Ok(())
+}
+
+fn verify_flac_output(
+    source: &SourceAudioFact,
+    request: &TranscodeAudioRequest,
+    output: &AudioOutputStreamFact,
+) -> Result<(), FfmpegError> {
+    if request.audio.target_codec == "flac" {
+        let actual = voom_worker_protocol::AudioSampleFacts {
+            sample_rate: output.sample_rate,
+            sample_format: output.sample_format.clone(),
+            bits_per_sample: output.bits_per_sample,
+            channels: output.channels,
+            channel_layout: output.channel_layout.clone(),
+        };
+        resolve_flac_audio(source, request)?
+            .verify(&actual)
+            .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))?;
+    }
+    Ok(())
+}
+
 fn validate_ac3_source_facts(
     request: &TranscodeAudioRequest,
     sources: &[SourceAudioFact],
@@ -2120,6 +2202,7 @@ pub(crate) fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
         "opus" => Ok("libopus"),
         "eac3" => Ok("eac3"),
         "ac3" => Ok("ac3"),
+        "flac" => Ok("flac"),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unsupported audio codec: {other}"
         ))),
@@ -2190,6 +2273,7 @@ fn verify_transcode_audio_probe(
                 "AC-3 output channel/layout facts mismatch".to_owned(),
             ));
         }
+        verify_flac_output(source, request, output)?;
         verify_preserved_audio_metadata(source, output)?;
     }
     Ok(())
@@ -2227,6 +2311,7 @@ fn verify_synthesize_audio_probe(
         ));
     }
     for (source, output) in selected_sources.iter().zip(&probe.selected_output_streams) {
+        verify_flac_output(source, request, output)?;
         if output.default != Some(false) {
             return Err(FfmpegError::OutputFactsMismatch(
                 "synthesized audio must be non-default".to_owned(),

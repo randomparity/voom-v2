@@ -727,7 +727,7 @@ fn conformance_synthesize_audio_downmix_lowers_to_synthesize_operation() {
 fn conformance_synthesize_audio_rejects_bad_codec() {
     assert_eq!(
         compile_error_codes(
-            "policy \"p\" { phase a { synthesize audio from commentary { codec flac  channels 2 } } }"
+            "policy \"p\" { phase a { synthesize audio from commentary { codec mp3  channels 2 } } }"
         ),
         vec!["unknown_phase_statement_or_operation".to_owned()]
     );

@@ -85,3 +85,23 @@ No generalized codec framework or serialized comparison object is introduced.
   (#764) and real-library execution (#339). ADR 0114 owns settings/facts and the
   distinction between production output-fact verification and generated-test sample
   equality. Existing transaction/publication guards remain unchanged.
+
+## Threat model
+
+- Boundary inventory: no new transport or authority boundary. Existing authenticated
+  worker requests widen the target token to FLAC; untrusted media probe facts feed
+  integer settings; resolved settings and confined input/output paths feed argv;
+  observed output facts cross back into worker results and existing publication.
+- Actor model: authenticated operators choose policy/work and supply media. Media
+  bytes and their probe facts remain untrusted. The configured FFmpeg/FFprobe
+  executable and existing authenticated worker/owner deployment remain trusted.
+- Controls per boundary: existing HTTP authentication/lease checks govern requests;
+  closed target/default-profile validation and per-stream checked fact resolution
+  govern FLAC settings before process launch. Argv uses separate arguments, bounded
+  numeric values and an exact layout set. Existing staging confinement, option-like
+  path rejection, no-overwrite, source hash and process deadlines remain. Exact
+  output codec/rate/layout/precision verification precedes success; failure reports
+  diagnostic field/codec facts without adding credentials or subprocess logging.
+- Explicitly out of scope: replacing existing transport, process containment or
+  executable provisioning; library execution (#339) and ownership migration
+  (ADR 0050/#416–#425). No new permission, network listener or secret is introduced.

@@ -104,6 +104,7 @@ const ALL_ENCODERS: &str = concat!(
     " A..... aac AAC\n",
     " A..... libopus Opus\n",
     " A..... ac3 AC-3\n",
+    " A..... flac FLAC\n",
     " A..... eac3 E-AC-3\n",
 );
 const ALL_MUXERS: &str = "Muxers:\n E matroska Matroska\n E mp4 MP4\n E ogg Ogg\n";
@@ -285,13 +286,13 @@ fn non_executable_file(dir: &Path, name: &str) -> PathBuf {
 
 #[test]
 fn preflight_audio_encoders_are_optional() {
-    for missing in ["aac", "libopus", "eac3", "ac3"] {
+    for missing in ["aac", "libopus", "eac3", "ac3", "flac"] {
         let temp = tempfile::tempdir().unwrap();
         let ffmpeg = fake_ffmpeg_without(temp.path(), missing);
         let report = preflight_with_paths(&ffmpeg, &fake_ffprobe(temp.path())).unwrap();
         assert!(!report.has_encoder(missing));
         assert!(report.has_encoder("libx265"));
-        for other in ["aac", "libopus", "eac3", "ac3"] {
+        for other in ["aac", "libopus", "eac3", "ac3", "flac"] {
             assert_eq!(report.has_encoder(other), other != missing);
         }
     }

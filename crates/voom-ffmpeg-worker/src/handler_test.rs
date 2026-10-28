@@ -747,7 +747,7 @@ async fn transcode_audio_rejects_unsupported_codec_before_ffmpeg() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.mkv");
     tokio::fs::write(&input, b"input").await.unwrap();
-    let request = transcode_audio_request(dir.path(), &input, audio_expected(&input).await, "flac");
+    let request = transcode_audio_request(dir.path(), &input, audio_expected(&input).await, "mp3");
 
     let err = handle_transcode_audio(&request, &config(dir.path()))
         .await
@@ -1587,6 +1587,7 @@ async fn missing_audio_encoder_fails_before_input_access() {
         ("opus", "libopus"),
         ("eac3", "eac3"),
         ("ac3", "ac3"),
+        ("flac", "flac"),
     ] {
         let request = transcode_audio_request(
             dir.path(),

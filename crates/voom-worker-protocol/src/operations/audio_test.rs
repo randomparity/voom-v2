@@ -908,18 +908,20 @@ fn audio_contract_constants_pin_canonical_values() {
     assert_eq!(TRANSCODE_AUDIO_CODEC_OPUS, "opus");
     assert_eq!(TRANSCODE_AUDIO_CODEC_EAC3, "eac3");
     assert_eq!(TRANSCODE_AUDIO_CODEC_AC3, "ac3");
+    assert_eq!(TRANSCODE_AUDIO_CODEC_FLAC, "flac");
     assert_eq!(AUDIO_PROFILE_DEFAULT, "default");
     assert_eq!(EXTRACT_AUDIO_CONTAINER, "ogg");
     assert_eq!(EXTRACT_AUDIO_CODEC, "opus");
 }
 
 #[test]
-fn supported_transcode_audio_codecs_are_aac_opus_eac3_ac3() {
+fn supported_transcode_audio_codecs_include_flac() {
     assert!(is_supported_transcode_audio_codec("aac"));
     assert!(is_supported_transcode_audio_codec("opus"));
     assert!(is_supported_transcode_audio_codec("eac3"));
     assert!(is_supported_transcode_audio_codec("ac3"));
-    assert!(!is_supported_transcode_audio_codec("flac"));
+    assert!(is_supported_transcode_audio_codec("flac"));
+    assert!(!is_supported_transcode_audio_codec("mp3"));
     assert!(!is_supported_transcode_audio_codec(""));
 }
 
@@ -940,7 +942,7 @@ fn default_profile_resolves_per_channel_bitrate_per_codec() {
 }
 
 #[test]
-fn unsupported_codec_or_profile_has_no_target_bitrate() {
+fn lossless_codec_or_unsupported_profile_has_no_target_bitrate() {
     assert_eq!(
         audio_target_bitrate_kbps_per_channel("flac", AUDIO_PROFILE_DEFAULT),
         None
