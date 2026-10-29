@@ -134,6 +134,14 @@ class ManifestTests(HarnessFixture):
             harness.refuse_private_path_in_checkout(harness.REPO_ROOT / "docs" / "m.json")
         harness.refuse_private_path_in_checkout(self.base / "elsewhere" / "m.json")
 
+    def test_private_manifest_is_allowed_in_a_checkout_only_where_git_ignores_it(self):
+        repo = self.base / "clone"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        with self.assertRaises(harness.HarnessError):
+            harness.refuse_private_path_in_checkout(repo / ".agent" / "m.json")
+        (repo / ".gitignore").write_text(".agent/\n")
+        harness.refuse_private_path_in_checkout(repo / ".agent" / "m.json")
+
 
 class ReplayTests(HarnessFixture):
     def test_replay_records_fields_failures_and_leaves_media_unchanged(self):
@@ -156,7 +164,8 @@ class ReplayTests(HarnessFixture):
         self.assertEqual(rows["f0004"]["failure"]["code"], "transport_IncompleteRead")
         self.assertEqual(rows["f0005"]["outcome"], "probe_failed")
         self.assertEqual(rows["f0005"]["failure"]["code"], "malformed_result")
-        self.assertEqual(record["repetitions"][0]["logical_bytes_read"], (64 + 32 + 16 + 16) * 3)
+        # Completed whole-file reads only: observed 3, probe_failed 1 (hash), hash_failed 0.
+        self.assertEqual(record["repetitions"][0]["logical_bytes_read"], 64 * 3 + 16 + 8)
 
     def test_budget_stops_scheduling_files_that_do_not_fit(self):
         record = harness.capture(self.run_args(max_bytes=64 * 3 + 16 * 3))
@@ -220,6 +229,19 @@ class ContractTests(unittest.TestCase):
         leaked = {"schema": harness.SCHEMA, "corpus": {"root": "/srv/media"}, "build": {},
                   "host": {}, "parameters": {}, "repetitions": [], "not_measured": {}}
         self.assertIn("host path", harness.validate_run(leaked))
+
+    def test_validation_rejects_missing_identity_markers_and_failure_shape(self):
+        path = sorted(BASELINE_DIR.glob("*.json"))[0]
+        record = json.loads(path.read_text(encoding="utf-8"))
+        del record["build"]["harness_sha256"]
+        del record["not_measured"]["retries"]
+        row = record["repetitions"][0]["files"][0]
+        row["outcome"] = "hash_failed"
+        problems = harness.validate_run(record)
+        for expected in ("build harness_sha256", "not_measured", "file failure"):
+            self.assertIn(expected, problems)
+        del record["repetitions"][0]["workers"]
+        self.assertIn("repetition workers", harness.validate_run(record))
 
     def test_committed_baseline_runs_satisfy_the_record_contract(self):
         runs = sorted(BASELINE_DIR.glob("*.json"))

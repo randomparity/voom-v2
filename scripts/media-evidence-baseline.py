@@ -41,6 +41,9 @@ NETWORK_FILESYSTEMS = {
 # Every read the replayed sequence performs: one hash-worker pass plus the probe
 # worker's pre- and post-probe observation passes.
 READS_PER_FILE = 3
+# Whole-file reads a row completed, by outcome; a failed operation's partial read is not
+# counted here, and worker `rchar` cross-checks the total.
+READS_COMPLETED = {"observed": 3, "disagree": 3, "probe_failed": 1, "hash_failed": 0}
 # Source constants that define current behavior, read from the checkout so a
 # record always names the values of the build it measured.
 SOURCE_CONSTANTS = {
@@ -101,19 +104,21 @@ def read_constants(repo_root: Path) -> dict[str, int]:
 
 
 def refuse_private_path_in_checkout(output: Path) -> None:
-    """Private manifests hold host paths; keep them out of any Git worktree."""
-    parent = output.resolve().parent
-    parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["git", "-C", str(parent), "rev-parse", "--show-toplevel"],
+    """Private manifests hold host paths; refuse any Git worktree path Git would not ignore."""
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    inside = subprocess.run(
+        ["git", "-C", str(output.parent), "rev-parse", "--show-toplevel"],
         capture_output=True, text=True, check=False,
     )
-    if result.returncode != 0:
+    if inside.returncode != 0:
         return
-    top = Path(result.stdout.strip()).resolve()
-    if not parent.is_relative_to(top / ".agent"):
+    ignored = subprocess.run(
+        ["git", "-C", str(output.parent), "check-ignore", "-q", str(output)], check=False
+    )
+    if ignored.returncode != 0:
         raise HarnessError(
-            "private manifest must live outside the checkout or under its ignored .agent/"
+            "private manifest must live outside the checkout or at a path Git ignores"
         )
 
 
@@ -486,7 +491,9 @@ def run_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, A
         row["resident_bytes_before"] = residency[row["id"]]
     return {
         "index": index, "evicted": args.evict, "wall_seconds": round(wall, 6),
-        "logical_bytes_read": sum(entry["size_bytes"] for entry in files) * READS_PER_FILE,
+        "logical_bytes_read": sum(
+            row["size_bytes"] * READS_COMPLETED[row["outcome"]] for row in rows
+        ),
         "files": rows, "workers": usage, "host_counters": counters,
     }
 
@@ -540,6 +547,52 @@ def is_metric(value: Any) -> bool:
     return value == UNAVAILABLE or (isinstance(value, (int, float)) and not isinstance(value, bool))
 
 
+REQUIRED_KEYS = {
+    "corpus": {"label", "storage_class", "filesystem_type", "selected_ids", "skipped_budget_ids"},
+    "build": {"git_commit", "harness_sha256", "hash_worker_sha256", "probe_worker_sha256",
+              "ffprobe_version"},
+    "parameters": {*SOURCE_CONSTANTS, "concurrency", "evict", "repetitions"},
+}
+
+
+def row_problems(row: dict[str, Any]) -> list[str]:
+    problems = []
+    if not re.fullmatch(r"f\d{4}", str(row.get("id", ""))):
+        problems.append("file id")
+    for key in ("queue_delay_seconds", "hash_seconds", "probe_seconds", "resident_bytes_before"):
+        if not is_metric(row.get(key)):
+            problems.append(f"file {key}")
+    outcome = row.get("outcome")
+    if outcome not in READS_COMPLETED:
+        problems.append("file outcome")
+    failure = row.get("failure")
+    failed = outcome in ("hash_failed", "probe_failed")
+    if failed and (not isinstance(failure, dict) or set(failure) != {"stage", "class", "code"}):
+        problems.append("file failure")
+    if not failed and failure is not None:
+        problems.append("file failure")
+    return problems
+
+
+def repetition_problems(repetition: dict[str, Any]) -> list[str]:
+    problems = []
+    for key in ("wall_seconds", "logical_bytes_read"):
+        if not is_metric(repetition.get(key)):
+            problems.append(f"repetition {key}")
+    workers = repetition.get("workers") or {}
+    counters = repetition.get("host_counters") or {}
+    rows = repetition.get("files") or []
+    for name, present in (("workers", workers), ("host_counters", counters), ("files", rows)):
+        if not present:
+            problems.append(f"repetition {name}")
+    for worker in workers.values():
+        problems += [f"worker {key}" for key, value in worker.items() if not is_metric(value)]
+    problems += ["host counter" for value in counters.values() if not is_metric(value)]
+    for row in rows:
+        problems += row_problems(row)
+    return problems
+
+
 def validate_run(record: dict[str, Any]) -> list[str]:
     """Return every contract violation in a committed-safe run record."""
     problems = []
@@ -550,24 +603,14 @@ def validate_run(record: dict[str, Any]) -> list[str]:
             problems.append(f"missing {section}")
     if problems:
         return problems
-    for name in SOURCE_CONSTANTS:
-        if not isinstance(record["parameters"].get(name), int):
-            problems.append(f"parameter {name}")
+    for section, keys in REQUIRED_KEYS.items():
+        problems += [f"{section} {key}" for key in sorted(keys - set(record[section]))]
+    if set(record["not_measured"]) != set(NOT_MEASURED):
+        problems.append("not_measured")
+    if not record["repetitions"]:
+        problems.append("repetitions")
     for repetition in record["repetitions"]:
-        for key in ("wall_seconds", "logical_bytes_read"):
-            if not is_metric(repetition.get(key)):
-                problems.append(f"repetition {key}")
-        for worker in repetition["workers"].values():
-            problems += [f"worker {key}" for key, value in worker.items() if not is_metric(value)]
-        for row in repetition["files"]:
-            if not re.fullmatch(r"f\d{4}", row.get("id", "")):
-                problems.append("file id")
-            for key in ("queue_delay_seconds", "hash_seconds", "probe_seconds",
-                        "resident_bytes_before"):
-                if not is_metric(row.get(key)):
-                    problems.append(f"file {key}")
-            if row.get("outcome") not in ("observed", "disagree", "hash_failed", "probe_failed"):
-                problems.append("file outcome")
+        problems += repetition_problems(repetition)
     text = json.dumps(record)
     if re.search(r'"/|\\\\|/home/|/Users/|/mnt/', text):
         problems.append("host path")

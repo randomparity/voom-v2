@@ -55,7 +55,7 @@ Per-stage metrics (a stage is one worker operation kind or one harness phase):
 | CPU | `utime+stime+cutime+cstime` of each worker process; includes reaped children such as ffprobe | `/proc/<pid>/stat` |
 | Peak memory | `VmHWM` of each worker process; children excluded | `/proc/<pid>/status` |
 | Retries | Count of retried operations per file | harness |
-| Logical bytes | Bytes the application asked to read: size × reads performed. `rchar` cross-checks it. | harness, `/proc/<pid>/io` |
+| Logical bytes | Size × whole-file reads completed: 3 for `observed` or `disagree`, 1 for `probe_failed`, 0 for `hash_failed`. Partial reads of a failed operation are excluded; `rchar` cross-checks the total. | harness, `/proc/<pid>/io` |
 | Physical bytes | Bytes fetched from the storage layer by the worker (`read_bytes`). On network storage, host-wide interface and CIFS counters. | `/proc/<pid>/io`, `/proc/net/dev`, `/proc/fs/cifs/Stats` |
 | Outcome | `observed`, `disagree`, `hash_failed`, or `probe_failed`, with failure class and code only | harness |
 
@@ -212,6 +212,29 @@ python3 scripts/media-evidence-baseline.py run <private-dir>/network-manifest.js
   --output docs/media-evidence-baseline/<date>-network-corpus-as-found.json
 ```
 
-`<private-dir>` must be outside the checkout. The harness refuses a private manifest inside
-a Git worktree, except under the ignored `.agent/`. `just media-evidence-baseline-selftest`
+`<private-dir>` should be outside the checkout. The harness refuses a private manifest inside
+a Git worktree unless Git ignores that path. `just media-evidence-baseline-selftest`
 validates every committed record.
+
+## Record format
+
+Schema `media-evidence-baseline-run/1`, one JSON object per run. `validate_run` in the
+harness is the executable definition. It checks:
+
+- `corpus`: `label`, `filesystem_type`, `storage_class` (`local`, `network`, or
+  `unavailable`), `manifest_files`, `selected_ids`, and `skipped_budget_ids`.
+- `build`: `git_commit`, `git_changed_paths` (tracked paths only), `harness_sha256`,
+  `hash_worker_sha256`, `probe_worker_sha256`, and `ffprobe_version`.
+- `host`: `os`, `machine`, `cpu_count`, `memory_bytes`, and `python`.
+- `parameters`: the five source constants, `concurrency`, `reads_per_file`,
+  `max_bytes_per_repetition`, `repetitions`, and `evict`.
+- `repetitions[]`: `index`, `evicted`, `wall_seconds`, `logical_bytes_read`,
+  `workers.{hash,probe}`, and `host_counters`. Workers carry `cpu_seconds`,
+  `peak_rss_bytes`, `rchar`, and `read_bytes`; host counters carry `network_rx_bytes` and
+  `cifs_bytes_read`.
+- `files[]`: `id`, `size_bytes`, `ext`, `resident_bytes_before`, `queue_delay_seconds`,
+  `hash_seconds`, `probe_seconds`, `outcome`, and `failure`. `failure` is `null` or
+  `{stage, class, code}`.
+- `not_measured`: each unmeasured metric with its reason.
+
+Every metric is a number or the string `unavailable`.
