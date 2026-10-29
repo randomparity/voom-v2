@@ -3,7 +3,7 @@
 ## Authority and scope
 
 Frozen charter: issue #763, token `q763-8c9d96fa`, WORK:SCOPE
-[6482597768](https://github.com/randomparity/voom-v2/issues/763#issuecomment-6482597768).
+[6491651206](https://github.com/randomparity/voom-v2/issues/763#issuecomment-6491651206).
 The operator explicitly authorized building custom FFmpeg in Docker/Podman and
 running FFmpeg in that container. This is one coupled release unit: the two PCM
 targets cannot satisfy ADR 0114 without the mux capability, and that capability
@@ -95,6 +95,73 @@ timing that stock remuxing can otherwise replace with codec-derived rounding.
 Absent or nonpositive durations are not invented; default-off behavior is unchanged.
 Selected PCM outputs never use that exception: strict source/output validation
 must succeed. Tests include mixed selected and untouched unknown-layout PCM.
+
+## Installed owner-node launchers
+
+The operator explicitly approved deployment shims/tests and two additional branch
+review passes on 2026-10-29. The owner node agent intentionally clears worker
+environments and forwards only typed dependency executable paths. Direct launcher
+exports therefore do not establish node deployment. Preserve that boundary; add no
+agent configuration fields, production inheritance or control-plane byte access.
+
+An explicit `containers/ffmpeg/install.py --config ABS --destination ABS
+--source-witness ABS` command installs two executable shims for the existing
+`dependencies.ffmpeg_bin` and `dependencies.ffprobe_bin` fields. Run it as the
+worker account from its canonical granted working directory. Destination is a new
+private directory under an existing canonical, account-owned parent without group
+or other write permission. Refuse existing destinations (including symlinks),
+nonabsolute paths and invalid source configuration. Never overwrite an installation.
+The installed directory must be disjoint from every configured media grant,
+including neither nesting direction. Mode0700 cannot protect code from a decoder
+running as the same host user through a writable mount. Validate the exact copied
+configuration before any setup engine call; reject overlap and test both RO/RW
+grants. Harness installations live beside source/staging roots, outside their mounts.
+Create the directory mode0700 and files exclusively; remove only this newly owned
+installation on a handled failure. Process/host death can leave an incomplete
+private directory; report/refuse it on another install, never silently reuse it.
+
+Copy exactly the validated configuration and runtime.py bytes into that directory;
+configuration mode0600, runtime mode0600, two shims mode0700. No installed file
+references the source checkout. The host Python interpreter and engine executable
+remain explicitly provisioned, stable operator dependencies. Each /bin/sh shim
+exports literal shell-quoted configuration/context and execs the absolute Python
+interpreter with `-I`, the installed runtime and its fixed tool selector. Exec
+preserves the worker-established parent identity, cwd, binary streams and status.
+No extra supervising process, routing framework or arbitrary argument insertion.
+
+Freeze HOME and a minimal PATH formed from the selected engine executable's
+canonical directory and system utility directories. Support explicit DOCKER_CONFIG,
+XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_RUNTIME_DIR directory overrides. Capture
+only those supported variables when present; unset absent supported overrides in
+the shim. Reject nonempty other DOCKER_*, CONTAINER_*, CONTAINERS_*, PODMAN_*
+variables and STORAGE_DRIVER/STORAGE_OPTS at install, with instructions to use the
+supported configuration files or remove the override. Existing runtime steering
+rejection remains; no generic parent environment passthrough is introduced. HOME,
+Python, engine and copied configuration are trusted operator deployment inputs.
+
+Before reporting installed paths, run the existing complete witness/staging/UID
+setup check using the captured context and installed runtime. Then invoke both
+installed shims with only the caller PID in their environment and require successful
+version probes. Setup failures remove the newly created installation and report
+an actionable error. The installed configuration is operator-editable; rerun its
+setup check after changing configuration/shares. Reinstallation uses a new path
+and explicit dependency-path switch; native rollback remains unchanged.
+
+Required proof uses the real node-agent ChildSupervisor to start both real workers
+with existing typed dependency paths and env_clear. Execute PCM16/24 requests and
+probe their output through those children, compare canonical signed samples/facts,
+and shut down/reap both. Run from the granted staging cwd with owned generated
+fixtures and inherited test TMPDIR unchanged. Existing container-worker-check
+executes this named integration case on Linux Docker CI and all four local
+engine/platform arms. Portable tests cover literal quoting, absent environment,
+unsupported overrides, exclusive/private outputs, setup-failure cleanup, preserved
+PID/argv/streams/status and continued operation after deleting source runtime bytes.
+No node-agent production or dependency-manifest change is needed.
+
+The native FLAC/ALAC preservation helper retains its preexisting packet-payload
+assertions. Exact copied packet timestamps/durations are required for PCM operations.
+Stock native FFmpeg9.0.2 short-packet duration loss remains an adjacent investigation,
+not a generated-DURATION-tag exception or work absorbed by this change.
 
 ## Build and provenance
 

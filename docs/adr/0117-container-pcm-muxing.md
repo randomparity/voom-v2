@@ -30,6 +30,16 @@ retain native execution and build native amd64/arm64 images. Container execution
 only and source-label preserving. Require operator-prepared accessible roots;
 never relabel existing media or disable SELinux. No image publication is included.
 
+An explicit installer copies the bounded runtime and validated configuration into
+an account-private installation and creates two exec shims. Existing owner-node
+dependency executable fields select those shims. They restore only the supported
+explicit operator context under env_clear; no node-agent schema or production
+inheritance is added. Installed bytes survive source-worktree cleanup. Setup and
+both tools are checked before the installation reports success; existing targets
+are never overwritten. Installation directories are disjoint from all media grants,
+so a same-user decoder cannot modify the installed runtime through a writable mount.
+The operator approved this deployment repair on 2026-10-29.
+
 An operation guardian owns create/start/remove, watches a dedicated launcher
 lease while the launcher watches the pre-spawn caller identity with Linux pidfd
 or macOS kqueue NOTE_EXIT, and force-removes only its owned container on exit
