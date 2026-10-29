@@ -58,6 +58,11 @@ NOT_MEASURED = {
 }
 
 
+def build_identity() -> dict[str, Any]:
+    """This script's hash, with the fingerprint module it imports as the helper."""
+    return fingerprint.build_identity(Path(__file__), Path(_spec.origin))
+
+
 # ---- detection probability -------------------------------------------------------------
 
 
@@ -121,7 +126,7 @@ def run_probability(scratch_parent: Path, trials: int = TRIALS,
         shutil.rmtree(scratch)
     return {
         "schema": PROBABILITY_SCHEMA,
-        "build": fingerprint.build_identity(),
+        "build": build_identity(),
         "host": baseline.host_identity(),
         "parameters": {"trials": trials, "standard_errors": STANDARD_ERRORS,
                        "sample_bytes": fingerprint.SAMPLE_BYTES,
@@ -265,7 +270,7 @@ def run_ctime_probe(parents: list[Path], manifests: list[Path],
     check_outside_corpora(parents, manifest_roots(manifests))
     return {
         "schema": PROBE_SCHEMA,
-        "build": fingerprint.build_identity(),
+        "build": build_identity(),
         "host": baseline.host_identity(),
         "parameters": {"probe_bytes": PROBE_BYTES, "settle_seconds": settle,
                        "steps": list(STEPS)},

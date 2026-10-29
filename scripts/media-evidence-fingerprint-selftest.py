@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -101,6 +102,7 @@ class FingerprintTests(unittest.TestCase):
             write_file(path, 1 * MIB)
             before = {name: experiment.fingerprint(path, name)[0]
                       for name in ("meta", "meta-ctime", "ht64")}
+            time.sleep(experiment.CLOCK_TICK_SECONDS)
             os.chmod(path, 0o600)
             for name, value in before.items():
                 changed = experiment.fingerprint(path, name)[0] != value

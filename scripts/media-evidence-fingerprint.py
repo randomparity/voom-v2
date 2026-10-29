@@ -2,11 +2,12 @@
 """Experiment-only partial-fingerprint evaluation for issue #796.
 
 `oracle` runs mutation-oracle cases O1-O13 of docs/media-evidence-protocol.md against each
-stage-3 candidate (and, on request, #798's additions) on synthetic fixtures in a scratch directory it creates and removes. `run`
-measures each candidate's cost over a private #788 manifest and writes a committed-safe
-record. A `Fingerprint` is experiment evidence only: nothing here converts it into, stores it
-as, or compares it with production identity evidence. Records carry ids, booleans, counts and
-metrics, never digests, inode numbers, paths or file names.
+stage-3 candidate, and on request #798's additions, on synthetic fixtures in a scratch
+directory it creates and removes. `run` measures each candidate's cost over a private #788
+manifest and writes a committed-safe record. A `Fingerprint` is experiment evidence only:
+nothing here converts it into, stores it as, or compares it with production identity
+evidence. Records carry ids, booleans, counts and metrics, never digests, inode numbers,
+paths or file names.
 """
 
 from __future__ import annotations
@@ -70,6 +71,9 @@ LARGE_BYTES = 8 * MIB
 SHORT_BYTES = 100 * KIB
 OVERLAP_BYTES = 96 * KIB
 SIDECAR_BYTES = 4 * KIB
+# Kernels without fine-grained timestamps stamp ctime from a clock that ticks every few ms. A
+# construction waits this long so it never shares a tick with the observation before it.
+CLOCK_TICK_SECONDS = 0.02
 # An even whole second, so +100 ns and +900 ns share their 1 s and 2 s buckets (O7).
 BASE_MTIME_NS = 1_600_000_000 * 1_000_000_000
 BUMPED_MTIME_NS = BASE_MTIME_NS + 1_000_000_000
@@ -310,6 +314,7 @@ class Oracle:
                 expect_change: bool) -> tuple[str, str]:
         """Fingerprint, apply `change` (which returns the path to re-observe), and classify."""
         before, reference = self.fingerprint(path, candidate), reference_digest(path)
+        time.sleep(CLOCK_TICK_SECONDS)
         after_path = change(path)
         after = self.fingerprint(after_path, candidate)
         changed = reference_digest(after_path) != reference
@@ -454,6 +459,7 @@ class Oracle:
         path = self.large_fixture(directory)
         cache = {self.fingerprint(path, candidate): reference_digest(path)}
         offset = self.first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
+        time.sleep(CLOCK_TICK_SECONDS)
         edit_restoring_mtime(path, offset)
         cached = cache.get(self.fingerprint(path, candidate))
         current = reference_digest(path)
@@ -665,13 +671,15 @@ def candidate_parameters(candidates: list[str]) -> dict[str, dict[str, Any]]:
     }
 
 
-def build_identity() -> dict[str, Any]:
+def build_identity(script: Path = Path(__file__), helper: Path = Path(_spec.origin)
+                   ) -> dict[str, Any]:
+    """Commit, changed paths, and the hashes of the script that ran and the module it imports."""
     commit = baseline.git_output("rev-parse", "HEAD")
     return {
         "git_commit": commit.strip() if commit else UNAVAILABLE,
         "git_changed_paths": baseline.tracked_changes(),
-        "script_sha256": baseline.sha256_file(Path(__file__).resolve()),
-        "helper_sha256": baseline.sha256_file(Path(_spec.origin).resolve()),
+        "script_sha256": baseline.sha256_file(script.resolve()),
+        "helper_sha256": baseline.sha256_file(helper.resolve()),
     }
 
 

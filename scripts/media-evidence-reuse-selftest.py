@@ -61,6 +61,12 @@ class ProbabilityTests(unittest.TestCase):
     def test_scratch_directory_is_removed(self):
         self.assertEqual(list(Path(self.parent.name).iterdir()), [])
 
+    def test_record_names_this_script_and_its_fingerprint_helper(self):
+        build = self.record["build"]
+        sha = fingerprint.baseline.sha256_file
+        self.assertEqual(build["script_sha256"], sha(SCRIPTS / "media-evidence-reuse.py"))
+        self.assertEqual(build["helper_sha256"], sha(SCRIPTS / "media-evidence-fingerprint.py"))
+
 
 class ProbeTests(unittest.TestCase):
     @classmethod
@@ -72,7 +78,7 @@ class ProbeTests(unittest.TestCase):
         cls.parent.mkdir()
         cls.manifest = root / "manifest.json"
         cls.manifest.write_text(json.dumps({"root": str(cls.corpus)}))
-        cls.record = reuse.run_ctime_probe([cls.parent], [cls.manifest], settle=0.01)
+        cls.record = reuse.run_ctime_probe([cls.parent], [cls.manifest], settle=0.05)
         cls.steps = {step["step"]: step for step in cls.record["filesystems"][0]["steps"]}
 
     @classmethod
