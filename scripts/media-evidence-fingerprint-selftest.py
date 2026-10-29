@@ -56,7 +56,57 @@ class SamplePlanTests(unittest.TestCase):
         self.assertTrue(all(left[1] < right[0] for left, right in zip(plan, plan[1:])))
 
 
+class RandomPlanTests(unittest.TestCase):
+    """#798: seeded-random interior blocks, modelling a check against a stored block table."""
+
+    def interior_bytes(self, candidate, size, seed):
+        """Bytes read between the 64 KiB head and tail; adjacent blocks merge into one range."""
+        plan = experiment.sample_plan(candidate, size, seed)
+        self.assertEqual(plan[0][0], 0)
+        self.assertEqual(plan[-1][1], size)
+        for start, end in plan:
+            self.assertEqual(start % (64 * KIB), 0)
+            self.assertTrue(end % (64 * KIB) == 0 or end == size)
+        return sum(end - start for start, end in plan) - 2 * 64 * KIB
+
+    def test_blocks_are_aligned_distinct_and_inside_the_interior_pool(self):
+        self.assertEqual(self.interior_bytes("rnd64-i32", 8 * MIB, seed=7), 32 * 64 * KIB)
+        self.assertEqual(self.interior_bytes("rnd64-i8", 64 * MIB, seed=7), 8 * 64 * KIB)
+
+    def test_seed_reproduces_the_plan_and_another_seed_moves_it(self):
+        size = 64 * MIB
+        self.assertEqual(experiment.sample_plan("rnd64-i8", size, 1),
+                         experiment.sample_plan("rnd64-i8", size, 1))
+        self.assertNotEqual(experiment.sample_plan("rnd64-i8", size, 1),
+                            experiment.sample_plan("rnd64-i8", size, 2))
+
+    def test_sample_count_is_clamped_to_the_interior_pool(self):
+        self.assertEqual(experiment.interior_block_count(10 * 64 * KIB), 8)
+        self.assertEqual(self.interior_bytes("rnd64-i32", 10 * 64 * KIB, seed=3), 8 * 64 * KIB)
+        self.assertEqual(experiment.sample_plan("rnd64-i8", 100 * KIB, 3), [(0, 100 * KIB)])
+
+    def test_parameters_name_ctime_and_sampling_kind(self):
+        parameters = experiment.candidate_parameters(["ht64-i8", "rnd64-i8", "meta-ctime"])
+        self.assertEqual(parameters["ht64-i8"]["sampling"], "fixed")
+        self.assertEqual(parameters["rnd64-i8"]["sampling"], "random")
+        self.assertEqual(parameters["meta-ctime"]["sampling"], "none")
+        self.assertTrue(parameters["meta-ctime"]["ctime"])
+        self.assertFalse(parameters["ht64-i8"]["ctime"])
+
+
 class FingerprintTests(unittest.TestCase):
+    def test_only_meta_ctime_sees_a_metadata_only_change(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch, "chmod.bin")
+            write_file(path, 1 * MIB)
+            before = {name: experiment.fingerprint(path, name)[0]
+                      for name in ("meta", "meta-ctime", "ht64")}
+            os.chmod(path, 0o600)
+            for name, value in before.items():
+                changed = experiment.fingerprint(path, name)[0] != value
+                self.assertEqual(changed, name == "meta-ctime", name)
+            self.assertEqual(experiment.fingerprint(path, "meta-ctime")[1], 0)
+
     def test_stable_file_gives_equal_fingerprints_and_counts_bytes(self):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch, "stable.bin")
@@ -80,7 +130,9 @@ class FingerprintTests(unittest.TestCase):
 
     def test_fingerprint_offers_no_conversion_into_other_evidence(self):
         fields = {field.name for field in experiment.dataclasses.fields(experiment.Fingerprint)}
-        self.assertEqual(fields, {"candidate", "size", "mtime_ns", "file_key", "sample_digest"})
+        self.assertEqual(
+            fields, {"candidate", "size", "mtime_ns", "ctime_ns", "file_key", "sample_digest"}
+        )
         public = {name for name in vars(experiment.Fingerprint) if not name.startswith("_")}
         self.assertEqual(public, set())
 
@@ -118,6 +170,22 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(self.outcomes["O10", "meta"], "not-applicable")
         self.assertEqual(self.outcomes["O10", "ht64"], "detected")
         self.assertEqual(self.outcomes["O12", "meta"], "missed")
+
+    def test_reuse_candidates_have_valid_outcomes_and_ctime_catches_restored_mtime(self):
+        with tempfile.TemporaryDirectory() as parent:
+            record = experiment.run_oracle(
+                Path(parent), candidates=list(experiment.REUSE_CANDIDATES))
+        self.assertEqual(experiment.validate_oracle(record), [])
+        outcomes = {(row["case"], row["candidate"]): row["outcome"] for row in record["cases"]}
+        self.assertNotIn("invalid", outcomes.values())
+        for case in ("O1", "O13", "O12"):
+            self.assertEqual(outcomes[case, "meta-ctime"], "detected")
+        self.assertEqual(outcomes["O10", "meta-ctime"], "not-applicable")
+        for candidate in ("rnd64-i8", "rnd64-i32"):
+            self.assertEqual(outcomes["O1", candidate], "missed")
+            self.assertEqual(outcomes["O13", candidate], "missed")
+            self.assertEqual(outcomes["O10", candidate], "detected")
+            self.assertEqual(outcomes["O8", candidate], "equal")
 
     def test_scratch_directory_is_removed(self):
         self.assertEqual(list(Path(self.parent.name).iterdir()), [])
