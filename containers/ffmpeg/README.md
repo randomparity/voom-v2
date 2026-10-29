@@ -183,7 +183,9 @@ just container-worker-check docker IMAGE_ID
 The first command needs no engine. The other commands require the built image;
 missing prerequisites are failures. `container-check` additionally uses host
 mkvmerge to inspect and remux headers. It checks 20 PCM cells, integer samples,
-normal remuxes/default-off controls and the software encoder profile. Video profile
+normal remuxes/default-off controls, copied audio packet timing and the software
+encoder profile. Opt-in muxing stores observed positive audio BlockDuration
+values so remuxing cannot discard their rounding; absent durations are not invented. Video profile
 proof writes seekable MKV files: upstream libaom's deferred AV1 extradata cannot
 be finalized in a Matroska pipe, while the worker writes regular staging files.
 

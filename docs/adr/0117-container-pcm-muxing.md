@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (2026-10-28)
 
 ## Context
 
@@ -44,6 +44,14 @@ runtime adds platform-specific Python process-watch capabilities, a local engine
 or Desktop VM and prepared mount roots as deployment prerequisites. Image source/signature/base/package pins and build
 provenance become project maintenance responsibilities. No serialized setting,
 protocol version or control-plane byte-ownership change is needed.
+
+The opt-in mux mode also emits positive observed audio BlockDuration values.
+Stock copy-only muxing can discard an explicit final packet duration when it
+lacks a default frame duration, changing a 15 ms packet to a codec-derived 14 ms
+observation. Preserve those incoming values for copied audio; do not invent
+missing durations. Default-off muxing stays unchanged. The generated DURATION
+tag may be regenerated, as explicitly authorized, while user metadata and actual
+packet bytes/pts/dts/duration remain exact.
 
 The guardian handles launcher SIGKILL and worker death while the engine and
 guardian remain available. Engine failure, late daemon creation, or killing the

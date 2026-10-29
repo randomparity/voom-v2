@@ -114,6 +114,25 @@ def check_pcm(tools, directory):
     return count
 
 
+def check_packet_timing(tools, directory):
+    source = directory / "timing-source.mkv"
+    tools.run("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000",
+                         "-t", "0.1", "-c:a", "flac", str(source)], directory=directory)
+    packets = []
+    for name, options in (("source", None), ("native", []), ("preserved", ["-pcm_wavex", "1"])):
+        path = source if options is None else directory / ("timing-" + name + ".mkv")
+        if options is not None:
+            tools.run("ffmpeg", ["-v", "error", "-i", str(source), "-c", "copy"] +
+                      options + [str(path)], directory=directory)
+        observed = json.loads(tools.run("ffprobe", ["-v", "error", "-show_packets",
+                              "-show_data_hash", "sha256", "-of", "json", "pipe:0"],
+                              path.read_bytes()))["packets"]
+        packets.append([[packet.get(key) for key in ("data_hash", "pts", "dts", "duration")]
+                        for packet in observed])
+    assert packets[0][-1][-1] == 15 and packets[1][-1][-1] == 14, "native timing control changed"
+    assert packets[0] == packets[2], "opt-in mux lost copied audio packet timing"
+
+
 def check_profile(tools, directory):
     for encoder in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
         tools.run("ffmpeg", ["-v", "error", "-f", "lavfi", "-i",
@@ -150,10 +169,12 @@ def main():
     root = Path(__file__).resolve().parents[2] / ".test-tmp"
     root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pcm-mux-", dir=root) as temporary:
+        check_packet_timing(tools, Path(temporary))
         count = check_pcm(tools, Path(temporary))
         check_profile(tools, Path(temporary))
     print(json.dumps({"pcm_cells": count, "remux_cells": count, "native_controls": count,
-                      "profile_encoders": 10, "seconds": round(time.monotonic() - started, 3)}))
+                      "profile_encoders": 10, "copied_timing_cases": 2,
+                      "seconds": round(time.monotonic() - started, 3)}))
 
 
 if __name__ == "__main__":

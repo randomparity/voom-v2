@@ -66,7 +66,16 @@
                                          &codecpriv, &codecpriv_size, &max_payload_size);
          if (ret < 0)
              goto fail;
-@@ -3670,6 +3677,7 @@
+@@ -2893,6 +2900,8 @@
+     ebml_writer_add_block(&writer, mkv);
+ 
+     if (duration > 0 && (par->codec_type == AVMEDIA_TYPE_SUBTITLE ||
++        /* Preserve observed audio packet timing in the opt-in PCM workflow. */
++        (mkv->pcm_wavex && par->codec_type == AVMEDIA_TYPE_AUDIO) ||
+         /* If the packet's duration is inconsistent with the default duration,
+          * add an explicit duration element. */
+         track->default_duration_high > 0 &&
+@@ -3670,6 +3679,7 @@
  #define OFFSET(x) offsetof(MatroskaMuxContext, x)
  #define FLAGS AV_OPT_FLAG_ENCODING_PARAM
  static const AVOption options[] = {
