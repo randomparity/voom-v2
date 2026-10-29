@@ -553,22 +553,38 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def is_metric(value: Any) -> bool:
-    return value == UNAVAILABLE or (isinstance(value, (int, float)) and not isinstance(value, bool))
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return value == UNAVAILABLE or (number and value >= 0)
 
 
 REQUIRED_KEYS = {
-    "corpus": {"label", "storage_class", "filesystem_type", "selected_ids", "skipped_budget_ids"},
-    "build": {"git_commit", "harness_sha256", "hash_worker_sha256", "probe_worker_sha256",
-              "ffprobe_version"},
-    "parameters": {*SOURCE_CONSTANTS, "concurrency", "evict", "repetitions"},
+    "corpus": {"label", "storage_class", "filesystem_type", "manifest_files", "selected_ids",
+               "skipped_budget_ids"},
+    "build": {"git_commit", "git_changed_paths", "harness_sha256", "hash_worker_sha256",
+              "probe_worker_sha256", "ffprobe_version"},
+    "host": {"os", "machine", "cpu_count", "memory_bytes", "python"},
+    "parameters": {*SOURCE_CONSTANTS, "concurrency", "evict", "repetitions", "reads_per_file",
+                   "max_bytes_per_repetition"},
 }
+REPETITION_KEYS = {"index", "evicted", "wall_seconds", "logical_bytes_read", "workers",
+                   "host_counters", "files"}
+WORKER_KEYS = {"cpu_seconds", "peak_rss_bytes", "rchar", "read_bytes"}
+COUNTER_KEYS = {"network_rx_bytes", "cifs_bytes_read"}
+ROW_KEYS = {"id", "size_bytes", "ext", "resident_bytes_before", "queue_delay_seconds",
+            "hash_seconds", "probe_seconds", "outcome", "failure"}
+
+
+def missing(label: str, value: Any, keys: set[str]) -> list[str]:
+    present = set(value) if isinstance(value, dict) else set()
+    return [f"{label} {key}" for key in sorted(keys - present)]
 
 
 def row_problems(row: dict[str, Any]) -> list[str]:
-    problems = []
+    problems = missing("file", row, ROW_KEYS)
     if not re.fullmatch(r"f\d{4}", str(row.get("id", ""))):
         problems.append("file id")
-    for key in ("queue_delay_seconds", "hash_seconds", "probe_seconds", "resident_bytes_before"):
+    for key in ("size_bytes", "queue_delay_seconds", "hash_seconds", "probe_seconds",
+                "resident_bytes_before"):
         if not is_metric(row.get(key)):
             problems.append(f"file {key}")
     outcome = row.get("outcome")
@@ -584,18 +600,20 @@ def row_problems(row: dict[str, Any]) -> list[str]:
 
 
 def repetition_problems(repetition: dict[str, Any]) -> list[str]:
-    problems = []
+    problems = missing("repetition", repetition, REPETITION_KEYS)
     for key in ("wall_seconds", "logical_bytes_read"):
         if not is_metric(repetition.get(key)):
             problems.append(f"repetition {key}")
     workers = repetition.get("workers") or {}
     counters = repetition.get("host_counters") or {}
     rows = repetition.get("files") or []
-    for name, present in (("workers", workers), ("host_counters", counters), ("files", rows)):
-        if not present:
-            problems.append(f"repetition {name}")
+    if not rows:
+        problems.append("repetition files")
+    for name in ("hash", "probe"):
+        problems += missing(f"worker {name}", workers.get(name), WORKER_KEYS)
     for worker in workers.values():
         problems += [f"worker {key}" for key, value in worker.items() if not is_metric(value)]
+    problems += missing("host_counters", counters, COUNTER_KEYS)
     problems += ["host counter" for value in counters.values() if not is_metric(value)]
     for row in rows:
         problems += row_problems(row)
@@ -613,7 +631,7 @@ def validate_run(record: dict[str, Any]) -> list[str]:
     if problems:
         return problems
     for section, keys in REQUIRED_KEYS.items():
-        problems += [f"{section} {key}" for key in sorted(keys - set(record[section]))]
+        problems += missing(section, record[section], keys)
     if set(record["not_measured"]) != set(NOT_MEASURED):
         problems.append("not_measured")
     if not record["repetitions"]:

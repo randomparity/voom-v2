@@ -252,6 +252,12 @@ class ContractTests(unittest.TestCase):
         problems = harness.validate_run(record)
         for expected in ("build harness_sha256", "not_measured", "file failure"):
             self.assertIn(expected, problems)
+        del record["repetitions"][0]["workers"]["hash"]["rchar"]
+        del record["repetitions"][0]["files"][1]["size_bytes"]
+        record["repetitions"][0]["wall_seconds"] = -1
+        problems = harness.validate_run(record)
+        for expected in ("worker hash rchar", "file size_bytes", "repetition wall_seconds"):
+            self.assertIn(expected, problems)
         del record["repetitions"][0]["workers"]
         self.assertIn("repetition workers", harness.validate_run(record))
 
