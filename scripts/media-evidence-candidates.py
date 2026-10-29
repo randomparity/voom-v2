@@ -116,6 +116,7 @@ def prepare(variant: str, directory: Path) -> Path:
     """Build `variant` in a detached worktree at `directory`; return its worker directory."""
     if variant not in VARIANTS:
         raise CandidateError(f"unknown variant {variant}; choose one of {', '.join(VARIANTS)}")
+    directory = directory.resolve()
     if directory.exists():
         raise CandidateError(f"{directory} already exists; choose a new directory")
     # Edit in memory first, so a drifted source fails before any worktree exists.
