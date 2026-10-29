@@ -15,7 +15,24 @@ struct Args {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), VoomError> {
-    let args = Args::parse();
-    let config = AgentConfig::load(&args.config)?;
-    AgentRuntime::new(config)?.run().await
+    startup(async {
+        let args = Args::parse();
+        let config = AgentConfig::load(&args.config)?;
+        AgentRuntime::new(config)?.run().await
+    })
+    .await
 }
+
+async fn startup<F: std::future::Future>(run: F) -> F::Output {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .json()
+        .with_current_span(false)
+        .init();
+    run.await
+}
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;

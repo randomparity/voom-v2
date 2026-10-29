@@ -16,7 +16,9 @@ SLOs, weaker fencing and automatic resumption retain their approved external own
 
 ## Global Constraints
 
-Use the existing workspace Rust/tokio/sqlx/axum stack; add no dependencies.
+Use the existing workspace Rust/tokio/sqlx/axum stack; add no external packages
+or versions. Node diagnostics may use existing workspace tracing and
+tracing-subscriber dependencies.
 SQL belongs to voom-store; transactions are caller-owned through voom_store::tx.
 Preserve typed IDs, checked persisted values and existing public error/wire contracts.
 Real SQLite tests use real Tokio time and ManualClock for domain time.
@@ -116,8 +118,17 @@ named transaction helpers; replays add no duplicate terminal events.
 
 ## Local fencing diagnostics (C3, C5)
 
+Enable fixed WARN JSON-to-stderr logging in node binary startup, before runtime
+execution. Use the existing workspace tracing and tracing-subscriber packages;
+no new package/version, logging configuration, CLI/stdout/error contract or
+library-global initialization is introduced. Direct startup-assembly subprocess
+coverage verifies production logging is installed; scoped async subscriber capture
+separately verifies the runtime fence emitter.
+
 Use the existing Fenced outcome for a local heartbeat deadline/rejection fence;
-TerminalElsewhere remains reserved for a confirmed durable terminal observation.
+Confirmed remote completion/failure settlement paths retain their behavior.
+Remove the private TerminalElsewhere variant after correcting its sole producer;
+no confirmed durable terminal observation was represented by that path.
 The completion-settlement race must report the same local-fence diagnostic.
 Local fencing stops dispatch and releases local capacity as today; it does not
 send a late mutation using an expired lease or resume canceled work.

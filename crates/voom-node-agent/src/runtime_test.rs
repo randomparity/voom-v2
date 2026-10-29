@@ -13,6 +13,7 @@ use tempfile::TempDir;
 use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, oneshot};
+use tracing::instrument::WithSubscriber;
 use voom_core::{
     ArtifactAccessMode, LeaseId, NodeId, NodeIncarnationStatus, OperationKind, TicketId, WorkerId,
     ids::{ArtifactCommitIntentId, ArtifactCommitRecordId},
@@ -1806,6 +1807,7 @@ impl ControlPlaneApi for FakeControlPlane {
 enum WorkerMode {
     Silent,
     Error,
+    PendingDispatch,
 }
 
 #[derive(Debug)]
@@ -1813,6 +1815,7 @@ struct FakeWorker {
     mode: WorkerMode,
     dispatches: AtomicUsize,
     dispatched: Notify,
+    dispatch_dropped: AtomicBool,
 }
 
 impl FakeWorker {
@@ -1821,6 +1824,7 @@ impl FakeWorker {
             mode,
             dispatches: AtomicUsize::new(0),
             dispatched: Notify::new(),
+            dispatch_dropped: AtomicBool::new(false),
         }
     }
 }
@@ -1853,6 +1857,10 @@ impl ClientHandle for FakeWorker {
         self.dispatched.notify_waiters();
         let (mut writer, reader) = tokio::io::duplex(4096);
         match self.mode {
+            WorkerMode::PendingDispatch => {
+                let _guard = DispatchDropGuard(&self.dispatch_dropped);
+                return std::future::pending().await;
+            }
             WorkerMode::Silent => {
                 tokio::spawn(async move {
                     std::future::pending::<()>().await;
@@ -3001,7 +3009,7 @@ async fn pending_completion_keeps_heartbeat_until_user_cancellation_settles() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn pending_completion_stops_on_authoritative_lease_fence() {
+async fn local_fence_pending_completion_stops_without_late_mutation() {
     let control = Arc::new(FakeControlPlane::default());
     *control.complete_gate.lock().await = Some(Arc::new(Notify::new()));
     control
@@ -3013,23 +3021,30 @@ async fn pending_completion_stops_on_authoritative_lease_fence() {
     let held = held_lease(Arc::clone(&permits)).await;
     let (_cancel, cancel_rx) = watch::channel(LeaseCancellation::Running);
     let (_shutdown, shutdown_rx) = watch::channel(ShutdownKind::Running);
-    let task = tokio::spawn(run_lease(
-        held,
-        Arc::new(CapturingWorker::new()),
-        credentials(),
-        context(control.clone()),
-        cancel_rx,
-        shutdown_rx,
-        StdRng::seed_from_u64(459),
-    ));
+    let capture = FenceCapture::default();
+    let subscriber = capture.subscriber();
+    let task = tokio::spawn(
+        run_lease(
+            held,
+            Arc::new(CapturingWorker::new()),
+            credentials(),
+            context(control.clone()),
+            cancel_rx,
+            shutdown_rx,
+            StdRng::seed_from_u64(459),
+        )
+        .with_subscriber(subscriber),
+    );
     wait_for_count(&control.complete_started, &control.complete_calls, 1).await;
     advance_seconds(2).await;
     task.await.unwrap();
     assert!(
         control.failures.lock().await.is_empty(),
-        "an authoritative fence must not be restamped as worker failure"
+        "a local fence must not be restamped as worker failure"
     );
     assert!(permits.try_acquire_owned().is_ok());
+    assert_eq!(control.complete_calls.load(Ordering::SeqCst), 1);
+    capture.assert_local_fence();
 }
 
 #[tokio::test(start_paused = true)]
@@ -3057,4 +3072,109 @@ async fn pending_completion_observes_shutdown_without_waiting_for_http_deadline(
         [FailureClass::UserCancellation]
     );
     assert!(permits.try_acquire_owned().is_ok());
+}
+
+struct DispatchDropGuard<'a>(&'a AtomicBool);
+
+impl Drop for DispatchDropGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone, Default)]
+struct FenceCapture(Arc<StdMutex<Vec<u8>>>);
+
+impl std::io::Write for FenceCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl FenceCapture {
+    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+        let capture = self.clone();
+        tracing_subscriber::fmt()
+            .without_time()
+            .json()
+            .with_writer(move || capture.clone())
+            .finish()
+    }
+
+    fn assert_local_fence(&self) {
+        let bytes = self.0.lock().unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let events: Vec<JsonValue> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "expected one local-fence diagnostic: {text}"
+        );
+        assert_eq!(events[0]["level"], "WARN");
+        assert_eq!(events[0]["fields"]["event"], "lease_local_fence");
+        assert_eq!(events[0]["fields"]["lease_id"], "11");
+        assert_eq!(events[0]["fields"]["ticket_id"], "13");
+        assert_eq!(events[0]["fields"]["recovery_pending"], true);
+        assert!(!text.contains("/media"));
+        assert!(!text.contains("secret"));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_fence_hanging_heartbeat_cancels_dispatch_without_late_mutation() {
+    let control = Arc::new(FakeControlPlane::default());
+    control
+        .heartbeat_actions
+        .lock()
+        .await
+        .push_back(HeartbeatAction::Hang);
+    let worker = Arc::new(FakeWorker::new(WorkerMode::PendingDispatch));
+    let permits = Arc::new(Semaphore::new(1));
+    let held = held_lease(Arc::clone(&permits)).await;
+    let (_cancel, cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (_shutdown, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let mut loop_context = context(control.clone());
+    loop_context.progress_timeout = Duration::from_mins(1);
+    let capture = FenceCapture::default();
+    let task = tokio::spawn(
+        run_lease(
+            held,
+            worker.clone(),
+            credentials(),
+            loop_context,
+            cancel_rx,
+            shutdown_rx,
+            StdRng::seed_from_u64(459),
+        )
+        .with_subscriber(capture.subscriber()),
+    );
+    wait_for_count(&worker.dispatched, &worker.dispatches, 1).await;
+    advance_seconds(7).await;
+    task.await.unwrap();
+    assert!(worker.dispatch_dropped.load(Ordering::SeqCst));
+    assert!(permits.try_acquire_owned().is_ok());
+    assert!(control.failures.lock().await.is_empty());
+    assert_eq!(control.complete_calls.load(Ordering::SeqCst), 0);
+    capture.assert_local_fence();
+}
+
+#[tokio::test]
+async fn local_fence_diagnostic_excludes_confirmed_remote_terminality() {
+    let capture = FenceCapture::default();
+    settle_lease(
+        &context(Arc::new(FakeControlPlane::default())),
+        &dispatch(json!({})),
+        LeaseOutcome::Complete(json!({"ok": true})),
+    )
+    .with_subscriber(capture.subscriber())
+    .await
+    .unwrap();
+    assert!(capture.0.lock().unwrap().is_empty());
 }

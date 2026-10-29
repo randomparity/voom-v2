@@ -11,7 +11,9 @@ Expected implementation size: 700–1000 changed lines (L) — three transaction
 
 ## Global Constraints
 
-Use the existing workspace Rust/tokio/sqlx/axum stack; add no dependencies.
+Use the existing workspace Rust/tokio/sqlx/axum stack; add no external packages
+or versions. Node diagnostics may use existing workspace tracing and
+tracing-subscriber dependencies.
 SQL belongs to voom-store; transactions are caller-owned through voom_store::tx.
 Preserve typed IDs, checked persisted values and existing public error/wire contracts.
 Real SQLite tests use real Tokio time and ManualClock for domain time.
@@ -105,12 +107,18 @@ Verification inventory (each item Mode: focused-test):
 
 ## Task 3 — Local fence diagnostics
 
-Files: crates/voom-node-agent/src/runtime.rs and runtime_test.rs.
+Files: crates/voom-node-agent/src/runtime.rs and runtime_test.rs, Cargo.toml,
+src/main.rs and main_test.rs.
 Interfaces: existing LeaseOutcome::Fenced distinguishes local fencing;
-LeaseOutcome::TerminalElsewhere retains confirmed remote observations. Existing
+Confirmed remote completion/failure settlement paths retain their behavior.
+Remove the private TerminalElsewhere variant, whose only producer was the
+misclassified heartbeat fence; do not invent a remote observer to keep it alive. Existing
 run_lease and settle_lease signatures stay; no wire enum/fields are added.
 
 
+Initialize fixed WARN JSON stderr logging in binary startup only; library
+construction stays passive. Promote existing workspace instrumentation dependencies
+without adding configuration or changing CLI/stdout/error contracts.
 Keep fencing/cancellation behavior and distinguish it from confirmed remote
 terminality using existing outcomes. Add safe structured warning with typed IDs
 for the heartbeat fence and the completion-settlement fence race.
@@ -118,6 +126,9 @@ Verification inventory (each item Mode: focused-test):
 - Node fake-client hanging-heartbeat test: expected red is no local-fence event;
   green cargo test -p voom-node-agent local_fence. Preserve zero late fail/complete
   acknowledgement, dispatch cancellation and returned permit.
+- Direct binary startup-assembly subprocess coverage: expected red is absent JSON
+  stderr diagnostic; green cargo test -p voom-node-agent --bin voom-node-agent
+  local_fence_startup. Actual fence emission is covered separately by runtime tests.
 - Retain existing TTL, shutdown, terminal retry and worker-capacity tests;
   green cargo test -p voom-node-agent --lib.
 

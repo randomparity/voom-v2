@@ -3376,6 +3376,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "tracing",
  "tracing-subscriber",
  "voom-api",
  "voom-control-plane",
