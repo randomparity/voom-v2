@@ -63,7 +63,7 @@ class VariantEditTests(unittest.TestCase):
     def test_drifted_source_fails_instead_of_building_the_wrong_variant(self):
         with self.assertRaises(candidates.CandidateError):
             candidates.apply_edits("fn main() {}\n", candidates.VARIANTS["buf64k"])
-        old = candidates.VARIANTS["batch8k"][0][0]
+        old = candidates.VARIANTS["batch8k"][1][0]
         with self.assertRaises(candidates.CandidateError):
             candidates.apply_edits(old + old, candidates.VARIANTS["batch8k"])
 

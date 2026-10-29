@@ -86,7 +86,7 @@ VARIANTS: dict[str, list[tuple[str, str]]] = {
     "buf64k": buffer_variant("64 * 1024"),
     "buf1m": buffer_variant("1024 * 1024"),
     "buf4m": buffer_variant("4 * 1024 * 1024"),
-    "batch8k": [(ASYNC_LOOP, BLOCKING_LOOP)],
+    "batch8k": [("use tokio::io::AsyncReadExt;\n", ""), (ASYNC_LOOP, BLOCKING_LOOP)],
 }
 
 # Lower is better for every compared metric. Resource metrics are judged by the protocol's
