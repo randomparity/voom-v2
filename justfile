@@ -37,7 +37,8 @@ source-checks: check-workflows check-workflows-selftest check-test-layout \
     check-adr-index check-adr-index-selftest acceptance-bootstrap-selftest \
     media-inventory-selftest media-evidence-baseline-selftest \
     media-evidence-fingerprint-selftest check-media-evidence-fingerprint-guard \
-    check-media-evidence-fingerprint-guard-selftest container-unit-check
+    check-media-evidence-fingerprint-guard-selftest container-unit-check \
+    media-evidence-lazy-selftest
 
 # Filename/path diversity must affect real canary recommendation membership.
 media-inventory-selftest:
@@ -57,6 +58,10 @@ check-media-evidence-fingerprint-guard:
 
 check-media-evidence-fingerprint-guard-selftest:
     ./scripts/check-media-evidence-fingerprint-guard-selftest.sh
+
+# The lazy full-hash lifecycle prototype must meet its recovery matrix and stay redacted.
+media-evidence-lazy-selftest:
+    python3 scripts/media-evidence-lazy-selftest.py
 
 # Acceptance setup must fail closed and retain no registration bearer.
 acceptance-bootstrap-selftest:
