@@ -202,3 +202,13 @@ fixtures and exact containers; image/VM installation and removal remain operator
 operations. Native suites explicitly ignore four named PCM container cases;
 the required Linux Docker CI job executes all four. Hosted native macOS CI does
 not claim Docker/Podman Desktop coverage; those arms require actual Desktop hosts.
+
+On the tested macOS Podman Desktop virtiofs share, host-side overwrite-rename of
+an already observed file made that pathname unavailable in the VM, although the
+host could read it. This also reproduced with VM `stat`, without concurrent
+Docker activity. New immutable paths worked. The project's production publication
+sequence (fresh copy, fsync, hard-link without replacement, unlink temporary name,
+directory fsync) also remained visible, including a previously missing target.
+The media fixtures therefore use their new immutable paths; they do not overwrite
+an observed source name. No launcher retry, delay, cache manipulation or mount
+change masks this observed filesystem limitation.

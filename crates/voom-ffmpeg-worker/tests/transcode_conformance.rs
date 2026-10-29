@@ -14,7 +14,7 @@
     reason = "conformance tests use unwrap/expect for assertion plumbing"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1579,9 +1579,9 @@ async fn offset_pcm_fixture(
     input: &Path,
     codec: &str,
     offset: &str,
-) {
+) -> PathBuf {
     if !codec.starts_with("pcm_") {
-        return;
+        return input.to_owned();
     }
     let shifted = input.with_file_name("shifted.mkv");
     flac_command(
@@ -1603,8 +1603,7 @@ async fn offset_pcm_fixture(
             .arg(&shifted),
     )
     .await;
-    std::fs::rename(shifted, input).unwrap();
-    let probe = flac_physical_probe(&preflight.ffprobe_path, input).await;
+    let probe = flac_physical_probe(&preflight.ffprobe_path, &shifted).await;
     let pts = probe["packets"]
         .as_array()
         .unwrap()
@@ -1618,6 +1617,7 @@ async fn offset_pcm_fixture(
     } else {
         pts > 0
     });
+    shifted
 }
 
 async fn flac_physical_probe(ffprobe: &Path, path: &Path) -> serde_json::Value {
@@ -1720,10 +1720,12 @@ async fn verify_lossless_integer_samples(codec: &str) {
                 let input = dir.path().join("source.mkv");
                 let output = dir.path().join("encoded.mkv");
                 generate_flac_source(&preflight, &input, layout, bits, rate).await;
-                if rate == 44_100 && matches!(layout, "mono" | "stereo") {
+                let input = if rate == 44_100 && matches!(layout, "mono" | "stereo") {
                     let offset = if layout == "mono" { "5" } else { "-0.05" };
-                    offset_pcm_fixture(&preflight, &input, codec, offset).await;
-                }
+                    offset_pcm_fixture(&preflight, &input, codec, offset).await
+                } else {
+                    input
+                };
                 let request = lossless_request(codec, &input, &output, None).await;
                 let result = synthesize_through_worker(&request).await;
                 assert_eq!(
@@ -1789,7 +1791,7 @@ async fn verify_lossless_downmix(codec: &str) {
         let reference = dir.path().join("reference.mkv");
         generate_flac_source(&preflight, &input, layout, bits, 48_000).await;
         let offset = if layout == "7.1" { "5" } else { "-0.05" };
-        offset_pcm_fixture(&preflight, &input, codec, offset).await;
+        let input = offset_pcm_fixture(&preflight, &input, codec, offset).await;
         let request = lossless_request(codec, &input, &output, Some(target)).await;
         let result = synthesize_through_worker(&request).await;
         assert_eq!(audio_expected(&input).await, request.input.expected);
