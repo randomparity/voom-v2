@@ -1,10 +1,11 @@
 --- a/libavformat/matroskaenc.c
 +++ b/libavformat/matroskaenc.c
-@@ -262,6 +262,7 @@
+@@ -262,6 +262,8 @@
      int                 flipped_raw_rgb;
      int                 default_mode;
      int                 move_cues_to_front;
 +    int                 pcm_wavex;
++    int                 preserve_audio_duration;
  
      uint32_t            segment_uid[4];
  } MatroskaMuxContext;
@@ -70,16 +71,17 @@
      ebml_writer_add_block(&writer, mkv);
  
      if (duration > 0 && (par->codec_type == AVMEDIA_TYPE_SUBTITLE ||
-+        /* Preserve observed audio packet timing in the opt-in PCM workflow. */
-+        (mkv->pcm_wavex && par->codec_type == AVMEDIA_TYPE_AUDIO) ||
++        /* Preserve observed audio packet timing only in an explicit opt-in mode. */
++        ((mkv->pcm_wavex || mkv->preserve_audio_duration) && par->codec_type == AVMEDIA_TYPE_AUDIO) ||
          /* If the packet's duration is inconsistent with the default duration,
           * add an explicit duration element. */
          track->default_duration_high > 0 &&
-@@ -3670,6 +3679,7 @@
+@@ -3670,6 +3680,8 @@
  #define OFFSET(x) offsetof(MatroskaMuxContext, x)
  #define FLAGS AV_OPT_FLAG_ENCODING_PARAM
  static const AVOption options[] = {
 +    { "pcm_wavex", "store known-layout PCM16/24 as ACM WAVEFORMATEXTENSIBLE", OFFSET(pcm_wavex), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { "preserve_audio_duration", "retain positive observed audio BlockDuration", OFFSET(preserve_audio_duration), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
      { "reserve_index_space", "reserve a given amount of space (in bytes) at the beginning of the file for the index (cues)", OFFSET(reserve_cues_space), AV_OPT_TYPE_INT,   { .i64 = 0 },   0, INT_MAX,   FLAGS },
      { "cues_to_front", "move Cues (the index) to the front by shifting data if necessary", OFFSET(move_cues_to_front), AV_OPT_TYPE_BOOL, { .i64 = 0}, 0, 1, FLAGS },
      { "cluster_size_limit",  "store at most the provided amount of bytes in a cluster",                                     OFFSET(cluster_size_limit), AV_OPT_TYPE_INT  , { .i64 = -1 }, -1, INT_MAX,   FLAGS },

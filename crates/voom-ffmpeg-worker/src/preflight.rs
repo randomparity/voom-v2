@@ -52,6 +52,7 @@ pub struct FfmpegPreflight {
     pub pcm_s16le_encoder: String,
     pub pcm_s24le_encoder: String,
     pub pcm_wavex: bool,
+    pub audio_duration: bool,
     pub matroska_muxer: String,
     pub mp4_muxer: String,
     pub ogg_muxer: String,
@@ -295,12 +296,17 @@ pub fn preflight_with_paths(
         clippy::print_stderr,
         reason = "the worker has no tracing subscriber and optional probe failures must be observable"
     )]
-    let pcm_wavex = command_text(
+    let matroska_help = command_text(
         "ffmpeg -hide_banner -h muxer=matroska",
         command_output(Command::new(ffmpeg_path).args(["-hide_banner", "-h", "muxer=matroska"])),
     )
-    .inspect_err(|error| eprintln!("optional PCM capability probe failed: {error}"))
-    .is_ok_and(|help| has_pcm_wavex_option(&help));
+    .inspect_err(|error| eprintln!("optional PCM capability probe failed: {error}"));
+    let pcm_wavex = matroska_help
+        .as_ref()
+        .is_ok_and(|help| has_pcm_wavex_option(help));
+    let audio_duration = matroska_help
+        .as_ref()
+        .is_ok_and(|help| has_audio_duration_option(help));
     let muxers = command_text(
         "ffmpeg -hide_banner -muxers",
         command_output(Command::new(ffmpeg_path).arg("-hide_banner").arg("-muxers")),
@@ -332,6 +338,7 @@ pub fn preflight_with_paths(
         pcm_s16le_encoder,
         pcm_s24le_encoder,
         pcm_wavex,
+        audio_duration,
         matroska_muxer,
         mp4_muxer,
         ogg_muxer,
@@ -359,5 +366,12 @@ fn has_pcm_wavex_option(help: &str) -> bool {
     help.lines().any(|line| {
         let mut fields = line.split_whitespace();
         fields.next() == Some("-pcm_wavex") && fields.next() == Some("<boolean>")
+    })
+}
+
+fn has_audio_duration_option(help: &str) -> bool {
+    help.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next() == Some("-preserve_audio_duration") && fields.next() == Some("<boolean>")
     })
 }

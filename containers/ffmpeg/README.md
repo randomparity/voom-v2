@@ -245,3 +245,43 @@ directory fsync) also remained visible, including a previously missing target.
 The media fixtures therefore use their new immutable paths; they do not overwrite
 an observed source name. No launcher retry, delay, cache manipulation or mount
 change masks this observed filesystem limitation.
+
+## Copied audio timing
+
+The project muxer also provides default-off `preserve_audio_duration`. The FFmpeg
+worker observes this capability and enables it independently of `pcm_wavex` for
+audio transforms, retaining incoming positive packet durations without changing
+copied PCM header selection. PCM retains its existing layout capability requirement.
+
+Native startup and encoder availability remain supported. Audio operations compare
+copied packet payloads and observed timing before returning a publishable result;
+a native build that changes those observations fails with an actionable preservation
+error. Such failure can leave existing owned staging data, but cannot publish it.
+Operations with copied audio perform additional streaming packet reads; operations
+without copied audio avoid those scans. Build the current project image and install
+its paired launchers in a fresh private
+destination to preserve the rounded Matroska durations that stock muxing can discard.
+An existing installation retains its immutable older image until the operator selects
+a newly built installation; no automatic replacement occurs.
+
+Preservation compares the configured probe's observations. FFprobe 8.0.1 reports
+14 ms for a short FLAC packet whose explicit Matroska BlockDuration is observed as
+15 ms by newer probes. An unchanged 14 ms observation therefore cannot prove that
+raw container field survived. Use the current paired project image and probe for
+strict Matroska BlockDuration evidence; native builds remain optional.
+
+Stock FFmpeg 9 can also omit copied WavPack durations or round copied AAC
+durations after Matroska placement. These observed changes are rejected even
+when packet payloads are unchanged. Native success therefore depends on the
+source representation as well as the codec and available encoder.
+
+`just container-worker-check ENGINE IMAGE` includes the six-target, ordinary and
+synthesis timing regression alongside strict PCM checks.
+`just copied-audio-check ENGINE IMAGE [DESKTOP]` exercises the authenticated CLI,
+inspects twelve committed outputs,
+and proves rejection before publication using a native encoder with the installed
+project probe, including an explicit observed 15-to-14 ms control. It also requires the
+native FFmpeg and MKVToolNix fixture tools already used by media CI.
+On macOS, pass the existing Docker context or Podman machine as `DESKTOP`, for
+example `just copied-audio-check docker IMAGE desktop-linux`. The proof passes
+that explicit selector through the existing installer configuration.

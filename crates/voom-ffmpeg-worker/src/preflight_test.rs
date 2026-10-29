@@ -353,3 +353,18 @@ fn synchronous_preflight_stamps_actual_caller_identity() {
     command.env("VOOM_MEDIA_CALLER_PID", "wrong inherited identity");
     assert!(command_output(&mut command).unwrap().status.success());
 }
+
+#[test]
+fn duration_mux_capability_requires_an_exact_boolean_option_row() {
+    assert!(has_audio_duration_option(
+        "  -preserve_audio_duration <boolean> E.......... retain timing"
+    ));
+    for help in [
+        "Unknown option preserve_audio_duration",
+        "-preserve_audio_duration_extra <boolean>",
+        "-preserve_audio_duration <string>",
+        "error: -preserve_audio_duration <boolean>",
+    ] {
+        assert!(!has_audio_duration_option(help));
+    }
+}
