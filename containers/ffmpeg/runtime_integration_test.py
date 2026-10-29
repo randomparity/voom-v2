@@ -53,7 +53,8 @@ def finish(process, data=b"", expected=0):
 
 def owned_ids(engine):
     return set(runtime.capture(engine.prefix + ["ps", "-a", "--no-trunc", "--filter",
-                       "label=" + runtime.LABEL, "--format", "{{.ID}}"])
+                       "label=" + runtime.LABEL, "--filter",
+                       "volume=" + engine.config.read_write_roots[0], "--format", "{{.ID}}"])
                .decode().splitlines())
 
 
