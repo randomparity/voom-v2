@@ -196,8 +196,8 @@ def regression(args, root):
     spec.loader.exec_module(bootstrap)
     arguments = ["serve", "--workdir", str(root / "stack"), "--staging", str(stage),
                  "--output", str(output), "--bin-dir", str(args.bin_dir)]
-    for source in sources.values():
-        arguments += ["--input", str(source.parent)]
+    for input_source in sources.values():
+        arguments += ["--input", str(input_source.parent)]
     previous_directory = Path.cwd()
     try:
         os.environ["VOOM_FFMPEG_BIN"] = tools["ffmpeg_bin"]
