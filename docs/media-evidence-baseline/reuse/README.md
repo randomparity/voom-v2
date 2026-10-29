@@ -43,7 +43,9 @@ like.
   a content write with the mtime restored (the O1 construction), a `chmod` and a rename.
   ctime is read at once and again after 2 s, beyond the mount's 1 s attribute cache. The
   inode and the inode generation (`FS_IOC_GETVERSION`) are read before and after. The probe
-  refuses a scratch directory inside either corpus root.
+  refuses a scratch directory inside either corpus root. `probability` and the fingerprint
+  `oracle` take no manifest and do not check their scratch directory; the operator must pick
+  one outside every corpus, as these runs did.
 
 Commands, run under the host-wide exclusive corpus lock. The two corpus runs ran from
 `db8b90bd` with a clean tree. The oracles, `probability` and `ctime-probe` were re-captured
