@@ -165,8 +165,19 @@ class RunTests(unittest.TestCase):
                 cells["ht64"]["repetitions"][0]["logical_bytes_read"], 100 * KIB + 128 * KIB
             )
             self.assertEqual(cells["ht64"]["observed"], {
-                "files": 3, "failed": 0, "stable": 3, "distinct": 3,
+                "files": 3, "failed": 0, "stable": 3, "distinct_content": 3,
             })
+
+    def test_distinctness_ignores_inode_and_mtime(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            first, second = Path(scratch, "a.mkv"), Path(scratch, "b.mkv")
+            write_file(first, 4 * MIB, mtime_ns=1)
+            write_file(second, 4 * MIB, mtime_ns=2)
+            for candidate in experiment.CANDIDATES:
+                observed = [experiment.fingerprint(path, candidate)[0]
+                            for path in (first, second)]
+                counts = experiment.observed_counts([observed])
+                self.assertEqual(counts["distinct_content"], 1, candidate)
 
     def test_digest_or_inode_fields_fail_validation(self):
         record = json.loads(json.dumps(self.minimal_record()))

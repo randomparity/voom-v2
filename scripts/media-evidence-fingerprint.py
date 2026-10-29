@@ -531,7 +531,11 @@ def run_repetition(index: int, candidate: str, root: Path, files: list[dict[str,
 
 
 def observed_counts(observations: list[list[Any]]) -> dict[str, int]:
-    """Stability across repetitions and distinctness across files, as counts only."""
+    """Stability across repetitions and distinctness across files, as counts only.
+
+    Distinctness compares size and sampled bytes only: the inode and mtime differ between any
+    two files, so counting them would make every file distinct by construction.
+    """
     per_file = list(zip(*observations))
     failed = sum(1 for values in per_file if any(value is None for value in values))
     stable = sum(
@@ -540,7 +544,7 @@ def observed_counts(observations: list[list[Any]]) -> dict[str, int]:
     )
     first = [value for value in observations[0] if value is not None]
     return {"files": len(per_file), "failed": failed, "stable": stable,
-            "distinct": len(set(first))}
+            "distinct_content": len({(value.size, value.sample_digest) for value in first})}
 
 
 def capture(args: argparse.Namespace) -> dict[str, Any]:
@@ -663,7 +667,7 @@ REPETITION_KEYS = {"index", "evicted", "wall_seconds", "cpu_seconds", "logical_b
                    "process_io", "host_counters", "files"}
 ROW_KEYS = {"id", "size_bytes", "ext", "outcome", "failure", "logical_bytes", "seconds",
             "resident_bytes_before"}
-OBSERVED_KEYS = {"files", "failed", "stable", "distinct"}
+OBSERVED_KEYS = {"files", "failed", "stable", "distinct_content"}
 
 
 def row_problems(row: dict[str, Any]) -> list[str]:

@@ -1,22 +1,28 @@
 {
   "build": {
-    "git_changed_paths": [],
-    "git_commit": "ddc08bc7b4e4140d13a361ff7c421aaa91320bac",
+    "git_changed_paths": [
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-local-corpus-evicted.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-network-corpus-as-found.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-oracle.json",
+      "scripts/media-evidence-fingerprint-selftest.py",
+      "scripts/media-evidence-fingerprint.py"
+    ],
+    "git_commit": "205e6292b479ad58017ca694c41bc887756ca25d",
     "helper_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
-    "script_sha256": "bb68621829456e0beeff526d836e7407229a825152a73e770f3ba050b334b679"
+    "script_sha256": "e7a564464195c0bc26746f1499543adf5d9d5e5fa3e29f4ebb703ed80faa0eb1"
   },
   "cells": [
     {
       "candidate": "meta",
       "observed": {
-        "distinct": 34,
+        "distinct_content": 34,
         "failed": 0,
         "files": 34,
         "stable": 34
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.003014,
+          "cpu_seconds": 0.002943,
           "evicted": true,
           "files": [
             {
@@ -26,7 +32,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000159,
+              "seconds": 6.8e-05,
               "size_bytes": 37990440428
             },
             {
@@ -36,7 +42,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 2.7e-05,
+              "seconds": 4.6e-05,
               "size_bytes": 21801097511
             },
             {
@@ -46,7 +52,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 2.8e-05,
+              "seconds": 1.6e-05,
               "size_bytes": 31030179822
             },
             {
@@ -56,7 +62,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 4.4e-05,
+              "seconds": 3.2e-05,
               "size_bytes": 6080870033
             },
             {
@@ -66,7 +72,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.6e-05,
+              "seconds": 0.00014,
               "size_bytes": 17557320827
             },
             {
@@ -76,7 +82,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000263,
+              "seconds": 1.4e-05,
               "size_bytes": 6133744474
             },
             {
@@ -86,7 +92,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 4e-05,
+              "seconds": 1.8e-05,
               "size_bytes": 28508359333
             },
             {
@@ -96,7 +102,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000136,
+              "seconds": 3.9e-05,
               "size_bytes": 6632256356
             },
             {
@@ -106,7 +112,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.6e-05,
+              "seconds": 0.000287,
               "size_bytes": 25824716796
             },
             {
@@ -116,7 +122,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000116,
+              "seconds": 8.2e-05,
               "size_bytes": 30419525224
             },
             {
@@ -126,7 +132,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.6e-05,
+              "seconds": 3.7e-05,
               "size_bytes": 30860411814
             },
             {
@@ -136,7 +142,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.2e-05,
+              "seconds": 1e-05,
               "size_bytes": 40336448075
             },
             {
@@ -146,7 +152,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.2e-05,
+              "seconds": 0.000139,
               "size_bytes": 26361761976
             },
             {
@@ -156,7 +162,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000157,
+              "seconds": 4.1e-05,
               "size_bytes": 27636697625
             },
             {
@@ -166,7 +172,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1e-05,
+              "seconds": 0.000387,
               "size_bytes": 41017980921
             },
             {
@@ -176,7 +182,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8e-06,
+              "seconds": 0.000186,
               "size_bytes": 31517427237
             },
             {
@@ -186,7 +192,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 7e-06,
+              "seconds": 1.4e-05,
               "size_bytes": 30916551392
             },
             {
@@ -196,7 +202,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1e-05,
+              "seconds": 1.1e-05,
               "size_bytes": 33837777161
             },
             {
@@ -206,7 +212,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 7e-06,
+              "seconds": 1e-05,
               "size_bytes": 34824789204
             },
             {
@@ -216,7 +222,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.5e-05,
+              "seconds": 0.000162,
               "size_bytes": 30531832894
             },
             {
@@ -226,7 +232,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000107,
+              "seconds": 0.000152,
               "size_bytes": 35560995734
             },
             {
@@ -236,7 +242,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000247,
+              "seconds": 7e-06,
               "size_bytes": 8936706238
             },
             {
@@ -246,7 +252,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 9e-06,
+              "seconds": 6e-06,
               "size_bytes": 39587664898
             },
             {
@@ -256,7 +262,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000167,
+              "seconds": 4e-06,
               "size_bytes": 34006233910
             },
             {
@@ -266,7 +272,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.2e-05,
+              "seconds": 6e-06,
               "size_bytes": 7409964744
             },
             {
@@ -276,7 +282,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000113,
+              "seconds": 6e-06,
               "size_bytes": 29561967125
             },
             {
@@ -286,7 +292,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.1e-05,
+              "seconds": 5e-06,
               "size_bytes": 40590412109
             },
             {
@@ -296,7 +302,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1e-05,
+              "seconds": 6e-06,
               "size_bytes": 35434157476
             },
             {
@@ -306,7 +312,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 9e-06,
+              "seconds": 4e-06,
               "size_bytes": 21560018363
             },
             {
@@ -316,7 +322,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 9e-06,
+              "seconds": 5e-06,
               "size_bytes": 28713346968
             },
             {
@@ -326,7 +332,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 7e-06,
+              "seconds": 4e-06,
               "size_bytes": 34244443281
             },
             {
@@ -336,7 +342,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8e-06,
+              "seconds": 6e-06,
               "size_bytes": 26420951081
             },
             {
@@ -346,7 +352,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 9e-06,
+              "seconds": 5e-06,
               "size_bytes": 26639167947
             },
             {
@@ -356,7 +362,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8.2e-05,
+              "seconds": 6e-06,
               "size_bytes": 26814442489
             }
           ],
@@ -367,13 +373,13 @@
           "index": 1,
           "logical_bytes_read": 0,
           "process_io": {
-            "rchar": 49999,
+            "rchar": 49991,
             "read_bytes": 0
           },
-          "wall_seconds": 0.002748
+          "wall_seconds": 0.002678
         },
         {
-          "cpu_seconds": 0.001376,
+          "cpu_seconds": 0.001559,
           "evicted": true,
           "files": [
             {
@@ -383,7 +389,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000348,
+              "seconds": 3.8e-05,
               "size_bytes": 37990440428
             },
             {
@@ -393,7 +399,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 2.9e-05,
+              "seconds": 4.1e-05,
               "size_bytes": 21801097511
             },
             {
@@ -403,7 +409,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000165,
+              "seconds": 2.8e-05,
               "size_bytes": 31030179822
             },
             {
@@ -413,7 +419,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 2.2e-05,
+              "seconds": 2.6e-05,
               "size_bytes": 6080870033
             },
             {
@@ -423,7 +429,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.2e-05,
+              "seconds": 1.6e-05,
               "size_bytes": 17557320827
             },
             {
@@ -433,7 +439,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 2.5e-05,
+              "seconds": 1.7e-05,
               "size_bytes": 6133744474
             },
             {
@@ -443,7 +449,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.5e-05,
+              "seconds": 9e-06,
               "size_bytes": 28508359333
             },
             {
@@ -453,7 +459,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.2e-05,
+              "seconds": 7e-05,
               "size_bytes": 6632256356
             },
             {
@@ -463,7 +469,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.8e-05,
+              "seconds": 9e-06,
               "size_bytes": 25824716796
             },
             {
@@ -473,7 +479,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 2.8e-05,
+              "seconds": 1e-05,
               "size_bytes": 30419525224
             },
             {
@@ -483,7 +489,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8e-06,
+              "seconds": 3.9e-05,
               "size_bytes": 30860411814
             },
             {
@@ -493,7 +499,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 8e-06,
               "size_bytes": 40336448075
             },
             {
@@ -503,7 +509,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 7e-06,
+              "seconds": 1.1e-05,
               "size_bytes": 26361761976
             },
             {
@@ -513,7 +519,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8e-06,
+              "seconds": 0.000258,
               "size_bytes": 27636697625
             },
             {
@@ -523,7 +529,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 1.4e-05,
               "size_bytes": 41017980921
             },
             {
@@ -533,7 +539,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 9e-06,
               "size_bytes": 31517427237
             },
             {
@@ -543,7 +549,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 8e-06,
               "size_bytes": 30916551392
             },
             {
@@ -553,7 +559,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 8e-06,
               "size_bytes": 33837777161
             },
             {
@@ -563,7 +569,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 8e-06,
               "size_bytes": 34824789204
             },
             {
@@ -573,7 +579,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 8e-06,
               "size_bytes": 30531832894
             },
             {
@@ -583,7 +589,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 35560995734
             },
             {
@@ -593,7 +599,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 8e-06,
               "size_bytes": 8936706238
             },
             {
@@ -603,7 +609,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 8e-06,
               "size_bytes": 39587664898
             },
             {
@@ -613,7 +619,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 34006233910
             },
             {
@@ -623,7 +629,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 7409964744
             },
             {
@@ -633,7 +639,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 8e-06,
               "size_bytes": 29561967125
             },
             {
@@ -643,7 +649,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 40590412109
             },
             {
@@ -653,7 +659,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 35434157476
             },
             {
@@ -673,7 +679,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 28713346968
             },
             {
@@ -683,7 +689,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 34244443281
             },
             {
@@ -693,7 +699,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 6e-06,
               "size_bytes": 26420951081
             },
             {
@@ -703,7 +709,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 26639167947
             },
             {
@@ -713,7 +719,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 26814442489
             }
           ],
@@ -724,13 +730,13 @@
           "index": 2,
           "logical_bytes_read": 0,
           "process_io": {
-            "rchar": 114,
+            "rchar": 106,
             "read_bytes": 0
           },
-          "wall_seconds": 0.001179
+          "wall_seconds": 0.001366
         },
         {
-          "cpu_seconds": 0.00127,
+          "cpu_seconds": 0.00095,
           "evicted": true,
           "files": [
             {
@@ -740,7 +746,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 3.9e-05,
+              "seconds": 0.00011,
               "size_bytes": 37990440428
             },
             {
@@ -750,7 +756,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 2.7e-05,
+              "seconds": 1.5e-05,
               "size_bytes": 21801097511
             },
             {
@@ -760,7 +766,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.8e-05,
+              "seconds": 3.5e-05,
               "size_bytes": 31030179822
             },
             {
@@ -770,7 +776,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.4e-05,
+              "seconds": 2.1e-05,
               "size_bytes": 6080870033
             },
             {
@@ -780,7 +786,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.2e-05,
+              "seconds": 8e-06,
               "size_bytes": 17557320827
             },
             {
@@ -790,7 +796,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.4e-05,
+              "seconds": 0.000147,
               "size_bytes": 6133744474
             },
             {
@@ -800,7 +806,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8e-06,
+              "seconds": 7e-06,
               "size_bytes": 28508359333
             },
             {
@@ -810,7 +816,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1.2e-05,
+              "seconds": 7e-06,
               "size_bytes": 6632256356
             },
             {
@@ -820,7 +826,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 7e-06,
+              "seconds": 1.2e-05,
               "size_bytes": 25824716796
             },
             {
@@ -830,7 +836,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 1.1e-05,
               "size_bytes": 30419525224
             },
             {
@@ -840,7 +846,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 1e-05,
+              "seconds": 9.7e-05,
               "size_bytes": 30860411814
             },
             {
@@ -850,7 +856,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8e-06,
+              "seconds": 5e-06,
               "size_bytes": 40336448075
             },
             {
@@ -860,7 +866,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 8e-06,
+              "seconds": 6e-06,
               "size_bytes": 26361761976
             },
             {
@@ -870,7 +876,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000243,
+              "seconds": 6e-06,
               "size_bytes": 27636697625
             },
             {
@@ -880,7 +886,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 4e-06,
               "size_bytes": 41017980921
             },
             {
@@ -890,7 +896,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 4e-06,
               "size_bytes": 31517427237
             },
             {
@@ -900,7 +906,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 30916551392
             },
             {
@@ -910,7 +916,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 33837777161
             },
             {
@@ -920,7 +926,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 5e-06,
               "size_bytes": 34824789204
             },
             {
@@ -930,7 +936,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 4e-06,
               "size_bytes": 30531832894
             },
             {
@@ -940,7 +946,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 6e-06,
+              "seconds": 0.000128,
               "size_bytes": 35560995734
             },
             {
@@ -950,7 +956,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 0.000115,
               "size_bytes": 8936706238
             },
             {
@@ -960,7 +966,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 7e-06,
               "size_bytes": 39587664898
             },
             {
@@ -1030,7 +1036,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 28713346968
             },
             {
@@ -1040,7 +1046,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 34244443281
             },
             {
@@ -1050,7 +1056,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 26420951081
             },
             {
@@ -1060,7 +1066,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 26639167947
             },
             {
@@ -1070,7 +1076,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5e-06,
+              "seconds": 4e-06,
               "size_bytes": 26814442489
             }
           ],
@@ -1081,24 +1087,24 @@
           "index": 3,
           "logical_bytes_read": 0,
           "process_io": {
-            "rchar": 115,
+            "rchar": 107,
             "read_bytes": 0
           },
-          "wall_seconds": 0.001104
+          "wall_seconds": 0.0008
         }
       ]
     },
     {
       "candidate": "ht64",
       "observed": {
-        "distinct": 34,
+        "distinct_content": 34,
         "failed": 0,
         "files": 34,
         "stable": 34
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.012105,
+          "cpu_seconds": 0.011689,
           "evicted": true,
           "files": [
             {
@@ -1108,7 +1114,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003357,
+              "seconds": 0.003121,
               "size_bytes": 37990440428
             },
             {
@@ -1118,7 +1124,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003488,
+              "seconds": 0.002927,
               "size_bytes": 21801097511
             },
             {
@@ -1128,7 +1134,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002978,
+              "seconds": 0.002419,
               "size_bytes": 31030179822
             },
             {
@@ -1138,7 +1144,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003106,
+              "seconds": 0.002603,
               "size_bytes": 6080870033
             },
             {
@@ -1148,7 +1154,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000962,
+              "seconds": 0.000949,
               "size_bytes": 17557320827
             },
             {
@@ -1158,7 +1164,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000777,
+              "seconds": 0.000843,
               "size_bytes": 6133744474
             },
             {
@@ -1168,7 +1174,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000973,
+              "seconds": 0.000976,
               "size_bytes": 28508359333
             },
             {
@@ -1178,7 +1184,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001053,
+              "seconds": 0.001305,
               "size_bytes": 6632256356
             },
             {
@@ -1188,7 +1194,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000886,
+              "seconds": 0.001119,
               "size_bytes": 25824716796
             },
             {
@@ -1198,7 +1204,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001113,
+              "seconds": 0.001202,
               "size_bytes": 30419525224
             },
             {
@@ -1208,7 +1214,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001217,
+              "seconds": 0.001084,
               "size_bytes": 30860411814
             },
             {
@@ -1218,7 +1224,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001023,
+              "seconds": 0.001022,
               "size_bytes": 40336448075
             },
             {
@@ -1228,7 +1234,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000919,
+              "seconds": 0.00097,
               "size_bytes": 26361761976
             },
             {
@@ -1238,7 +1244,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000696,
+              "seconds": 0.000884,
               "size_bytes": 27636697625
             },
             {
@@ -1248,7 +1254,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001022,
+              "seconds": 0.00096,
               "size_bytes": 41017980921
             },
             {
@@ -1258,7 +1264,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001027,
+              "seconds": 0.001132,
               "size_bytes": 31517427237
             },
             {
@@ -1268,7 +1274,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000896,
+              "seconds": 0.00134,
               "size_bytes": 30916551392
             },
             {
@@ -1278,7 +1284,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001352,
+              "seconds": 0.00108,
               "size_bytes": 33837777161
             },
             {
@@ -1288,7 +1294,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001596,
+              "seconds": 0.00119,
               "size_bytes": 34824789204
             },
             {
@@ -1298,7 +1304,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001401,
+              "seconds": 0.000787,
               "size_bytes": 30531832894
             },
             {
@@ -1308,7 +1314,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001323,
+              "seconds": 0.000873,
               "size_bytes": 35560995734
             },
             {
@@ -1318,7 +1324,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001,
+              "seconds": 0.001105,
               "size_bytes": 8936706238
             },
             {
@@ -1328,7 +1334,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000888,
+              "seconds": 0.000931,
               "size_bytes": 39587664898
             },
             {
@@ -1338,7 +1344,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000682,
+              "seconds": 0.000661,
               "size_bytes": 34006233910
             },
             {
@@ -1348,7 +1354,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000674,
+              "seconds": 0.000631,
               "size_bytes": 7409964744
             },
             {
@@ -1358,7 +1364,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000756,
+              "seconds": 0.000604,
               "size_bytes": 29561967125
             },
             {
@@ -1368,7 +1374,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00081,
+              "seconds": 0.000753,
               "size_bytes": 40590412109
             },
             {
@@ -1378,7 +1384,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000719,
+              "seconds": 0.000786,
               "size_bytes": 35434157476
             },
             {
@@ -1388,7 +1394,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000613,
+              "seconds": 0.000625,
               "size_bytes": 21560018363
             },
             {
@@ -1398,7 +1404,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000712,
+              "seconds": 0.00067,
               "size_bytes": 28713346968
             },
             {
@@ -1408,7 +1414,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000618,
+              "seconds": 0.000606,
               "size_bytes": 34244443281
             },
             {
@@ -1418,7 +1424,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000636,
+              "seconds": 0.000781,
               "size_bytes": 26420951081
             },
             {
@@ -1428,7 +1434,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000629,
+              "seconds": 0.00066,
               "size_bytes": 26639167947
             },
             {
@@ -1438,7 +1444,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000574,
+              "seconds": 0.000609,
               "size_bytes": 26814442489
             }
           ],
@@ -1449,13 +1455,13 @@
           "index": 1,
           "logical_bytes_read": 4456448,
           "process_io": {
-            "rchar": 4456563,
+            "rchar": 4456555,
             "read_bytes": 9330688
           },
-          "wall_seconds": 0.010641
+          "wall_seconds": 0.010189
         },
         {
-          "cpu_seconds": 0.010892,
+          "cpu_seconds": 0.010601,
           "evicted": true,
           "files": [
             {
@@ -1465,7 +1471,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001758,
+              "seconds": 0.001707,
               "size_bytes": 37990440428
             },
             {
@@ -1475,7 +1481,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001732,
+              "seconds": 0.001606,
               "size_bytes": 21801097511
             },
             {
@@ -1485,7 +1491,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001767,
+              "seconds": 0.001688,
               "size_bytes": 31030179822
             },
             {
@@ -1495,7 +1501,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001333,
+              "seconds": 0.001303,
               "size_bytes": 6080870033
             },
             {
@@ -1505,7 +1511,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000887,
+              "seconds": 0.000904,
               "size_bytes": 17557320827
             },
             {
@@ -1515,7 +1521,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000642,
+              "seconds": 0.000644,
               "size_bytes": 6133744474
             },
             {
@@ -1525,7 +1531,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000927,
+              "seconds": 0.000919,
               "size_bytes": 28508359333
             },
             {
@@ -1535,7 +1541,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000975,
+              "seconds": 0.000898,
               "size_bytes": 6632256356
             },
             {
@@ -1545,7 +1551,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000854,
+              "seconds": 0.000885,
               "size_bytes": 25824716796
             },
             {
@@ -1555,7 +1561,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000978,
+              "seconds": 0.000945,
               "size_bytes": 30419525224
             },
             {
@@ -1565,7 +1571,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000868,
+              "seconds": 0.000896,
               "size_bytes": 30860411814
             },
             {
@@ -1575,7 +1581,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000732,
+              "seconds": 0.000983,
               "size_bytes": 40336448075
             },
             {
@@ -1585,7 +1591,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000935,
+              "seconds": 0.000914,
               "size_bytes": 26361761976
             },
             {
@@ -1595,7 +1601,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000805,
+              "seconds": 0.000761,
               "size_bytes": 27636697625
             },
             {
@@ -1605,7 +1611,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00092,
+              "seconds": 0.000832,
               "size_bytes": 41017980921
             },
             {
@@ -1615,7 +1621,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000698,
+              "seconds": 0.000691,
               "size_bytes": 31517427237
             },
             {
@@ -1625,7 +1631,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001201,
+              "seconds": 0.00115,
               "size_bytes": 30916551392
             },
             {
@@ -1635,7 +1641,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000971,
+              "seconds": 0.001052,
               "size_bytes": 33837777161
             },
             {
@@ -1645,7 +1651,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001273,
+              "seconds": 0.001243,
               "size_bytes": 34824789204
             },
             {
@@ -1655,7 +1661,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000743,
+              "seconds": 0.000644,
               "size_bytes": 30531832894
             },
             {
@@ -1665,7 +1671,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000788,
+              "seconds": 0.00073,
               "size_bytes": 35560995734
             },
             {
@@ -1675,7 +1681,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000907,
+              "seconds": 0.000921,
               "size_bytes": 8936706238
             },
             {
@@ -1685,7 +1691,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000878,
+              "seconds": 0.000791,
               "size_bytes": 39587664898
             },
             {
@@ -1695,7 +1701,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000592,
+              "seconds": 0.000575,
               "size_bytes": 34006233910
             },
             {
@@ -1705,7 +1711,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000625,
+              "seconds": 0.000735,
               "size_bytes": 7409964744
             },
             {
@@ -1715,7 +1721,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000589,
+              "seconds": 0.000753,
               "size_bytes": 29561967125
             },
             {
@@ -1725,7 +1731,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000681,
+              "seconds": 0.000527,
               "size_bytes": 40590412109
             },
             {
@@ -1735,7 +1741,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000583,
+              "seconds": 0.000551,
               "size_bytes": 35434157476
             },
             {
@@ -1745,7 +1751,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000549,
+              "seconds": 0.000572,
               "size_bytes": 21560018363
             },
             {
@@ -1755,7 +1761,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000618,
+              "seconds": 0.000573,
               "size_bytes": 28713346968
             },
             {
@@ -1765,7 +1771,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000632,
+              "seconds": 0.000694,
               "size_bytes": 34244443281
             },
             {
@@ -1775,7 +1781,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000576,
+              "seconds": 0.000625,
               "size_bytes": 26420951081
             },
             {
@@ -1785,7 +1791,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000488,
+              "seconds": 0.000514,
               "size_bytes": 26639167947
             },
             {
@@ -1795,7 +1801,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000538,
+              "seconds": 0.00052,
               "size_bytes": 26814442489
             }
           ],
@@ -1806,13 +1812,13 @@
           "index": 2,
           "logical_bytes_read": 4456448,
           "process_io": {
-            "rchar": 4456565,
+            "rchar": 4456561,
             "read_bytes": 9330688
           },
-          "wall_seconds": 0.008167
+          "wall_seconds": 0.008022
         },
         {
-          "cpu_seconds": 0.01056,
+          "cpu_seconds": 0.01035,
           "evicted": true,
           "files": [
             {
@@ -1822,7 +1828,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001726,
+              "seconds": 0.001753,
               "size_bytes": 37990440428
             },
             {
@@ -1832,7 +1838,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001594,
+              "seconds": 0.00162,
               "size_bytes": 21801097511
             },
             {
@@ -1842,7 +1848,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001721,
+              "seconds": 0.001666,
               "size_bytes": 31030179822
             },
             {
@@ -1852,7 +1858,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001207,
+              "seconds": 0.001301,
               "size_bytes": 6080870033
             },
             {
@@ -1862,7 +1868,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000943,
+              "seconds": 0.000906,
               "size_bytes": 17557320827
             },
             {
@@ -1872,7 +1878,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000619,
+              "seconds": 0.000714,
               "size_bytes": 6133744474
             },
             {
@@ -1882,7 +1888,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000874,
+              "seconds": 0.000923,
               "size_bytes": 28508359333
             },
             {
@@ -1892,7 +1898,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001023,
+              "seconds": 0.000961,
               "size_bytes": 6632256356
             },
             {
@@ -1902,7 +1908,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000926,
+              "seconds": 0.000828,
               "size_bytes": 25824716796
             },
             {
@@ -1912,7 +1918,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000982,
+              "seconds": 0.001088,
               "size_bytes": 30419525224
             },
             {
@@ -1922,7 +1928,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000679,
+              "seconds": 0.000708,
               "size_bytes": 30860411814
             },
             {
@@ -1932,7 +1938,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000815,
+              "seconds": 0.00078,
               "size_bytes": 40336448075
             },
             {
@@ -1942,7 +1948,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000859,
+              "seconds": 0.000868,
               "size_bytes": 26361761976
             },
             {
@@ -1952,7 +1958,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000765,
+              "seconds": 0.000803,
               "size_bytes": 27636697625
             },
             {
@@ -1962,7 +1968,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000879,
+              "seconds": 0.000975,
               "size_bytes": 41017980921
             },
             {
@@ -1972,7 +1978,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000983,
+              "seconds": 0.000671,
               "size_bytes": 31517427237
             },
             {
@@ -1982,7 +1988,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001071,
+              "seconds": 0.001402,
               "size_bytes": 30916551392
             },
             {
@@ -1992,7 +1998,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001077,
+              "seconds": 0.00103,
               "size_bytes": 33837777161
             },
             {
@@ -2002,7 +2008,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.001081,
+              "seconds": 0.001228,
               "size_bytes": 34824789204
             },
             {
@@ -2012,7 +2018,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000685,
+              "seconds": 0.000718,
               "size_bytes": 30531832894
             },
             {
@@ -2022,7 +2028,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000804,
+              "seconds": 0.000883,
               "size_bytes": 35560995734
             },
             {
@@ -2032,7 +2038,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000959,
+              "seconds": 0.000957,
               "size_bytes": 8936706238
             },
             {
@@ -2042,7 +2048,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000803,
+              "seconds": 0.000833,
               "size_bytes": 39587664898
             },
             {
@@ -2052,7 +2058,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00067,
+              "seconds": 0.000631,
               "size_bytes": 34006233910
             },
             {
@@ -2062,7 +2068,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000577,
+              "seconds": 0.000614,
               "size_bytes": 7409964744
             },
             {
@@ -2072,7 +2078,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000524,
+              "seconds": 0.000608,
               "size_bytes": 29561967125
             },
             {
@@ -2082,7 +2088,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000619,
+              "seconds": 0.0006,
               "size_bytes": 40590412109
             },
             {
@@ -2092,7 +2098,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000605,
+              "seconds": 0.000525,
               "size_bytes": 35434157476
             },
             {
@@ -2102,7 +2108,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000596,
+              "seconds": 0.000546,
               "size_bytes": 21560018363
             },
             {
@@ -2112,7 +2118,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000645,
+              "seconds": 0.000633,
               "size_bytes": 28713346968
             },
             {
@@ -2122,7 +2128,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000594,
+              "seconds": 0.000661,
               "size_bytes": 34244443281
             },
             {
@@ -2132,7 +2138,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000523,
+              "seconds": 0.000592,
               "size_bytes": 26420951081
             },
             {
@@ -2142,7 +2148,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000543,
+              "seconds": 0.000537,
               "size_bytes": 26639167947
             },
             {
@@ -2152,7 +2158,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.000662,
+              "seconds": 0.000525,
               "size_bytes": 26814442489
             }
           ],
@@ -2163,24 +2169,24 @@
           "index": 3,
           "logical_bytes_read": 4456448,
           "process_io": {
-            "rchar": 4456567,
+            "rchar": 4456563,
             "read_bytes": 9330688
           },
-          "wall_seconds": 0.00817
+          "wall_seconds": 0.008162
         }
       ]
     },
     {
       "candidate": "ht1m",
       "observed": {
-        "distinct": 34,
+        "distinct_content": 34,
         "failed": 0,
         "files": 34,
         "stable": 34
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.122565,
+          "cpu_seconds": 0.121976,
           "evicted": true,
           "files": [
             {
@@ -2190,7 +2196,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005865,
+              "seconds": 0.006066,
               "size_bytes": 37990440428
             },
             {
@@ -2200,7 +2206,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.006988,
+              "seconds": 0.00663,
               "size_bytes": 21801097511
             },
             {
@@ -2210,7 +2216,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.006885,
+              "seconds": 0.006863,
               "size_bytes": 31030179822
             },
             {
@@ -2220,7 +2226,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.006687,
+              "seconds": 0.006896,
               "size_bytes": 6080870033
             },
             {
@@ -2230,7 +2236,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005088,
+              "seconds": 0.004763,
               "size_bytes": 17557320827
             },
             {
@@ -2240,7 +2246,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005554,
+              "seconds": 0.004575,
               "size_bytes": 6133744474
             },
             {
@@ -2250,7 +2256,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005818,
+              "seconds": 0.00515,
               "size_bytes": 28508359333
             },
             {
@@ -2260,7 +2266,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004494,
+              "seconds": 0.005402,
               "size_bytes": 6632256356
             },
             {
@@ -2270,7 +2276,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00518,
+              "seconds": 0.004749,
               "size_bytes": 25824716796
             },
             {
@@ -2280,7 +2286,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00475,
+              "seconds": 0.004734,
               "size_bytes": 30419525224
             },
             {
@@ -2290,7 +2296,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005029,
+              "seconds": 0.004887,
               "size_bytes": 30860411814
             },
             {
@@ -2300,7 +2306,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005067,
+              "seconds": 0.00521,
               "size_bytes": 40336448075
             },
             {
@@ -2310,7 +2316,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005093,
+              "seconds": 0.005427,
               "size_bytes": 26361761976
             },
             {
@@ -2320,7 +2326,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005172,
+              "seconds": 0.005406,
               "size_bytes": 27636697625
             },
             {
@@ -2330,7 +2336,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005,
+              "seconds": 0.00476,
               "size_bytes": 41017980921
             },
             {
@@ -2340,7 +2346,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004682,
+              "seconds": 0.004818,
               "size_bytes": 31517427237
             },
             {
@@ -2350,7 +2356,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004759,
+              "seconds": 0.004572,
               "size_bytes": 30916551392
             },
             {
@@ -2360,7 +2366,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004724,
+              "seconds": 0.00461,
               "size_bytes": 33837777161
             },
             {
@@ -2370,7 +2376,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005807,
+              "seconds": 0.004706,
               "size_bytes": 34824789204
             },
             {
@@ -2380,7 +2386,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004473,
+              "seconds": 0.004573,
               "size_bytes": 30531832894
             },
             {
@@ -2390,7 +2396,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004669,
+              "seconds": 0.004838,
               "size_bytes": 35560995734
             },
             {
@@ -2400,7 +2406,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005271,
+              "seconds": 0.004943,
               "size_bytes": 8936706238
             },
             {
@@ -2410,7 +2416,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004495,
+              "seconds": 0.005149,
               "size_bytes": 39587664898
             },
             {
@@ -2420,7 +2426,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005376,
+              "seconds": 0.00445,
               "size_bytes": 34006233910
             },
             {
@@ -2430,7 +2436,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004673,
+              "seconds": 0.003901,
               "size_bytes": 7409964744
             },
             {
@@ -2440,7 +2446,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004184,
+              "seconds": 0.004215,
               "size_bytes": 29561967125
             },
             {
@@ -2450,7 +2456,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004588,
+              "seconds": 0.004672,
               "size_bytes": 40590412109
             },
             {
@@ -2460,7 +2466,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004774,
+              "seconds": 0.004602,
               "size_bytes": 35434157476
             },
             {
@@ -2470,7 +2476,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003898,
+              "seconds": 0.005007,
               "size_bytes": 21560018363
             },
             {
@@ -2480,7 +2486,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004173,
+              "seconds": 0.004414,
               "size_bytes": 28713346968
             },
             {
@@ -2490,7 +2496,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004274,
+              "seconds": 0.004148,
               "size_bytes": 34244443281
             },
             {
@@ -2500,7 +2506,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004836,
+              "seconds": 0.004744,
               "size_bytes": 26420951081
             },
             {
@@ -2510,7 +2516,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00417,
+              "seconds": 0.004074,
               "size_bytes": 26639167947
             },
             {
@@ -2520,7 +2526,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004241,
+              "seconds": 0.004654,
               "size_bytes": 26814442489
             }
           ],
@@ -2531,13 +2537,13 @@
           "index": 1,
           "logical_bytes_read": 71303168,
           "process_io": {
-            "rchar": 71303287,
+            "rchar": 71303283,
             "read_bytes": 103219200
           },
-          "wall_seconds": 0.044502
+          "wall_seconds": 0.044576
         },
         {
-          "cpu_seconds": 0.120248,
+          "cpu_seconds": 0.117989,
           "evicted": true,
           "files": [
             {
@@ -2547,7 +2553,364 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.006166,
+              "seconds": 0.005202,
+              "size_bytes": 37990440428
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0002",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.006072,
+              "size_bytes": 21801097511
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0003",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.005834,
+              "size_bytes": 31030179822
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0004",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.005931,
+              "size_bytes": 6080870033
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0005",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004544,
+              "size_bytes": 17557320827
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0006",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004427,
+              "size_bytes": 6133744474
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0007",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.005048,
+              "size_bytes": 28508359333
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0008",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.005305,
+              "size_bytes": 6632256356
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0009",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004946,
+              "size_bytes": 25824716796
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0010",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004542,
+              "size_bytes": 30419525224
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0011",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004533,
+              "size_bytes": 30860411814
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0012",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.005111,
+              "size_bytes": 40336448075
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0013",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.005348,
+              "size_bytes": 26361761976
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0014",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004661,
+              "size_bytes": 27636697625
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0015",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004523,
+              "size_bytes": 41017980921
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0016",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004526,
+              "size_bytes": 31517427237
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0017",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004594,
+              "size_bytes": 30916551392
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0018",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004538,
+              "size_bytes": 33837777161
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0019",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004763,
+              "size_bytes": 34824789204
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0020",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004361,
+              "size_bytes": 30531832894
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0021",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004518,
+              "size_bytes": 35560995734
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0022",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004919,
+              "size_bytes": 8936706238
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0023",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004558,
+              "size_bytes": 39587664898
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0024",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004286,
+              "size_bytes": 34006233910
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0025",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004231,
+              "size_bytes": 7409964744
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0026",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.003985,
+              "size_bytes": 29561967125
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0027",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004235,
+              "size_bytes": 40590412109
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0028",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004592,
+              "size_bytes": 35434157476
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0029",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.003968,
+              "size_bytes": 21560018363
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0030",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004085,
+              "size_bytes": 28713346968
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0031",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004428,
+              "size_bytes": 34244443281
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0032",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004093,
+              "size_bytes": 26420951081
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0033",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.004005,
+              "size_bytes": 26639167947
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0034",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.003906,
+              "size_bytes": 26814442489
+            }
+          ],
+          "host_counters": {
+            "cifs_bytes_read": 0,
+            "network_rx_bytes": 0
+          },
+          "index": 2,
+          "logical_bytes_read": 71303168,
+          "process_io": {
+            "rchar": 71303284,
+            "read_bytes": 103219200
+          },
+          "wall_seconds": 0.041784
+        },
+        {
+          "cpu_seconds": 0.118376,
+          "evicted": true,
+          "files": [
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0001",
+              "logical_bytes": 2097152,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.006625,
               "size_bytes": 37990440428
             },
             {
@@ -2567,7 +2930,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00556,
+              "seconds": 0.00573,
               "size_bytes": 31030179822
             },
             {
@@ -2577,7 +2940,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005023,
+              "seconds": 0.005461,
               "size_bytes": 6080870033
             },
             {
@@ -2587,7 +2950,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004388,
+              "seconds": 0.004443,
               "size_bytes": 17557320827
             },
             {
@@ -2597,7 +2960,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004428,
+              "seconds": 0.004679,
               "size_bytes": 6133744474
             },
             {
@@ -2607,7 +2970,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00506,
+              "seconds": 0.004832,
               "size_bytes": 28508359333
             },
             {
@@ -2617,7 +2980,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005049,
+              "seconds": 0.004836,
               "size_bytes": 6632256356
             },
             {
@@ -2627,7 +2990,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004563,
+              "seconds": 0.004551,
               "size_bytes": 25824716796
             },
             {
@@ -2637,7 +3000,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004733,
+              "seconds": 0.004794,
               "size_bytes": 30419525224
             },
             {
@@ -2647,7 +3010,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005085,
+              "seconds": 0.00463,
               "size_bytes": 30860411814
             },
             {
@@ -2657,7 +3020,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005121,
+              "seconds": 0.004973,
               "size_bytes": 40336448075
             },
             {
@@ -2667,7 +3030,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005344,
+              "seconds": 0.004634,
               "size_bytes": 26361761976
             },
             {
@@ -2677,7 +3040,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00513,
+              "seconds": 0.004477,
               "size_bytes": 27636697625
             },
             {
@@ -2687,7 +3050,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005233,
+              "seconds": 0.004768,
               "size_bytes": 41017980921
             },
             {
@@ -2697,7 +3060,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004601,
+              "seconds": 0.004551,
               "size_bytes": 31517427237
             },
             {
@@ -2707,7 +3070,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004777,
+              "seconds": 0.004579,
               "size_bytes": 30916551392
             },
             {
@@ -2717,7 +3080,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004677,
+              "seconds": 0.004512,
               "size_bytes": 33837777161
             },
             {
@@ -2727,7 +3090,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004542,
+              "seconds": 0.004512,
               "size_bytes": 34824789204
             },
             {
@@ -2737,7 +3100,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004663,
+              "seconds": 0.004251,
               "size_bytes": 30531832894
             },
             {
@@ -2747,7 +3110,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004669,
+              "seconds": 0.004577,
               "size_bytes": 35560995734
             },
             {
@@ -2757,7 +3120,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004685,
+              "seconds": 0.004737,
               "size_bytes": 8936706238
             },
             {
@@ -2767,7 +3130,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004214,
+              "seconds": 0.004545,
               "size_bytes": 39587664898
             },
             {
@@ -2777,7 +3140,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004557,
+              "seconds": 0.005015,
               "size_bytes": 34006233910
             },
             {
@@ -2787,7 +3150,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004079,
+              "seconds": 0.004172,
               "size_bytes": 7409964744
             },
             {
@@ -2797,7 +3160,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004553,
+              "seconds": 0.003983,
               "size_bytes": 29561967125
             },
             {
@@ -2807,7 +3170,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004326,
+              "seconds": 0.004108,
               "size_bytes": 40590412109
             },
             {
@@ -2817,7 +3180,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00432,
+              "seconds": 0.004031,
               "size_bytes": 35434157476
             },
             {
@@ -2827,7 +3190,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004189,
+              "seconds": 0.004105,
               "size_bytes": 21560018363
             },
             {
@@ -2837,7 +3200,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004555,
+              "seconds": 0.004055,
               "size_bytes": 28713346968
             },
             {
@@ -2847,7 +3210,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004265,
+              "seconds": 0.004283,
               "size_bytes": 34244443281
             },
             {
@@ -2857,7 +3220,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004895,
+              "seconds": 0.004049,
               "size_bytes": 26420951081
             },
             {
@@ -2867,7 +3230,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003932,
+              "seconds": 0.004107,
               "size_bytes": 26639167947
             },
             {
@@ -2877,7 +3240,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003889,
+              "seconds": 0.004391,
               "size_bytes": 26814442489
             }
           ],
@@ -2885,384 +3248,27 @@
             "cifs_bytes_read": 0,
             "network_rx_bytes": 0
           },
-          "index": 2,
-          "logical_bytes_read": 71303168,
-          "process_io": {
-            "rchar": 71303288,
-            "read_bytes": 103219200
-          },
-          "wall_seconds": 0.042716
-        },
-        {
-          "cpu_seconds": 0.124565,
-          "evicted": true,
-          "files": [
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0001",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.006476,
-              "size_bytes": 37990440428
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0002",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.006676,
-              "size_bytes": 21801097511
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0003",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.00587,
-              "size_bytes": 31030179822
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0004",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.006343,
-              "size_bytes": 6080870033
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0005",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004442,
-              "size_bytes": 17557320827
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0006",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004708,
-              "size_bytes": 6133744474
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0007",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.005183,
-              "size_bytes": 28508359333
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0008",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.005853,
-              "size_bytes": 6632256356
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0009",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004569,
-              "size_bytes": 25824716796
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0010",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004529,
-              "size_bytes": 30419525224
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0011",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004722,
-              "size_bytes": 30860411814
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0012",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.005324,
-              "size_bytes": 40336448075
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0013",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004555,
-              "size_bytes": 26361761976
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0014",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.005419,
-              "size_bytes": 27636697625
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0015",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.005124,
-              "size_bytes": 41017980921
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0016",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004665,
-              "size_bytes": 31517427237
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0017",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004785,
-              "size_bytes": 30916551392
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0018",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004653,
-              "size_bytes": 33837777161
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0019",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.005672,
-              "size_bytes": 34824789204
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0020",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004714,
-              "size_bytes": 30531832894
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0021",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004994,
-              "size_bytes": 35560995734
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0022",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004742,
-              "size_bytes": 8936706238
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0023",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004738,
-              "size_bytes": 39587664898
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0024",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004741,
-              "size_bytes": 34006233910
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0025",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.003949,
-              "size_bytes": 7409964744
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0026",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004445,
-              "size_bytes": 29561967125
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0027",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004379,
-              "size_bytes": 40590412109
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0028",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004678,
-              "size_bytes": 35434157476
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0029",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004415,
-              "size_bytes": 21560018363
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0030",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004361,
-              "size_bytes": 28713346968
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0031",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004643,
-              "size_bytes": 34244443281
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0032",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004567,
-              "size_bytes": 26420951081
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0033",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004157,
-              "size_bytes": 26639167947
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0034",
-              "logical_bytes": 2097152,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.004058,
-              "size_bytes": 26814442489
-            }
-          ],
-          "host_counters": {
-            "cifs_bytes_read": 0,
-            "network_rx_bytes": 1020
-          },
           "index": 3,
           "logical_bytes_read": 71303168,
           "process_io": {
-            "rchar": 71303289,
+            "rchar": 71303286,
             "read_bytes": 103219200
           },
-          "wall_seconds": 0.043734
+          "wall_seconds": 0.041923
         }
       ]
     },
     {
       "candidate": "ht64-i8",
       "observed": {
-        "distinct": 34,
+        "distinct_content": 34,
         "failed": 0,
         "files": 34,
         "stable": 34
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.043312,
+          "cpu_seconds": 0.043178,
           "evicted": true,
           "files": [
             {
@@ -3272,7 +3278,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.006411,
+              "seconds": 0.005569,
               "size_bytes": 37990440428
             },
             {
@@ -3282,7 +3288,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.006263,
+              "seconds": 0.005625,
               "size_bytes": 21801097511
             },
             {
@@ -3292,7 +3298,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005321,
+              "seconds": 0.005969,
               "size_bytes": 31030179822
             },
             {
@@ -3302,7 +3308,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005581,
+              "seconds": 0.005145,
               "size_bytes": 6080870033
             },
             {
@@ -3312,7 +3318,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004657,
+              "seconds": 0.004285,
               "size_bytes": 17557320827
             },
             {
@@ -3322,7 +3328,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004524,
+              "seconds": 0.003923,
               "size_bytes": 6133744474
             },
             {
@@ -3332,7 +3338,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00447,
+              "seconds": 0.004583,
               "size_bytes": 28508359333
             },
             {
@@ -3342,7 +3348,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004559,
+              "seconds": 0.004564,
               "size_bytes": 6632256356
             },
             {
@@ -3352,7 +3358,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004383,
+              "seconds": 0.004386,
               "size_bytes": 25824716796
             },
             {
@@ -3362,7 +3368,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004622,
+              "seconds": 0.004968,
               "size_bytes": 30419525224
             },
             {
@@ -3372,7 +3378,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004826,
+              "seconds": 0.004314,
               "size_bytes": 30860411814
             },
             {
@@ -3382,7 +3388,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004332,
+              "seconds": 0.004246,
               "size_bytes": 40336448075
             },
             {
@@ -3392,7 +3398,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005229,
+              "seconds": 0.005425,
               "size_bytes": 26361761976
             },
             {
@@ -3402,7 +3408,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004818,
+              "seconds": 0.004774,
               "size_bytes": 27636697625
             },
             {
@@ -3412,7 +3418,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004911,
+              "seconds": 0.004863,
               "size_bytes": 41017980921
             },
             {
@@ -3422,7 +3428,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005069,
+              "seconds": 0.005195,
               "size_bytes": 31517427237
             },
             {
@@ -3432,7 +3438,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005131,
+              "seconds": 0.004918,
               "size_bytes": 30916551392
             },
             {
@@ -3442,7 +3448,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004911,
+              "seconds": 0.005101,
               "size_bytes": 33837777161
             },
             {
@@ -3452,7 +3458,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004931,
+              "seconds": 0.005155,
               "size_bytes": 34824789204
             },
             {
@@ -3462,7 +3468,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004001,
+              "seconds": 0.004008,
               "size_bytes": 30531832894
             },
             {
@@ -3472,7 +3478,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00416,
+              "seconds": 0.004028,
               "size_bytes": 35560995734
             },
             {
@@ -3482,7 +3488,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004254,
+              "seconds": 0.004119,
               "size_bytes": 8936706238
             },
             {
@@ -3492,7 +3498,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003318,
+              "seconds": 0.00341,
               "size_bytes": 39587664898
             },
             {
@@ -3502,7 +3508,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002606,
+              "seconds": 0.003303,
               "size_bytes": 34006233910
             },
             {
@@ -3512,7 +3518,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00276,
+              "seconds": 0.002628,
               "size_bytes": 7409964744
             },
             {
@@ -3522,7 +3528,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002895,
+              "seconds": 0.002681,
               "size_bytes": 29561967125
             },
             {
@@ -3532,7 +3538,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002828,
+              "seconds": 0.002737,
               "size_bytes": 40590412109
             },
             {
@@ -3542,7 +3548,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002809,
+              "seconds": 0.002841,
               "size_bytes": 35434157476
             },
             {
@@ -3552,7 +3558,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002681,
+              "seconds": 0.002725,
               "size_bytes": 21560018363
             },
             {
@@ -3562,7 +3568,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002794,
+              "seconds": 0.002756,
               "size_bytes": 28713346968
             },
             {
@@ -3572,7 +3578,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002955,
+              "seconds": 0.002705,
               "size_bytes": 34244443281
             },
             {
@@ -3582,7 +3588,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002985,
+              "seconds": 0.002712,
               "size_bytes": 26420951081
             },
             {
@@ -3592,7 +3598,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002547,
+              "seconds": 0.002571,
               "size_bytes": 26639167947
             },
             {
@@ -3602,7 +3608,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002238,
+              "seconds": 0.002246,
               "size_bytes": 26814442489
             }
           ],
@@ -3613,13 +3619,13 @@
           "index": 1,
           "logical_bytes_read": 22282240,
           "process_io": {
-            "rchar": 22282361,
+            "rchar": 22282358,
             "read_bytes": 28270592
           },
-          "wall_seconds": 0.036535
+          "wall_seconds": 0.036227
         },
         {
-          "cpu_seconds": 0.042438,
+          "cpu_seconds": 0.040497,
           "evicted": true,
           "files": [
             {
@@ -3629,7 +3635,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005188,
+              "seconds": 0.005186,
               "size_bytes": 37990440428
             },
             {
@@ -3639,7 +3645,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005037,
+              "seconds": 0.004639,
               "size_bytes": 21801097511
             },
             {
@@ -3649,7 +3655,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004476,
+              "seconds": 0.005261,
               "size_bytes": 31030179822
             },
             {
@@ -3659,7 +3665,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004684,
+              "seconds": 0.005282,
               "size_bytes": 6080870033
             },
             {
@@ -3669,7 +3675,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003792,
+              "seconds": 0.003741,
               "size_bytes": 17557320827
             },
             {
@@ -3679,7 +3685,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003643,
+              "seconds": 0.003696,
               "size_bytes": 6133744474
             },
             {
@@ -3689,7 +3695,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004122,
+              "seconds": 0.004541,
               "size_bytes": 28508359333
             },
             {
@@ -3699,7 +3705,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003814,
+              "seconds": 0.003763,
               "size_bytes": 6632256356
             },
             {
@@ -3709,7 +3715,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003494,
+              "seconds": 0.00351,
               "size_bytes": 25824716796
             },
             {
@@ -3719,7 +3725,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004143,
+              "seconds": 0.003762,
               "size_bytes": 30419525224
             },
             {
@@ -3729,7 +3735,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003963,
+              "seconds": 0.00384,
               "size_bytes": 30860411814
             },
             {
@@ -3739,7 +3745,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004085,
+              "seconds": 0.003647,
               "size_bytes": 40336448075
             },
             {
@@ -3749,7 +3755,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003735,
+              "seconds": 0.003523,
               "size_bytes": 26361761976
             },
             {
@@ -3759,7 +3765,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004027,
+              "seconds": 0.003415,
               "size_bytes": 27636697625
             },
             {
@@ -3769,7 +3775,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004846,
+              "seconds": 0.004452,
               "size_bytes": 41017980921
             },
             {
@@ -3779,7 +3785,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003733,
+              "seconds": 0.004151,
               "size_bytes": 31517427237
             },
             {
@@ -3789,7 +3795,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003912,
+              "seconds": 0.00398,
               "size_bytes": 30916551392
             },
             {
@@ -3799,7 +3805,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003927,
+              "seconds": 0.003721,
               "size_bytes": 33837777161
             },
             {
@@ -3809,7 +3815,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003917,
+              "seconds": 0.003716,
               "size_bytes": 34824789204
             },
             {
@@ -3819,7 +3825,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004074,
+              "seconds": 0.003717,
               "size_bytes": 30531832894
             },
             {
@@ -3829,7 +3835,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004009,
+              "seconds": 0.003718,
               "size_bytes": 35560995734
             },
             {
@@ -3839,7 +3845,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003791,
+              "seconds": 0.003711,
               "size_bytes": 8936706238
             },
             {
@@ -3849,7 +3855,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002947,
+              "seconds": 0.003052,
               "size_bytes": 39587664898
             },
             {
@@ -3859,7 +3865,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002638,
+              "seconds": 0.00227,
               "size_bytes": 34006233910
             },
             {
@@ -3869,7 +3875,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002337,
+              "seconds": 0.002332,
               "size_bytes": 7409964744
             },
             {
@@ -3879,7 +3885,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00265,
+              "seconds": 0.002306,
               "size_bytes": 29561967125
             },
             {
@@ -3889,7 +3895,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002489,
+              "seconds": 0.002359,
               "size_bytes": 40590412109
             },
             {
@@ -3899,7 +3905,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002548,
+              "seconds": 0.002359,
               "size_bytes": 35434157476
             },
             {
@@ -3909,7 +3915,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002414,
+              "seconds": 0.00252,
               "size_bytes": 21560018363
             },
             {
@@ -3919,7 +3925,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002344,
+              "seconds": 0.002325,
               "size_bytes": 28713346968
             },
             {
@@ -3929,7 +3935,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002374,
+              "seconds": 0.002368,
               "size_bytes": 34244443281
             },
             {
@@ -3939,7 +3945,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002367,
+              "seconds": 0.002357,
               "size_bytes": 26420951081
             },
             {
@@ -3949,7 +3955,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002223,
+              "seconds": 0.002101,
               "size_bytes": 26639167947
             },
             {
@@ -3959,7 +3965,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002251,
+              "seconds": 0.002149,
               "size_bytes": 26814442489
             }
           ],
@@ -3970,13 +3976,13 @@
           "index": 2,
           "logical_bytes_read": 22282240,
           "process_io": {
-            "rchar": 22282361,
+            "rchar": 22282358,
             "read_bytes": 28270592
           },
-          "wall_seconds": 0.031469
+          "wall_seconds": 0.030542
         },
         {
-          "cpu_seconds": 0.041134,
+          "cpu_seconds": 0.041373,
           "evicted": true,
           "files": [
             {
@@ -3986,7 +3992,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004812,
+              "seconds": 0.004564,
               "size_bytes": 37990440428
             },
             {
@@ -3996,7 +4002,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004427,
+              "seconds": 0.004378,
               "size_bytes": 21801097511
             },
             {
@@ -4006,7 +4012,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004458,
+              "seconds": 0.004671,
               "size_bytes": 31030179822
             },
             {
@@ -4016,7 +4022,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004849,
+              "seconds": 0.00406,
               "size_bytes": 6080870033
             },
             {
@@ -4026,7 +4032,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003614,
+              "seconds": 0.003873,
               "size_bytes": 17557320827
             },
             {
@@ -4036,7 +4042,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003762,
+              "seconds": 0.003669,
               "size_bytes": 6133744474
             },
             {
@@ -4046,7 +4052,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003811,
+              "seconds": 0.004176,
               "size_bytes": 28508359333
             },
             {
@@ -4056,7 +4062,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003877,
+              "seconds": 0.003975,
               "size_bytes": 6632256356
             },
             {
@@ -4066,7 +4072,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003438,
+              "seconds": 0.004319,
               "size_bytes": 25824716796
             },
             {
@@ -4076,7 +4082,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004088,
+              "seconds": 0.003948,
               "size_bytes": 30419525224
             },
             {
@@ -4086,7 +4092,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00371,
+              "seconds": 0.004096,
               "size_bytes": 30860411814
             },
             {
@@ -4096,7 +4102,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003937,
+              "seconds": 0.003898,
               "size_bytes": 40336448075
             },
             {
@@ -4106,7 +4112,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003528,
+              "seconds": 0.003495,
               "size_bytes": 26361761976
             },
             {
@@ -4116,7 +4122,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.0034,
+              "seconds": 0.003666,
               "size_bytes": 27636697625
             },
             {
@@ -4126,7 +4132,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004041,
+              "seconds": 0.003976,
               "size_bytes": 41017980921
             },
             {
@@ -4136,7 +4142,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004049,
+              "seconds": 0.003658,
               "size_bytes": 31517427237
             },
             {
@@ -4146,7 +4152,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00369,
+              "seconds": 0.003655,
               "size_bytes": 30916551392
             },
             {
@@ -4156,7 +4162,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004117,
+              "seconds": 0.004267,
               "size_bytes": 33837777161
             },
             {
@@ -4166,7 +4172,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00396,
+              "seconds": 0.00429,
               "size_bytes": 34824789204
             },
             {
@@ -4176,7 +4182,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004224,
+              "seconds": 0.003788,
               "size_bytes": 30531832894
             },
             {
@@ -4186,7 +4192,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003901,
+              "seconds": 0.004253,
               "size_bytes": 35560995734
             },
             {
@@ -4196,7 +4202,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003629,
+              "seconds": 0.003579,
               "size_bytes": 8936706238
             },
             {
@@ -4206,7 +4212,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.003018,
+              "seconds": 0.002994,
               "size_bytes": 39587664898
             },
             {
@@ -4216,7 +4222,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00231,
+              "seconds": 0.002355,
               "size_bytes": 34006233910
             },
             {
@@ -4226,7 +4232,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002459,
+              "seconds": 0.002231,
               "size_bytes": 7409964744
             },
             {
@@ -4236,7 +4242,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00231,
+              "seconds": 0.002397,
               "size_bytes": 29561967125
             },
             {
@@ -4246,7 +4252,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002378,
+              "seconds": 0.002392,
               "size_bytes": 40590412109
             },
             {
@@ -4256,7 +4262,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002354,
+              "seconds": 0.002464,
               "size_bytes": 35434157476
             },
             {
@@ -4266,7 +4272,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002491,
+              "seconds": 0.002336,
               "size_bytes": 21560018363
             },
             {
@@ -4276,7 +4282,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002442,
+              "seconds": 0.002372,
               "size_bytes": 28713346968
             },
             {
@@ -4286,7 +4292,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002378,
+              "seconds": 0.002454,
               "size_bytes": 34244443281
             },
             {
@@ -4296,7 +4302,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002258,
+              "seconds": 0.002209,
               "size_bytes": 26420951081
             },
             {
@@ -4306,7 +4312,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002315,
+              "seconds": 0.002258,
               "size_bytes": 26639167947
             },
             {
@@ -4316,7 +4322,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.002197,
+              "seconds": 0.002185,
               "size_bytes": 26814442489
             }
           ],
@@ -4327,24 +4333,24 @@
           "index": 3,
           "logical_bytes_read": 22282240,
           "process_io": {
-            "rchar": 22282361,
+            "rchar": 22282358,
             "read_bytes": 28270592
           },
-          "wall_seconds": 0.030706
+          "wall_seconds": 0.030783
         }
       ]
     },
     {
       "candidate": "ht64-i32",
       "observed": {
-        "distinct": 34,
+        "distinct_content": 34,
         "failed": 0,
         "files": 34,
         "stable": 34
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.132755,
+          "cpu_seconds": 0.132025,
           "evicted": true,
           "files": [
             {
@@ -4354,7 +4360,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.016783,
+              "seconds": 0.016307,
               "size_bytes": 37990440428
             },
             {
@@ -4364,7 +4370,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015954,
+              "seconds": 0.015817,
               "size_bytes": 21801097511
             },
             {
@@ -4374,7 +4380,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015588,
+              "seconds": 0.016451,
               "size_bytes": 31030179822
             },
             {
@@ -4384,7 +4390,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015261,
+              "seconds": 0.014621,
               "size_bytes": 6080870033
             },
             {
@@ -4394,7 +4400,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015098,
+              "seconds": 0.014991,
               "size_bytes": 17557320827
             },
             {
@@ -4404,7 +4410,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.014711,
+              "seconds": 0.01519,
               "size_bytes": 6133744474
             },
             {
@@ -4414,7 +4420,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.016367,
+              "seconds": 0.016516,
               "size_bytes": 28508359333
             },
             {
@@ -4424,7 +4430,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.014364,
+              "seconds": 0.016181,
               "size_bytes": 6632256356
             },
             {
@@ -4434,7 +4440,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.014909,
+              "seconds": 0.014065,
               "size_bytes": 25824716796
             },
             {
@@ -4444,7 +4450,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015476,
+              "seconds": 0.015536,
               "size_bytes": 30419525224
             },
             {
@@ -4454,7 +4460,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.014664,
+              "seconds": 0.015503,
               "size_bytes": 30860411814
             },
             {
@@ -4464,7 +4470,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.01582,
+              "seconds": 0.015115,
               "size_bytes": 40336448075
             },
             {
@@ -4474,7 +4480,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.014604,
+              "seconds": 0.014781,
               "size_bytes": 26361761976
             },
             {
@@ -4484,7 +4490,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015507,
+              "seconds": 0.01481,
               "size_bytes": 27636697625
             },
             {
@@ -4494,7 +4500,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015486,
+              "seconds": 0.015029,
               "size_bytes": 41017980921
             },
             {
@@ -4504,7 +4510,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.0158,
+              "seconds": 0.014422,
               "size_bytes": 31517427237
             },
             {
@@ -4514,7 +4520,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015039,
+              "seconds": 0.015987,
               "size_bytes": 30916551392
             },
             {
@@ -4524,7 +4530,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015088,
+              "seconds": 0.015679,
               "size_bytes": 33837777161
             },
             {
@@ -4534,7 +4540,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.016522,
+              "seconds": 0.014621,
               "size_bytes": 34824789204
             },
             {
@@ -4544,7 +4550,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.016233,
+              "seconds": 0.014841,
               "size_bytes": 30531832894
             },
             {
@@ -4554,7 +4560,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.016489,
+              "seconds": 0.015191,
               "size_bytes": 35560995734
             },
             {
@@ -4564,7 +4570,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.015295,
+              "seconds": 0.014948,
               "size_bytes": 8936706238
             },
             {
@@ -4574,7 +4580,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012794,
+              "seconds": 0.012473,
               "size_bytes": 39587664898
             },
             {
@@ -4584,7 +4590,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.01152,
+              "seconds": 0.010465,
               "size_bytes": 34006233910
             },
             {
@@ -4594,7 +4600,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.009602,
+              "seconds": 0.010568,
               "size_bytes": 7409964744
             },
             {
@@ -4604,7 +4610,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.009128,
+              "seconds": 0.010444,
               "size_bytes": 29561967125
             },
             {
@@ -4614,7 +4620,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00975,
+              "seconds": 0.009897,
               "size_bytes": 40590412109
             },
             {
@@ -4624,7 +4630,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.009426,
+              "seconds": 0.0093,
               "size_bytes": 35434157476
             },
             {
@@ -4634,7 +4640,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.009098,
+              "seconds": 0.009658,
               "size_bytes": 21560018363
             },
             {
@@ -4644,7 +4650,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.009341,
+              "seconds": 0.009542,
               "size_bytes": 28713346968
             },
             {
@@ -4654,7 +4660,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.009107,
+              "seconds": 0.009122,
               "size_bytes": 34244443281
             },
             {
@@ -4664,7 +4670,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.009079,
+              "seconds": 0.009092,
               "size_bytes": 26420951081
             },
             {
@@ -4674,7 +4680,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.008197,
+              "seconds": 0.008189,
               "size_bytes": 26639167947
             },
             {
@@ -4684,24 +4690,24 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.007931,
+              "seconds": 0.007704,
               "size_bytes": 26814442489
             }
           ],
           "host_counters": {
             "cifs_bytes_read": 0,
-            "network_rx_bytes": 256
+            "network_rx_bytes": 8808
           },
           "index": 1,
           "logical_bytes_read": 75759616,
           "process_io": {
-            "rchar": 75759737,
+            "rchar": 75759734,
             "read_bytes": 85073920
           },
-          "wall_seconds": 0.118336
+          "wall_seconds": 0.117467
         },
         {
-          "cpu_seconds": 0.132719,
+          "cpu_seconds": 0.129544,
           "evicted": true,
           "files": [
             {
@@ -4711,7 +4717,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.014551,
+              "seconds": 0.013598,
               "size_bytes": 37990440428
             },
             {
@@ -4721,7 +4727,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.01416,
+              "seconds": 0.013161,
               "size_bytes": 21801097511
             },
             {
@@ -4731,7 +4737,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012529,
+              "seconds": 0.013175,
               "size_bytes": 31030179822
             },
             {
@@ -4741,7 +4747,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.013103,
+              "seconds": 0.012469,
               "size_bytes": 6080870033
             },
             {
@@ -4751,7 +4757,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012415,
+              "seconds": 0.01235,
               "size_bytes": 17557320827
             },
             {
@@ -4761,7 +4767,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012923,
+              "seconds": 0.012476,
               "size_bytes": 6133744474
             },
             {
@@ -4771,7 +4777,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.013345,
+              "seconds": 0.013378,
               "size_bytes": 28508359333
             },
             {
@@ -4781,414 +4787,57 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.013247,
+              "seconds": 0.012839,
               "size_bytes": 6632256356
             },
             {
               "ext": ".mkv",
               "failure": null,
               "id": "f0009",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.01252,
-              "size_bytes": 25824716796
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0010",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012309,
-              "size_bytes": 30419525224
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0011",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012689,
-              "size_bytes": 30860411814
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0012",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.0131,
-              "size_bytes": 40336448075
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0013",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.013573,
-              "size_bytes": 26361761976
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0014",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012862,
-              "size_bytes": 27636697625
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0015",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012873,
-              "size_bytes": 41017980921
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0016",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012506,
-              "size_bytes": 31517427237
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0017",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.013274,
-              "size_bytes": 30916551392
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0018",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012658,
-              "size_bytes": 33837777161
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0019",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.013225,
-              "size_bytes": 34824789204
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0020",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012413,
-              "size_bytes": 30531832894
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0021",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012688,
-              "size_bytes": 35560995734
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0022",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012534,
-              "size_bytes": 8936706238
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0023",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.010591,
-              "size_bytes": 39587664898
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0024",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.008891,
-              "size_bytes": 34006233910
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0025",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.008258,
-              "size_bytes": 7409964744
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0026",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007573,
-              "size_bytes": 29561967125
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0027",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007489,
-              "size_bytes": 40590412109
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0028",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007625,
-              "size_bytes": 35434157476
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0029",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007647,
-              "size_bytes": 21560018363
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0030",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007545,
-              "size_bytes": 28713346968
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0031",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007571,
-              "size_bytes": 34244443281
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0032",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007523,
-              "size_bytes": 26420951081
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0033",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007132,
-              "size_bytes": 26639167947
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0034",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.007203,
-              "size_bytes": 26814442489
-            }
-          ],
-          "host_counters": {
-            "cifs_bytes_read": 0,
-            "network_rx_bytes": 120
-          },
-          "index": 2,
-          "logical_bytes_read": 75759616,
-          "process_io": {
-            "rchar": 75759737,
-            "read_bytes": 85073920
-          },
-          "wall_seconds": 0.099418
-        },
-        {
-          "cpu_seconds": 0.136987,
-          "evicted": true,
-          "files": [
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0001",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.013611,
-              "size_bytes": 37990440428
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0002",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.014042,
-              "size_bytes": 21801097511
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0003",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012938,
-              "size_bytes": 31030179822
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0004",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012981,
-              "size_bytes": 6080870033
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0005",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012562,
-              "size_bytes": 17557320827
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0006",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012938,
-              "size_bytes": 6133744474
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0007",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012378,
-              "size_bytes": 28508359333
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0008",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.013079,
-              "size_bytes": 6632256356
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0009",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012141,
-              "size_bytes": 25824716796
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0010",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.014378,
-              "size_bytes": 30419525224
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0011",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.013626,
-              "size_bytes": 30860411814
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0012",
-              "logical_bytes": 2228224,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.012835,
-              "size_bytes": 40336448075
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0013",
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
               "seconds": 0.012617,
+              "size_bytes": 25824716796
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0010",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012284,
+              "size_bytes": 30419525224
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0011",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013405,
+              "size_bytes": 30860411814
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0012",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012529,
+              "size_bytes": 40336448075
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0013",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012595,
               "size_bytes": 26361761976
             },
             {
@@ -5198,7 +4847,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012785,
+              "seconds": 0.012378,
               "size_bytes": 27636697625
             },
             {
@@ -5208,7 +4857,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012564,
+              "seconds": 0.011849,
               "size_bytes": 41017980921
             },
             {
@@ -5218,7 +4867,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.011566,
+              "seconds": 0.011725,
               "size_bytes": 31517427237
             },
             {
@@ -5228,7 +4877,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012873,
+              "seconds": 0.012336,
               "size_bytes": 30916551392
             },
             {
@@ -5238,7 +4887,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.013473,
+              "seconds": 0.012614,
               "size_bytes": 33837777161
             },
             {
@@ -5248,7 +4897,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.013252,
+              "seconds": 0.013363,
               "size_bytes": 34824789204
             },
             {
@@ -5258,7 +4907,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.013355,
+              "seconds": 0.012218,
               "size_bytes": 30531832894
             },
             {
@@ -5268,7 +4917,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.0123,
+              "seconds": 0.012935,
               "size_bytes": 35560995734
             },
             {
@@ -5278,7 +4927,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.012497,
+              "seconds": 0.01159,
               "size_bytes": 8936706238
             },
             {
@@ -5288,7 +4937,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.010461,
+              "seconds": 0.009362,
               "size_bytes": 39587664898
             },
             {
@@ -5298,7 +4947,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.010211,
+              "seconds": 0.008366,
               "size_bytes": 34006233910
             },
             {
@@ -5308,7 +4957,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.008135,
+              "seconds": 0.007669,
               "size_bytes": 7409964744
             },
             {
@@ -5318,7 +4967,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.008676,
+              "seconds": 0.008916,
               "size_bytes": 29561967125
             },
             {
@@ -5328,7 +4977,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.008345,
+              "seconds": 0.008037,
               "size_bytes": 40590412109
             },
             {
@@ -5338,7 +4987,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.00784,
+              "seconds": 0.008209,
               "size_bytes": 35434157476
             },
             {
@@ -5348,7 +4997,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.008148,
+              "seconds": 0.007442,
               "size_bytes": 21560018363
             },
             {
@@ -5358,7 +5007,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.007884,
+              "seconds": 0.007581,
               "size_bytes": 28713346968
             },
             {
@@ -5368,7 +5017,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.008799,
+              "seconds": 0.007382,
               "size_bytes": 34244443281
             },
             {
@@ -5378,7 +5027,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.008003,
+              "seconds": 0.008133,
               "size_bytes": 26420951081
             },
             {
@@ -5388,7 +5037,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.007164,
+              "seconds": 0.007234,
               "size_bytes": 26639167947
             },
             {
@@ -5398,21 +5047,378 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.007063,
+              "seconds": 0.006913,
               "size_bytes": 26814442489
             }
           ],
           "host_counters": {
             "cifs_bytes_read": 0,
-            "network_rx_bytes": 60
+            "network_rx_bytes": 0
+          },
+          "index": 2,
+          "logical_bytes_read": 75759616,
+          "process_io": {
+            "rchar": 75759734,
+            "read_bytes": 85073920
+          },
+          "wall_seconds": 0.096865
+        },
+        {
+          "cpu_seconds": 0.135134,
+          "evicted": true,
+          "files": [
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0001",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013985,
+              "size_bytes": 37990440428
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0002",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.014745,
+              "size_bytes": 21801097511
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0003",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013114,
+              "size_bytes": 31030179822
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0004",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013647,
+              "size_bytes": 6080870033
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0005",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012238,
+              "size_bytes": 17557320827
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0006",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012653,
+              "size_bytes": 6133744474
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0007",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012186,
+              "size_bytes": 28508359333
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0008",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013059,
+              "size_bytes": 6632256356
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0009",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012579,
+              "size_bytes": 25824716796
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0010",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.014167,
+              "size_bytes": 30419525224
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0011",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013498,
+              "size_bytes": 30860411814
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0012",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012854,
+              "size_bytes": 40336448075
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0013",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.01237,
+              "size_bytes": 26361761976
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0014",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012489,
+              "size_bytes": 27636697625
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0015",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012791,
+              "size_bytes": 41017980921
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0016",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012181,
+              "size_bytes": 31517427237
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0017",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012853,
+              "size_bytes": 30916551392
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0018",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012462,
+              "size_bytes": 33837777161
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0019",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013023,
+              "size_bytes": 34824789204
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0020",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013009,
+              "size_bytes": 30531832894
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0021",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.012572,
+              "size_bytes": 35560995734
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0022",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.013614,
+              "size_bytes": 8936706238
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0023",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.011141,
+              "size_bytes": 39587664898
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0024",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.009633,
+              "size_bytes": 34006233910
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0025",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007622,
+              "size_bytes": 7409964744
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0026",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.008326,
+              "size_bytes": 29561967125
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0027",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007576,
+              "size_bytes": 40590412109
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0028",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007943,
+              "size_bytes": 35434157476
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0029",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007961,
+              "size_bytes": 21560018363
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0030",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007554,
+              "size_bytes": 28713346968
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0031",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007846,
+              "size_bytes": 34244443281
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0032",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007544,
+              "size_bytes": 26420951081
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0033",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007388,
+              "size_bytes": 26639167947
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0034",
+              "logical_bytes": 2228224,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.007435,
+              "size_bytes": 26814442489
+            }
+          ],
+          "host_counters": {
+            "cifs_bytes_read": 0,
+            "network_rx_bytes": 228
           },
           "index": 3,
           "logical_bytes_read": 75759616,
           "process_io": {
-            "rchar": 75759738,
+            "rchar": 75759735,
             "read_bytes": 85073920
           },
-          "wall_seconds": 0.100113
+          "wall_seconds": 0.099891
         }
       ]
     }

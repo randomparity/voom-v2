@@ -1,9 +1,15 @@
 {
   "build": {
-    "git_changed_paths": [],
-    "git_commit": "ddc08bc7b4e4140d13a361ff7c421aaa91320bac",
+    "git_changed_paths": [
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-local-corpus-evicted.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-network-corpus-as-found.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-oracle.json",
+      "scripts/media-evidence-fingerprint-selftest.py",
+      "scripts/media-evidence-fingerprint.py"
+    ],
+    "git_commit": "205e6292b479ad58017ca694c41bc887756ca25d",
     "helper_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
-    "script_sha256": "bb68621829456e0beeff526d836e7407229a825152a73e770f3ba050b334b679"
+    "script_sha256": "e7a564464195c0bc26746f1499543adf5d9d5e5fa3e29f4ebb703ed80faa0eb1"
   },
   "cases": [
     {

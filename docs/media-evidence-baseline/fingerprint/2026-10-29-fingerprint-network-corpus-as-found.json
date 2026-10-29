@@ -1,22 +1,28 @@
 {
   "build": {
-    "git_changed_paths": [],
-    "git_commit": "ddc08bc7b4e4140d13a361ff7c421aaa91320bac",
+    "git_changed_paths": [
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-local-corpus-evicted.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-network-corpus-as-found.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-oracle.json",
+      "scripts/media-evidence-fingerprint-selftest.py",
+      "scripts/media-evidence-fingerprint.py"
+    ],
+    "git_commit": "205e6292b479ad58017ca694c41bc887756ca25d",
     "helper_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
-    "script_sha256": "bb68621829456e0beeff526d836e7407229a825152a73e770f3ba050b334b679"
+    "script_sha256": "e7a564464195c0bc26746f1499543adf5d9d5e5fa3e29f4ebb703ed80faa0eb1"
   },
   "cells": [
     {
       "candidate": "meta",
       "observed": {
-        "distinct": 3,
+        "distinct_content": 3,
         "failed": 0,
         "files": 3,
         "stable": 3
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.001647,
+          "cpu_seconds": 0.001667,
           "evicted": false,
           "files": [
             {
@@ -26,7 +32,7 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5.1e-05,
+              "seconds": 5.2e-05,
               "size_bytes": 5864433687
             },
             {
@@ -36,7 +42,101 @@
               "logical_bytes": 0,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 5.6e-05,
+              "seconds": 6.9e-05,
+              "size_bytes": 7190609920
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0063",
+              "logical_bytes": 0,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 0.000117,
+              "size_bytes": 11607474513
+            }
+          ],
+          "host_counters": {
+            "cifs_bytes_read": 0,
+            "network_rx_bytes": 0
+          },
+          "index": 1,
+          "logical_bytes_read": 0,
+          "process_io": {
+            "rchar": 49986,
+            "read_bytes": 0
+          },
+          "wall_seconds": 0.001598
+        },
+        {
+          "cpu_seconds": 0.000586,
+          "evicted": false,
+          "files": [
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0049",
+              "logical_bytes": 0,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 3.7e-05,
+              "size_bytes": 5864433687
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0074",
+              "logical_bytes": 0,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 3.9e-05,
+              "size_bytes": 7190609920
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0063",
+              "logical_bytes": 0,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 3e-05,
+              "size_bytes": 11607474513
+            }
+          ],
+          "host_counters": {
+            "cifs_bytes_read": 0,
+            "network_rx_bytes": 0
+          },
+          "index": 2,
+          "logical_bytes_read": 0,
+          "process_io": {
+            "rchar": 100,
+            "read_bytes": 0
+          },
+          "wall_seconds": 0.000533
+        },
+        {
+          "cpu_seconds": 0.000508,
+          "evicted": false,
+          "files": [
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0049",
+              "logical_bytes": 0,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 3.3e-05,
+              "size_bytes": 5864433687
+            },
+            {
+              "ext": ".mkv",
+              "failure": null,
+              "id": "f0074",
+              "logical_bytes": 0,
+              "outcome": "observed",
+              "resident_bytes_before": 0,
+              "seconds": 3.9e-05,
               "size_bytes": 7190609920
             },
             {
@@ -54,121 +154,27 @@
             "cifs_bytes_read": 0,
             "network_rx_bytes": 0
           },
-          "index": 1,
-          "logical_bytes_read": 0,
-          "process_io": {
-            "rchar": 49985,
-            "read_bytes": 0
-          },
-          "wall_seconds": 0.001567
-        },
-        {
-          "cpu_seconds": 0.000628,
-          "evicted": false,
-          "files": [
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0049",
-              "logical_bytes": 0,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 4.1e-05,
-              "size_bytes": 5864433687
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0074",
-              "logical_bytes": 0,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.000108,
-              "size_bytes": 7190609920
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0063",
-              "logical_bytes": 0,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.00011,
-              "size_bytes": 11607474513
-            }
-          ],
-          "host_counters": {
-            "cifs_bytes_read": 0,
-            "network_rx_bytes": 0
-          },
-          "index": 2,
-          "logical_bytes_read": 0,
-          "process_io": {
-            "rchar": 99,
-            "read_bytes": 0
-          },
-          "wall_seconds": 0.000561
-        },
-        {
-          "cpu_seconds": 0.000457,
-          "evicted": false,
-          "files": [
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0049",
-              "logical_bytes": 0,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 0.000173,
-              "size_bytes": 5864433687
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0074",
-              "logical_bytes": 0,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 2.4e-05,
-              "size_bytes": 7190609920
-            },
-            {
-              "ext": ".mkv",
-              "failure": null,
-              "id": "f0063",
-              "logical_bytes": 0,
-              "outcome": "observed",
-              "resident_bytes_before": 0,
-              "seconds": 3.3e-05,
-              "size_bytes": 11607474513
-            }
-          ],
-          "host_counters": {
-            "cifs_bytes_read": 0,
-            "network_rx_bytes": 0
-          },
           "index": 3,
           "logical_bytes_read": 0,
           "process_io": {
-            "rchar": 100,
+            "rchar": 101,
             "read_bytes": 0
           },
-          "wall_seconds": 0.000415
+          "wall_seconds": 0.000458
         }
       ]
     },
     {
       "candidate": "ht64",
       "observed": {
-        "distinct": 3,
+        "distinct_content": 3,
         "failed": 0,
         "files": 3,
         "stable": 3
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.00177,
+          "cpu_seconds": 0.001907,
           "evicted": false,
           "files": [
             {
@@ -178,7 +184,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005224,
+              "seconds": 0.004551,
               "size_bytes": 5864433687
             },
             {
@@ -188,7 +194,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.005033,
+              "seconds": 0.00374,
               "size_bytes": 7190609920
             },
             {
@@ -198,24 +204,24 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 0,
-              "seconds": 0.004458,
+              "seconds": 0.00468,
               "size_bytes": 11607474513
             }
           ],
           "host_counters": {
             "cifs_bytes_read": 985448,
-            "network_rx_bytes": 1031173
+            "network_rx_bytes": 1031162
           },
           "index": 1,
           "logical_bytes_read": 393216,
           "process_io": {
-            "rchar": 393316,
+            "rchar": 393317,
             "read_bytes": 0
           },
-          "wall_seconds": 0.005451
+          "wall_seconds": 0.005136
         },
         {
-          "cpu_seconds": 0.001586,
+          "cpu_seconds": 0.001299,
           "evicted": false,
           "files": [
             {
@@ -225,7 +231,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 331776,
-              "seconds": 0.000515,
+              "seconds": 0.000426,
               "size_bytes": 5864433687
             },
             {
@@ -235,7 +241,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 327680,
-              "seconds": 0.000325,
+              "seconds": 0.000496,
               "size_bytes": 7190609920
             },
             {
@@ -245,7 +251,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 331776,
-              "seconds": 0.000412,
+              "seconds": 0.000255,
               "size_bytes": 11607474513
             }
           ],
@@ -256,13 +262,13 @@
           "index": 2,
           "logical_bytes_read": 393216,
           "process_io": {
-            "rchar": 393316,
+            "rchar": 393317,
             "read_bytes": 0
           },
-          "wall_seconds": 0.000863
+          "wall_seconds": 0.000769
         },
         {
-          "cpu_seconds": 0.001263,
+          "cpu_seconds": 0.001356,
           "evicted": false,
           "files": [
             {
@@ -272,7 +278,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 331776,
-              "seconds": 0.000593,
+              "seconds": 0.000403,
               "size_bytes": 5864433687
             },
             {
@@ -282,7 +288,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 327680,
-              "seconds": 0.000303,
+              "seconds": 0.000385,
               "size_bytes": 7190609920
             },
             {
@@ -292,7 +298,7 @@
               "logical_bytes": 131072,
               "outcome": "observed",
               "resident_bytes_before": 331776,
-              "seconds": 0.000256,
+              "seconds": 0.000404,
               "size_bytes": 11607474513
             }
           ],
@@ -306,21 +312,21 @@
             "rchar": 393317,
             "read_bytes": 0
           },
-          "wall_seconds": 0.000798
+          "wall_seconds": 0.000791
         }
       ]
     },
     {
       "candidate": "ht1m",
       "observed": {
-        "distinct": 3,
+        "distinct_content": 3,
         "failed": 0,
         "files": 3,
         "stable": 3
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.014608,
+          "cpu_seconds": 0.012827,
           "evicted": false,
           "files": [
             {
@@ -330,7 +336,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 331776,
-              "seconds": 0.026221,
+              "seconds": 0.023114,
               "size_bytes": 5864433687
             },
             {
@@ -340,7 +346,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 327680,
-              "seconds": 0.025165,
+              "seconds": 0.023523,
               "size_bytes": 7190609920
             },
             {
@@ -350,13 +356,13 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 331776,
-              "seconds": 0.026101,
+              "seconds": 0.024356,
               "size_bytes": 11607474513
             }
           ],
           "host_counters": {
             "cifs_bytes_read": 24182784,
-            "network_rx_bytes": 25287015
+            "network_rx_bytes": 25286718
           },
           "index": 1,
           "logical_bytes_read": 6291456,
@@ -364,10 +370,10 @@
             "rchar": 6291557,
             "read_bytes": 0
           },
-          "wall_seconds": 0.026612
+          "wall_seconds": 0.024791
         },
         {
-          "cpu_seconds": 0.010919,
+          "cpu_seconds": 0.01122,
           "evicted": false,
           "files": [
             {
@@ -377,7 +383,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 8392704,
-              "seconds": 0.003508,
+              "seconds": 0.003816,
               "size_bytes": 5864433687
             },
             {
@@ -387,7 +393,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 8388608,
-              "seconds": 0.003554,
+              "seconds": 0.003439,
               "size_bytes": 7190609920
             },
             {
@@ -397,7 +403,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 8392704,
-              "seconds": 0.003356,
+              "seconds": 0.003653,
               "size_bytes": 11607474513
             }
           ],
@@ -411,10 +417,10 @@
             "rchar": 6291558,
             "read_bytes": 0
           },
-          "wall_seconds": 0.003945
+          "wall_seconds": 0.004214
         },
         {
-          "cpu_seconds": 0.010536,
+          "cpu_seconds": 0.010107,
           "evicted": false,
           "files": [
             {
@@ -424,7 +430,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 8392704,
-              "seconds": 0.003215,
+              "seconds": 0.003414,
               "size_bytes": 5864433687
             },
             {
@@ -434,7 +440,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 8388608,
-              "seconds": 0.0034,
+              "seconds": 0.003364,
               "size_bytes": 7190609920
             },
             {
@@ -444,7 +450,7 @@
               "logical_bytes": 2097152,
               "outcome": "observed",
               "resident_bytes_before": 8392704,
-              "seconds": 0.0035,
+              "seconds": 0.00304,
               "size_bytes": 11607474513
             }
           ],
@@ -458,21 +464,21 @@
             "rchar": 6291558,
             "read_bytes": 0
           },
-          "wall_seconds": 0.003995
+          "wall_seconds": 0.003673
         }
       ]
     },
     {
       "candidate": "ht64-i8",
       "observed": {
-        "distinct": 3,
+        "distinct_content": 3,
         "failed": 0,
         "files": 3,
         "stable": 3
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.004729,
+          "cpu_seconds": 0.004041,
           "evicted": false,
           "files": [
             {
@@ -482,7 +488,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8392704,
-              "seconds": 0.00687,
+              "seconds": 0.005113,
               "size_bytes": 5864433687
             },
             {
@@ -492,7 +498,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8388608,
-              "seconds": 0.007286,
+              "seconds": 0.004784,
               "size_bytes": 7190609920
             },
             {
@@ -502,13 +508,13 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8392704,
-              "seconds": 0.007397,
+              "seconds": 0.00449,
               "size_bytes": 11607474513
             }
           ],
           "host_counters": {
             "cifs_bytes_read": 1671168,
-            "network_rx_bytes": 1750404
+            "network_rx_bytes": 1750338
           },
           "index": 1,
           "logical_bytes_read": 1966080,
@@ -516,10 +522,10 @@
             "rchar": 1966182,
             "read_bytes": 0
           },
-          "wall_seconds": 0.007851
+          "wall_seconds": 0.005265
         },
         {
-          "cpu_seconds": 0.004192,
+          "cpu_seconds": 0.004848,
           "evicted": false,
           "files": [
             {
@@ -529,7 +535,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8949760,
-              "seconds": 0.001655,
+              "seconds": 0.001456,
               "size_bytes": 5864433687
             },
             {
@@ -539,7 +545,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8945664,
-              "seconds": 0.001289,
+              "seconds": 0.001674,
               "size_bytes": 7190609920
             },
             {
@@ -549,7 +555,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8949760,
-              "seconds": 0.001086,
+              "seconds": 0.001522,
               "size_bytes": 11607474513
             }
           ],
@@ -563,10 +569,10 @@
             "rchar": 1966183,
             "read_bytes": 0
           },
-          "wall_seconds": 0.001851
+          "wall_seconds": 0.002094
         },
         {
-          "cpu_seconds": 0.00366,
+          "cpu_seconds": 0.003467,
           "evicted": false,
           "files": [
             {
@@ -576,7 +582,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8949760,
-              "seconds": 0.001496,
+              "seconds": 0.001136,
               "size_bytes": 5864433687
             },
             {
@@ -586,7 +592,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8945664,
-              "seconds": 0.001103,
+              "seconds": 0.001079,
               "size_bytes": 7190609920
             },
             {
@@ -596,7 +602,7 @@
               "logical_bytes": 655360,
               "outcome": "observed",
               "resident_bytes_before": 8949760,
-              "seconds": 0.001024,
+              "seconds": 0.001045,
               "size_bytes": 11607474513
             }
           ],
@@ -610,21 +616,21 @@
             "rchar": 1966183,
             "read_bytes": 0
           },
-          "wall_seconds": 0.001657
+          "wall_seconds": 0.001378
         }
       ]
     },
     {
       "candidate": "ht64-i32",
       "observed": {
-        "distinct": 3,
+        "distinct_content": 3,
         "failed": 0,
         "files": 3,
         "stable": 3
       },
       "repetitions": [
         {
-          "cpu_seconds": 0.013242,
+          "cpu_seconds": 0.011401,
           "evicted": false,
           "files": [
             {
@@ -634,7 +640,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 8949760,
-              "seconds": 0.014213,
+              "seconds": 0.015811,
               "size_bytes": 5864433687
             },
             {
@@ -644,7 +650,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 8945664,
-              "seconds": 0.013884,
+              "seconds": 0.01493,
               "size_bytes": 7190609920
             },
             {
@@ -654,7 +660,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 8949760,
-              "seconds": 0.01471,
+              "seconds": 0.014571,
               "size_bytes": 11607474513
             }
           ],
@@ -668,10 +674,10 @@
             "rchar": 6684775,
             "read_bytes": 0
           },
-          "wall_seconds": 0.015209
+          "wall_seconds": 0.015977
         },
         {
-          "cpu_seconds": 0.011335,
+          "cpu_seconds": 0.011303,
           "evicted": false,
           "files": [
             {
@@ -681,7 +687,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 11038720,
-              "seconds": 0.00398,
+              "seconds": 0.004026,
               "size_bytes": 5864433687
             },
             {
@@ -691,7 +697,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 11034624,
-              "seconds": 0.003819,
+              "seconds": 0.003825,
               "size_bytes": 7190609920
             },
             {
@@ -701,7 +707,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 11038720,
-              "seconds": 0.00361,
+              "seconds": 0.003383,
               "size_bytes": 11607474513
             }
           ],
@@ -715,10 +721,10 @@
             "rchar": 6684775,
             "read_bytes": 0
           },
-          "wall_seconds": 0.004143
+          "wall_seconds": 0.004207
         },
         {
-          "cpu_seconds": 0.01122,
+          "cpu_seconds": 0.010743,
           "evicted": false,
           "files": [
             {
@@ -728,7 +734,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 11038720,
-              "seconds": 0.003687,
+              "seconds": 0.003564,
               "size_bytes": 5864433687
             },
             {
@@ -738,7 +744,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 11034624,
-              "seconds": 0.004076,
+              "seconds": 0.003533,
               "size_bytes": 7190609920
             },
             {
@@ -748,7 +754,7 @@
               "logical_bytes": 2228224,
               "outcome": "observed",
               "resident_bytes_before": 11038720,
-              "seconds": 0.003553,
+              "seconds": 0.003535,
               "size_bytes": 11607474513
             }
           ],
@@ -762,7 +768,7 @@
             "rchar": 6684775,
             "read_bytes": 0
           },
-          "wall_seconds": 0.004294
+          "wall_seconds": 0.003903
         }
       ]
     }

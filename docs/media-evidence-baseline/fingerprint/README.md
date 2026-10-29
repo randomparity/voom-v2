@@ -31,8 +31,10 @@ Overlapping ranges are merged and read once with `pread`. A pre- and post-read `
 agree on size, mtime, dev, ino and nlink, the same fields the hash worker compares. Otherwise
 the fingerprint is rejected as drift.
 
-Commands, run at `ddc08bc7` with a clean tracked tree. Each record carries the script's and
-the imported #788 helper's SHA-256.
+Commands, run from parent commit `205e6292` with this branch's final scripts in the working
+tree; each record's `git_changed_paths` lists those scripts and the records being replaced.
+Each record carries the script's and the imported #788 helper's SHA-256, and the script's
+matches the committed file.
 
 ```sh
 python3 scripts/media-evidence-baseline.py manifest <local-root> \
@@ -97,22 +99,22 @@ medians, CV in parentheses. CPU is the experiment process's user plus system tim
 
 | Candidate | Logical (MB) | Physical (MB) | Wall (ms) | CPU (ms) | Slowest file (ms) |
 |---|---:|---:|---:|---:|---:|
-| `meta` | 0 | 0 | 1.2 (55%) | 1.4 | 0.3 |
-| `ht64` | 4.46 | 9.33 | 8.2 (16%) | 10.9 | 3.5 |
-| `ht1m` | 71.30 | 103.22 | 43.7 (2%) | 122.6 | 7.0 |
-| `ht64-i8` | 22.28 | 28.27 | 31.5 (10%) | 42.4 | 6.4 |
-| `ht64-i32` | 75.76 | 85.07 | 100.1 (10%) | 132.8 | 16.8 |
+| `meta` | 0 | 0 | 1.4 (60%) | 1.6 | 0.4 |
+| `ht64` | 4.46 | 9.33 | 8.2 (14%) | 10.6 | 3.1 |
+| `ht1m` | 71.30 | 103.22 | 41.9 (4%) | 118.4 | 6.9 |
+| `ht64-i8` | 22.28 | 28.27 | 30.8 (10%) | 41.4 | 6.0 |
+| `ht64-i32` | 75.76 | 85.07 | 99.9 (11%) | 132.0 | 16.5 |
 
 **Network, as-found** (3 files, 24.7 GB). Repetition 1 is reported separately, as the protocol
 requires; repetitions 2 and 3 were served from the client cache, with 0 CIFS bytes read:
 
-| Candidate | Logical (MB) | Rep 1 CIFS read (MB) | Rep 1 wall (ms) | Reps 2–3 wall (ms) |
-|---|---:|---:|---:|---:|
-| `meta` | 0 | 0 | 1.6 | 0.6, 0.4 |
-| `ht64` | 0.39 | 0.99 | 5.5 | 0.9, 0.8 |
-| `ht1m` | 6.29 | 24.18 | 26.6 | 3.9, 4.0 |
-| `ht64-i8` | 1.97 | 1.67 | 7.9 | 1.9, 1.7 |
-| `ht64-i32` | 6.68 | 6.27 | 15.2 | 4.1, 4.3 |
+| Candidate | Logical (MB) | Rep 1 CIFS read (MB) | Rep 1 wall / CPU (ms) | Reps 2–3 wall (ms) | Reps 2–3 CPU (ms) |
+|---|---:|---:|---:|---:|---:|
+| `meta` | 0 | 0 | 1.6 / 1.7 | 0.5, 0.5 | 0.6, 0.5 |
+| `ht64` | 0.39 | 0.99 | 5.1 / 1.9 | 0.8, 0.8 | 1.3, 1.4 |
+| `ht1m` | 6.29 | 24.18 | 24.8 / 12.8 | 4.2, 3.7 | 11.2, 10.1 |
+| `ht64-i8` | 1.97 | 1.67 | 5.3 / 4.0 | 2.1, 1.4 | 4.9, 3.5 |
+| `ht64-i32` | 6.68 | 6.27 | 16.0 / 11.4 | 4.2, 3.9 | 11.3, 10.7 |
 
 For scale, the #788 baseline read 2,805.9 GB logical in 613.9 s per local repetition and
 74.0 GB per network repetition. The instruments differ. The baseline drives the release Rust
@@ -120,9 +122,10 @@ workers over HTTP; this experiment reads in-process from Python. Compare orders 
 not ratios, and no protocol threshold comparison is claimed against stage 0.
 
 **Observed over this finite corpus** (kept apart from the oracle): in every cell, every file
-gave the same fingerprint in all three repetitions, with no failures. The 34 local files gave
-34 distinct fingerprints and the 3 network files gave 3. That says nothing about collision or
-mutation-detection rates in general.
+gave the same fingerprint in all three repetitions, with no failures. Compared on size and
+sampled bytes only (the inode and mtime would make any two files differ), every candidate told
+apart all 34 local files and all 3 network files; `meta` did so by size alone. That says
+nothing about collision or mutation-detection rates in general.
 
 - Readahead makes physical reads exceed logical reads on local storage: 2.1× for `ht64` and
   1.1× for `ht64-i32`. On CIFS, `ht1m`'s first repetition read 3.8× its logical bytes.
@@ -142,12 +145,14 @@ mutation-detection rates in general.
 ## Disclosures
 
 - All runs held an exclusive host lock that serializes corpus measurements between parallel
-  experiments. The local and network captures together took 2 s (20:27:27–20:27:29 UTC). The
-  oracle ran outside the lock and read no corpus. Other host activity, including parallel
-  experiment builds waiting on the lock, was not controlled.
+  experiments. The local and network captures took 1 s (21:22:21–21:22:22 UTC), and the
+  oracle, which reads no corpus, followed under the same lock. An earlier capture at
+  20:27 UTC, made before the distinctness count was corrected, was discarded and not
+  committed; its bytes read were identical and its timings of the same magnitude. Other host
+  activity, including parallel experiment builds waiting on the lock, was not controlled.
 - The network corpus is shared with an active rehearsal, and host counters include its
-  traffic. This experiment added about 33 MB of CIFS reads, which is negligible load on the
-  rehearsal.
+  traffic. Each capture added about 33 MB of CIFS reads (66 MB in total), negligible load on
+  the rehearsal.
 - Network cells ran back to back in one process. Each cell's first repetition found pages
   cached by earlier cells (the `resident_bytes_before` field), so later candidates' first
   repetitions are not cold. Server cache state is not observable.
