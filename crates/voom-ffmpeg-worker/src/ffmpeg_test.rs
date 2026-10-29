@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use voom_worker_protocol::{
@@ -1474,14 +1475,10 @@ async fn synthesize_multiple_companions_preserves_original_default_selection() {
                 "disposition":{"default":0,"forced":1,"comment":1}
             }));
         }
-        let ffprobe = stub_bin(
+        let ffprobe = audio_probe_stub(
             dir.path(),
-            "ffprobe",
-            &format!(
-                "#!/bin/sh\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in *input.mkv) echo '{}' ;; *) echo '{}' ;; esac\n",
-                serde_json::json!({"format":{"format_name":"matroska"},"streams":streams}),
-                serde_json::json!({"format":{"format_name":"matroska"},"streams":output_streams})
-            ),
+            serde_json::json!({"format":{"format_name":"matroska"},"streams":streams}),
+            serde_json::json!({"format":{"format_name":"matroska"},"streams":output_streams}),
         );
         let mut request = synthesize_audio_request(dir.path());
         request.selection.selected_streams = [1, 3]
@@ -1576,11 +1573,21 @@ fn synthesize_audio_request(root: &Path) -> TranscodeAudioRequest {
 /// (index 4) tagged with the new snapshot id, so the output probe resolves the
 /// appended downmixed stream.
 fn ffprobe_synthesize_stub(dir: &Path) -> PathBuf {
-    stub_bin(
-        dir,
-        "ffprobe",
-        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"eac3\",\"channels\":6,\"tags\":{\"language\":\"eng\",\"title\":\"Main\"},\"disposition\":{\"default\":1,\"forced\":0,\"comment\":0}},{\"index\":4,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2,\"tags\":{\"language\":\"eng\",\"snapshot_stream_id\":\"synth-1\"},\"disposition\":{\"default\":0}}]}\nJSON\n",
-    )
+    let source = serde_json::json!({"format":{"format_name":"matroska"},"streams":[
+        {"index":1,"codec_type":"audio","codec_name":"eac3","channels":6,
+         "tags":{"language":"eng","title":"Main"},"disposition":{"default":1,"forced":0,"comment":0}},
+        {"index":4,"codec_type":"audio","codec_name":"aac","channels":2,
+         "tags":{"language":"jpn"},"disposition":{"default":0}}
+    ]});
+    let mut output = source.clone();
+    output["streams"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "index":5,"codec_type":"audio","codec_name":"aac","channels":2,
+            "tags":{"language":"eng","snapshot_stream_id":"synth-1"},"disposition":{"default":0}
+        }));
+    audio_probe_stub(dir, source, output)
 }
 
 fn transcode_audio_request(
@@ -1656,11 +1663,39 @@ fn ffprobe_audio_stub(
     first_codec: &str,
     third_codec: &str,
 ) -> PathBuf {
+    let streams = serde_json::json!({"format":{"format_name":container},"streams":[
+        {"index":1,"codec_type":"audio","codec_name":first_codec,"channels":6,
+         "tags":{"language":"eng","title":"Main"},"disposition":{"default":1,"forced":0,"comment":0}},
+        {"index":2,"codec_type":"audio","codec_name":"aac","channels":2},
+        {"index":3,"codec_type":"audio","codec_name":third_codec,
+         "tags":{"language":"jpn","title":"Commentary"},"disposition":{"default":0,"forced":0,"comment":1}}
+    ]});
+    audio_probe_stub(dir, streams.clone(), streams)
+}
+
+fn audio_probe_stub(dir: &Path, mut source: Value, mut output: Value) -> PathBuf {
+    let mut records = Vec::new();
+    for probe in [&mut source, &mut output] {
+        let streams = probe["streams"].as_array_mut().unwrap();
+        let mut packets = String::new();
+        for stream in streams {
+            stream["time_base"] = serde_json::json!("1/1000");
+            writeln!(
+                packets,
+                "stream_index={}|pts=0|dts=0|duration=20|data_hash=SHA256:{}",
+                stream["index"],
+                "00".repeat(32)
+            )
+            .unwrap();
+        }
+        records.push(packets);
+    }
     stub_bin(
         dir,
         "ffprobe",
         &format!(
-            "#!/bin/sh\ncat <<'JSON'\n{{\"format\":{{\"format_name\":\"{container}\"}},\"streams\":[{{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"{first_codec}\",\"channels\":6,\"tags\":{{\"language\":\"eng\",\"title\":\"Main\"}},\"disposition\":{{\"default\":1,\"forced\":0,\"comment\":0}}}},{{\"index\":2,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2}},{{\"index\":3,\"codec_type\":\"audio\",\"codec_name\":\"{third_codec}\",\"tags\":{{\"language\":\"jpn\",\"title\":\"Commentary\"}},\"disposition\":{{\"default\":0,\"forced\":0,\"comment\":1}}}}]}}\nJSON\n"
+            "#!/bin/sh\npackets=0\nfor arg; do last=$arg; [ \"$arg\" != -show_packets ] || packets=1; done\ncase \"$last\" in *input.mkv) if [ $packets = 1 ]; then cat <<'PACKETS'\n{}PACKETS\nelse cat <<'JSON'\n{}\nJSON\nfi ;; *) if [ $packets = 1 ]; then cat <<'PACKETS'\n{}PACKETS\nelse cat <<'JSON'\n{}\nJSON\nfi ;; esac\n",
+            records[0], source, records[1], output
         ),
     )
 }
