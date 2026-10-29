@@ -125,6 +125,9 @@ def check_lossy_signal(ffmpeg, source, output, stage, downmix):
     if sys.byteorder != "little":
         expected.byteswap()
         actual.byteswap()
+    assert len(expected) % channels == len(actual) % channels == 0, "incomplete channel frames"
+    # At 48 kHz allow up to two AAC frames of encoder priming/padding.
+    assert abs(len(expected) - len(actual)) // channels <= 2048, "lossy length changed"
     frames = min(len(expected), len(actual)) // channels
     positions = range(4096, frames - 4096, 47)
     assert len(positions) > 500, "lossy signal witness is too short"
@@ -221,7 +224,7 @@ def check_noop(stack, select, execution, codec, output):
     assert output.is_file(), "no-op lost the committed file"
 
 
-def check_lineage(stack, execution, codec):
+def check_lineage(stack, execution, codec, source_version):
     phase = execution["file_phases"][0]
     with sqlite3.connect(f"file:{stack.workdir}/voom.db?mode=ro", uri=True) as db:
         rows = db.execute(
@@ -232,7 +235,8 @@ def check_lineage(stack, execution, codec):
         ).fetchall()
     assert len(rows) == 1, rows
     row = rows[0]
-    assert row[:5] == (1, 4, codec, 2, 0) and row[5] != row[6], row
+    assert row[:5] == (1, 4, codec, 2, 0), row
+    assert row[5:] == (source_version, phase["produced_file_version_id"]), row
 
 
 def check_archival_samples(ffmpeg, source, output, stage, codec, downmix, source_bits):
@@ -278,7 +282,8 @@ def execute_case(stack, source, codec, mode, tools, stage, output, timing_differ
     else:
         check_lossy_signal(tools["ffmpeg_bin"], source, actual, stage, downmix)
     if downmix:
-        check_lineage(stack, execution, codec)
+        assert len(plan["nodes"]) == 1 and plan["nodes"][0]["target"]["type"] == "file_version"
+        check_lineage(stack, execution, codec, plan["nodes"][0]["target"]["id"])
     else:
         check_noop(stack, select, execution, codec, actual)
     assert original == (
