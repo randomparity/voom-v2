@@ -33,8 +33,9 @@ the fingerprint is rejected as drift.
 
 Commands, run from parent commit `205e6292` with this branch's final scripts in the working
 tree; each record's `git_changed_paths` lists those scripts and the records being replaced.
-Each record carries the script's and the imported #788 helper's SHA-256, and the script's
-matches the committed file.
+Each record carries the script's and the imported #788 helper's SHA-256. The script hash
+is that of `scripts/media-evidence-fingerprint.py` at `0c487038`; later commits only split
+record validation into smaller functions.
 
 ```sh
 python3 scripts/media-evidence-baseline.py manifest <local-root> \

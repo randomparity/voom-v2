@@ -606,11 +606,6 @@ def build_identity() -> dict[str, Any]:
     }
 
 
-def missing(label: str, value: Any, keys: set[str]) -> list[str]:
-    present = set(value) if isinstance(value, dict) else set()
-    return [f"{label} {key}" for key in sorted(keys - present)]
-
-
 def privacy_problems(record: dict[str, Any]) -> list[str]:
     """No path, inode, mtime or digest may be committed; build hashes are the one exception."""
     problems = []
@@ -638,6 +633,15 @@ HOST_KEYS = {"os", "machine", "cpu_count", "memory_bytes", "python"}
 CASE_KEYS = {"case", "candidate", "outcome", "reference", "reason"}
 
 
+def case_problems(row: dict[str, Any], candidates: set[str]) -> list[str]:
+    problems = baseline.missing("case", row, CASE_KEYS)
+    if row.get("case") not in CONSTRUCTIONS or row.get("candidate") not in candidates:
+        problems.append("case identity")
+    if row.get("outcome") not in OUTCOMES or row.get("reference") not in REFERENCES:
+        problems.append("case outcome")
+    return problems
+
+
 def validate_oracle(record: dict[str, Any]) -> list[str]:
     problems = [] if record.get("schema") == ORACLE_SCHEMA else ["schema"]
     for section in ("build", "host", "parameters", "constructions", "excluded_cases", "cases"):
@@ -645,19 +649,14 @@ def validate_oracle(record: dict[str, Any]) -> list[str]:
             problems.append(f"missing {section}")
     if problems:
         return problems
-    problems += missing("build", record["build"], BUILD_KEYS)
-    problems += missing("host", record["host"], HOST_KEYS)
+    problems += baseline.missing("build", record["build"], BUILD_KEYS)
+    problems += baseline.missing("host", record["host"], HOST_KEYS)
     candidates = set(record["parameters"].get("candidates", {}))
     if not candidates <= set(CANDIDATES):
         problems.append("candidates")
-    seen = set()
     for row in record["cases"]:
-        problems += missing("case", row, CASE_KEYS)
-        if row.get("case") not in CONSTRUCTIONS or row.get("candidate") not in candidates:
-            problems.append("case identity")
-        if row.get("outcome") not in OUTCOMES or row.get("reference") not in REFERENCES:
-            problems.append("case outcome")
-        seen.add((row.get("case"), row.get("candidate")))
+        problems += case_problems(row, candidates)
+    seen = {(row.get("case"), row.get("candidate")) for row in record["cases"]}
     if seen != {(case, name) for case in CONSTRUCTIONS for name in candidates}:
         problems.append("case coverage")
     return problems + privacy_problems(record)
@@ -671,7 +670,7 @@ OBSERVED_KEYS = {"files", "failed", "stable", "distinct_content"}
 
 
 def row_problems(row: dict[str, Any]) -> list[str]:
-    problems = missing("file", row, ROW_KEYS)
+    problems = baseline.missing("file", row, ROW_KEYS)
     if not re.fullmatch(r"f\d{4}", str(row.get("id", ""))):
         problems.append("file id")
     for key in ("size_bytes", "logical_bytes", "seconds", "resident_bytes_before"):
@@ -690,7 +689,7 @@ def row_problems(row: dict[str, Any]) -> list[str]:
 
 
 def repetition_problems(repetition: dict[str, Any]) -> list[str]:
-    problems = missing("repetition", repetition, REPETITION_KEYS)
+    problems = baseline.missing("repetition", repetition, REPETITION_KEYS)
     for key in ("wall_seconds", "cpu_seconds", "logical_bytes_read"):
         if not baseline.is_metric(repetition.get(key)):
             problems.append(f"repetition {key}")
@@ -709,6 +708,17 @@ def repetition_problems(repetition: dict[str, Any]) -> list[str]:
     return problems
 
 
+def cell_problems(cell: dict[str, Any]) -> list[str]:
+    problems = baseline.missing("observed", cell.get("observed"), OBSERVED_KEYS)
+    if cell.get("candidate") not in CANDIDATES:
+        problems.append("cell candidate")
+    if not cell.get("repetitions"):
+        problems.append("cell repetitions")
+    for repetition in cell.get("repetitions") or []:
+        problems += repetition_problems(repetition)
+    return problems
+
+
 def validate_run(record: dict[str, Any]) -> list[str]:
     problems = [] if record.get("schema") == RUN_SCHEMA else ["schema"]
     for section in ("corpus", "build", "host", "parameters", "cells", "not_measured"):
@@ -716,24 +726,18 @@ def validate_run(record: dict[str, Any]) -> list[str]:
             problems.append(f"missing {section}")
     if problems:
         return problems
-    problems += missing("corpus", record["corpus"], {
+    problems += baseline.missing("corpus", record["corpus"], {
         "label", "filesystem_type", "storage_class", "manifest_files", "selected_ids"})
-    problems += missing("build", record["build"], BUILD_KEYS)
-    problems += missing("host", record["host"], HOST_KEYS)
-    problems += missing("parameters", record["parameters"], {
+    problems += baseline.missing("build", record["build"], BUILD_KEYS)
+    problems += baseline.missing("host", record["host"], HOST_KEYS)
+    problems += baseline.missing("parameters", record["parameters"], {
         "candidates", "concurrency", "repetitions", "evict"})
     if set(record["not_measured"]) != set(NOT_MEASURED):
         problems.append("not_measured")
     if not record["cells"]:
         problems.append("cells")
     for cell in record["cells"]:
-        if cell.get("candidate") not in CANDIDATES:
-            problems.append("cell candidate")
-        problems += missing("observed", cell.get("observed"), OBSERVED_KEYS)
-        if not cell.get("repetitions"):
-            problems.append("cell repetitions")
-        for repetition in cell.get("repetitions") or []:
-            problems += repetition_problems(repetition)
+        problems += cell_problems(cell)
     return problems + privacy_problems(record)
 
 
