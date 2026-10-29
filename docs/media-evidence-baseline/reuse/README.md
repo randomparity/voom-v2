@@ -45,8 +45,13 @@ like.
   inode and the inode generation (`FS_IOC_GETVERSION`) are read before and after. The probe
   refuses a scratch directory inside either corpus root.
 
-Commands, run from `db8b90bd` with a clean tree under the host-wide exclusive corpus lock.
-Each record's `build` carries the commit and script hashes.
+Commands, run under the host-wide exclusive corpus lock. The two corpus runs ran from
+`db8b90bd` with a clean tree. The oracles, `probability` and `ctime-probe` were re-captured
+from `1cb8613d`, which adds a 20 ms wait before each oracle edit (a coarse-tick kernel could
+otherwise leave ctime unchanged) and makes reuse records hash their own script; each record's
+`git_changed_paths` lists the records being replaced. The re-captured outcomes equal the first
+capture's exactly. The corpus `run` path did not change, so the corpus records were not
+re-captured; they carry the fingerprint script hash at `db8b90bd`.
 
 ```sh
 python3 scripts/media-evidence-baseline.py manifest <local-root> \
@@ -120,8 +125,9 @@ gave identical outcomes, with no `invalid` row:
 
 "Changed" means the settled ctime differs from the ctime before the step; every local step
 also changed at once. No step changed the inode. The inode generation was `unchanged` for
-every btrfs step and `unsupported` on tmpfs and on the network mount. A second network probe
-at 23:31 UTC, written to a scratch file outside the committed records, gave identical results.
+every btrfs step and `unsupported` on tmpfs and on the network mount. Two further network probes,
+at 23:31 UTC (kept outside the committed records) and 23:49 UTC (the committed re-capture),
+gave identical results.
 
 On the network mount the ctime the client reports follows the mtime. The client briefly shows
 its own updated ctime, then the server's value replaces it on attribute revalidation. A
@@ -204,13 +210,14 @@ the runs, so no detection rate was observed.
 
 ## Disclosures
 
-- The main capture held the exclusive corpus lock from 23:22:46 to 23:23:49 UTC, and the
-  confirming probe and `stat` from 23:31:26 to 23:31:40 UTC. Other host activity, including a
+- The first capture held the exclusive corpus lock from 23:22:46 to 23:23:49 UTC, the
+  confirming probe and `stat` from 23:31:26 to 23:31:40 UTC, and the re-capture from
+  23:48:39 to 23:49:41 UTC. Other host activity, including a
   sibling benchmark's builds waiting on the lock, was not controlled.
 - The network corpus is shared with an active rehearsal. The corpus runs added 8.8 MB of CIFS
-  reads. Each probe wrote 65,538 bytes to a scratch directory on the same share, outside the
-  corpus, renamed and chmod-ed that file, and removed the directory; the record's
-  `scratch_removed` is true, and a listing afterwards showed no residue. No corpus file was
+  reads. Each of the three network probes wrote 65,538 bytes to a scratch directory on the
+  same share, outside the corpus, renamed and chmod-ed that file, and removed the directory;
+  the record's `scratch_removed` is true, and a listing after each probe showed no residue. No corpus file was
   written.
 - The tmpfs and btrfs probes and oracles wrote only to scratch directories they removed. The
   btrfs scratch directory is on the local corpus's filesystem, outside the corpus.

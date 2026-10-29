@@ -1,9 +1,14 @@
 {
   "build": {
-    "git_changed_paths": [],
-    "git_commit": "db8b90bd32517b79d3b30d19e26fa821ac3fa3e9",
+    "git_changed_paths": [
+      "docs/media-evidence-baseline/reuse/2026-10-29-reuse-ctime-probe.json",
+      "docs/media-evidence-baseline/reuse/2026-10-29-reuse-oracle-btrfs.json",
+      "docs/media-evidence-baseline/reuse/2026-10-29-reuse-oracle-tmpfs.json",
+      "docs/media-evidence-baseline/reuse/2026-10-29-reuse-probability.json"
+    ],
+    "git_commit": "1cb8613d0e3f62faecd0deb42c7bb01abf955ce8",
     "helper_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
-    "script_sha256": "7587d9b54158964c9c45b7d027c7d554443fd3c909a71b011d0d090170e25927"
+    "script_sha256": "2a32fd3c42d2804009fd02b48ffcb1546a44d0d0780dd5025d7507ae0739ce83"
   },
   "cases": [
     {
