@@ -53,11 +53,13 @@ Logical bytes per local, evicted pass over 34 files; network is the 3-file subse
 | `ht64-i8` / `rnd64-i8` | #796 / #798 | `ht64` + 8 interior 64 KiB blocks | 22.28 MB | 1.97 MB |
 | `ht64-i32` / `rnd64-i32` | #796 / #798 | `ht64` + 32 interior 64 KiB blocks | 75.76 MB | 6.68 MB |
 
-- Fingerprint wall times were 1–116 ms per local pass, against 613.9 s for #788's three full
+- Fingerprint wall times were about 1–118 ms per local pass, against 613.9 s for #788's three full
   reads. The instruments differ (Python in-process versus release workers over HTTP); compare
   orders of magnitude only.
-- `rnd64` additionally needs a per-block digest table built by one full read: 457 MB for the
-  local corpus, 12 MB for the network subset.
+- `rnd64` also needs a per-block digest table. Building it costs one full read (935.3 GB
+  local, 24.7 GB network), unless it is produced during a full read that happens anyway, and
+  storing it takes 32 bytes per 64 KiB block (457 MB local, 12 MB network). The table rows
+  above show only the per-check reads.
 - #797's lazy lifecycle defers the one full read without removing it. Its eventual logical
   bytes equal one full read plus fingerprints, with zero wasted speculative work observed.
 - On the network subset, #788's probe re-reads were already served by the client cache, so
