@@ -118,6 +118,9 @@ class ConfigTests(unittest.TestCase):
                                                       system=system, cwd=str(root / "staging"))
                         self.assertEqual(config.desktop, desktop)
                         raise InstallationObserved
+                    destination = (arguments[arguments.index("-o") + 1]
+                                   if arguments[0] == "mkvmerge" else arguments[-1])
+                    Path(destination).write_bytes(b"generated media fixture")
                     return b""
 
                 with patch.object(proof.shutil, "which", return_value="/native/tool"), \

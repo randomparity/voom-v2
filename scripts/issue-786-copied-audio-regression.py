@@ -122,8 +122,16 @@ def positive(stack, source, codec, synthesis, tools, stage, output, root):
     print(json.dumps({"codec": codec, "synthesis": synthesis, "committed_tuples": "exact"}), flush=True)
 
 
-def negative(stack, source, stage, output, root):
+def negative(stack, source, stage, output, root, ffmpeg, ffprobe):
     original = hashlib.sha256(source.read_bytes()).hexdigest()
+    before = probe(ffprobe, source, stage)
+    control = stage / "native-control.mkv"
+    run([ffmpeg, "-v", "error", "-copyts", "-i", source, "-map", "0", "-c", "copy",
+         "-c:a:0", "alac", "-avoid_negative_ts", "disabled", control], stage)
+    after = probe(ffprobe, control, stage)
+    source_packet, copied_packet = tuples(before, 2)[0], tuples(after, 2)[0]
+    assert source_packet[:-1] == copied_packet[:-1]
+    assert source_packet[-1] == 15 and copied_packet[-1] == 14, (source_packet, copied_packet)
     select = selection(stack, source, "alac", False, root)
     try:
         stack.voom("compliance", "execute", *select, "--staging-root", stage,
@@ -147,15 +155,20 @@ def negative(stack, source, stage, output, root):
         raise AssertionError("native rounded copied packet unexpectedly became publishable")
     assert not list(output.rglob("*.mkv")), "unsafe copied packet was published"
     assert original == hashlib.sha256(source.read_bytes()).hexdigest(), "native source changed"
-    print(json.dumps({"native_unsafe_output": "rejected-before-publication"}), flush=True)
+    print(json.dumps({"native_encoder_project_probe": "rejected-before-publication",
+                      "observed_duration": [15, 14]}), flush=True)
 
 
 def regression(args, root):
-    native = {name: shutil.which(name) for name in ("ffmpeg", "ffprobe", "mkvmerge")}
+    native = {name: shutil.which(name) for name in ("ffmpeg", "mkvmerge")}
     if not all(native.values()):
-        raise RuntimeError("install native ffmpeg, ffprobe and mkvtoolnix before this proof")
+        raise RuntimeError("install native ffmpeg and mkvtoolnix before this proof")
     for name in ("scratch", "input", "staging", "output"):
         (root / name).mkdir()
+    rejected = root / "native"
+    rejected.mkdir()
+    for name in ("input", "staging", "output"):
+        (rejected / name).mkdir()
     scratch, stage, output = (root / name for name in ("scratch", "staging", "output"))
     video, short = scratch / "video.mkv", scratch / "short.flac"
     run([native["ffmpeg"], "-v", "error", "-f", "lavfi", "-i", "color=size=16x16:rate=10",
@@ -164,15 +177,19 @@ def regression(args, root):
          "-af", "atrim=end_sample=700", "-c:a", "flac", "-frame_size", "4608", short])
     sources = {(codec, synthesis): generate(root, codec, synthesis, video, short)
                for codec in CODECS for synthesis in (False, True)}
+    source = rejected / "input/source.mkv"
+    shutil.copyfile(sources[("alac", False)], source)
     config = root / "container.json"
     configuration = {"engine": args.engine, "image": args.image,
-                     "read_only_roots": [str(root / "input")],
-                     "read_write_roots": [str(stage), str(output)]}
+                     "read_only_roots": [str(root / "input"), str(rejected / "input")],
+                     "read_write_roots": [str(stage), str(output),
+                                          str(rejected / "staging"), str(rejected / "output")]}
     if args.desktop:
         configuration["desktop"] = args.desktop
     config.write_text(json.dumps(configuration))
     tools = json.loads(run([sys.executable, REPO / "containers/ffmpeg/install.py", "--config", config,
-                           "--destination", root / "installed", "--source-witness", sources[("aac", False)]], stage))
+                           "--destination", root / "installed", "--source-witness", sources[("aac", False)],
+                           "--source-witness", source], stage))
     spec = importlib.util.spec_from_file_location("bootstrap", REPO / "scripts/acceptance-bootstrap.py")
     bootstrap = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bootstrap)
@@ -188,20 +205,16 @@ def regression(args, root):
         with bootstrap.Bootstrap(bootstrap.parser().parse_args(arguments)) as stack:
             for (codec, synthesis), source in sources.items():
                 positive(stack, source, codec, synthesis, tools, stage, output, root)
-        rejected = root / "native"
-        rejected.mkdir()
-        for name in ("input", "staging", "output"):
-            (rejected / name).mkdir()
-        source = rejected / "input/source.mkv"
-        shutil.copyfile(sources[("alac", False)], source)
         os.environ["VOOM_FFMPEG_BIN"] = native["ffmpeg"]
-        os.environ["VOOM_FFPROBE_BIN"] = native["ffprobe"]
+        # Older native probes hide this fixture's explicit Matroska BlockDuration.
+        os.environ["VOOM_FFPROBE_BIN"] = tools["ffprobe_bin"]
         os.chdir(rejected / "staging")
         arguments = ["serve", "--workdir", str(rejected / "stack"), "--input", str(source.parent),
                      "--staging", str(rejected / "staging"), "--output", str(rejected / "output"),
                      "--bin-dir", str(args.bin_dir)]
         with bootstrap.Bootstrap(bootstrap.parser().parse_args(arguments)) as stack:
-            negative(stack, source, rejected / "staging", rejected / "output", rejected)
+            negative(stack, source, rejected / "staging", rejected / "output", rejected,
+                     native["ffmpeg"], tools["ffprobe_bin"])
     finally:
         os.chdir(previous_directory)
     print(json.dumps({"status": "ok", "project_cases": 12, "native_rejections": 1, "ignored": 0}), flush=True)

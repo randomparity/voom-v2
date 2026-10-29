@@ -1080,7 +1080,7 @@ async fn add_track_synthesis_preserves_surround_and_appends_stereo_companion() {
                 "-i",
                 "anullsrc=channel_layout=5.1:sample_rate=48000",
                 "-t",
-                "0.25",
+                "0.256",
                 "-c:a",
                 "eac3",
                 "-metadata:s:a:0",
@@ -1515,6 +1515,11 @@ async fn generate_flac_source(
                 "ffv1",
                 "-c:a",
                 "flac",
+                // Whole 10 ms frames keep this positive fixture safe on native muxers.
+                "-frame_size:a:0",
+                &(rate / 100).to_string(),
+                "-frame_size:a:1",
+                "480",
                 "-sample_fmt:a:0",
                 if bits == 16 { "s16" } else { "s32" },
                 "-bits_per_raw_sample:a:0",
@@ -2237,7 +2242,7 @@ async fn pcm_container_preserves_untouched_unknown_layout_stream() {
     assert_eq!(audio_expected(&input).await, request.input.expected);
 }
 
-// A rounded explicit Matroska BlockDuration must not silently become codec-derived timing.
+// Cross-container rounding must fail even on probes that hide Matroska BlockDuration.
 #[tokio::test]
 async fn copied_audio_timing_native_rejects_unsafe_output() {
     let preflight = voom_ffmpeg_worker::preflight_with_paths(
@@ -2246,9 +2251,69 @@ async fn copied_audio_timing_native_rejects_unsafe_output() {
     )
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let input = copied_audio_short_fixture(&preflight, dir.path()).await;
+    let input = dir.path().join("source.wav");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-af",
+                "atrim=end_sample=700",
+                "-c:a",
+                "pcm_s24le",
+            ])
+            .arg(&input),
+    )
+    .await;
+    let control = dir.path().join("native-control.mkv");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-v", "error", "-copyts", "-i"])
+            .arg(&input)
+            .args([
+                "-map",
+                "0",
+                "-map",
+                "0:0",
+                "-c",
+                "copy",
+                "-c:a:1",
+                "alac",
+                "-ac:a:1",
+                "1",
+                "-avoid_negative_ts",
+                "disabled",
+            ])
+            .arg(&control),
+    )
+    .await;
+    let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+    let after = flac_physical_probe(&preflight.ffprobe_path, &control).await;
+    let packets: Vec<_> = [&before, &after]
+        .into_iter()
+        .map(|probe| {
+            probe["packets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|packet| packet["stream_index"] == 0)
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(before["streams"][0]["time_base"], "1/48000");
+    assert_eq!(after["streams"][0]["time_base"], "1/1000");
+    assert_eq!(packets[0]["duration"], 700);
+    assert_eq!(packets[1]["duration"], 14);
+    for field in ["data_hash", "pts", "dts"] {
+        assert_eq!(packets[0][field], packets[1][field]);
+    }
     let output = dir.path().join("encoded.mkv");
-    let request = lossless_request("alac", &input, &output, None).await;
+    let mut request = lossless_request("alac", &input, &output, Some(1)).await;
+    request.selection.selected_streams[0].provider_stream_index = 0;
     let config = FfmpegConfig::new(
         preflight.ffmpeg_path,
         preflight.ffprobe_path,
@@ -2257,8 +2322,10 @@ async fn copied_audio_timing_native_rejects_unsafe_output() {
     );
     let result = handle_transcode_audio(&request, &config).await;
     assert!(
-        result.is_err(),
-        "unsafe copied duration must fail before a publishable worker result"
+        matches!(&result, Err(voom_ffmpeg_worker::handler::TranscodeAudioError::MalformedWorkerResult {
+            message, ..
+        }) if message.contains("copied audio preservation")),
+        "unsafe copied duration must fail before a publishable worker result: {result:?}"
     );
 }
 
@@ -2316,16 +2383,6 @@ async fn copied_audio_short_fixture(
             .arg(directory.join("copied.flac")),
     )
     .await;
-    let probe = flac_physical_probe(&preflight.ffprobe_path, &input).await;
-    assert_eq!(
-        probe["packets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["stream_index"] == 2)
-            .unwrap()["duration"],
-        15
-    );
     input
 }
 
@@ -2347,6 +2404,16 @@ async fn pcm_container_copied_audio_timing() {
     let dir = tempfile::tempdir().unwrap();
     let input = copied_audio_short_fixture(&preflight, dir.path()).await;
     let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+    assert_eq!(
+        before["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|packet| packet["stream_index"] == 2)
+            .unwrap()["duration"],
+        15,
+        "project probe must observe the rounded short-packet sentinel"
+    );
     let source_facts = audio_expected(&input).await;
     for codec in ["aac", "opus", "eac3", "ac3", "flac", "alac"] {
         for synthesis in [None, Some(1)] {

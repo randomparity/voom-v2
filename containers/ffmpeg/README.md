@@ -264,12 +264,19 @@ destination to preserve the rounded Matroska durations that stock muxing can dis
 An existing installation retains its immutable older image until the operator selects
 a newly built installation; no automatic replacement occurs.
 
+Preservation compares the configured probe's observations. FFprobe 8.0.1 reports
+14 ms for a short FLAC packet whose explicit Matroska BlockDuration is observed as
+15 ms by newer probes. An unchanged 14 ms observation therefore cannot prove that
+raw container field survived. Use the current paired project image and probe for
+strict Matroska BlockDuration evidence; native builds remain optional.
+
 `just container-worker-check ENGINE IMAGE` includes the six-target, ordinary and
 synthesis timing regression alongside strict PCM checks.
 `just copied-audio-check ENGINE IMAGE [DESKTOP]` exercises the authenticated CLI,
 inspects twelve committed outputs,
-and proves native unsafe-output rejection before publication. It also requires the
-native FFmpeg/FFprobe and MKVToolNix fixture tools already used by media CI.
+and proves rejection before publication using a native encoder with the installed
+project probe, including an explicit observed 15-to-14 ms control. It also requires the
+native FFmpeg and MKVToolNix fixture tools already used by media CI.
 On macOS, pass the existing Docker context or Podman machine as `DESKTOP`, for
 example `just copied-audio-check docker IMAGE desktop-linux`. The proof passes
 that explicit selector through the existing installer configuration.

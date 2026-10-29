@@ -9,6 +9,9 @@ patch is gated by pcm_wavex, which only PCM requests enable.
 Authority: [frozen scope](https://github.com/randomparity/voom-v2/issues/786#issuecomment-6496872502).
 The approved preserve-or-reject policy retains ADR0119 native optionality and
 PCM strict facts/samples/timing. No public or persisted schema changes.
+FFprobe8.0.1 observes14ms for the same explicit15ms source bytes. Preservation
+therefore proves the configured probe's observations, not unobserved container fields.
+Use the current paired project image/probe for strict BlockDuration evidence.
 
 ## Scope and ownership
 
@@ -46,7 +49,7 @@ No source mutation, automatic installation or fallback encoder is introduced.
 
 ## Packet proof and process bounds
 
-A worker-private module invokes paired ffprobe with select_streams=a,
+A worker-private module invokes configured ffprobe with select_streams=a,
 show_packets, show_data_hash=sha256 and compact key/value output. Explicit
 packet_side_data= suppresses nested side-data fields; accept its trailing empty
 section delimiter, while rejecting unknown fields and empty interior sections. Read only
@@ -77,8 +80,10 @@ unchanged. No network, credentials, protocol or authorization surface is added.
 
 ## Success and validation
 
-- A generated MKVToolNix short FLAC sentinel reproduces15-to14 on native and
-  fails before publication; a safe native copied packet fixture succeeds.
+- A generated MKVToolNix short FLAC sentinel reproduces15-to14 with a native
+  encoder/current project probe and fails before publication. A native-pair WAV
+  synthesis control rejects exact700/48000-to14/1000 duration drift. Safe native
+  fixtures use complete frames and retain samples/layouts/metadata assertions.
 - The project build preserves exact copied MKV tuples for six non-PCM targets
   in ordinary and strict-downmix synthesis, with metadata/dispositions, source
   SHA256 and lineage intact. Dedicated actual authenticated CLI proof checks
