@@ -2,8 +2,8 @@
 
 ## Problem
 
-Stages 1 and 2 of the frozen [protocol](../../media-evidence-protocol.md) need candidate
-results against #788's baseline records without changing production defaults.
+Stages 1–2 of the frozen [protocol](../../media-evidence-protocol.md) need results against
+#788's baselines; production defaults stay unchanged.
 
 ## Scope
 
@@ -19,15 +19,17 @@ results against #788's baseline records without changing production defaults.
   - `model <record>`: from per-file completion (queue delay + hash + probe), first durable
     observation under the barrier (ADR 0067/0077), per-file readiness, flush counts 1/10/1000.
 - Self-test plus `source-checks` recipe. Records named `<date>-stage<n>-<cell>-<corpus>.json`,
-  sorting after #788's; summary maps each to its variant, command, and worker SHA-256.
+  sorting after #788's. `compare`/`model` output lives only in the summary
+  `stages-1-2.md`, which maps each record to its variant, command, and worker SHA-256.
 - Cells, 3 repetitions each: stage 1 local evicted full pass per variant. Stage 2 uses the
   stage-1 selection: among non-failed variants without regression or guardrail breach, the
   best wall improvement, then best summed-hash improvement; else baseline. Local full pass at
-  concurrency 8; local subset `f0004,f0025,f0022,f0005,f0009,f0015` at 1/2/4; network subset
-  `f0049,f0074,f0063` at 1/2/8, plus 4 when the selection is not baseline.
+  concurrency 8; local subset `f0004,f0025,f0022,f0005,f0009,f0015` at 1/2/4 (4 is the
+  reference); network subset `f0049,f0074,f0063` at 1/2, plus 4 when the selection is not
+  baseline. Network 8 is excluded: three files cap it at the concurrency-4 cell.
 - Model boundaries: batches are provisional; durability is session completion; per-file
-  readiness needs a superseding ADR and covers present files only, not absence.
-- Not measured: probe-buffer variants; flush byte bound; real publication; stages 3–5.
+  readiness needs a superseding ADR and never covers absence.
+- Not measured: probe-buffer variants; flush byte bound; publication; stages 3–4, 5 (#801).
 
 ### Failure model
 
@@ -35,10 +37,9 @@ results against #788's baseline records without changing production defaults.
    rehearsal; the self-test in CI.
 2. Invariants: originals read-only; production worker source and defaults unchanged;
    committed files carry no host path or name; no captured number invented or dropped.
-3. Accepted: cross-cell cache differences on `as-found` network cells, so network deltas
-   may be inconclusive; other host load is disclosed, not controlled; model omits
-   completion-transaction time.
-4. Elsewhere: fingerprints, lazy hashing #790; decision #791; production changes #792; SLO #471.
+3. Accepted: `as-found` network cache differences across cells (deltas may be
+   inconclusive); other host load disclosed, not controlled; no completion-transaction time.
+4. Elsewhere: stages 3–4 #790; decision #791; production changes #792; SLO #471.
 
 ## Success
 
