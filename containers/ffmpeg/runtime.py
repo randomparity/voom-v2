@@ -139,11 +139,11 @@ class CallerWatch:
         self.close()
 
 
-def capture(argv, timeout=DEADLINE, data=None):
+def capture(argv, timeout=DEADLINE, data=None, env=None):
     try:
         result = subprocess.run(argv, input=data, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=max(timeout, 0.01),
-                                close_fds=True)
+                                close_fds=True, env=env)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise SetupError(f"container command failed ({argv[0]}): {error}") from error
     if result.returncode:
@@ -152,9 +152,9 @@ def capture(argv, timeout=DEADLINE, data=None):
     return result.stdout
 
 
-def json_capture(argv, timeout=DEADLINE):
+def json_capture(argv, timeout=DEADLINE, env=None):
     try:
-        return json.loads(capture(argv, timeout))
+        return json.loads(capture(argv, timeout, env=env))
     except (ValueError, TypeError) as error:
         raise SetupError("container engine returned malformed JSON") from error
 
@@ -193,7 +193,12 @@ class Engine:
             architecture = info["Architecture"]
         else:
             if config.desktop:
-                record = json_capture(["podman", "machine", "inspect", config.desktop])[0]
+                # Podman derives this endpoint from TMPDIR, unlike the worker's media temp root.
+                native_temp = capture(["getconf", "DARWIN_USER_TEMP_DIR"]).decode().strip()
+                if not os.path.isabs(native_temp) or not os.path.isdir(native_temp):
+                    raise SetupError("macOS did not provide its native user temporary directory")
+                record = json_capture(["podman", "machine", "inspect", config.desktop],
+                                      env={**os.environ, "TMPDIR": native_temp})[0]
                 if record.get("Name") != config.desktop or record.get("State") != "running" or \
                         record.get("Rootful") is not False:
                     raise SetupError("start the named rootless Podman Desktop machine")

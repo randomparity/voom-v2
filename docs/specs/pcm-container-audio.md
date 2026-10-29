@@ -176,6 +176,11 @@ Unix socket; use the inspected socket through explicit `podman --url unix://...`
 for every command. The installed client/server must support that forwarded
 Desktop socket or fail with a prerequisite diagnostic; do not silently substitute
 an arbitrary SSH service. Reject remote endpoints and conflicting steering.
+Podman Desktop inspection receives the native macOS user temporary directory
+from `getconf DARWIN_USER_TEMP_DIR`: Podman derives its forwarded socket from
+TMPDIR, so the worker's pinned media TMPDIR must not steer endpoint discovery.
+Only inspection receives this environment adjustment; the verified named-machine
+socket is frozen, worker/media TMPDIR is unchanged, and absent sockets fail closed.
 Linux Podman remains explicitly local. No Docker Desktop installation, machine
 creation, engine switching or root provisioning occurs automatically.
 

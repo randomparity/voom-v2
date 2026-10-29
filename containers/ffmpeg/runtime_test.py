@@ -92,6 +92,24 @@ class ConfigTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_desktop_inspection_uses_native_temp_without_changing_worker_tmpdir(self):
+        config = runtime.Config("podman", "sha256:" + "1" * 64, (), (), "owned-machine")
+        machine = [{"Name": config.desktop, "State": "running", "Rootful": False,
+                    "ConnectionInfo": {"PodmanSocket": {"Path": "/native/engine.sock"}}}]
+        info = {"host": {"security": {"rootless": True}, "arch": "arm64"}}
+        image = [{"Os": "linux", "Architecture": "arm64", "Id": config.image}]
+        pinned = Path(__file__).resolve().parents[2] / ".test-tmp"
+        with tempfile.TemporaryDirectory(dir=pinned) as native, \
+                patch.dict(os.environ, {"TMPDIR": "/worker/staging"}, clear=True), \
+                patch.object(runtime, "capture", return_value=native.encode()) as native_temp, \
+                patch.object(runtime, "unix_endpoint", return_value="unix:///native/engine.sock"), \
+                patch.object(runtime, "json_capture", side_effect=[machine, info, image]) as inspect:
+            engine = runtime.Engine(config)
+            self.assertEqual(inspect.call_args_list[0].kwargs.get("env", {}).get("TMPDIR"), native)
+            native_temp.assert_called_once_with(["getconf", "DARWIN_USER_TEMP_DIR"])
+            self.assertEqual(os.environ["TMPDIR"], "/worker/staging")
+            self.assertEqual(engine.prefix, ["podman", "--url", "unix:///native/engine.sock"])
+
     def test_steering_override_and_remote_endpoint_fail_before_engine_access(self):
         config = runtime.Config("docker", "sha256:" + "1" * 64, (), ())
         for name in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY",

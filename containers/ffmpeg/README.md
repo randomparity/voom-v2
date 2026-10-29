@@ -91,7 +91,12 @@ context, or the exact existing Podman machine name. Linux rejects `desktop`.
 The launcher inspects and freezes that local Unix-socket endpoint. Unset
 DOCKER_HOST, DOCKER_CONTEXT, DOCKER_TLS_VERIFY, DOCKER_CERT_PATH, CONTAINER_HOST
 and CONTAINER_CONNECTION; these conflict with explicit endpoint selection.
-No engine/default/context is changed automatically.
+No engine/default/context is changed automatically. Podman Desktop must expose its
+forwarded socket under the native macOS user temporary directory. The launcher
+uses `getconf DARWIN_USER_TEMP_DIR` only for machine inspection, then freezes
+the verified socket. Worker/media TMPDIR remains unchanged; Podman otherwise
+derives a nonexistent socket from that staging path. Start the named machine
+with its normal Desktop environment if the native socket is absent.
 
 Docker Desktop must share the configured host roots. Podman Desktop requires
 operator-provisioned **same-path** VM shares, for example when creating a new
