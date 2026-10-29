@@ -15,7 +15,7 @@ is therefore read three times. Workers were built in release mode from `main` at
 `ed738f22`; this branch changes no crate, and each record carries the worker binaries'
 SHA-256. The harness bytes (`harness_sha256` `e19c61f4…`) are those committed in `77bb392a`.
 That harness listed untracked paths in `git_changed_paths` too; later harness versions list
-tracked paths only, so the files named there were new, not modified.
+tracked paths only. Entries in these records may be new files rather than modifications.
 
 Host: Linux x86_64, 32 CPUs, 124 GiB RAM, ffprobe 8.1.3. The local corpus is on NVMe-backed
 btrfs. The network corpus is on a CIFS mount.
