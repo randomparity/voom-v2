@@ -8,7 +8,7 @@ The operator explicitly authorized building custom FFmpeg in Docker/Podman and
 running FFmpeg in that container. This is one coupled release unit: the two PCM
 targets cannot satisfy ADR 0114 without the mux capability, and that capability
 must have an installable runtime. No independent product is being absorbed.
-[ADR 0117](../adr/0117-container-pcm-muxing.md) records the toolchain boundary.
+[ADR 0119](../adr/0119-container-pcm-muxing.md) records the toolchain boundary.
 
 ## Global Constraints
 

@@ -1191,7 +1191,7 @@ async fn run_lease(
         outcome = dispatch_outcome(&lease.dispatch, Arc::clone(&child), &credentials, &context) => outcome,
         changed = worker_cancel.changed() => cancellation_outcome(&changed, *worker_cancel.borrow()),
         changed = shutdown.changed() => shutdown_outcome(&changed, *shutdown.borrow()),
-        Some(()) = lease_fence_rx.recv() => LeaseOutcome::TerminalElsewhere,
+        Some(()) = lease_fence_rx.recv() => LeaseOutcome::Fenced,
     };
     let settled = if matches!(&outcome, LeaseOutcome::Complete(_)) {
         tokio::select! {
@@ -1204,7 +1204,7 @@ async fn run_lease(
                 let kind = *shutdown.borrow();
                 settle_lease(&context, &lease.dispatch, shutdown_outcome(&changed, kind)).await
             },
-            Some(()) = lease_fence_rx.recv() => Ok(()),
+            Some(()) = lease_fence_rx.recv() => settle_lease(&context, &lease.dispatch, LeaseOutcome::Fenced).await,
         }
     } else {
         settle_lease(&context, &lease.dispatch, outcome).await
@@ -1463,7 +1463,6 @@ pub(crate) async fn consume_progress_stream(
 pub(crate) enum LeaseOutcome {
     Complete(JsonValue),
     Failure(FailureClass, String, JsonValue),
-    TerminalElsewhere,
     Fenced,
 }
 
@@ -1502,7 +1501,16 @@ async fn settle_lease(
         LeaseOutcome::Failure(class, reason, evidence) => {
             settle_failure(context, dispatch, class, reason, evidence).await
         }
-        LeaseOutcome::TerminalElsewhere | LeaseOutcome::Fenced => Ok(()),
+        LeaseOutcome::Fenced => {
+            tracing::warn!(
+                event = "lease_local_fence",
+                lease_id = %dispatch.lease_id,
+                ticket_id = %dispatch.ticket_id,
+                recovery_pending = true,
+                "lease fenced locally; remote recovery pending"
+            );
+            Ok(())
+        }
     }
 }
 

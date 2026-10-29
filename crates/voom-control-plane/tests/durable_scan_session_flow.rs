@@ -32,7 +32,7 @@ const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
 struct Fixture {
-    _database: TempDatabase,
+    database: TempDatabase,
     cp: ControlPlane,
     pool: sqlx::SqlitePool,
     clock: Arc<ManualClock>,
@@ -324,7 +324,7 @@ async fn fixture() -> Fixture {
     .await
     .unwrap();
     Fixture {
-        _database: database,
+        database,
         cp,
         pool,
         clock,
@@ -710,4 +710,385 @@ async fn assert_location_retired(fixture: &Fixture, id: u64, session: ScanSessio
     assert!(row.0.is_some());
     assert_eq!(row.1, 1);
     assert_eq!(row.2, Some(i64::try_from(session.0).unwrap()));
+}
+
+// These fixtures retain a healthy owner and a long session deadline so only
+// routing-ticket failure can close the scan.
+#[expect(clippy::panic, reason = "fixture root must permit scan scheduling")]
+async fn recovery_run(fixture: &Fixture) -> voom_control_plane::scan::ScanRunRequested {
+    let root = create_root(fixture, "recovery").await;
+    let voom_control_plane::scan::ScanRunOutcome::Requested(run) =
+        fixture.cp.request_scan_run(root, 3_600).await.unwrap()
+    else {
+        panic!("available fixture root must schedule a scan");
+    };
+    start(fixture, run.scan_session_id, "recovery").await;
+    run
+}
+
+async fn expired_scan_lease(fixture: &Fixture, ticket: voom_core::TicketId) {
+    sqlx::query("UPDATE tickets SET state = 'leased', attempt = max_attempts WHERE id = ?")
+        .bind(i64::try_from(ticket.0).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO leases (ticket_id, worker_id, state, acquired_at, expires_at, last_heartbeat_at, ttl_seconds) VALUES (?, (SELECT MIN(id) FROM workers), 'held', '1970-01-01T00:00:00Z', '1970-01-01T00:00:01Z', '1970-01-01T00:00:00Z', 1)")
+        .bind(i64::try_from(ticket.0).unwrap())
+        .execute(&fixture.pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn scan_recovery_closes_healthy_owner_scan_on_exhausted_expiry() {
+    let fixture = fixture().await;
+    let run = recovery_run(&fixture).await;
+    expired_scan_lease(&fixture, run.ticket_id).await;
+    let now = T0 + Duration::seconds(2);
+    fixture.cp.expire_due(now).await.unwrap();
+    assert_eq!(
+        fixture
+            .cp
+            .scan_session(run.scan_session_id)
+            .await
+            .unwrap()
+            .status,
+        ScanSessionStatus::Failed,
+        "lease exhaustion must not leave a healthy owner's scan running"
+    );
+    let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM events WHERE kind IN ('lease.expired', 'ticket.failed_terminal', 'scan_session.failed') ORDER BY event_id")
+        .fetch_all(&fixture.pool).await.unwrap();
+    assert_eq!(
+        kinds,
+        [
+            "lease.expired",
+            "ticket.failed_terminal",
+            "scan_session.failed"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn scan_recovery_reopens_and_converges_concurrently_once() {
+    let fixture = fixture().await;
+    let run = recovery_run(&fixture).await;
+    sqlx::query("UPDATE tickets SET state = 'failed' WHERE id = ?")
+        .bind(i64::try_from(run.ticket_id.0).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let reopened_pool = voom_store::connect(&voom_store::test_support::sqlite_url_for(
+        fixture.database.path(),
+    ))
+    .await
+    .unwrap();
+    let reopened = ControlPlane::open_with_pool(reopened_pool, fixture.clock.clone())
+        .await
+        .unwrap();
+    let now = T0 + Duration::seconds(2);
+    let (left, right) = tokio::join!(fixture.cp.remote_recover(now), reopened.remote_recover(now));
+    left.unwrap();
+    right.unwrap();
+    reopened.remote_recover(now).await.unwrap();
+    assert_eq!(
+        reopened
+            .scan_session(run.scan_session_id)
+            .await
+            .unwrap()
+            .status,
+        ScanSessionStatus::Failed
+    );
+    assert_eq!(scan_event_count(&fixture, "scan_session.failed").await, 1);
+}
+
+#[tokio::test]
+async fn scan_recovery_event_failure_rolls_back_expiry_ticket_and_scan() {
+    let fixture = fixture().await;
+    let run = recovery_run(&fixture).await;
+    expired_scan_lease(&fixture, run.ticket_id).await;
+    sqlx::query("CREATE TRIGGER reject_scan_failure BEFORE INSERT ON events WHEN NEW.kind = 'scan_session.failed' BEGIN SELECT RAISE(ABORT, 'injected scan event failure'); END")
+        .execute(&fixture.pool).await.unwrap();
+    assert!(
+        fixture
+            .cp
+            .expire_due(T0 + Duration::seconds(2))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .cp
+            .scan_session(run.scan_session_id)
+            .await
+            .unwrap()
+            .status,
+        ScanSessionStatus::Running
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
+        .bind(i64::try_from(run.ticket_id.0).unwrap())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "leased");
+    let state: String = sqlx::query_scalar("SELECT state FROM leases WHERE ticket_id = ?")
+        .bind(i64::try_from(run.ticket_id.0).unwrap())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "held");
+    assert_eq!(scan_event_count(&fixture, "lease.expired").await, 0);
+    assert_eq!(
+        scan_event_count(&fixture, "ticket.failed_terminal").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn scan_recovery_rejects_corrupt_linkage_even_for_terminal_sessions() {
+    for (field, value) in [
+        ("scan_session_id", json!("-1")),
+        ("scan_session_id", json!("9223372036854775808")),
+        ("scan_session_id", json!("999999")),
+        ("source_storage_root_id", json!(999_999)),
+        ("node_id", json!("999999")),
+        ("branch_id", json!("wrong")),
+    ] {
+        let fixture = fixture().await;
+        let run = recovery_run(&fixture).await;
+        fixture
+            .cp
+            .cancel_scan_session(
+                run.scan_session_id,
+                ScanTerminalReason::new("fixture cancellation").unwrap(),
+            )
+            .await
+            .unwrap();
+        let path = if matches!(field, "node_id" | "branch_id") {
+            format!("$.{field}")
+        } else {
+            format!("$.rendered_payload.{field}")
+        };
+        sqlx::query("UPDATE tickets SET state = 'failed', payload = json_set(payload, ?, json(?)) WHERE id = ?")
+            .bind(path).bind(value.to_string()).bind(i64::try_from(run.ticket_id.0).unwrap())
+            .execute(&fixture.pool).await.unwrap();
+        // Keep the other canonical fields coherent so these cases exercise
+        // association validation, not merely payload/declaration rejection.
+        if field == "source_storage_root_id" {
+            sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.declared_artifact_access[0].target.storage_root_id', 999999)")
+                .execute(&fixture.pool).await.unwrap();
+        }
+        if value == json!("999999") && field == "scan_session_id" {
+            sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.plan_id', '999999', '$.branch_id', 'scan-run-999999')")
+                .execute(&fixture.pool).await.unwrap();
+        }
+        let error = fixture.cp.remote_recover(T0).await.unwrap_err();
+        assert!(
+            matches!(error, voom_core::VoomError::Database { .. }),
+            "{field}: {error}"
+        );
+        assert_eq!(
+            fixture
+                .cp
+                .scan_session(run.scan_session_id)
+                .await
+                .unwrap()
+                .status,
+            ScanSessionStatus::Cancelled
+        );
+    }
+}
+
+#[tokio::test]
+async fn scan_recovery_preserves_generic_requeued_and_succeeded_work() {
+    for mode in ["generic", "requeued", "succeeded"] {
+        let fixture = fixture().await;
+        let run = recovery_run(&fixture).await;
+        if mode == "succeeded" {
+            fixture
+                .cp
+                .complete_scan_session(RemoteScanCompleteInput {
+                    node_id: fixture.node_id,
+                    scan_session_id: run.scan_session_id,
+                    incarnation_id: fixture.incarnation_id,
+                    token: fixture.token.clone(),
+                    idempotency_key: "recovery-complete".to_owned(),
+                    request_hash: "recovery-complete".to_owned(),
+                    last_sequence: None,
+                    observation_count: 0,
+                })
+                .await
+                .unwrap();
+        }
+        if mode == "generic" {
+            sqlx::query(
+                "UPDATE tickets SET payload = json_set(payload, '$.workflow_id', 'other-workflow')",
+            )
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        }
+        expired_scan_lease(&fixture, run.ticket_id).await;
+        if mode == "requeued" {
+            sqlx::query("UPDATE tickets SET max_attempts = attempt + 1")
+                .execute(&fixture.pool)
+                .await
+                .unwrap();
+        }
+        fixture
+            .cp
+            .remote_recover(T0 + Duration::seconds(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .cp
+                .scan_session(run.scan_session_id)
+                .await
+                .unwrap()
+                .status,
+            if mode == "succeeded" {
+                ScanSessionStatus::Succeeded
+            } else {
+                ScanSessionStatus::Running
+            }
+        );
+        assert_eq!(scan_event_count(&fixture, "scan_session.failed").await, 0);
+    }
+}
+
+#[tokio::test]
+async fn scan_recovery_selected_corrupt_session_rolls_back_expiry() {
+    for terminal in [false, true] {
+        let fixture = fixture().await;
+        let run = recovery_run(&fixture).await;
+        if terminal {
+            fixture
+                .cp
+                .cancel_scan_session(
+                    run.scan_session_id,
+                    ScanTerminalReason::new("terminal corruption fixture").unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        expired_scan_lease(&fixture, run.ticket_id).await;
+        sqlx::query("UPDATE scan_sessions SET requested_at = 'corrupt timestamp'")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let error = fixture
+            .cp
+            .expire_due(T0 + Duration::seconds(2))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, voom_core::VoomError::Database { .. }));
+        assert_eq!(scan_event_count(&fixture, "lease.expired").await, 0);
+        let state: String = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
+            .bind(i64::try_from(run.ticket_id.0).unwrap())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "leased");
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::panic, reason = "fixture root must permit scan scheduling")]
+async fn scan_recovery_skips_terminal_history_before_candidate_cap() {
+    let fixture = fixture().await;
+    let run = recovery_run(&fixture).await;
+    fixture
+        .cp
+        .cancel_scan_session(
+            run.scan_session_id,
+            ScanTerminalReason::new("historical").unwrap(),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET state = 'failed'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("WITH RECURSIVE copies(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM copies WHERE n <= 1000) INSERT INTO tickets (kind, state, priority, payload, attempt, max_attempts, next_eligible_at, created_at, state_changed_at) SELECT kind, state, priority, payload, attempt, max_attempts, next_eligible_at, created_at, state_changed_at FROM tickets, copies WHERE tickets.id = ?")
+        .bind(i64::try_from(run.ticket_id.0).unwrap()).execute(&fixture.pool).await.unwrap();
+    let root = fixture
+        .cp
+        .scan_session(run.scan_session_id)
+        .await
+        .unwrap()
+        .storage_root_id;
+    let voom_control_plane::scan::ScanRunOutcome::Requested(active) =
+        fixture.cp.request_scan_run(root, 3600).await.unwrap()
+    else {
+        panic!("root is available")
+    };
+    sqlx::query("UPDATE tickets SET state = 'failed' WHERE id = ?")
+        .bind(i64::try_from(active.ticket_id.0).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    fixture.cp.remote_recover(T0).await.unwrap();
+    assert_eq!(
+        fixture
+            .cp
+            .scan_session(active.scan_session_id)
+            .await
+            .unwrap()
+            .status,
+        ScanSessionStatus::Failed
+    );
+    assert_eq!(scan_event_count(&fixture, "scan_session.failed").await, 1);
+}
+
+#[tokio::test]
+async fn scan_recovery_drains_multiple_live_batches() {
+    let fixture = fixture().await;
+    // More live sessions than the shared recovery batch bound: each pass must
+    // make progress instead of revisiting the newly terminal first page.
+    for index in 0..1001 {
+        let root = create_root(&fixture, &format!("batch-{index}")).await;
+        fixture.cp.request_scan_run(root, 3600).await.unwrap();
+    }
+    sqlx::query("UPDATE tickets SET state = 'failed'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    fixture.cp.remote_recover(T0).await.unwrap();
+    assert_eq!(
+        scan_event_count(&fixture, "scan_session.failed").await,
+        1000
+    );
+    fixture.cp.remote_recover(T0).await.unwrap();
+    assert_eq!(
+        scan_event_count(&fixture, "scan_session.failed").await,
+        1001
+    );
+    fixture.cp.remote_recover(T0).await.unwrap();
+    assert_eq!(
+        scan_event_count(&fixture, "scan_session.failed").await,
+        1001
+    );
+}
+
+#[tokio::test]
+async fn scan_recovery_preserves_unrelated_workflow_named_scan_run() {
+    let fixture = fixture().await;
+    let ticket = fixture
+        .cp
+        .create_ticket(voom_store::repo::execution::tickets::NewTicket {
+            job_id: None,
+            kind: voom_core::TicketOperation::new("custom.worker.echo").unwrap(),
+            priority: 0,
+            payload: json!({"workflow_id": "scan-run", "value": "ordinary opaque work"}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    expired_scan_lease(&fixture, ticket.id).await;
+    let result = fixture.cp.remote_recover(T0 + Duration::seconds(2)).await;
+    assert!(
+        result.is_ok(),
+        "generic ticket metadata must not opt into scan linkage: {result:?}"
+    );
+    assert_eq!(result.unwrap().failed_tickets, vec![ticket.id]);
+    assert_eq!(scan_event_count(&fixture, "scan_session.failed").await, 0);
 }

@@ -168,3 +168,212 @@ async fn migration_count(pool: &sqlx::SqlitePool) -> Result<i64, sqlx::Error> {
         .fetch_one(pool)
         .await
 }
+
+#[cfg(unix)]
+mod recovery_process {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "fixtures use assertions and checked setup"
+    )]
+    use super::*;
+    use secrecy::SecretString;
+    use serde_json::json;
+    use voom_control_plane::ControlPlane;
+    use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
+    use voom_control_plane::scan::{RemoteScanStartInput, ScanRunOutcome};
+    use voom_control_plane::workers::RegisterNodeInput;
+    use voom_core::{
+        ArtifactAccessMode, LibraryId, NodeId, NodeIncarnationId, NodeKind, OperationKind,
+        ProviderLocator, ScanSessionId, ScanSessionStatus, StorageProviderKind, StorageRootId,
+    };
+    use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+    use voom_store::repo::library::library_roots::{
+        HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    };
+    const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
+    struct RecoveryFixture {
+        database: TempDatabase,
+        cp: ControlPlane,
+        pool: sqlx::SqlitePool,
+        node_id: NodeId,
+        incarnation_id: NodeIncarnationId,
+        token: SecretString,
+    }
+    struct Process(Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn recovery_process_expires_scan_lease_without_executor() -> TestResult {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let fixture = runtime.block_on(recovery_fixture());
+        let run = runtime.block_on(async {
+            let root = create_root(&fixture, "automatic").await;
+            let ScanRunOutcome::Requested(run) = fixture.cp.request_scan_run(root, 86_400).await.unwrap() else { return Err("root blocked"); };
+            start(&fixture, run.scan_session_id, "automatic").await;
+            sqlx::query("UPDATE tickets SET state = 'leased', attempt = max_attempts WHERE id = ?")
+                .bind(i64::try_from(run.ticket_id.0).unwrap()).execute(&fixture.pool).await.unwrap();
+            sqlx::query("INSERT INTO leases (ticket_id, worker_id, state, acquired_at, expires_at, last_heartbeat_at, ttl_seconds) VALUES (?, (SELECT MIN(id) FROM workers), 'held', '1970-01-01T00:00:00Z', '1970-01-01T00:00:01Z', '1970-01-01T00:00:00Z', 1)")
+                .bind(i64::try_from(run.ticket_id.0).unwrap()).execute(&fixture.pool).await.unwrap();
+            Ok(run)
+        })?;
+        let url = sqlite_url_for(fixture.database.path());
+        let mut process = Process(
+            command(&url)
+                .args(["--bind", "127.0.0.1:0", "--allow-cleartext-loopback"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()?,
+        );
+        let stderr = process.0.stderr.take().ok_or("missing stderr")?;
+        let (sender, receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let _ = sender.send(line);
+            }
+        });
+        let result = (|| -> TestResult {
+            wait_for_event(&receiver, "listening")?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let status = runtime
+                    .block_on(fixture.cp.scan_session(run.scan_session_id))?
+                    .status;
+                if status == ScanSessionStatus::Failed {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!("automatic recovery left scan {status:?}").into());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let (ticket, lease): (String, String) = runtime.block_on(sqlx::query_as("SELECT t.state, l.state FROM tickets t JOIN leases l ON l.ticket_id = t.id WHERE t.id = ?").bind(i64::try_from(run.ticket_id.0)?).fetch_one(&fixture.pool))?;
+            assert_eq!((ticket.as_str(), lease.as_str()), ("failed", "expired"));
+            let owner: String = runtime.block_on(
+                sqlx::query_scalar("SELECT status FROM nodes WHERE id = ?")
+                    .bind(i64::try_from(fixture.node_id.0)?)
+                    .fetch_one(&fixture.pool),
+            )?;
+            assert_eq!(
+                owner, "active",
+                "healthy owner must not take the stale-node shortcut"
+            );
+            Ok(())
+        })();
+        send_sigterm(&process.0);
+        let status = process.0.wait()?;
+        reader.join().map_err(|_| "stderr reader panicked")?;
+        result?;
+        assert!(status.success());
+        Ok(())
+    }
+    async fn recovery_fixture() -> RecoveryFixture {
+        let database = TempDatabase::new().unwrap();
+        let url = voom_store::test_support::sqlite_url_for(database.path());
+        voom_store::init(&url).await.unwrap();
+        let pool = voom_store::connect(&url).await.unwrap();
+        let cp = ControlPlane::open(&url).await.unwrap();
+        let registered = cp
+            .register_node(RegisterNodeInput {
+                name: "durable-scan-charter-owner".to_owned(),
+                kind: NodeKind::Remote,
+                heartbeat_ttl_seconds: 600,
+                metadata: json!({}),
+            })
+            .await
+            .unwrap();
+        let incarnation_id = INCARNATION.parse().unwrap();
+        cp.remote_activate(RemoteActivateInput {
+            storage_roots: Vec::new(),
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            idempotency_key: "durable-scan-charter-activate".to_owned(),
+            request_hash: "durable-scan-charter-activate-body".to_owned(),
+            incarnation_id,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "scan".to_owned(),
+                operations: vec![OperationKind::ProbeFile],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                accelerator: None,
+                max_parallel: 1,
+            }],
+        })
+        .await
+        .unwrap();
+        RecoveryFixture {
+            database,
+            cp,
+            pool,
+            node_id: registered.node.id,
+            incarnation_id,
+            token: registered.token,
+        }
+    }
+
+    async fn create_root(fixture: &RecoveryFixture, suffix: &str) -> StorageRootId {
+        let library = fixture
+            .cp
+            .create_library(NewLibrary {
+                slug: format!("charter-{suffix}"),
+                display_name: format!("Charter {suffix}"),
+                media_kind: LibraryMediaKind::Movie,
+                description: None,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let root = fixture
+            .cp
+            .create_library_root(new_root(library.id, fixture.node_id, suffix))
+            .await
+            .unwrap();
+        fixture
+            .cp
+            .activate_library_root(root.id, format!("charter-{suffix}"))
+            .await
+            .unwrap();
+        root.id
+    }
+
+    fn new_root(library_id: LibraryId, owner: NodeId, suffix: &str) -> NewLibraryRoot {
+        NewLibraryRoot {
+            library_id,
+            owner_node_id: owner,
+            provider_kind: StorageProviderKind::LocalFilesystem,
+            provider_locator: ProviderLocator::new(format!("/charter/{suffix}")).unwrap(),
+            display_locator: format!("/charter/{suffix}"),
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            extension_allowlist: Vec::new(),
+            scan_mode: LibraryScanMode::ManualRecursive,
+            symlink_policy: SymlinkPolicy::Reject,
+            hidden_file_policy: HiddenFilePolicy::Ignore,
+            max_depth: None,
+            stability_seconds: 0,
+            debounce_seconds: 0,
+            default_output_root_id: None,
+            default_staging_root_id: None,
+            default_backup_root_id: None,
+            enabled: true,
+        }
+    }
+
+    async fn start(fixture: &RecoveryFixture, id: ScanSessionId, key: &str) {
+        fixture
+            .cp
+            .start_scan_session(RemoteScanStartInput {
+                node_id: fixture.node_id,
+                scan_session_id: id,
+                incarnation_id: fixture.incarnation_id,
+                token: fixture.token.clone(),
+                idempotency_key: format!("start-{key}"),
+                request_hash: format!("start-{key}-body"),
+            })
+            .await
+            .unwrap();
+    }
+}

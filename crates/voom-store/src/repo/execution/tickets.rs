@@ -818,6 +818,47 @@ impl SqliteTicketRepo {
         Ok(tickets)
     }
 
+    /// Select a bounded unit of failed canonical scan routing work in ticket order.
+    ///
+    /// Terminal history is excluded only when its routing identifiers, root,
+    /// owner and status agree. Malformed associations remain candidates so the
+    /// caller diagnoses them before classifying missing or terminal work. This
+    /// selection is not an audit of unrelated fields in historical terminal rows;
+    /// selected tickets and sessions still undergo their full checked decoding.
+    ///
+    /// # Errors
+    /// Returns [`VoomError::Database`] on query or ticket decoding failure.
+    pub async fn failed_scan_run_candidates_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<Vec<Ticket>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TICKET_RETURNING_COLS} FROM tickets \
+             WHERE state = 'failed' AND kind = 'synthetic.workflow.operation.scan_library' \
+             AND json_extract(payload, '$.workflow_id') = 'scan-run' \
+             AND NOT COALESCE((id >= 0 \
+               AND json_type(payload, '$.rendered_payload.scan_session_id') = 'text' \
+               AND json_type(payload, '$.plan_id') = 'text' \
+               AND json_type(payload, '$.branch_id') = 'text' \
+               AND json_type(payload, '$.node_id') = 'text' \
+               AND json_type(payload, '$.rendered_payload.source_storage_root_id') = 'integer' \
+               AND EXISTS (SELECT 1 FROM scan_sessions AS session \
+                 WHERE session.id > 0 AND session.storage_root_id > 0 AND session.owner_node_id > 0 \
+                   AND CAST(session.id AS TEXT) = json_extract(payload, '$.rendered_payload.scan_session_id') \
+                   AND CAST(session.id AS TEXT) = json_extract(payload, '$.plan_id') \
+                   AND 'scan-run-' || session.id = json_extract(payload, '$.branch_id') \
+                   AND CAST(session.owner_node_id AS TEXT) = json_extract(payload, '$.node_id') \
+                   AND session.storage_root_id = json_extract(payload, '$.rendered_payload.source_storage_root_id') \
+                   AND session.status IN ('succeeded', 'failed', 'cancelled', 'stale'))), 0) \
+             ORDER BY id ASC LIMIT ?"
+        ))
+        .bind(super::leases::LEASE_BATCH_LIMIT)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("failed scan routing candidates", error))?;
+        rows.iter().map(row_to_ticket).collect()
+    }
+
     /// Return the earliest-created failed ticket for one workflow.
     ///
     /// # Errors

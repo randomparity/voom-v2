@@ -111,4 +111,5 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0112](0112-bounded-http-request-ingestion.md) | Bound worker HTTP request ingestion before append |
 | [0113](0113-ac3-audio-constraints.md) | Bound AC-3 settings and check encoder availability per operation |
 | [0114](0114-lossless-audio-facts-contract.md) | Resolve bounded lossless integer audio facts per stream |
-| [0117](0117-container-pcm-muxing.md) | Preserve PCM layout with an opt-in FFmpeg container |
+| [0118](0118-automatic-lease-recovery-and-scan-terminality.md) | Automatic lease recovery and scan terminality |
+| [0119](0119-container-pcm-muxing.md) | Preserve PCM layout with an opt-in FFmpeg container |

@@ -1208,3 +1208,98 @@ async fn ready_matching_aliases_keep_order_and_exclude_unsupported_tokens() {
     );
     tx.rollback().await.unwrap();
 }
+
+async fn scan_recovery_ticket(pool: &sqlx::SqlitePool) -> (SqliteTicketRepo, Ticket) {
+    crate::test_support::seed_test_storage_root(pool)
+        .await
+        .unwrap();
+    let session: i64 = sqlx::query_scalar("INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, idle_timeout_seconds, progress_deadline_at, requested_at, terminal_at, terminal_reason) VALUES (9000001, 1, 9000001, 'failed', 3600, '1970-01-01T01:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:01Z', 'history') RETURNING id")
+        .fetch_one(pool).await.unwrap();
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let ticket = repo.create(NewTicket {
+        kind: ticket_op("synthetic.workflow.operation.scan_library"),
+        payload: serde_json::json!({"workflow_id": "scan-run", "plan_id": session.to_string(), "branch_id": format!("scan-run-{session}"), "node_id": "9000001", "rendered_payload": {"scan_session_id": session.to_string(), "source_storage_root_id": 9_000_001}}),
+        ..sample_new_ticket()
+    }).await.unwrap();
+    sqlx::query("UPDATE tickets SET state = 'failed' WHERE id = ?")
+        .bind(i64::try_from(ticket.id.0).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    (repo, ticket)
+}
+
+#[tokio::test]
+async fn scan_recovery_skips_terminal_history_before_candidate_cap() {
+    let (pool, _tmp) = pool().await;
+    let (repo, ticket) = scan_recovery_ticket(&pool).await;
+    sqlx::query("WITH RECURSIVE copies(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM copies WHERE n <= 1000) INSERT INTO tickets (kind, state, priority, payload, attempt, max_attempts, next_eligible_at, created_at, state_changed_at) SELECT kind, state, priority, payload, attempt, max_attempts, next_eligible_at, created_at, state_changed_at FROM tickets, copies WHERE tickets.id = ?")
+        .bind(i64::try_from(ticket.id.0).unwrap()).execute(&pool).await.unwrap();
+    // A missing association must survive selection for the caller to diagnose.
+    sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.rendered_payload.scan_session_id', '999999') WHERE id = (SELECT MAX(id) FROM tickets)").execute(&pool).await.unwrap();
+    // Opaque workflow metadata cannot opt another operation into scan recovery.
+    let generic = repo
+        .create(NewTicket {
+            kind: ticket_op("custom.worker.echo"),
+            payload: serde_json::json!({"workflow_id": "scan-run"}),
+            ..sample_new_ticket()
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET state = 'failed' WHERE id = ?")
+        .bind(i64::try_from(generic.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = crate::tx::begin_read_only(&pool, "scan recovery test")
+        .await
+        .unwrap();
+    let selected = repo
+        .failed_scan_run_candidates_in_tx(&mut tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        selected.len(),
+        1,
+        "terminal history must not consume the candidate cap"
+    );
+    assert_eq!(
+        selected[0].payload["rendered_payload"]["scan_session_id"],
+        "999999"
+    );
+}
+
+#[tokio::test]
+async fn scan_recovery_bounds_candidates_and_retains_invalid_terminal_linkage() {
+    let (pool, _tmp) = pool().await;
+    let (repo, ticket) = scan_recovery_ticket(&pool).await;
+    sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.node_id', '-1')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("WITH RECURSIVE copies(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM copies WHERE n <= 1000) INSERT INTO tickets (kind, state, priority, payload, attempt, max_attempts, next_eligible_at, created_at, state_changed_at) SELECT kind, state, priority, payload, attempt, max_attempts, next_eligible_at, created_at, state_changed_at FROM tickets, copies WHERE tickets.id = ?")
+        .bind(i64::try_from(ticket.id.0).unwrap()).execute(&pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_only(&pool, "scan recovery test")
+        .await
+        .unwrap();
+    let selected = repo
+        .failed_scan_run_candidates_in_tx(&mut tx)
+        .await
+        .unwrap();
+    assert_eq!(selected.len(), 1000);
+    assert!(selected.windows(2).all(|pair| pair[0].id < pair[1].id));
+}
+
+#[tokio::test]
+async fn scan_recovery_decodes_corrupt_selected_ticket_before_missing_link() {
+    let (pool, _tmp) = pool().await;
+    let (repo, _) = scan_recovery_ticket(&pool).await;
+    sqlx::query("UPDATE tickets SET created_at = 'invalid timestamp', payload = json_set(payload, '$.rendered_payload.scan_session_id', '999999')").execute(&pool).await.unwrap();
+    let mut tx = crate::tx::begin_read_only(&pool, "scan recovery test")
+        .await
+        .unwrap();
+    assert!(matches!(
+        repo.failed_scan_run_candidates_in_tx(&mut tx).await,
+        Err(VoomError::Database { .. })
+    ));
+}
