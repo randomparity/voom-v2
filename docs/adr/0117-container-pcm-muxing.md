@@ -52,6 +52,9 @@ observation. Preserve those incoming values for copied audio; do not invent
 missing durations. Default-off muxing stays unchanged. The generated DURATION
 tag may be regenerated, as explicitly authorized, while user metadata and actual
 packet bytes/pts/dts/duration remain exact.
+PCM worker commands retain the input timestamp origin and disable automatic
+negative-timestamp shifting. The mux patch alone cannot recover timestamps that
+FFmpeg's input pipeline has already rebased.
 
 The guardian handles launcher SIGKILL and worker death while the engine and
 guardian remain available. Engine failure, late daemon creation, or killing the

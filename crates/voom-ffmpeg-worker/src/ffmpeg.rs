@@ -1036,7 +1036,7 @@ pub async fn run_ffmpeg_transcode_audio(
     let mut command = Command::new(&config.ffmpeg_path);
     if pcm_precision(&request.audio.target_codec).is_some() {
         // Copied PCM with unknown layout must not acquire a channel-count guess.
-        command.arg("-guess_layout_max").arg("0");
+        command.args(["-copyts", "-guess_layout_max", "0"]);
     }
     command
         .arg("-hide_banner")
@@ -1057,7 +1057,7 @@ pub async fn run_ffmpeg_transcode_audio(
         append_audio_metadata(&mut command, source.audio_ordinal, source);
     }
     if pcm_precision(&request.audio.target_codec).is_some() {
-        command.arg("-pcm_wavex").arg("1");
+        command.args(["-pcm_wavex", "1", "-avoid_negative_ts", "disabled"]);
     }
     command
         .arg("-map_metadata")
@@ -1131,7 +1131,7 @@ async fn run_ffmpeg_synthesize_audio(
     let mut command = Command::new(&config.ffmpeg_path);
     if pcm_precision(&request.audio.target_codec).is_some() {
         // Copied PCM with unknown layout must not acquire a channel-count guess.
-        command.arg("-guess_layout_max").arg("0");
+        command.args(["-copyts", "-guess_layout_max", "0"]);
     }
     command
         .arg("-hide_banner")
@@ -1167,7 +1167,7 @@ async fn run_ffmpeg_synthesize_audio(
         append_compatibility_identities(&mut command, &input_probe, compatibility, request)?;
     }
     if pcm_precision(&request.audio.target_codec).is_some() {
-        command.arg("-pcm_wavex").arg("1");
+        command.args(["-pcm_wavex", "1", "-avoid_negative_ts", "disabled"]);
     }
     command
         .arg("-map")

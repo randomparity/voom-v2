@@ -1574,6 +1574,52 @@ async fn lossless_request(
     }
 }
 
+async fn offset_pcm_fixture(
+    preflight: &voom_ffmpeg_worker::FfmpegPreflight,
+    input: &Path,
+    codec: &str,
+    offset: &str,
+) {
+    if !codec.starts_with("pcm_") {
+        return;
+    }
+    let shifted = input.with_file_name("shifted.mkv");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-v", "error", "-copyts", "-i"])
+            .arg(input)
+            .args([
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-pcm_wavex",
+                "1",
+                "-output_ts_offset",
+                offset,
+                "-avoid_negative_ts",
+                "disabled",
+            ])
+            .arg(&shifted),
+    )
+    .await;
+    std::fs::rename(shifted, input).unwrap();
+    let probe = flac_physical_probe(&preflight.ffprobe_path, input).await;
+    let pts = probe["packets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|packet| packet["stream_index"] == 2)
+        .unwrap()["pts"]
+        .as_i64()
+        .unwrap();
+    assert!(if offset.starts_with('-') {
+        pts < 0
+    } else {
+        pts > 0
+    });
+}
+
 async fn flac_physical_probe(ffprobe: &Path, path: &Path) -> serde_json::Value {
     let output = flac_command(
         tokio::process::Command::new(ffprobe)
@@ -1623,12 +1669,7 @@ fn assert_lossless_preservation(
         for field in ["codec_name", "tags", "disposition"] {
             let mut expected = before["streams"][index][field].clone();
             let mut actual = streams[index][field].clone();
-            if field == "tags"
-                && matches!(
-                    before["streams"][index]["codec_name"].as_str(),
-                    Some("pcm_s16le" | "pcm_s24le")
-                )
-            {
+            if field == "tags" && codec.starts_with("pcm_") {
                 // #763's explicit operator decision permits only regenerated mux DURATION.
                 expected.as_object_mut().unwrap().remove("DURATION");
                 actual.as_object_mut().unwrap().remove("DURATION");
@@ -1679,6 +1720,10 @@ async fn verify_lossless_integer_samples(codec: &str) {
                 let input = dir.path().join("source.mkv");
                 let output = dir.path().join("encoded.mkv");
                 generate_flac_source(&preflight, &input, layout, bits, rate).await;
+                if rate == 44_100 && matches!(layout, "mono" | "stereo") {
+                    let offset = if layout == "mono" { "5" } else { "-0.05" };
+                    offset_pcm_fixture(&preflight, &input, codec, offset).await;
+                }
                 let request = lossless_request(codec, &input, &output, None).await;
                 let result = synthesize_through_worker(&request).await;
                 assert_eq!(
@@ -1743,6 +1788,8 @@ async fn verify_lossless_downmix(codec: &str) {
         let output = dir.path().join("downmix.mkv");
         let reference = dir.path().join("reference.mkv");
         generate_flac_source(&preflight, &input, layout, bits, 48_000).await;
+        let offset = if layout == "7.1" { "5" } else { "-0.05" };
+        offset_pcm_fixture(&preflight, &input, codec, offset).await;
         let request = lossless_request(codec, &input, &output, Some(target)).await;
         let result = synthesize_through_worker(&request).await;
         assert_eq!(audio_expected(&input).await, request.input.expected);

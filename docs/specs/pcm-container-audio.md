@@ -85,6 +85,10 @@ preserves unaffected tracks without inventing their layout. Known-layout copied
 PCM16/24 tracks may gain WAVEX headers, with their packet bytes/facts preserved.
 PCM invocations disable FFmpeg input layout guessing with `-guess_layout_max 0`,
 so copied unknown-layout tracks cannot acquire channel-count-derived WAVEX masks.
+They preserve the input timeline with `-copyts` and output
+`-avoid_negative_ts disabled`; neither positive start times nor representable
+negative packet timestamps are shifted to zero. Required archival and synthesis
+fixtures exercise both signs and compare copied packet tuples.
 With the option enabled, positive observed audio packet durations are written as
 explicit BlockDuration elements, including copied audio. This preserves container
 timing that stock remuxing can otherwise replace with codec-derived rounding.
