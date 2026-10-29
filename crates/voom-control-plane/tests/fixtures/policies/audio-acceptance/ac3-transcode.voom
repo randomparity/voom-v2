@@ -1,0 +1,5 @@
+policy "acceptance ac3 transcode" {
+  phase encode {
+    transcode audio to ac3 where language in ["eng"]
+  }
+}

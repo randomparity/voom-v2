@@ -1,0 +1,5 @@
+policy "acceptance pcm_s24le transcode" {
+  phase encode {
+    transcode audio to pcm_s24le where language in ["eng"]
+  }
+}

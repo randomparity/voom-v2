@@ -133,10 +133,18 @@ jobs:
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
         with:
           just-version: '1.58.0'
-      - name: Install fixture inspector
+      - name: Install fixture media tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg mkvtoolnix
+      - name: Provision acceptance Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          python-version: '3.13'
+          activate-environment: true
+          no-project: true
+      - name: Verify acceptance Python
+        run: python3 -c 'import sys; assert sys.version_info >= (3, 13), sys.version'
       - name: Build pinned native image
         run: |
           image=$(just container-build docker)
@@ -149,3 +157,5 @@ jobs:
         run: just container-worker-check docker "$PCM_IMAGE"
       - name: Verify copied packet publication and native rejection
         run: just copied-audio-check docker "$PCM_IMAGE"
+      - name: Exercise required generated audio owner CLI acceptance
+        run: just audio-acceptance docker "$PCM_IMAGE"

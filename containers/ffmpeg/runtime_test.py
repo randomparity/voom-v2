@@ -129,6 +129,39 @@ class ConfigTests(unittest.TestCase):
                     proof.regression(args, root)
 
 
+    def test_audio_acceptance_passes_platform_configuration_to_installer(self):
+        repository = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location(
+            "audio_acceptance", repository / "crates/voom-cli/tests/support/real_owner_audio.py")
+        proof = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(proof)
+
+        class InstallationObserved(Exception):
+            pass
+
+        for engine, system, desktop in [("docker", "Linux", ""),
+                                        ("docker", "Darwin", "desktop-linux"),
+                                        ("podman", "Darwin", "owned-machine")]:
+            with self.subTest(engine=engine, system=system):
+                root = self.root / f"audio-{engine}-{system}"
+                root.mkdir()
+                args = SimpleNamespace(engine=engine, image="sha256:" + "1" * 64,
+                                       desktop=desktop, bin_dir=root / "unused")
+
+                def external_command(arguments, cwd=None):
+                    if Path(arguments[1]).name == "install.py":
+                        config = runtime.parse_config((root / "container.json").read_bytes(),
+                                                      system=system, cwd=str(root / "staging"))
+                        self.assertEqual(config.desktop, desktop)
+                        raise InstallationObserved
+                    return b""
+
+                with patch.object(proof, "integer_wave"), \
+                        patch.object(proof, "run", side_effect=external_command), \
+                        self.assertRaises(InstallationObserved):
+                    proof.acceptance(args, root)
+
+
 class EngineTests(unittest.TestCase):
     def test_desktop_inspection_uses_native_temp_without_changing_worker_tmpdir(self):
         config = runtime.Config("podman", "sha256:" + "1" * 64, (), (), "owned-machine")

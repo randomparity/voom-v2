@@ -360,3 +360,8 @@ container-worker-check ENGINE IMAGE:
 copied-audio-check ENGINE IMAGE DESKTOP='':
     cargo build --workspace --all-features --bins
     python3 scripts/issue-786-copied-audio-regression.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}} --desktop {{quote(DESKTOP)}}
+
+# Required generated audio CLI/control-plane/owner-node acceptance; no optional skips.
+audio-acceptance ENGINE IMAGE WORKDIR='' DESKTOP='':
+    cargo build --workspace --all-features --bins
+    python3 crates/voom-cli/tests/support/real_owner_audio.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}} --desktop {{quote(DESKTOP)}} {{if WORKDIR == '' { '' } else { '--workdir ' + quote(WORKDIR) }}}

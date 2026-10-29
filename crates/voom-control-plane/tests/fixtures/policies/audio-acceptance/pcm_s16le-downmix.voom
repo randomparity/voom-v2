@@ -1,0 +1,8 @@
+policy "acceptance pcm_s16le downmix" {
+  phase encode {
+    synthesize audio from language in ["eng"] and channels >= 6 {
+      codec pcm_s16le
+      channels 2
+    }
+  }
+}
