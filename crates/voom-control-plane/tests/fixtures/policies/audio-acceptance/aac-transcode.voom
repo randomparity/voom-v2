@@ -1,0 +1,5 @@
+policy "acceptance aac transcode" {
+  phase encode {
+    transcode audio to aac where language in ["eng"]
+  }
+}

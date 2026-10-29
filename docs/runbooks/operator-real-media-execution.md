@@ -14,6 +14,10 @@ stack below. The local helper requires Python 3.13 or newer, `jq`, `ffmpeg`,
 and output directories must be separate and must not contain one another.
 Choose input media and output retention before starting; promotion is add-only.
 
+For audio target bounds, encoder/build availability, generated-media proof and
+copied-audio publication constraints, read the
+[audio support matrix](../audio-support-matrix.md).
+
 The bundled API automatically recovers remote authority while its listener runs.
 It starts a recovery pass immediately, then waits five seconds after each pass;
 passes run serially with a thirty-second deadline. Expired exhausted scan-routing
