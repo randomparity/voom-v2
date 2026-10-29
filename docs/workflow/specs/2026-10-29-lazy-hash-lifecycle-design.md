@@ -2,58 +2,59 @@
 
 ## Problem
 
-A provisional fingerprint, if ever accepted, needs a deferred full hash. Its lifecycle under
-restart, cancel, retry, starvation, concurrent mutation and late disagreement, and its eventual
-I/O, are unmeasured. Stage 4 and oracle cases O13–O15 of
-[the protocol](../../media-evidence-protocol.md) need that evidence.
+A provisional fingerprint needs a deferred full hash whose recovery behavior and eventual I/O
+are unmeasured ([protocol](../../media-evidence-protocol.md) stage 4, O13–O15).
 
 ## Scope
 
-`scripts/media-evidence-lazy.py`, experiment-only, imports read-only helpers from
-`media-evidence-baseline.py` (neither file changes). One per-file record holds state
-`unknown`, `provisional`, `verified`, `stale` or `disagreement`:
+`scripts/media-evidence-lazy.py`, experiment-only, imports `media-evidence-baseline.py`
+helpers (unchanged); digests are `exp-blake2b:` (1 MiB reads); no store, worker, lease or
+absence code. Per-file records persist in a scratch JSON state file, written
+temp-then-rename per transition; a digest appears only in the write that sets `verified`.
 
-- `observe`: stat plus a fixed fingerprint (size, mtime ns, inode key, 64 KiB head/tail
-  digest) moves any state to `provisional`. Fingerprint search belongs to #796.
-- `verify`: one full read with pre/post stat. Stat drift gives `stale`; interruption keeps
-  `provisional` and publishes nothing; a fingerprint recomputed from that pass, or a prior
-  verified digest, that differs gives `disagreement`; else `verified`.
-- Plans from provisional evidence are `held`, `committable` once verified, `revoked` on
-  disagreement; outputs are then `quarantined`. Digests are `exp-blake2b:` (1 MiB reads), never `blake3:`; nothing touches the store, workers,
-leases or absence reconciliation.
+- `observe` takes stat plus a fixed fingerprint (size, mtime ns, inode key, 64 KiB head/tail
+  digest). `unknown`, `stale`, `disagreement` → `provisional`; `verified` stays if the
+  fingerprint is unchanged, else → `stale`.
+- `verify` reads the whole file between two stats. A start stat unlike the provisional one, or
+  drift → `stale`; a head/tail fingerprint recomputed from the pass unlike the provisional one →
+  `disagreement`; else `verified`. Interruption leaves the state file untouched.
+- Plans: `held` while provisional, `committable` if verified, else `revoked`, outputs `quarantined`.
 
-`matrix` runs on scratch fixtures, with deterministic fault hooks and an oracle that knows the
-true content: clean, restart (O14), cancel, retry, starvation (on-demand-only versus aged
-background), concurrent mutation (O10 drift and an unseen interior edit), late disagreement
-(O15 head and interior), stale evidence (O13). `run` measures one lifecycle per repetition:
-observe all, two probe re-observations each, then verify all, 4 in flight. `compare` applies
-protocol thresholds to logical and physical bytes against the #788 records.
+`matrix` uses scratch fixtures and an oracle knowing true content [expected result]: clean
+[verified]; restart O14, a child SIGKILLs itself mid-read, a fresh reader loads the state file
+[provisional, no digest, plan held, partial read wasted]; cancel [same, no reload]; retry, first
+open fails [verified, both reads counted]; mutation during the read O10 [stale]; unseen interior
+edit during the read, mtime restored [verified: constructed miss]; O15 head edit [disagreement,
+revoked, quarantined], interior edit [verified: miss]; O13 verified then head edit [stale],
+interior edit [verified: miss]. Re-verification stops after 2 attempts. Starvation: 8
+background files, one new on-demand file and one verify per tick, 32 ticks; on-demand-only [8
+provisional] versus oldest background every 4th tick [8 verified].
+
+`run` per repetition: observe all, two probe re-observations each, verify all, 4 in flight; a
+stale file is a recorded row, not retried. `compare` applies protocol thresholds to logical and
+physical bytes against the #788 records.
 
 ### Failure model
 
 - Actors and deployments: a local operator on the measurement host; CI runs the self-test.
-- Invariants and assets at stake: corpora stay read-only; committed records carry no host path;
-  experiment digests never reach a production hash field.
-- Accepted failure classes: wall and CPU are not comparable with #788's worker instrument
-  (reported, not compared); host counters include rehearsal traffic (disclosed).
-- Covered elsewhere: fingerprint choice (#796); buffers, concurrency (#789); reuse (#798);
-  decision (#791); production lifecycle (#792).
+- Invariants and assets: corpora stay read-only; records carry no host path; experiment
+  digests never reach a production hash field.
+- Accepted failure classes: wall and CPU differ from #788's worker instrument (reported, not
+  compared); host counters include rehearsal traffic (disclosed).
+- Covered elsewhere: fingerprints #796; buffers, concurrency #789; reuse #798; decision #791.
 
 ## Success
 
-1. The five states and transitions are implemented, and every listed matrix case is reported
-   with expected and observed state, detection versus oracle, waste bytes, dispositions.
-2. Records for 3 local evicted repetitions and the 3-file network subset report eventual
-   logical bytes by component, physical bytes, and residency, within protocol budgets.
-3. A results note gives commands, comparison, constructed misses, exclusions, disclosures.
-4. `just media-evidence-lazy-selftest` validates committed records, in `source-checks`.
+1. Each matrix case reports expected and observed state, oracle verdict, waste bytes and
+   dispositions, matching its bracketed expectation.
+2. Records of 3 local evicted repetitions and the 3-file network subset give logical bytes by
+   component, physical bytes and residency, within protocol budgets.
+3. A results note gives commands, comparison, misses, exclusions and disclosures; `just
+   media-evidence-lazy-selftest` validates committed records in `source-checks`.
 
 ## Validation
 
-- Transitions and plan dispositions: focused-test in the self-test, one per matrix case.
-- Matrix determinism: focused-test runs `matrix` twice and asserts identical output.
-- Record schema and redaction: focused-test rejects missing metrics, host paths, `blake3:`.
-- Committed records: focused-test validates every `*lazy*.json` record.
-- Comparison: focused-test checks `compare` on synthetic medians on both threshold sides.
-- Corpus read-only: task-test-not-applicable, because opens are read-only and the matrix
-  mutates only scratch copies; the note records pre/post manifest equality.
+- Focused-tests: each matrix case, determinism, schema, redaction (host paths, `blake3:`),
+  committed records, `compare`.
+- Corpus read-only: task-test-not-applicable (read-only opens; only scratch copies mutate);
+  the note records manifest equality before and after.
