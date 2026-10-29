@@ -1,0 +1,299 @@
+{
+  "build": {
+    "baseline_harness_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
+    "git_changed_paths": [
+      "docs/workflow/specs/2026-10-29-lazy-hash-lifecycle-design.md",
+      "justfile"
+    ],
+    "git_commit": "19efbaefe5e69421a8f48971d8752f92878ce638",
+    "harness_sha256": "5a2e790db2fe45241243bcfaf9b9a4666f44a31129e940203b64fb27be814218"
+  },
+  "cases": [
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 4194304,
+        "wasted": 0
+      },
+      "case": "clean",
+      "expected": {
+        "digest_published": true,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "observed": {
+        "digest_published": true,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "oracle_case": null
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 4194304,
+        "wasted": 2097152
+      },
+      "case": "restart",
+      "expected": {
+        "digest_published": false,
+        "killed_mid_read": true,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "held",
+        "resumed_state": "verified",
+        "state": "provisional"
+      },
+      "observed": {
+        "digest_published": false,
+        "killed_mid_read": true,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "held",
+        "resumed_state": "verified",
+        "state": "provisional"
+      },
+      "oracle_case": "O14"
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 0,
+        "wasted": 1048576
+      },
+      "case": "cancel",
+      "expected": {
+        "digest_published": false,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "held",
+        "state": "provisional"
+      },
+      "observed": {
+        "digest_published": false,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "held",
+        "state": "provisional"
+      },
+      "oracle_case": null
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 4194304,
+        "wasted": 2097152
+      },
+      "case": "retry",
+      "expected": {
+        "digest_published": true,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "observed": {
+        "digest_published": true,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "oracle_case": null
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 0,
+        "wasted": 2097152
+      },
+      "case": "retry-exhausted",
+      "expected": {
+        "digest_published": false,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "held",
+        "state": "provisional"
+      },
+      "observed": {
+        "digest_published": false,
+        "oracle": "no-change",
+        "output": "kept",
+        "plan": "held",
+        "state": "provisional"
+      },
+      "oracle_case": null
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 0,
+        "wasted": 4194305
+      },
+      "case": "concurrent-mutation",
+      "expected": {
+        "digest_published": false,
+        "oracle": "detected",
+        "output": "quarantined",
+        "plan": "revoked",
+        "state": "stale"
+      },
+      "observed": {
+        "digest_published": false,
+        "oracle": "detected",
+        "output": "quarantined",
+        "plan": "revoked",
+        "state": "stale"
+      },
+      "oracle_case": "O10"
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 4194304,
+        "wasted": 0
+      },
+      "case": "unseen-interior-edit-during-read",
+      "expected": {
+        "digest_published": true,
+        "oracle": "missed",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "observed": {
+        "digest_published": true,
+        "oracle": "missed",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "oracle_case": "O10"
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 0,
+        "wasted": 4194304
+      },
+      "case": "late-disagreement-head",
+      "expected": {
+        "digest_published": false,
+        "oracle": "detected",
+        "output": "quarantined",
+        "plan": "revoked",
+        "state": "disagreement"
+      },
+      "observed": {
+        "digest_published": false,
+        "oracle": "detected",
+        "output": "quarantined",
+        "plan": "revoked",
+        "state": "disagreement"
+      },
+      "oracle_case": "O15"
+    },
+    {
+      "bytes": {
+        "fingerprint": 131072,
+        "full": 4194304,
+        "wasted": 0
+      },
+      "case": "late-disagreement-interior",
+      "expected": {
+        "digest_published": true,
+        "oracle": "missed",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "observed": {
+        "digest_published": true,
+        "oracle": "missed",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "oracle_case": "O15"
+    },
+    {
+      "bytes": {
+        "fingerprint": 262144,
+        "full": 4194304,
+        "wasted": 0
+      },
+      "case": "stale-evidence-head",
+      "expected": {
+        "digest_published": false,
+        "oracle": "detected",
+        "output": "quarantined",
+        "plan": "revoked",
+        "state": "stale"
+      },
+      "observed": {
+        "digest_published": false,
+        "oracle": "detected",
+        "output": "quarantined",
+        "plan": "revoked",
+        "state": "stale"
+      },
+      "oracle_case": "O13"
+    },
+    {
+      "bytes": {
+        "fingerprint": 262144,
+        "full": 4194304,
+        "wasted": 0
+      },
+      "case": "stale-evidence-interior",
+      "expected": {
+        "digest_published": true,
+        "oracle": "missed",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "observed": {
+        "digest_published": true,
+        "oracle": "missed",
+        "output": "kept",
+        "plan": "committable",
+        "state": "verified"
+      },
+      "oracle_case": "O13"
+    }
+  ],
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "parameters": {
+    "fingerprint_window_bytes": 65536,
+    "fixture_bytes": 4194304,
+    "max_verify_attempts": 2,
+    "observations_per_file": 3,
+    "read_chunk_bytes": 1048576
+  },
+  "schema": "media-evidence-lazy-matrix/1",
+  "starvation": [
+    {
+      "background_provisional": 8,
+      "background_verified": 0,
+      "demand_backlog": 0,
+      "policy": "on-demand-only"
+    },
+    {
+      "background_provisional": 0,
+      "background_verified": 8,
+      "demand_backlog": 8,
+      "policy": "aged"
+    }
+  ]
+}

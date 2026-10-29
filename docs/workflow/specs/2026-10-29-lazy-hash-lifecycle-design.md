@@ -24,7 +24,7 @@ temp-then-rename per transition; a digest appears only in the write that sets `v
 `matrix` uses scratch fixtures and an oracle knowing true content [expected result]: clean
 [verified]; restart O14, a child SIGKILLs itself mid-read, a fresh reader loads the state file
 [provisional, no digest, plan held, partial read wasted]; cancel [same, no reload]; retry, first
-open fails [verified, both reads counted]; mutation during the read O10 [stale]; unseen interior
+read fails [verified, both reads counted]; mutation during the read O10 [stale]; unseen interior
 edit during the read, mtime restored [verified: constructed miss]; O15 head edit [disagreement,
 revoked, quarantined], interior edit [verified: miss]; O13 verified then head edit [stale],
 interior edit [verified: miss]. Re-verification stops after 2 attempts. Starvation: 8
