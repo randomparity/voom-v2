@@ -1,0 +1,271 @@
+{
+  "build": {
+    "baseline_harness_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
+    "git_changed_paths": [],
+    "git_commit": "0a3650c2b4624ccd86f5185a03b4b35f18d65d6c",
+    "harness_sha256": "5a2e790db2fe45241243bcfaf9b9a4666f44a31129e940203b64fb27be814218"
+  },
+  "corpus": {
+    "filesystem_type": "cifs",
+    "label": "network-corpus",
+    "manifest_files": 121,
+    "selected_ids": [
+      "f0049",
+      "f0074",
+      "f0063"
+    ],
+    "skipped_budget_ids": [],
+    "storage_class": "network",
+    "unchanged_after_run": true
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "not_measured": {
+    "complete_library": "run covers a recorded subset, not a whole library",
+    "discovery": "run starts from a manifest; the scan worker is not run",
+    "ffprobe_reads": "probe re-observations read fingerprints; ffprobe itself is not run",
+    "first_actionable_plan": "the prototype does not plan corpus files",
+    "first_durable_observation": "the prototype publishes nothing to the control plane",
+    "first_transformation_start": "the prototype does not transform",
+    "first_verified_output": "the prototype does not verify outputs",
+    "retries": "run performs no retries; a stale or failed verify is a recorded row",
+    "sidecar_hashing": "run observes primaries only"
+  },
+  "parameters": {
+    "concurrency": 4,
+    "evict": false,
+    "fingerprint_window_bytes": 65536,
+    "max_bytes_per_repetition": 80000000000,
+    "max_verify_attempts": 2,
+    "observations_per_file": 3,
+    "read_chunk_bytes": 1048576,
+    "repetitions": 3
+  },
+  "repetitions": [
+    {
+      "all_provisional_seconds": 0.012744,
+      "evicted": false,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 5864433687,
+          "id": "f0049",
+          "observe_delay_seconds": 0.001336,
+          "observe_seconds": 0.009495,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 0,
+          "size_bytes": 5864433687,
+          "state": "verified",
+          "verify_delay_seconds": 0.012793,
+          "verify_seconds": 15.015496,
+          "wasted_bytes": 0
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 7190609920,
+          "id": "f0074",
+          "observe_delay_seconds": 0.001539,
+          "observe_seconds": 0.008986,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 0,
+          "size_bytes": 7190609920,
+          "state": "verified",
+          "verify_delay_seconds": 0.012779,
+          "verify_seconds": 17.224306,
+          "wasted_bytes": 0
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 11607474513,
+          "id": "f0063",
+          "observe_delay_seconds": 0.001719,
+          "observe_seconds": 0.009949,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 0,
+          "size_bytes": 11607474513,
+          "state": "verified",
+          "verify_delay_seconds": 0.012886,
+          "verify_seconds": 23.442538,
+          "wasted_bytes": 0
+        }
+      ],
+      "host_counters": {
+        "cifs_bytes_read": 24662518120,
+        "network_rx_bytes": 25787806374
+      },
+      "index": 1,
+      "logical_bytes": {
+        "deferred_full_hash": 24662518120,
+        "owner_fingerprint": 393216,
+        "probe_reobservation": 786432,
+        "total": 24663697768,
+        "wasted": 0
+      },
+      "process": {
+        "cpu_seconds": 35.82,
+        "peak_rss_bytes": 35680256,
+        "rchar": 24672600139,
+        "read_bytes": 0
+      },
+      "wall_seconds": 23.455657
+    },
+    {
+      "all_provisional_seconds": 0.008639,
+      "evicted": false,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 5864433687,
+          "id": "f0049",
+          "observe_delay_seconds": 0.000206,
+          "observe_seconds": 0.00665,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 0,
+          "size_bytes": 5864433687,
+          "state": "verified",
+          "verify_delay_seconds": 0.00876,
+          "verify_seconds": 9.98626,
+          "wasted_bytes": 0
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 7190609920,
+          "id": "f0074",
+          "observe_delay_seconds": 0.000341,
+          "observe_seconds": 0.007283,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 0,
+          "size_bytes": 7190609920,
+          "state": "verified",
+          "verify_delay_seconds": 0.008676,
+          "verify_seconds": 11.855926,
+          "wasted_bytes": 0
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 11607474513,
+          "id": "f0063",
+          "observe_delay_seconds": 0.000549,
+          "observe_seconds": 0.000969,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 11607478272,
+          "size_bytes": 11607474513,
+          "state": "verified",
+          "verify_delay_seconds": 0.00869,
+          "verify_seconds": 16.214487,
+          "wasted_bytes": 0
+        }
+      ],
+      "host_counters": {
+        "cifs_bytes_read": 13055043607,
+        "network_rx_bytes": 13650696727
+      },
+      "index": 2,
+      "logical_bytes": {
+        "deferred_full_hash": 24662518120,
+        "owner_fingerprint": 393216,
+        "probe_reobservation": 786432,
+        "total": 24663697768,
+        "wasted": 0
+      },
+      "process": {
+        "cpu_seconds": 35.18,
+        "peak_rss_bytes": 35680256,
+        "rchar": 24672550261,
+        "read_bytes": 0
+      },
+      "wall_seconds": 16.223583
+    },
+    {
+      "all_provisional_seconds": 0.011174,
+      "evicted": false,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 5864433687,
+          "id": "f0049",
+          "observe_delay_seconds": 0.000208,
+          "observe_seconds": 0.010009,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 0,
+          "size_bytes": 5864433687,
+          "state": "verified",
+          "verify_delay_seconds": 0.011206,
+          "verify_seconds": 9.976129,
+          "wasted_bytes": 0
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 7190609920,
+          "id": "f0074",
+          "observe_delay_seconds": 0.000341,
+          "observe_seconds": 0.008522,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 0,
+          "size_bytes": 7190609920,
+          "state": "verified",
+          "verify_delay_seconds": 0.011315,
+          "verify_seconds": 11.851989,
+          "wasted_bytes": 0
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "fingerprint_bytes": 131072,
+          "full_hash_bytes": 11607474513,
+          "id": "f0063",
+          "observe_delay_seconds": 0.00054,
+          "observe_seconds": 0.001409,
+          "probe_reobservation_bytes": 262144,
+          "resident_bytes_before": 11607478272,
+          "size_bytes": 11607474513,
+          "state": "verified",
+          "verify_delay_seconds": 0.011273,
+          "verify_seconds": 16.159397,
+          "wasted_bytes": 0
+        }
+      ],
+      "host_counters": {
+        "cifs_bytes_read": 13055043607,
+        "network_rx_bytes": 13650716969
+      },
+      "index": 3,
+      "logical_bytes": {
+        "deferred_full_hash": 24662518120,
+        "owner_fingerprint": 393216,
+        "probe_reobservation": 786432,
+        "total": 24663697768,
+        "wasted": 0
+      },
+      "process": {
+        "cpu_seconds": 35.24,
+        "peak_rss_bytes": 35860480,
+        "rchar": 24672550262,
+        "read_bytes": 0
+      },
+      "wall_seconds": 16.171131
+    }
+  ],
+  "schema": "media-evidence-lazy-run/1"
+}
