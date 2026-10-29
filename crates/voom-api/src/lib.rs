@@ -23,6 +23,7 @@ pub const SCHEMA_VERSION: &str = "0";
 mod commit;
 pub mod config;
 mod execution;
+pub mod recovery;
 mod scan;
 pub mod server;
 

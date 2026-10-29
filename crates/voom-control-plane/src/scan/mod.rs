@@ -6,6 +6,7 @@
 //! turns evidence into identity inside the completion transaction.
 
 pub(crate) mod publish;
+mod recovery;
 pub mod run;
 pub mod sessions;
 
