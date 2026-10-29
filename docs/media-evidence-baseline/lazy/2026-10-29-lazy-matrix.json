@@ -3,11 +3,10 @@
     "baseline_harness_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
     "git_changed_paths": [
       "docs/media-evidence-baseline/lazy/2026-10-29-lazy-matrix.json",
-      "scripts/media-evidence-lazy-selftest.py",
       "scripts/media-evidence-lazy.py"
     ],
-    "git_commit": "dbd40cb3f9f23377be7740ac3945ee58eacfb045",
-    "harness_sha256": "a1360d6ab1c5d10cd9718c62be63a43d5acf8ab0ce6eeb922d51ac84f5494d04"
+    "git_commit": "9e26cc64db4edf98193242adf855ff3767758dc1",
+    "harness_sha256": "34e5f275f8083cb4be8750a35dd8a66b3b25af2eb4a244f84f38b51ce5bec09b"
   },
   "cases": [
     {

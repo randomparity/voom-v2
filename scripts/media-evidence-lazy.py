@@ -349,10 +349,9 @@ class Case:
         return {"expected": expected, "observed": observed, "bytes": dict(self.bytes)}
 
 
-def expect(state: str, oracle: str, plan: str, output: str = "kept",
-           digest: bool | None = None) -> dict[str, Any]:
+def expect(state: str, oracle: str, plan: str, output: str = "kept") -> dict[str, Any]:
     return {"state": state, "oracle": oracle, "plan": plan, "output": output,
-            "digest_published": state == "verified" if digest is None else digest}
+            "digest_published": state == "verified"}
 
 
 def planned(case: Case) -> Case:
@@ -707,10 +706,6 @@ def matrix_record() -> dict[str, Any]:
 # ---------------------------------------------------------------------------- validation
 
 
-def is_metric(value: Any) -> bool:
-    return baseline.is_metric(value)
-
-
 def common_problems(record: dict[str, Any]) -> list[str]:
     text = json.dumps(record)
     problems = ["host path"] if HOST_PATH.search(text) else []
@@ -738,7 +733,7 @@ CORPUS_KEYS = {"label", "filesystem_type", "storage_class", "manifest_files", "s
 def run_row_problems(row: dict[str, Any]) -> list[str]:
     problems = baseline.missing("file", row, RUN_ROW_KEYS)
     for key in RUN_ROW_KEYS - {"id", "ext", "state", "failure"}:
-        if key in row and not is_metric(row[key]):
+        if key in row and not baseline.is_metric(row[key]):
             problems.append(f"file {key}")
     if row.get("state") not in STATES:
         problems.append("file state")
@@ -759,7 +754,7 @@ def run_repetition_problems(repetition: dict[str, Any]) -> list[str]:
     problems += baseline.missing("host_counters", counters, baseline.COUNTER_KEYS)
     values = [repetition.get("wall_seconds"), repetition.get("all_provisional_seconds"),
               *logical.values(), *process.values(), *counters.values()]
-    problems += ["repetition metric" for value in values if not is_metric(value)]
+    problems += ["repetition metric" for value in values if not baseline.is_metric(value)]
     rows = repetition.get("files") or []
     if not rows:
         problems.append("repetition files")
@@ -797,7 +792,7 @@ def validate_matrix(record: dict[str, Any]) -> list[str]:
         if case.get("expected") != case.get("observed"):
             problems.append(f"case {case.get('case')} expectation")
         counted = case.get("bytes")
-        if not isinstance(counted, dict) or not all(map(is_metric, counted.values())):
+        if not isinstance(counted, dict) or not all(map(baseline.is_metric, counted.values())):
             problems.append(f"case {case.get('case')} bytes")
     by_policy = {entry.get("policy"): entry for entry in record.get("starvation") or []}
     for policy, expected in STARVATION_EXPECTED.items():

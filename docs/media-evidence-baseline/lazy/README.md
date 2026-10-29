@@ -176,8 +176,8 @@ every record here and runs the matrix on any CI host.
   discarded and not committed: a harness defect recorded process CPU as `unavailable`. The
   defect is fixed and covered by the self-test. Its logical byte counts equalled the committed run's.
 - The corpus records name the harness committed in `0a3650c2` (`harness_sha256`
-  `5a2e790d…`). Review fixes after the captures changed only plan promotion after a
-  revocation and the `compare` output. The `run` path creates no plans and does not call
+  `5a2e790d…`). Later commits changed only plan promotion after a revocation, the
+  `compare` output, and two behavior-preserving simplifications. The `run` path creates no plans and does not call
   `compare`, so the corpus runs were not recaptured. The matrix record was regenerated with
   the final harness.
 - Local physical reads were about 70 MB (0.007%) below the deferred full-hash bytes in each
