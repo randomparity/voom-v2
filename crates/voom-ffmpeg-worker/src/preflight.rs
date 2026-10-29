@@ -49,6 +49,9 @@ pub struct FfmpegPreflight {
     pub eac3_encoder: String,
     pub flac_encoder: String,
     pub alac_encoder: String,
+    pub pcm_s16le_encoder: String,
+    pub pcm_s24le_encoder: String,
+    pub pcm_wavex: bool,
     pub matroska_muxer: String,
     pub mp4_muxer: String,
     pub ogg_muxer: String,
@@ -71,6 +74,8 @@ impl FfmpegPreflight {
             "eac3" => !self.eac3_encoder.is_empty(),
             "flac" => !self.flac_encoder.is_empty(),
             "alac" => !self.alac_encoder.is_empty(),
+            "pcm_s16le" => !self.pcm_s16le_encoder.is_empty(),
+            "pcm_s24le" => !self.pcm_s24le_encoder.is_empty(),
             _ => self.has_hardware_encoder(encoder),
         }
     }
@@ -284,6 +289,18 @@ pub fn preflight_with_paths(
     let eac3_encoder = parse_token(&encoders, "eac3").unwrap_or_default();
     let flac_encoder = parse_token(&encoders, "flac").unwrap_or_default();
     let alac_encoder = parse_token(&encoders, "alac").unwrap_or_default();
+    let pcm_s16le_encoder = parse_token(&encoders, "pcm_s16le").unwrap_or_default();
+    let pcm_s24le_encoder = parse_token(&encoders, "pcm_s24le").unwrap_or_default();
+    #[expect(
+        clippy::print_stderr,
+        reason = "the worker has no tracing subscriber and optional probe failures must be observable"
+    )]
+    let pcm_wavex = command_text(
+        "ffmpeg -hide_banner -h muxer=matroska",
+        command_output(Command::new(ffmpeg_path).args(["-hide_banner", "-h", "muxer=matroska"])),
+    )
+    .inspect_err(|error| eprintln!("optional PCM capability probe failed: {error}"))
+    .is_ok_and(|help| has_pcm_wavex_option(&help));
     let muxers = command_text(
         "ffmpeg -hide_banner -muxers",
         command_output(Command::new(ffmpeg_path).arg("-hide_banner").arg("-muxers")),
@@ -312,6 +329,9 @@ pub fn preflight_with_paths(
         eac3_encoder,
         flac_encoder,
         alac_encoder,
+        pcm_s16le_encoder,
+        pcm_s24le_encoder,
+        pcm_wavex,
         matroska_muxer,
         mp4_muxer,
         ogg_muxer,
@@ -334,3 +354,10 @@ fn vaapi_config_from_process_env() -> Result<Option<VaapiPreflightConfig>, Ffmpe
 #[cfg(test)]
 #[path = "preflight_test.rs"]
 mod tests;
+
+fn has_pcm_wavex_option(help: &str) -> bool {
+    help.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next() == Some("-pcm_wavex") && fields.next() == Some("<boolean>")
+    })
+}

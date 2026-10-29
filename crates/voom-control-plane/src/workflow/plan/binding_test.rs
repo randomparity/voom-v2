@@ -1002,7 +1002,7 @@ fn recorded_staged_output_addresses_feed_verification_only() {
 
 #[test]
 fn lossless_dispatch_preserves_target_and_selection() {
-    for codec in ["flac", "alac"] {
+    for codec in ["flac", "alac", "pcm_s16le", "pcm_s24le"] {
         verify_lossless_dispatch(codec);
     }
 }

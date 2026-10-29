@@ -88,6 +88,13 @@ worker also requires `nvidia_smi_bin = "/usr/bin/nvidia-smi"`. The agent clears 
 environment, does not supply `PATH`, and injects only the absolute dependency paths needed
 by that worker as `VOOM_FFMPEG_BIN`, `VOOM_FFPROBE_BIN`, and `VOOM_NVIDIA_SMI_BIN`.
 
+For the optional PCM container profile, [install private paired tools](../../containers/ffmpeg/README.md#verify-and-opt-in)
+as the worker account and put the returned absolute paths in `ffmpeg_bin` and
+`ffprobe_bin`. The installation captures the explicit engine context and copies
+its runtime/configuration outside all media grants. Raw checkout launchers depend
+on environment the agent intentionally clears; they are not deployment paths.
+The agent's environment isolation and dependency schema remain unchanged.
+
 A worker declaring `remux` requires `mkvmerge_bin`; the agent injects its absolute
 path as `VOOM_MKVMERGE_BIN`. Existing remux configurations must add this dependency
 before upgrading. Install MKVToolNix on the agent host and configure its actual

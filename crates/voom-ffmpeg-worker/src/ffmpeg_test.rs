@@ -2500,7 +2500,7 @@ fn flac_source_json() -> Value {
 
 #[tokio::test]
 async fn lossless_rejects_bad_facts_before_output() {
-    for codec in ["flac", "alac"] {
+    for codec in ["flac", "alac", "pcm_s24le"] {
         verify_lossless_bad_facts(codec).await;
     }
 }
@@ -2575,7 +2575,7 @@ async fn verify_lossless_bad_facts(codec: &str) {
 
 #[tokio::test]
 async fn lossless_settings_emit_precision_without_bitrate() {
-    for codec in ["flac", "alac"] {
+    for codec in ["flac", "alac", "pcm_s24le"] {
         verify_lossless_settings(codec).await;
     }
 }
@@ -2608,10 +2608,10 @@ async fn verify_lossless_settings(codec: &str) {
     let args = std::fs::read_to_string(&args_path).unwrap();
     for setting in [
         format!("-c:a:0\n{codec}\n").as_str(),
-        if codec == "flac" {
-            "-sample_fmt:a:0\ns32\n"
-        } else {
+        if codec == "alac" {
             "-sample_fmt:a:0\ns32p\n"
+        } else {
+            "-sample_fmt:a:0\ns32\n"
         },
         "-bits_per_raw_sample:a:0\n24\n",
         "-ar:a:0\n48000\n",
@@ -2634,13 +2634,17 @@ async fn verify_lossless_settings(codec: &str) {
     let error = run_ffmpeg_transcode_audio(&config, &dir.path().join("in"), &output, &request)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("without reduction"), "{error}");
+    assert!(
+        error.to_string().contains("without reduction")
+            || error.to_string().contains("PCM precision"),
+        "{error}"
+    );
     assert!(!output.exists());
 }
 
 #[test]
 fn lossless_output_facts_must_match_source_or_transform() {
-    for codec in ["flac", "alac"] {
+    for codec in ["flac", "alac", "pcm_s24le"] {
         verify_lossless_output_facts(codec);
     }
 }
@@ -2696,4 +2700,44 @@ fn verify_lossless_output_facts(codec: &str) {
             assert!(verify(&probe).is_err(), "{field}, synthesis={synthesis}");
         }
     }
+}
+
+#[test]
+fn pcm_target_precision_is_explicit_and_never_reduces_source() {
+    let dir = tempfile::tempdir().unwrap();
+    for (codec, target) in [("pcm_s16le", 16), ("pcm_s24le", 24)] {
+        for source_bits in [16, 24] {
+            let mut source = flac_source_json();
+            source["bits_per_raw_sample"] = serde_json::json!(source_bits);
+            let sources = audio_facts_from_probe(&serde_json::json!({"streams":[source]})).unwrap();
+            let mut request = transcode_audio_request(dir.path(), &[1], codec);
+            let result = resolve_lossless_audio(&sources[0], &request);
+            if source_bits > target {
+                assert!(
+                    result.is_err(),
+                    "PCM must reject irreversible precision reduction"
+                );
+            } else {
+                assert_eq!(result.unwrap().bits_per_sample, target);
+            }
+            request.audio.lossless = Some(voom_worker_protocol::LosslessAudioSettings {
+                bits_per_sample: Some(if target == 16 { 24 } else { 16 }),
+            });
+            assert!(resolve_lossless_audio(&sources[0], &request).is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn media_spawn_stamps_actual_caller_identity() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "test \"$VOOM_MEDIA_CALLER_PID\" = \"$PPID\""]);
+    command.env("VOOM_MEDIA_CALLER_PID", "wrong inherited identity");
+    assert!(
+        output_retrying_etxtbsy(&mut command)
+            .await
+            .unwrap()
+            .status
+            .success()
+    );
 }

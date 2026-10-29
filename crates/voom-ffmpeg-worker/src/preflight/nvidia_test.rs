@@ -84,6 +84,7 @@ fn nvidia_preflight_runs_base_checks_before_interpreting_device_identity() {
             "ffmpeg:-hide_banner -version",
             "ffprobe:-hide_banner -version",
             "ffmpeg:-hide_banner -encoders",
+            "ffmpeg:-hide_banner -h muxer=matroska",
             "ffmpeg:-hide_banner -muxers",
             "nvidia-smi:-i GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
              --query-gpu=uuid,name,driver_version --format=csv,noheader,nounits",

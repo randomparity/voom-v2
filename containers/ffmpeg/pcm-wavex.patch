@@ -1,0 +1,109 @@
+--- a/libavformat/matroskaenc.c
++++ b/libavformat/matroskaenc.c
+@@ -262,6 +262,7 @@
+     int                 flipped_raw_rgb;
+     int                 default_mode;
+     int                 move_cues_to_front;
++    int                 pcm_wavex;
+ 
+     uint32_t            segment_uid[4];
+ } MatroskaMuxContext;
+@@ -1230,7 +1231,7 @@
+ static int mkv_assemble_codecprivate(AVFormatContext *s, AVIOContext *dyn_cp,
+                                      AVCodecParameters *par,
+                                      const uint8_t *extradata, int extradata_size,
+-                                     int native_id, int qt_id,
++                                     int native_id, int qt_id, int force_wavex,
+                                      uint8_t **codecpriv, int *codecpriv_size,
+                                      unsigned *max_payload_size)
+ {
+@@ -1288,7 +1289,8 @@
+             par->codec_tag = tag;
+ 
+         /* Same comment as for ff_put_bmp_header applies here. */
+-        ret = ff_put_wav_header(s, dyn_cp, par, FF_PUT_WAV_HEADER_FORCE_WAVEFORMATEX);
++        ret = ff_put_wav_header(s, dyn_cp, par, FF_PUT_WAV_HEADER_FORCE_WAVEFORMATEX |
++                                (force_wavex ? FF_PUT_WAV_HEADER_FORCE_WAVEFORMATEXTENSIBLE : 0));
+         if (ret < 0)
+             return ret;
+ #endif
+@@ -1342,7 +1344,7 @@
+     int ret, codecpriv_size;
+ 
+     ret = mkv_assemble_codecprivate(s, dyn_bc, par,
+-                                    side_data, side_data_size, 1, 0,
++                                    side_data, side_data_size, 1, 0, 0,
+                                     &codecpriv, &codecpriv_size, &max_payload_size);
+     if (ret < 0)
+         goto fail;
+@@ -1945,6 +1947,11 @@
+ {
+     AVCodecParameters *par = st->codecpar;
+     ebml_master subinfo, track_master;
++    const int force_wavex = mkv->pcm_wavex && !IS_WEBM(mkv) &&
++        (par->codec_id == AV_CODEC_ID_PCM_S16LE || par->codec_id == AV_CODEC_ID_PCM_S24LE) &&
++        par->ch_layout.order == AV_CHANNEL_ORDER_NATIVE &&
++        av_channel_layout_check(&par->ch_layout) &&
++        par->ch_layout.u.mask && par->ch_layout.u.mask < 0x40000;
+     int native_id = 0;
+     int qt_id = 0;
+     int bit_depth;
+@@ -2028,7 +2035,7 @@
+              * yet we use the VfW way to mux it for compatibility
+              * with old demuxers. (FIXME: Are they really important?) */
+         } else if (par->codec_id != AV_CODEC_ID_RAWVIDEO || par->codec_tag) {
+-            for (j = 0; ff_mkv_codec_tags[j].id != AV_CODEC_ID_NONE; j++) {
++            for (j = 0; !force_wavex && ff_mkv_codec_tags[j].id != AV_CODEC_ID_NONE; j++) {
+                 if (ff_mkv_codec_tags[j].id == par->codec_id) {
+                     put_ebml_string(pb, MATROSKA_ID_CODECID, ff_mkv_codec_tags[j].str);
+                     native_id = 1;
+@@ -2174,7 +2181,7 @@
+         track->codecpriv_offset = avio_tell(pb);
+         ret = mkv_assemble_codecprivate(s, mkv->tmp_bc, par,
+                                         par->extradata, par->extradata_size,
+-                                        native_id, qt_id,
++                                        native_id, qt_id, force_wavex,
+                                         &codecpriv, &codecpriv_size, &max_payload_size);
+         if (ret < 0)
+             goto fail;
+@@ -2893,6 +2900,8 @@
+     ebml_writer_add_block(&writer, mkv);
+ 
+     if (duration > 0 && (par->codec_type == AVMEDIA_TYPE_SUBTITLE ||
++        /* Preserve observed audio packet timing in the opt-in PCM workflow. */
++        (mkv->pcm_wavex && par->codec_type == AVMEDIA_TYPE_AUDIO) ||
+         /* If the packet's duration is inconsistent with the default duration,
+          * add an explicit duration element. */
+         track->default_duration_high > 0 &&
+@@ -3670,6 +3679,7 @@
+ #define OFFSET(x) offsetof(MatroskaMuxContext, x)
+ #define FLAGS AV_OPT_FLAG_ENCODING_PARAM
+ static const AVOption options[] = {
++    { "pcm_wavex", "store known-layout PCM16/24 as ACM WAVEFORMATEXTENSIBLE", OFFSET(pcm_wavex), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+     { "reserve_index_space", "reserve a given amount of space (in bytes) at the beginning of the file for the index (cues)", OFFSET(reserve_cues_space), AV_OPT_TYPE_INT,   { .i64 = 0 },   0, INT_MAX,   FLAGS },
+     { "cues_to_front", "move Cues (the index) to the front by shifting data if necessary", OFFSET(move_cues_to_front), AV_OPT_TYPE_BOOL, { .i64 = 0}, 0, 1, FLAGS },
+     { "cluster_size_limit",  "store at most the provided amount of bytes in a cluster",                                     OFFSET(cluster_size_limit), AV_OPT_TYPE_INT  , { .i64 = -1 }, -1, INT_MAX,   FLAGS },
+--- a/libavformat/riff.h
++++ b/libavformat/riff.h
+@@ -56,6 +56,9 @@
+  * Tell ff_put_wav_header() to write an empty channel mask.
+  */
+ #define FF_PUT_WAV_HEADER_SKIP_CHANNELMASK      0x00000002
++
++/** Force an explicit WAVEFORMATEXTENSIBLE channel mask, including mono/stereo. */
++#define FF_PUT_WAV_HEADER_FORCE_WAVEFORMATEXTENSIBLE 0x00000004
+ 
+ /**
+  * Write WAVEFORMAT header structure.
+--- a/libavformat/riffenc.c
++++ b/libavformat/riffenc.c
+@@ -76,7 +76,8 @@
+      * for indicating packet duration. */
+     frame_size = av_get_audio_frame_duration2(par, par->block_align);
+ 
+-    waveformatextensible = (par->ch_layout.order == AV_CHANNEL_ORDER_NATIVE &&
++    waveformatextensible = (flags & FF_PUT_WAV_HEADER_FORCE_WAVEFORMATEXTENSIBLE) ||
++                           (par->ch_layout.order == AV_CHANNEL_ORDER_NATIVE &&
+                             av_channel_layout_compare(&par->ch_layout, &(AVChannelLayout)AV_CHANNEL_LAYOUT_MONO) &&
+                             av_channel_layout_compare(&par->ch_layout, &(AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO)) ||
+                            par->sample_rate > 48000 ||

@@ -104,6 +104,7 @@ pub async fn canonical_decoded_audio(
 }
 
 async fn command_output(command: &mut Command) -> io::Result<Output> {
+    command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let operation = format!("{command:?}");
     let output = tokio::time::timeout(Duration::from_secs(10), command.kill_on_drop(true).output())
         .await

@@ -418,3 +418,27 @@ fn assert_process_exited(pid: &str) {
         .expect("process existence check should launch");
     assert!(!status.success(), "child process {pid} still exists");
 }
+
+#[tokio::test]
+async fn probe_spawn_seams_stamp_actual_caller_identity() {
+    let mut asynchronous = Command::new("sh");
+    asynchronous.args(["-c", "test \"$VOOM_MEDIA_CALLER_PID\" = \"$PPID\""]);
+    asynchronous.env("VOOM_MEDIA_CALLER_PID", "wrong inherited identity");
+    assert!(
+        command_output(&mut asynchronous)
+            .await
+            .expect("caller identity probe must run")
+            .status
+            .success()
+    );
+    let mut synchronous = std::process::Command::new("sh");
+    synchronous.args(["-c", "test \"$VOOM_MEDIA_CALLER_PID\" = \"$PPID\""]);
+    synchronous.env("VOOM_MEDIA_CALLER_PID", "wrong inherited identity");
+    assert!(
+        spawn_with_retry(&mut synchronous)
+            .expect("caller identity probe must run")
+            .wait()
+            .expect("caller identity probe must run")
+            .success()
+    );
+}

@@ -4392,7 +4392,7 @@ fn ac3_policy_plans_transcode_and_synthesis_with_stable_identity() {
 
 #[test]
 fn lossless_policy_plans_transcode_synthesis_and_noop() {
-    for codec in ["flac", "alac"] {
+    for codec in ["flac", "alac", "pcm_s16le", "pcm_s24le"] {
         verify_lossless_policy(codec);
     }
 }
@@ -4410,6 +4410,8 @@ fn verify_lossless_policy(codec: &str) {
         let operation = operation.replace("flac", codec);
         let source_codec = if source_codec == "flac" {
             codec
+        } else if source_codec == codec {
+            "flac"
         } else {
             source_codec
         };

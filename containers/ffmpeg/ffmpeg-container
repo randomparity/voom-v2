@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Execute the configured container's FFmpeg with operation-owned cleanup."""
+import sys
+import runtime
+
+sys.argv.insert(1, "ffmpeg")
+sys.exit(runtime.main())
