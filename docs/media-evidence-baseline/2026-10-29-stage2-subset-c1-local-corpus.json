@@ -1,0 +1,336 @@
+{
+  "build": {
+    "ffprobe_version": "8.1.3",
+    "git_changed_paths": [
+      "crates/voom-hash-worker/src/hash.rs"
+    ],
+    "git_commit": "7a8d8060e6b114966698d86da16d7cc9f3110623",
+    "harness_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
+    "hash_worker_sha256": "f73aa37087b37699f19a4dae8c2a62d2cfe9350a1248b92c724012cb90ba59ba",
+    "probe_worker_sha256": "a9e725bc257a80d4ba9282446bb448ddab32fe5aefc6c8f8a888cdf7f934b83b"
+  },
+  "corpus": {
+    "filesystem_type": "btrfs",
+    "label": "local-corpus",
+    "manifest_files": 34,
+    "selected_ids": [
+      "f0004",
+      "f0025",
+      "f0022",
+      "f0005",
+      "f0009",
+      "f0015"
+    ],
+    "skipped_budget_ids": [],
+    "storage_class": "local"
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "not_measured": {
+    "complete_library": "replay covers a recorded subset, not a whole library",
+    "discovery": "replay starts from a manifest; the scan worker is not run",
+    "ffprobe_child_peak_memory_and_io": "per-process counters exclude the ffprobe child",
+    "first_actionable_plan": "replay does not plan",
+    "first_durable_observation": "replay does not publish batches to the control plane",
+    "first_transformation_start": "replay does not transform",
+    "first_verified_output": "replay does not verify outputs",
+    "retries": "replay performs no retries; failures are recorded as rows",
+    "sidecar_hashing": "replay hashes primaries only"
+  },
+  "parameters": {
+    "concurrency": 1,
+    "evict": true,
+    "flush_estimated_bytes": 524288,
+    "flush_observation_count": 1000,
+    "hash_chunk_bytes": 1048576,
+    "max_bytes_per_repetition": 3000000000000,
+    "max_in_flight": 4,
+    "probe_observe_buffer_bytes": 16384,
+    "reads_per_file": 3,
+    "repetitions": 3
+  },
+  "repetitions": [
+    {
+      "evicted": true,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 1.639159,
+          "id": "f0004",
+          "outcome": "observed",
+          "probe_seconds": 4.028445,
+          "queue_delay_seconds": 0.001738,
+          "resident_bytes_before": 0,
+          "size_bytes": 6080870033
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 1.512172,
+          "id": "f0025",
+          "outcome": "observed",
+          "probe_seconds": 4.828998,
+          "queue_delay_seconds": 5.669956,
+          "resident_bytes_before": 0,
+          "size_bytes": 7409964744
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 2.111146,
+          "id": "f0022",
+          "outcome": "observed",
+          "probe_seconds": 5.829849,
+          "queue_delay_seconds": 12.011232,
+          "resident_bytes_before": 0,
+          "size_bytes": 8936706238
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 4.169872,
+          "id": "f0005",
+          "outcome": "observed",
+          "probe_seconds": 12.212352,
+          "queue_delay_seconds": 19.952324,
+          "resident_bytes_before": 0,
+          "size_bytes": 17557320827
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 6.138247,
+          "id": "f0009",
+          "outcome": "observed",
+          "probe_seconds": 16.810849,
+          "queue_delay_seconds": 36.334666,
+          "resident_bytes_before": 0,
+          "size_bytes": 25824716796
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 10.693563,
+          "id": "f0015",
+          "outcome": "observed",
+          "probe_seconds": 30.565394,
+          "queue_delay_seconds": 59.283847,
+          "resident_bytes_before": 0,
+          "size_bytes": 41017980921
+        }
+      ],
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 1516590
+      },
+      "index": 1,
+      "logical_bytes_read": 320482678677,
+      "wall_seconds": 100.543312,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 16.69,
+          "peak_rss_bytes": 8110080,
+          "rchar": 106827568275,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 89.88,
+          "peak_rss_bytes": 6836224,
+          "rchar": 213683407254,
+          "read_bytes": 82033852416
+        }
+      }
+    },
+    {
+      "evicted": true,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 1.507131,
+          "id": "f0004",
+          "outcome": "observed",
+          "probe_seconds": 4.462869,
+          "queue_delay_seconds": 0.000388,
+          "resident_bytes_before": 0,
+          "size_bytes": 6080870033
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 1.462175,
+          "id": "f0025",
+          "outcome": "observed",
+          "probe_seconds": 4.882694,
+          "queue_delay_seconds": 5.970496,
+          "resident_bytes_before": 0,
+          "size_bytes": 7409964744
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 2.120528,
+          "id": "f0022",
+          "outcome": "observed",
+          "probe_seconds": 5.923662,
+          "queue_delay_seconds": 12.315465,
+          "resident_bytes_before": 0,
+          "size_bytes": 8936706238
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 4.17286,
+          "id": "f0005",
+          "outcome": "observed",
+          "probe_seconds": 11.608606,
+          "queue_delay_seconds": 20.359751,
+          "resident_bytes_before": 0,
+          "size_bytes": 17557320827
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 6.060176,
+          "id": "f0009",
+          "outcome": "observed",
+          "probe_seconds": 16.706774,
+          "queue_delay_seconds": 36.141331,
+          "resident_bytes_before": 0,
+          "size_bytes": 25824716796
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 9.726801,
+          "id": "f0015",
+          "outcome": "observed",
+          "probe_seconds": 29.976379,
+          "queue_delay_seconds": 58.90838,
+          "resident_bytes_before": 0,
+          "size_bytes": 41017980921
+        }
+      ],
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 1412577
+      },
+      "index": 2,
+      "logical_bytes_read": 320482678677,
+      "wall_seconds": 98.612165,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 16.01,
+          "peak_rss_bytes": 9064448,
+          "rchar": 106827568275,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 89.35,
+          "peak_rss_bytes": 6541312,
+          "rchar": 213683407254,
+          "read_bytes": 82007666688
+        }
+      }
+    },
+    {
+      "evicted": true,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 1.523377,
+          "id": "f0004",
+          "outcome": "observed",
+          "probe_seconds": 3.973636,
+          "queue_delay_seconds": 0.0002,
+          "resident_bytes_before": 0,
+          "size_bytes": 6080870033
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 1.523887,
+          "id": "f0025",
+          "outcome": "observed",
+          "probe_seconds": 4.817132,
+          "queue_delay_seconds": 5.497303,
+          "resident_bytes_before": 0,
+          "size_bytes": 7409964744
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 2.14273,
+          "id": "f0022",
+          "outcome": "observed",
+          "probe_seconds": 5.898559,
+          "queue_delay_seconds": 11.838424,
+          "resident_bytes_before": 0,
+          "size_bytes": 8936706238
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 4.173423,
+          "id": "f0005",
+          "outcome": "observed",
+          "probe_seconds": 11.441061,
+          "queue_delay_seconds": 19.879804,
+          "resident_bytes_before": 0,
+          "size_bytes": 17557320827
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 6.110865,
+          "id": "f0009",
+          "outcome": "observed",
+          "probe_seconds": 17.009785,
+          "queue_delay_seconds": 35.494379,
+          "resident_bytes_before": 0,
+          "size_bytes": 25824716796
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "hash_seconds": 9.734158,
+          "id": "f0015",
+          "outcome": "observed",
+          "probe_seconds": 30.264433,
+          "queue_delay_seconds": 58.615108,
+          "resident_bytes_before": 0,
+          "size_bytes": 41017980921
+        }
+      ],
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 1634859
+      },
+      "index": 3,
+      "logical_bytes_read": 320482678677,
+      "wall_seconds": 98.614309,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 16.06,
+          "peak_rss_bytes": 10092544,
+          "rchar": 106827568275,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 88.75,
+          "peak_rss_bytes": 6651904,
+          "rchar": 213683407254,
+          "read_bytes": 82029084672
+        }
+      }
+    }
+  ],
+  "schema": "media-evidence-baseline-run/1"
+}

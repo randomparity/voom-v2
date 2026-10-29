@@ -314,7 +314,7 @@ def main(argv: list[str]) -> int:
                 name, _, path = item.partition("=")
                 results[name] = compare(baseline, load(Path(path)))
                 print("\n".join(render_comparison(name, results[name])))
-            print(f"Selection: {select(results)}")
+            print(f"Stage-1 selection rule: {select(results)}")
         else:
             for path in args.records:
                 print(json.dumps({"record": path.name, **model(load(path))}, sort_keys=True))
