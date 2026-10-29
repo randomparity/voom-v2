@@ -218,8 +218,9 @@ validates every committed record.
 
 ## Record format
 
-Schema `media-evidence-baseline-run/1`, one JSON object per run. `validate_run` in the
-harness is the executable definition. It checks:
+Schema `media-evidence-baseline-run/1`, one JSON object per run, with the fields below.
+`validate_run` in the harness enforces the schema, every section, the identity and
+parameter keys, every metric, row outcomes and failures, and the absence of host paths.
 
 - `corpus`: `label`, `filesystem_type`, `storage_class` (`local`, `network`, or
   `unavailable`), `manifest_files`, `selected_ids`, and `skipped_budget_ids`.
