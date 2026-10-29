@@ -319,7 +319,7 @@ class Worker:
             })
             response = connection.getresponse()
             text = response.read().decode("utf-8", "replace")
-        except OSError as error:
+        except (OSError, http.client.HTTPException) as error:
             return {"kind": "failure", "code": f"transport_{type(error).__name__}"}
         finally:
             connection.close()
@@ -374,6 +374,17 @@ def terminal_frame(lines: list[str]) -> dict[str, Any]:
     return {"kind": "failure", "code": "no_terminal_frame"}
 
 
+# The probe worker omits `modified_at` when it has none; production then treats the
+# observation as disagreeing, so only size and hash are required to be present.
+OBSERVED_FIELDS = {"size_bytes", "content_hash"}
+HASH_FIELDS = OBSERVED_FIELDS | {"modified_at"}
+MALFORMED_RESULT = {"kind": "failure", "code": "malformed_result"}
+
+
+def has_fields(value: Any, fields: set[str]) -> bool:
+    return isinstance(value, dict) and fields <= value.keys()
+
+
 def failure_of(stage: str, frame: dict[str, Any]) -> dict[str, Any]:
     """Keep class and code only: worker messages can carry host paths."""
     return {"stage": stage, "class": frame.get("class", "harness"), "code": frame.get("code")}
@@ -394,6 +405,9 @@ def replay_file(entry: dict[str, Any], root: Path, workers: dict[str, Worker],
     if hashed.get("kind") != "result":
         row.update(outcome="hash_failed", failure=failure_of("hash", hashed))
         return row
+    if not has_fields(hashed.get("payload"), HASH_FIELDS):
+        row.update(outcome="hash_failed", failure=failure_of("hash", MALFORMED_RESULT))
+        return row
     facts = hashed["payload"]
     begin = time.monotonic()
     probed = workers["probe"].call("probe_file", {
@@ -407,11 +421,14 @@ def replay_file(entry: dict[str, Any], root: Path, workers: dict[str, Worker],
     if probed.get("kind") != "result":
         row.update(outcome="probe_failed", failure=failure_of("probe", probed))
         return row
+    observed = probed.get("payload")
+    sides = [observed.get(side) for side in ("pre_probe", "post_probe")] \
+        if isinstance(observed, dict) else []
+    if not sides or not all(has_fields(side, OBSERVED_FIELDS) for side in sides):
+        row.update(outcome="probe_failed", failure=failure_of("probe", MALFORMED_RESULT))
+        return row
     agreed = all(
-        probed["payload"][side]["content_hash"] == facts["content_hash"]
-        and probed["payload"][side]["size_bytes"] == facts["size_bytes"]
-        and probed["payload"][side].get("modified_at") == facts["modified_at"]
-        for side in ("pre_probe", "post_probe")
+        side.get(field) == facts[field] for side in sides for field in HASH_FIELDS
     )
     row["outcome"] = "observed" if agreed else "disagree"
     return row

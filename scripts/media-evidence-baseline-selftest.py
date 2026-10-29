@@ -45,11 +45,20 @@ class Handler(BaseHTTPRequestHandler):
         path = payload["path"] if PROBE else os.path.join(
             payload["provider_locator"], payload["provider_relative_locator"])
         frames = [{"kind": "progress", "lease_id": lease, "seq": 0}]
-        if "fail" in os.path.basename(path):
+        name = os.path.basename(path)
+        if "trunc" in name and not PROBE:
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            self.wfile.write(b'{"lease_id": 1}\n')
+            return
+        if "fail" in name:
             frames.append({"kind": "error", "class": "artifact_unavailable", "code": "IO",
                            "message": "cannot read " + path})
-        elif "weird" in os.path.basename(path) and PROBE:
+        elif "weird" in name and PROBE:
             frames.append({"kind": "surprise"})
+        elif "badpayload" in name and PROBE:
+            frames.append({"kind": "result", "payload": {"pre_probe": {}}})
         elif PROBE:
             observed = facts(path)
             frames.append({"kind": "result", "payload": {
@@ -77,7 +86,8 @@ class HarnessFixture(unittest.TestCase):
         self.base = Path(temporary.name)
         self.root = self.base / "secret-library-root"
         names = {"a/Alpha Title (2001).mkv": 64, "b/fail-Beta.mp4": 32,
-                 "c/weird-Gamma.mkv": 16, "notes.txt": 8}
+                 "c/weird-Gamma.mkv": 16, "d/trunc-Delta.mkv": 8,
+                 "e/badpayload-Epsilon.mkv": 8, "notes.txt": 8}
         for relative, size in names.items():
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,8 +119,10 @@ class HarnessFixture(unittest.TestCase):
 class ManifestTests(HarnessFixture):
     def test_manifest_lists_only_video_files_by_ordinal_id(self):
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual([entry["id"] for entry in manifest["files"]], ["f0001", "f0002", "f0003"])
-        self.assertEqual([entry["ext"] for entry in manifest["files"]], [".mkv", ".mp4", ".mkv"])
+        self.assertEqual([entry["id"] for entry in manifest["files"]],
+                         ["f0001", "f0002", "f0003", "f0004", "f0005"])
+        self.assertEqual([entry["ext"] for entry in manifest["files"]],
+                         [".mkv", ".mp4", ".mkv", ".mkv", ".mkv"])
 
     def test_label_must_be_public_safe(self):
         with self.assertRaises(harness.HarnessError):
@@ -139,12 +151,16 @@ class ReplayTests(HarnessFixture):
                          {"stage": "hash", "class": "artifact_unavailable", "code": "IO"})
         self.assertEqual(rows["f0003"]["outcome"], "probe_failed")
         self.assertEqual(rows["f0003"]["failure"]["code"], "unknown_frame")
-        self.assertEqual(record["repetitions"][0]["logical_bytes_read"], (64 + 32 + 16) * 3)
+        self.assertEqual(rows["f0004"]["outcome"], "hash_failed")
+        self.assertEqual(rows["f0004"]["failure"]["code"], "transport_IncompleteRead")
+        self.assertEqual(rows["f0005"]["outcome"], "probe_failed")
+        self.assertEqual(rows["f0005"]["failure"]["code"], "malformed_result")
+        self.assertEqual(record["repetitions"][0]["logical_bytes_read"], (64 + 32 + 16 + 16) * 3)
 
     def test_budget_stops_scheduling_files_that_do_not_fit(self):
         record = harness.capture(self.run_args(max_bytes=64 * 3 + 16 * 3))
         self.assertEqual(record["corpus"]["selected_ids"], ["f0001", "f0003"])
-        self.assertEqual(record["corpus"]["skipped_budget_ids"], ["f0002"])
+        self.assertEqual(record["corpus"]["skipped_budget_ids"], ["f0002", "f0004", "f0005"])
 
     def test_nothing_fitting_the_budget_is_refused(self):
         with self.assertRaises(harness.HarnessError):
