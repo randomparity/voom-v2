@@ -13,7 +13,6 @@ def main():
     parser.add_argument("--engine", choices=("docker", "podman"), required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--desktop")
-    parser.add_argument("--filter", default="pcm_container_")
     parser.add_argument("--root", type=Path)
     args = parser.parse_args()
     repository = Path(__file__).resolve().parents[2]
@@ -43,10 +42,16 @@ def main():
         env.pop("VOOM_MEDIA_CONTAINER_CONFIG", None)
         subprocess.run(["cargo", "build", "-p", "voom-ffprobe-worker",
                         "--bin", "voom-ffprobe-worker"], cwd=repository, env=env, check=True)
-        targets = [("voom-ffmpeg-worker", "transcode_conformance", args.filter),
-                   ("voom-node-agent", "container_audio", "installed_container_tools_")]
+        targets = [
+            ("voom-ffmpeg-worker", "transcode_conformance", "pcm_container_", {
+                "pcm_container_real_worker_archival_matrix",
+                "pcm_container_real_worker_explicit_downmix",
+                "pcm_container_rejects_reduction_and_conflicting_precision_before_output",
+                "pcm_container_preserves_untouched_unknown_layout_stream"}),
+            ("voom-node-agent", "container_audio", "installed_container_tools_", {
+                "installed_container_tools_cross_owner_child_environment"})]
         commands = []
-        for package, target, selection in targets:
+        for package, target, selection, expected in targets:
             build = subprocess.run(
                 ["cargo", "test", "-p", package, "--test", target,
                  "--no-run", "--message-format=json"], cwd=repository, env=env,
@@ -59,8 +64,11 @@ def main():
                 raise RuntimeError(f"cargo did not identify exactly one {target} executable")
             listing = subprocess.run([executables[0], selection, "--ignored", "--list"],
                                      cwd=stage, env=env, capture_output=True, check=True)
-            if b": test" not in listing.stdout:
-                raise RuntimeError(f"required {target} selection matched no tests: {selection}")
+            selected = {line.removesuffix(": test") for line in listing.stdout.decode().splitlines()
+                        if line.endswith(": test")}
+            if selected != expected:
+                raise RuntimeError(f"required {target} cases differ: expected {sorted(expected)}, "
+                                   f"selected {sorted(selected)}")
             commands.append([executables[0], selection, "--ignored", "--test-threads=1",
                              "--nocapture"])
         # Finish every build before media runs. Cargo's crate cwd is outside the
