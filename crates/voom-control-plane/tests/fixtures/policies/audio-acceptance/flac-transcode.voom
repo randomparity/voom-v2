@@ -1,0 +1,5 @@
+policy "acceptance flac transcode" {
+  phase encode {
+    transcode audio to flac where language in ["eng"]
+  }
+}

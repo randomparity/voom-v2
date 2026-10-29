@@ -1,0 +1,8 @@
+policy "acceptance alac downmix" {
+  phase encode {
+    synthesize audio from language in ["eng"] and channels >= 6 {
+      codec alac
+      channels 2
+    }
+  }
+}

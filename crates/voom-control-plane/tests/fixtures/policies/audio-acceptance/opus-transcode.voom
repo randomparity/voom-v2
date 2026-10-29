@@ -1,0 +1,5 @@
+policy "acceptance opus transcode" {
+  phase encode {
+    transcode audio to opus where language in ["eng"]
+  }
+}
