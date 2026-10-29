@@ -108,7 +108,7 @@ Verification inventory (each item Mode: focused-test):
 ## Task 3 — Local fence diagnostics
 
 Files: crates/voom-node-agent/src/runtime.rs and runtime_test.rs, Cargo.toml,
-src/main.rs and main_test.rs.
+src/main.rs, tests/startup_logging.rs and tests/support/startup_cases.rs.
 Interfaces: existing LeaseOutcome::Fenced distinguishes local fencing;
 Confirmed remote completion/failure settlement paths retain their behavior.
 Remove the private TerminalElsewhere variant, whose only producer was the
@@ -126,8 +126,9 @@ Verification inventory (each item Mode: focused-test):
 - Node fake-client hanging-heartbeat test: expected red is no local-fence event;
   green cargo test -p voom-node-agent local_fence. Preserve zero late fail/complete
   acknowledgement, dispatch cancellation and returned permit.
-- Direct binary startup-assembly subprocess coverage: expected red is absent JSON
-  stderr diagnostic; green cargo test -p voom-node-agent --bin voom-node-agent
+- Direct binary startup-assembly subprocess coverage: initializer-removal red is
+  absent JSON stderr diagnostic; full production-main reversion structurally rejects
+  the missing startup capability while the integration test remains discovered; green cargo test -p voom-node-agent --test startup_logging
   local_fence_startup. Actual fence emission is covered separately by runtime tests.
 - Retain existing TTL, shutdown, terminal retry and worker-capacity tests;
   green cargo test -p voom-node-agent --lib.

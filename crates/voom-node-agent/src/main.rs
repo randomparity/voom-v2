@@ -32,7 +32,3 @@ async fn startup<F: std::future::Future>(run: F) -> F::Output {
         .init();
     run.await
 }
-
-#[cfg(test)]
-#[path = "main_test.rs"]
-mod tests;
