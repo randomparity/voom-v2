@@ -260,3 +260,32 @@ async fn missing_source_streams_cannot_establish_no_copied_audio() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn errored_metadata_cannot_establish_no_copied_audio() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = probe_config(
+        directory.path(),
+        "printf '%s' '{\"streams\":[{\"index\":1,\"codec_type\":\"audio\",\"time_base\":\"1/1000\"}]}'; printf '%s' '/private/media/input.mkv: demux error' >&2",
+    );
+    config.process_timeout = Duration::from_secs(2);
+    let selected = [AudioStreamRef {
+        snapshot_stream_id: "selected".to_owned(),
+        provider_stream_index: 1,
+    }];
+    let error = verify(
+        &config,
+        Path::new("input.mkv"),
+        Path::new("out.mkv"),
+        &selected,
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("probe reported errors"), "{error}");
+    assert!(
+        !error.contains("/private/media"),
+        "diagnostics must be sanitized"
+    );
+}

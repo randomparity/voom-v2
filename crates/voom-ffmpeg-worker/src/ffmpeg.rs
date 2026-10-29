@@ -1867,6 +1867,11 @@ async fn probe_json(config: &FfmpegConfig, path: &Path) -> Result<Value, FfmpegE
             FfmpegError::FfprobeFailed,
         ));
     }
+    if !output.stderr.is_empty() {
+        return Err(FfmpegError::FfprobeFailed(
+            "ffprobe reported errors; check media integrity and configured ffprobe".to_owned(),
+        ));
+    }
     serde_json::from_slice(&output.stdout)
         .map_err(|err| FfmpegError::FfprobeFailed(format!("invalid ffprobe JSON: {err}")))
 }

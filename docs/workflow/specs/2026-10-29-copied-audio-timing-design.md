@@ -54,8 +54,11 @@ show_packets, show_data_hash=sha256 and compact key/value output. Explicit
 packet_side_data= suppresses nested side-data fields; accept its trailing empty
 section delimiter, while rejecting unknown fields and empty interior sections. Read only
 stream_index,pts,dts,duration,data_hash. Map indices using observed source/output
-stream metadata and audio ordinal. For each copied stream, maintain count and
-SHA256 digest over canonical records; never retain all packets. Time base is a
+stream metadata and audio ordinal. Stream discovery also rejects error-level
+diagnostics before deciding no audio is
+copied; the existing metadata helper retains its audio/video/extraction callers.
+For each copied stream, maintain count and SHA256 digest over canonical records;
+never retain all packets. Time base is a
 checked positive rational. Canonical reduced i128 rational values preserve exact
 integer equality at identical time bases and permit exactly equal time values
 across containers. Rounding or rescaling drift fails. Absent timing is distinct
