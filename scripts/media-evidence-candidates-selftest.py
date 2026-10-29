@@ -121,6 +121,13 @@ class CompareTests(unittest.TestCase):
         result = candidates.compare(record([100.0] * 3), record([50.0] * 3, outcome="disagree"))
         self.assertTrue(result["failed"])
 
+    def test_zero_baseline_and_missing_repetitions_are_reported_not_crashed(self):
+        baseline, candidate = record([100.0] * 3, cpu=0.0), record([100.0] * 3, cpu=1.0)
+        result = candidates.compare(baseline, candidate)
+        self.assertEqual(result["metrics"]["hash_cpu"]["verdict"], "inconclusive")
+        with self.assertRaises(candidates.CandidateError):
+            candidates.compare(record([10.0], evict=False), record([10.0], evict=False))
+
     def test_mismatched_cells_are_refused(self):
         baseline = record([100.0] * 3)
         for other in (record([100.0] * 3, ids=("f0002",)), record([100.0] * 3, evict=False)):
@@ -174,10 +181,18 @@ class ModelTests(unittest.TestCase):
         model = candidates.model(as_found)
         self.assertEqual(model["barrier_first_durable_seconds"], 3.0)
 
-    def test_failed_rows_count_their_completed_stages(self):
+    def test_failed_rows_hold_the_barrier_but_are_never_ready(self):
+        timings = {"f0001": (0.0, 0.5, "unavailable"), "f0002": (1.0, 2.0, 3.0)}
+        failed = record([10.0], ids=tuple(timings), completions=timings)
+        failed["repetitions"][0]["files"][0]["outcome"] = "probe_failed"
+        model = candidates.model(failed)
+        self.assertEqual(model["barrier_first_durable_seconds"], 6.0)
+        self.assertEqual(model["per_file_first_ready_seconds"], 6.0)
+        self.assertEqual(model["first_batch_sent_seconds"][1], 0.5)
         timings = {"f0001": (1.0, 2.0, "unavailable")}
-        model = candidates.model(record([10.0], completions=timings))
+        model = candidates.model(record([10.0], completions=timings, outcome="hash_failed"))
         self.assertEqual(model["barrier_first_durable_seconds"], 3.0)
+        self.assertEqual(model["per_file_first_ready_seconds"], "unavailable")
 
 
 class PrepareTests(unittest.TestCase):

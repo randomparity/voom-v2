@@ -4,7 +4,8 @@ Captured on 2026-10-29 under the frozen [protocol](../media-evidence-protocol.md
 with the [#788 baseline](README.md). Design: [the #789 spec](../workflow/specs/2026-10-29-read-efficiency-scheduling-design.md).
 These are measurements of one host, not a performance budget, and production source and
 defaults are unchanged. The raw records are the `2026-10-29-stage*.json` files beside this
-summary. Every number below comes from them, rounded for display. The verdict tables are
+summary. Every measurement below comes from them, rounded for display; capture times and
+lock use come from the private capture log. The verdict tables are
 output of `scripts/media-evidence-candidates.py compare`, and the model table is output of
 its `model` subcommand.
 
@@ -68,8 +69,9 @@ Medians over 3 repetitions. The verdict uses the protocol's thresholds.
 | Hash peak RSS (MiB) | 5.2 | 5.7 regression | 14.9 regression | 38.8 regression | 4.8 inconclusive |
 
 No resource guardrail was breached: peak memory stayed far below baseline + 256 MiB, and CPU
-fell. The RSS "regression" rows meet the 5% speed threshold only. The protocol judges memory
-by its guardrail. **Selection: buf1m**, the best summed-hash improvement. No variant improved
+fell. The RSS "regression" rows meet the 5% threshold only. As the #789 design states,
+selection judges memory and CPU by the protocol's resource guardrails, not by that threshold;
+read the other way, selection would fall back to the 8 KiB baseline. **Selection: buf1m**, the best summed-hash improvement. No variant improved
 wall time, so the rule fell through to summed hash seconds.
 
 ## Stage 2: scheduling (from buf1m)

@@ -128,7 +128,7 @@ def prepare(variant: str, directory: Path) -> Path:
         (directory / HASH_SOURCE).write_text(edited, encoding="utf-8")
         subprocess.run(["cargo", "build", "--release", "--locked", "-p", "voom-hash-worker",
                         "-p", "voom-ffprobe-worker"], cwd=directory, check=True)
-    except (OSError, subprocess.CalledProcessError):
+    except BaseException:
         subprocess.run(["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force",
                         str(directory)], check=False)
         raise
@@ -182,10 +182,11 @@ def classify(baseline: list, candidate: list) -> dict[str, Any]:
     if UNAVAILABLE in baseline or UNAVAILABLE in candidate or not baseline or not candidate:
         return {"verdict": UNAVAILABLE}
     base_median, cand_median = statistics.median(baseline), statistics.median(candidate)
-    cv = statistics.stdev(baseline) / statistics.mean(baseline) if len(baseline) > 1 else None
+    mean = statistics.mean(baseline)
+    cv = statistics.stdev(baseline) / mean if len(baseline) > 1 and mean > 0 else None
     result = {"baseline_median": base_median, "candidate_median": cand_median,
               "baseline_cv": cv, "verdict": "inconclusive"}
-    if cv is None or cv > 0.20 or base_median == 0:
+    if cv is None or cv > 0.20:
         return result
     change = (base_median - cand_median) / base_median
     if change >= max(0.10, 2 * cv) and max(candidate) <= base_median:
@@ -218,6 +219,8 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, An
             raise CandidateError(f"cells differ in {section} {key}; they do not compare")
     base, base_first = series(baseline)
     cand, cand_first = series(candidate)
+    if not base["wall"] or not cand["wall"]:
+        raise CandidateError("a cell has no compared repetition; as-found cells need two or more")
     metrics = {name: classify(base[name], cand[name]) for name in base}
     if cand_first is not None:
         for name, value in cand_first.items():
@@ -243,6 +246,10 @@ def select(results: dict[str, dict[str, Any]]) -> str:
     return "baseline"
 
 
+def median_or_unavailable(values: list[float | None]) -> float | str:
+    return UNAVAILABLE if None in values else statistics.median(values)
+
+
 def model(record: dict[str, Any]) -> dict[str, Any]:
     """Modelled first durable observation per publication strategy, median over repetitions.
 
@@ -261,16 +268,19 @@ def model(record: dict[str, Any]) -> dict[str, Any]:
     for repetition in repetitions:
         done = sorted(completion(row) for row in repetition["files"])
         barrier.append(done[-1])
-        first.append(done[0])
-        middle.append(statistics.median(done))
+        # Only an agreeing observation carries identity a file could publish on its own.
+        ready = sorted(completion(row) for row in repetition["files"]
+                       if row["outcome"] == "observed")
+        first.append(ready[0] if ready else None)
+        middle.append(statistics.median(ready) if ready else None)
         for count in FLUSH_COUNTS:
             batches[count].append(done[min(count, len(done)) - 1])
     return {
         "label": "modelled",
         "first_durable_observation_measured": "inconclusive",
         "barrier_first_durable_seconds": statistics.median(barrier),
-        "per_file_first_ready_seconds": statistics.median(first),
-        "per_file_median_ready_seconds": statistics.median(middle),
+        "per_file_first_ready_seconds": median_or_unavailable(first),
+        "per_file_median_ready_seconds": median_or_unavailable(middle),
         "first_batch_sent_seconds": {count: statistics.median(values)
                                      for count, values in batches.items()},
     }
