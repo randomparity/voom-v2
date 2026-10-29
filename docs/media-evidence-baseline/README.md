@@ -74,9 +74,10 @@ logical reads per stream.
   discarded and not committed, because a harness defect corrupted its `git_changed_paths`
   field; the defect is fixed and covered by the self-test. Its measurements were valid:
   repetition 1 took 59.8 s, with first file done at 38.6 s and 24.7 GB of host CIFS reads.
-  It warmed the server and client caches for the committed run, so the committed
-  repetition 1 is not a first touch. The two runs together read ≈ 87 GB over the network,
-  within the 100 GB cell budget.
+  It may have warmed the server's cache, which is not observable, so the committed
+  repetition 1 is not a first touch on the server. The client page cache was cold at that
+  repetition: 0 resident bytes for every file, and CIFS reads equal to the subset size. The
+  two runs together read ≈ 87 GB over the network, within the 100 GB cell budget.
 - The local capture ran 2026-10-29 17:09–17:40 UTC. Other host activity was not
   controlled or recorded. The full local pass is the protocol's `evicted` local cell; no
   `as-found` local cell was captured.

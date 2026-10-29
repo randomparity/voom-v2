@@ -135,7 +135,10 @@ of variation (sample standard deviation divided by mean) over its repetitions.
   into a speed comparison or a rate.
 
 Primary metrics, in priority order: first durable observation, complete library, total
-logical and physical bytes, then CPU and memory.
+logical and physical bytes, then CPU and memory. The #788 replay harness cannot measure
+first durable observation, because it does not publish. A candidate owner comparing that
+metric first captures a stage-0 cell with the same instrument it will use for candidates,
+before any candidate run. Without that cell, the metric is reported inconclusive.
 
 ## Mutation oracle
 
