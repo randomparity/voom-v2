@@ -17,7 +17,8 @@ temp-then-rename per transition; a digest appears only in the write that sets `v
   fingerprint is unchanged, else → `stale`.
 - `verify` reads the whole file between two stats. A start stat unlike the provisional one, or
   drift → `stale`; a head/tail fingerprint recomputed from the pass unlike the provisional one →
-  `disagreement`; else `verified`. Interruption leaves the state file untouched.
+  `disagreement`; else `verified`. Interruption leaves the state file untouched; `verify` in
+  any other state is a recorded refusal.
 - Plans: `held` while provisional, `committable` if verified, else `revoked`, outputs `quarantined`.
 
 `matrix` uses scratch fixtures and an oracle knowing true content [expected result]: clean
@@ -30,15 +31,15 @@ interior edit [verified: miss]. Re-verification stops after 2 attempts. Starvati
 background files, one new on-demand file and one verify per tick, 32 ticks; on-demand-only [8
 provisional] versus oldest background every 4th tick [8 verified].
 
-`run` per repetition: observe all, two probe re-observations each, verify all, 4 in flight; a
-stale file is a recorded row, not retried. `compare` applies protocol thresholds to logical and
-physical bytes against the #788 records.
+`run` (#788's selected ids) per repetition: observe all, two probe re-observations each, verify
+all, 4 in flight; a stale file is a recorded row. `compare` applies protocol thresholds to bytes
+against #788 records, refusing a differing label, manifest size or id set. Schemas:
+`media-evidence-lazy-run/1`, `media-evidence-lazy-matrix/1`; both are committed.
 
 ### Failure model
 
 - Actors and deployments: a local operator on the measurement host; CI runs the self-test.
-- Invariants and assets: corpora stay read-only; records carry no host path; experiment
-  digests never reach a production hash field.
+- Invariants: corpora stay read-only; records carry no host path; digests stay experimental.
 - Accepted failure classes: wall and CPU differ from #788's worker instrument (reported, not
   compared); host counters include rehearsal traffic (disclosed).
 - Covered elsewhere: fingerprints #796; buffers, concurrency #789; reuse #798; decision #791.
@@ -47,14 +48,13 @@ physical bytes against the #788 records.
 
 1. Each matrix case reports expected and observed state, oracle verdict, waste bytes and
    dispositions, matching its bracketed expectation.
-2. Records of 3 local evicted repetitions and the 3-file network subset give logical bytes by
-   component, physical bytes and residency, within protocol budgets.
-3. A results note gives commands, comparison, misses, exclusions and disclosures; `just
-   media-evidence-lazy-selftest` validates committed records in `source-checks`.
+2. 3 local evicted and 3 network as-found repetitions give logical bytes by component,
+   physical bytes and residency, within budgets.
+3. A note gives commands, comparison, misses, exclusions, disclosures (no stage 1–3 selection
+   exists; the fingerprint is an instrument); the self-test runs in `source-checks`.
 
 ## Validation
 
-- Focused-tests: each matrix case, determinism, schema, redaction (host paths, `blake3:`),
-  committed records, `compare`.
+- Focused-tests: matrix cases, determinism, schemas, redaction, records, `compare` refusals.
 - Corpus read-only: task-test-not-applicable (read-only opens; only scratch copies mutate);
   the note records manifest equality before and after.
