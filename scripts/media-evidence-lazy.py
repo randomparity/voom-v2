@@ -214,8 +214,10 @@ class Lifecycle:
         with self.lock:
             if state == "verified":
                 record.update(state=state, digest=digest)
-                for plan in record["plans"]:
-                    record["plans"][plan] = "committable"
+                # Revocation is terminal: a plan made on earlier bytes never becomes committable.
+                for plan, disposition in record["plans"].items():
+                    if disposition == "held":
+                        record["plans"][plan] = "committable"
             else:
                 self._invalidate(record, state)
             self.state_file.save(self.records)
@@ -838,6 +840,8 @@ def lazy_physical(repetition: dict[str, Any], network: bool) -> int | str:
 def verdict(candidate: list[float], reference: list[float]) -> dict[str, Any]:
     """Protocol thresholds for a lower-is-better metric."""
     base_median = statistics.median(reference)
+    if base_median == 0 or statistics.mean(reference) == 0:
+        return {"verdict": "inconclusive", "reason": "zero baseline"}
     cv = statistics.stdev(reference) / statistics.mean(reference) if len(reference) > 1 else 0.0
     median = statistics.median(candidate)
     change = (median - base_median) / base_median
@@ -863,14 +867,21 @@ def compare(lazy: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
         "physical_bytes": ([lazy_physical(rep, network) for rep in lazy_reps],
                            [baseline_physical(rep, network) for rep in base_reps]),
     }
-    metrics = {}
+    metrics, repetition_1 = {}, {}
+    if first == 1:
+        repetition_1 = {
+            "logical_bytes": {"candidate": lazy["repetitions"][0]["logical_bytes"]["total"],
+                              "baseline": base["repetitions"][0]["logical_bytes_read"]},
+            "physical_bytes": {"candidate": lazy_physical(lazy["repetitions"][0], network),
+                               "baseline": baseline_physical(base["repetitions"][0], network)},
+        }
     for name, (candidate, reference) in series.items():
         if UNAVAILABLE in candidate or UNAVAILABLE in reference or not candidate:
             metrics[name] = {"verdict": "inconclusive", "reason": UNAVAILABLE}
         else:
             metrics[name] = verdict(candidate, reference)
     return {"corpus": lazy["corpus"]["label"], "repetitions_compared": len(lazy_reps),
-            "repetition_1_reported_separately": first == 1, "metrics": metrics}
+            "repetition_1": repetition_1 or None, "metrics": metrics}
 
 
 # ---------------------------------------------------------------------------- CLI

@@ -2,11 +2,12 @@
   "build": {
     "baseline_harness_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
     "git_changed_paths": [
-      "docs/workflow/specs/2026-10-29-lazy-hash-lifecycle-design.md",
-      "justfile"
+      "docs/media-evidence-baseline/lazy/2026-10-29-lazy-matrix.json",
+      "scripts/media-evidence-lazy-selftest.py",
+      "scripts/media-evidence-lazy.py"
     ],
-    "git_commit": "19efbaefe5e69421a8f48971d8752f92878ce638",
-    "harness_sha256": "5a2e790db2fe45241243bcfaf9b9a4666f44a31129e940203b64fb27be814218"
+    "git_commit": "dbd40cb3f9f23377be7740ac3945ee58eacfb045",
+    "harness_sha256": "a1360d6ab1c5d10cd9718c62be63a43d5acf8ab0ce6eeb922d51ac84f5494d04"
   },
   "cases": [
     {

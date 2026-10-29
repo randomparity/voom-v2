@@ -118,6 +118,15 @@ class LifecycleTests(unittest.TestCase):
         self.lifecycle.observe("f", self.path)
         self.assertEqual(self.lifecycle.verify("f", self.path)[0], "verified")
 
+    def test_revoked_plans_stay_revoked_after_re_verification(self):
+        self.lifecycle.observe("f", self.path)
+        self.lifecycle.plan("f", "p")
+        lazy.write_fixture(self.path, 9)
+        self.lifecycle.observe("f", self.path)
+        self.lifecycle.observe("f", self.path)
+        self.assertEqual(self.lifecycle.verify("f", self.path)[0], "verified")
+        self.assertEqual(self.lifecycle.record("f")["plans"], {"p": "revoked"})
+
     def test_fingerprint_cost_covers_short_overlapping_and_long_files(self):
         window = lazy.FINGERPRINT_WINDOW_BYTES
         for size, cost in ((0, 0), (10, 10), (window + 5, window + 5), (10 * window, 2 * window)):
@@ -241,7 +250,15 @@ class CompareTests(unittest.TestCase):
         lazy_record["parameters"]["evict"] = False
         result = lazy.compare(lazy_record, base)
         self.assertEqual(result["repetitions_compared"], 2)
+        self.assertEqual(result["repetition_1"]["logical_bytes"],
+                         {"candidate": 900, "baseline": 300})
         self.assertEqual(result["metrics"]["logical_bytes"]["verdict"], "improvement")
+
+    def test_a_zero_baseline_is_inconclusive_not_a_crash(self):
+        result = lazy.compare(candidate([100, 100, 100], 0), reference(300, 0))
+        self.assertEqual(result["metrics"]["physical_bytes"],
+                         {"verdict": "inconclusive", "reason": "zero baseline"})
+        self.assertIsNone(result["repetition_1"])
 
     def test_records_of_different_file_sets_are_refused(self):
         with self.assertRaisesRegex(lazy.HarnessError, "selected_ids"):
