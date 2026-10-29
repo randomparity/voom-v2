@@ -123,6 +123,7 @@ def positive(stack, source, codec, synthesis, tools, stage, output, root):
 
 
 def negative(stack, source, stage, output, root, ffmpeg, ffprobe):
+    assert source.parent == root / "input", "native negative must use its isolated source root"
     original = hashlib.sha256(source.read_bytes()).hexdigest()
     before = probe(ffprobe, source, stage)
     control = stage / "native-control.mkv"
@@ -203,8 +204,8 @@ def regression(args, root):
         os.environ["VOOM_FFPROBE_BIN"] = tools["ffprobe_bin"]
         os.chdir(stage)
         with bootstrap.Bootstrap(bootstrap.parser().parse_args(arguments)) as stack:
-            for (codec, synthesis), source in sources.items():
-                positive(stack, source, codec, synthesis, tools, stage, output, root)
+            for (codec, synthesis), positive_source in sources.items():
+                positive(stack, positive_source, codec, synthesis, tools, stage, output, root)
         os.environ["VOOM_FFMPEG_BIN"] = native["ffmpeg"]
         # Older native probes hide this fixture's explicit Matroska BlockDuration.
         os.environ["VOOM_FFPROBE_BIN"] = tools["ffprobe_bin"]
