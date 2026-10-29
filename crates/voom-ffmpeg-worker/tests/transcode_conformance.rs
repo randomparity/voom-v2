@@ -2329,6 +2329,50 @@ async fn copied_audio_timing_native_rejects_unsafe_output() {
     );
 }
 
+#[tokio::test]
+async fn copied_audio_probe_errors_reject_truncated_source() {
+    let preflight = voom_ffmpeg_worker::preflight_with_paths(
+        &native_audio_tool("ffmpeg"),
+        &native_audio_tool("ffprobe"),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let generated = copied_audio_short_fixture(&preflight, dir.path()).await;
+    let input = dir.path().join("truncated.mkv");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-v", "error", "-i"])
+            .arg(generated)
+            .args(["-map", "0", "-c", "copy"])
+            .arg(&input),
+    )
+    .await;
+    let mut bytes = tokio::fs::read(&input).await.unwrap();
+    bytes.truncate(bytes.len() - 20);
+    tokio::fs::write(&input, bytes).await.unwrap();
+    let probe = Command::new(&preflight.ffprobe_path)
+        .args(["-v", "error", "-show_packets", "-of", "json"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        probe.status.success(),
+        "the error must have a zero exit status"
+    );
+    assert!(
+        !probe.stderr.is_empty(),
+        "the fixture must report a demux error"
+    );
+    let request = lossless_request("alac", &input, &dir.path().join("rejected.mkv"), None).await;
+    let result = handle_transcode_audio(&request, &ffmpeg_config(&preflight)).await;
+    assert!(
+        matches!(&result, Err(voom_ffmpeg_worker::handler::TranscodeAudioError::MalformedWorkerResult {
+            message, ..
+        }) if message.contains("packet probe reported errors")),
+        "errored packet observations must not authorize success: {result:?}"
+    );
+}
+
 async fn copied_audio_short_fixture(
     preflight: &voom_ffmpeg_worker::FfmpegPreflight,
     directory: &Path,

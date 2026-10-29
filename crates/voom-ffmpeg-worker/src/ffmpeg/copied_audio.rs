@@ -251,6 +251,11 @@ async fn stderr(reader: impl AsyncRead + Unpin) -> Result<(), FfmpegError> {
     if bytes.len() as u64 > STDERR_LIMIT {
         return Err(invalid("probe diagnostic limit exceeded"));
     }
+    if !bytes.is_empty() {
+        return Err(invalid(
+            "packet probe reported errors; check media integrity and configured ffprobe",
+        ));
+    }
     Ok(())
 }
 

@@ -64,8 +64,11 @@ unknown audio stream. Preserve packet order within each stream.
 
 Bound individual lines to1024bytes and stderr to16384bytes. Drain both pipes
 concurrently with waiting. The existing process_timeout bounds the entire probe,
-including readers and wait. Kill and reap the direct child on error/timeout;
-kill_on_drop retains cancellation cleanup consistent with current worker commands
+including readers and wait.
+The probe uses error verbosity; any diagnostic fails even with a zero exit status,
+using a static sanitized error rather than forwarding tool diagnostics.
+Kill and reap the direct child on error/timeout; kill_on_drop retains cancellation
+cleanup consistent with current worker commands
 and installed launcher guardian. No unbounded stdout capture or detached reader.
 Errors name copied-audio preservation and actionable project-build capability;
 paths/media payloads do not enter diagnostics. No partial digest authorizes success.

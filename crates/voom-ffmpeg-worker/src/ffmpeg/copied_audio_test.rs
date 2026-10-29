@@ -140,6 +140,23 @@ async fn observe(config: &FfmpegConfig) -> Result<Vec<Fingerprint>, FfmpegError>
 }
 
 #[tokio::test]
+async fn zero_exit_probe_errors_cannot_authorize_packet_observations() {
+    let directory = tempfile::tempdir().unwrap();
+    let body = format!(
+        "printf '%s\\n' '{}'; printf '%s\\n' '/private/media/input.mkv: File ended prematurely' >&2",
+        record(2, Some(15)).trim_end()
+    );
+    let mut config = probe_config(directory.path(), &body);
+    config.process_timeout = Duration::from_secs(2);
+    let error = observe(&config).await.unwrap_err().to_string();
+    assert!(error.contains("packet probe reported errors"), "{error}");
+    assert!(
+        !error.contains("/private/media"),
+        "diagnostics must be sanitized"
+    );
+}
+
+#[tokio::test]
 async fn packet_probe_bounds_both_pipes_and_propagates_nonzero_exit() {
     for (body, expected) in [
         (
