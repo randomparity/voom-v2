@@ -35,6 +35,7 @@ pub fn generate_fixture(root: &Path, tracks: &[AudioFixtureTrack<'_>]) -> PathBu
     .unwrap();
     let attachment = root.join("original.txt");
     std::fs::write(&attachment, b"Preserve this attachment\n").unwrap();
+    let generated = root.join("generated.mkv");
     let path = root.join("source.mkv");
     let mut command = Command::new("ffmpeg");
     command.args([
@@ -49,7 +50,7 @@ pub fn generate_fixture(root: &Path, tracks: &[AudioFixtureTrack<'_>]) -> PathBu
         let expression = format!("0.1*sin(2*PI*{}*t)", track.frequency);
         let expressions = vec![expression; usize::try_from(track.channels).unwrap()].join("|");
         command.args(["-f", "lavfi", "-i"]).arg(format!(
-            "aevalsrc=exprs={expressions}:s=48000:c={}",
+            "aevalsrc=exprs={expressions}:s=32000:c={}",
             track.layout
         ));
     }
@@ -94,6 +95,10 @@ pub fn generate_fixture(root: &Path, tracks: &[AudioFixtureTrack<'_>]) -> PathBu
             } else {
                 "0"
             });
+        if track.codec == "wavpack" {
+            // One complete frame prevents Matroska placement from lacing away packet timestamps.
+            command.arg(format!("-frame_size:a:{index}")).arg("16000");
+        }
         if let Some(language) = track.language {
             command
                 .arg(format!("-metadata:s:a:{index}"))
@@ -109,8 +114,20 @@ pub fn generate_fixture(root: &Path, tracks: &[AudioFixtureTrack<'_>]) -> PathBu
             "-metadata:s:t:0",
             "filename=original.txt",
         ])
+        .arg(&generated);
+    successful(command);
+    // Native FFmpeg 9 omits WavPack durations while copying. Construct that representation
+    // before any scan observes this policy fixture; the worker must preserve its observations.
+    // At 32 kHz, derived AAC frames also occupy exactly 32 ms through Matroska placement.
+    let original_packets = packet_hashes(&generated);
+    let mut command = Command::new("ffmpeg");
+    command
+        .args(["-v", "error", "-nostdin", "-n", "-copyts", "-i"])
+        .arg(&generated)
+        .args(["-map", "0", "-c", "copy", "-avoid_negative_ts", "disabled"])
         .arg(&path);
     successful(command);
+    assert_eq!(packet_hashes(&path), original_packets);
     path
 }
 

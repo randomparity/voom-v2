@@ -90,6 +90,9 @@ unchanged. No network, credentials, protocol or authorization surface is added.
   encoder/current project probe and fails before publication. A native-pair WAV
   synthesis control rejects exact700/48000-to14/1000 duration drift. Safe native
   fixtures use complete frames and retain samples/layouts/metadata assertions.
+  Native policy fixtures use one 16000-sample WavPack frame at 32 kHz and
+  establish the native-copy representation before scanning. This keeps copied
+  AAC frames at exact 32 ms through placement; known 48 kHz loss controls remain.
 - The project build preserves exact copied MKV tuples for six non-PCM targets
   in ordinary and strict-downmix synthesis, with metadata/dispositions, source
   SHA256 and lineage intact. Dedicated actual authenticated CLI proof checks

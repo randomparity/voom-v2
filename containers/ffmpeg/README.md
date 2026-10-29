@@ -270,6 +270,11 @@ Preservation compares the configured probe's observations. FFprobe 8.0.1 reports
 raw container field survived. Use the current paired project image and probe for
 strict Matroska BlockDuration evidence; native builds remain optional.
 
+Stock FFmpeg 9 can also omit copied WavPack durations or round copied AAC
+durations after Matroska placement. These observed changes are rejected even
+when packet payloads are unchanged. Native success therefore depends on the
+source representation as well as the codec and available encoder.
+
 `just container-worker-check ENGINE IMAGE` includes the six-target, ordinary and
 synthesis timing regression alongside strict PCM checks.
 `just copied-audio-check ENGINE IMAGE [DESKTOP]` exercises the authenticated CLI,
