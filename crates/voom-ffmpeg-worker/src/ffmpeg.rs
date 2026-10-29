@@ -1,3 +1,5 @@
+mod copied_audio;
+
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -74,6 +76,7 @@ pub struct FfmpegConfig {
     available_video_encoders: BTreeSet<String>,
     available_audio_encoders: BTreeSet<String>,
     pcm_wavex: bool,
+    audio_duration: bool,
 }
 
 impl FfmpegConfig {
@@ -97,6 +100,7 @@ impl FfmpegConfig {
             process_timeout,
             accelerator: None,
             pcm_wavex: false,
+            audio_duration: false,
             available_audio_encoders: ALL_AUDIO_ENCODERS
                 .iter()
                 .map(|item| (*item).to_owned())
@@ -151,6 +155,19 @@ impl FfmpegConfig {
     #[must_use]
     pub const fn has_pcm_wavex(&self) -> bool {
         self.pcm_wavex
+    }
+
+    /// Records the observed duration-only Matroska capability.
+    #[must_use]
+    pub const fn with_audio_duration(mut self, available: bool) -> Self {
+        self.audio_duration = available;
+        self
+    }
+
+    /// Whether the muxer can preserve positive observed audio durations.
+    #[must_use]
+    pub const fn has_audio_duration(&self) -> bool {
+        self.audio_duration
     }
 
     /// Binds this worker configuration to one accelerator descriptor.
@@ -1034,15 +1051,13 @@ pub async fn run_ffmpeg_transcode_audio(
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
     validate_ac3_source_facts(request, &selected)?;
     let mut command = Command::new(&config.ffmpeg_path);
+    command.args(["-copyts"]);
     if pcm_precision(&request.audio.target_codec).is_some() {
         // Copied PCM with unknown layout must not acquire a channel-count guess.
-        command.args(["-copyts", "-guess_layout_max", "0"]);
+        command.args(["-guess_layout_max", "0"]);
     }
     command
-        .arg("-hide_banner")
-        .arg("-nostdin")
-        .arg("-n")
-        .arg("-i")
+        .args(["-hide_banner", "-nostdin", "-n", "-i"])
         .arg(input)
         .arg("-map")
         .arg("0")
@@ -1057,7 +1072,11 @@ pub async fn run_ffmpeg_transcode_audio(
         append_audio_metadata(&mut command, source.audio_ordinal, source);
     }
     if pcm_precision(&request.audio.target_codec).is_some() {
-        command.args(["-pcm_wavex", "1", "-avoid_negative_ts", "disabled"]);
+        command.args(["-pcm_wavex", "1"]);
+    }
+    command.args(["-avoid_negative_ts", "disabled"]);
+    if config.has_audio_duration() {
+        command.args(["-preserve_audio_duration", "1"]);
     }
     command
         .arg("-map_metadata")
@@ -1082,6 +1101,14 @@ pub async fn run_ffmpeg_transcode_audio(
         request,
         &probe,
     )?;
+    copied_audio::verify(
+        config,
+        input,
+        output,
+        &request.selection.selected_streams,
+        false,
+    )
+    .await?;
     Ok(probe)
 }
 
@@ -1129,15 +1156,13 @@ async fn run_ffmpeg_synthesize_audio(
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
     validate_ac3_source_facts(request, &selected)?;
     let mut command = Command::new(&config.ffmpeg_path);
+    command.args(["-copyts"]);
     if pcm_precision(&request.audio.target_codec).is_some() {
         // Copied PCM with unknown layout must not acquire a channel-count guess.
-        command.args(["-copyts", "-guess_layout_max", "0"]);
+        command.args(["-guess_layout_max", "0"]);
     }
     command
-        .arg("-hide_banner")
-        .arg("-nostdin")
-        .arg("-n")
-        .arg("-i")
+        .args(["-hide_banner", "-nostdin", "-n", "-i"])
         .arg(input)
         .arg("-map")
         .arg("0")
@@ -1145,17 +1170,6 @@ async fn run_ffmpeg_synthesize_audio(
         .arg("-0:t?")
         .arg("-c")
         .arg("copy");
-    // Explicit original defaults also prevent FFmpeg from choosing a default
-    // automatically when the source has none. Relative flags retain other bits.
-    for source in &source_streams {
-        command
-            .arg(format!("-disposition:a:{}", source.audio_ordinal))
-            .arg(if source.default == Some(true) {
-                "+default"
-            } else {
-                "-default"
-            });
-    }
     append_synthesis_tracks(
         &mut command,
         request,
@@ -1167,7 +1181,11 @@ async fn run_ffmpeg_synthesize_audio(
         append_compatibility_identities(&mut command, &input_probe, compatibility, request)?;
     }
     if pcm_precision(&request.audio.target_codec).is_some() {
-        command.args(["-pcm_wavex", "1", "-avoid_negative_ts", "disabled"]);
+        command.args(["-pcm_wavex", "1"]);
+    }
+    command.args(["-avoid_negative_ts", "disabled"]);
+    if config.has_audio_duration() {
+        command.args(["-preserve_audio_duration", "1"]);
     }
     command
         .arg("-map")
@@ -1193,6 +1211,14 @@ async fn run_ffmpeg_synthesize_audio(
         let actual = probe_json(config, output).await?;
         verify_compatibility_identities(&input_probe, &actual, compatibility, request)?;
     }
+    copied_audio::verify(
+        config,
+        input,
+        output,
+        &request.selection.selected_streams,
+        true,
+    )
+    .await?;
     Ok(probe)
 }
 
@@ -1203,6 +1229,17 @@ fn append_synthesis_tracks(
     source_streams: &[SourceAudioFact],
     target_channels: u64,
 ) -> Result<(), FfmpegError> {
+    // Explicit original defaults also prevent FFmpeg from choosing a default
+    // automatically when the source has none. Relative flags retain other bits.
+    for source in source_streams {
+        command
+            .arg(format!("-disposition:a:{}", source.audio_ordinal))
+            .arg(if source.default == Some(true) {
+                "+default"
+            } else {
+                "-default"
+            });
+    }
     // Companions are appended after the copied originals, so their output audio
     // ordinal starts at the original audio-stream count.
     let original_audio_count = source_streams.len();

@@ -136,6 +136,7 @@ fn ffmpeg_config(preflight: &voom_ffmpeg_worker::FfmpegPreflight) -> FfmpegConfi
         DEFAULT_PROCESS_TIMEOUT,
     )
     .with_pcm_wavex(preflight.pcm_wavex)
+    .with_audio_duration(preflight.audio_duration)
 }
 
 async fn observed_facts(path: &Path) -> TranscodeVideoExpectedFacts {
@@ -2234,4 +2235,160 @@ async fn pcm_container_preserves_untouched_unknown_layout_stream() {
     );
     assert_lossless_preservation("pcm_s24le", &before, &after, false);
     assert_eq!(audio_expected(&input).await, request.input.expected);
+}
+
+// A rounded explicit Matroska BlockDuration must not silently become codec-derived timing.
+#[tokio::test]
+async fn copied_audio_timing_native_rejects_unsafe_output() {
+    let preflight = voom_ffmpeg_worker::preflight_with_paths(
+        &native_audio_tool("ffmpeg"),
+        &native_audio_tool("ffprobe"),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let input = copied_audio_short_fixture(&preflight, dir.path()).await;
+    let output = dir.path().join("encoded.mkv");
+    let request = lossless_request("alac", &input, &output, None).await;
+    let config = FfmpegConfig::new(
+        preflight.ffmpeg_path,
+        preflight.ffprobe_path,
+        preflight.ffmpeg_version,
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let result = handle_transcode_audio(&request, &config).await;
+    assert!(
+        result.is_err(),
+        "unsafe copied duration must fail before a publishable worker result"
+    );
+}
+
+async fn copied_audio_short_fixture(
+    preflight: &voom_ffmpeg_worker::FfmpegPreflight,
+    directory: &Path,
+) -> PathBuf {
+    for (name, layout) in [("main", "stereo"), ("copied", "mono")] {
+        flac_command(
+            tokio::process::Command::new(&preflight.ffmpeg_path)
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("anullsrc=r=48000:cl={layout}"),
+                    "-af",
+                    "atrim=end_sample=700",
+                    "-c:a",
+                    "flac",
+                    // Keep a short final frame rather than advertising it as the default.
+                    "-frame_size",
+                    "4608",
+                ])
+                .arg(directory.join(format!("{name}.flac"))),
+        )
+        .await;
+    }
+    let video = directory.join("video.mkv");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=16x16:rate=10",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "ffv1",
+            ])
+            .arg(&video),
+    )
+    .await;
+    let input = directory.join("source.mkv");
+    flac_command(
+        tokio::process::Command::new("mkvmerge")
+            .arg("-o")
+            .arg(&input)
+            .arg(video)
+            .arg(directory.join("main.flac"))
+            .arg(directory.join("copied.flac")),
+    )
+    .await;
+    let probe = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+    assert_eq!(
+        probe["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["stream_index"] == 2)
+            .unwrap()["duration"],
+        15
+    );
+    input
+}
+
+fn native_audio_tool(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").expect("media tests require PATH"))
+        .map(|directory| directory.join(name))
+        .find(|path| path.is_file())
+        .expect("required native FFmpeg/FFprobe missing from PATH")
+}
+
+#[tokio::test]
+#[ignore = "requires project duration container; explicitly run by just container-worker-check"]
+async fn pcm_container_copied_audio_timing() {
+    let preflight = preflight_from_process_env().unwrap();
+    assert!(
+        preflight.audio_duration,
+        "required duration-only Matroska capability missing"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let input = copied_audio_short_fixture(&preflight, dir.path()).await;
+    let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+    let source_facts = audio_expected(&input).await;
+    for codec in ["aac", "opus", "eac3", "ac3", "flac", "alac"] {
+        for synthesis in [None, Some(1)] {
+            let output = dir
+                .path()
+                .join(format!("{codec}-{}.mkv", synthesis.is_some()));
+            let request = lossless_request(codec, &input, &output, synthesis).await;
+            handle_transcode_audio(&request, &ffmpeg_config(&preflight))
+                .await
+                .unwrap();
+            let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
+            for index in if synthesis.is_some() {
+                vec![1, 2]
+            } else {
+                vec![2]
+            } {
+                assert_eq!(
+                    before["streams"][index]["time_base"],
+                    after["streams"][index]["time_base"]
+                );
+                let tuples: Vec<Vec<_>> = [&before, &after]
+                    .into_iter()
+                    .map(|probe| {
+                        probe["packets"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|packet| packet["stream_index"] == index)
+                            .map(|packet| {
+                                ["data_hash", "pts", "dts", "duration"]
+                                    .map(|field| packet[field].clone())
+                            })
+                            .collect()
+                    })
+                    .collect();
+                assert!(!tuples[0].is_empty());
+                assert_eq!(
+                    tuples[0], tuples[1],
+                    "{codec} synthesis={synthesis:?} original={index}"
+                );
+            }
+            assert_eq!(source_facts, audio_expected(&input).await);
+        }
+    }
 }
