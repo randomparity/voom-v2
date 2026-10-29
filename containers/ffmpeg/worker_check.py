@@ -33,28 +33,40 @@ def main():
         config = owned / "config.json"
         config.write_text(json.dumps(value))
         tools = repository / "containers" / "ffmpeg"
-        env = {**os.environ, "VOOM_MEDIA_CONTAINER_CONFIG": str(config),
-               "VOOM_FFMPEG_BIN": str(tools / "ffmpeg-container"),
-               "VOOM_FFPROBE_BIN": str(tools / "ffprobe-container"),
-               "VOOM_MEDIA_CALLER_PID": str(os.getpid())}
-        subprocess.run(["python3", str(tools / "runtime.py"), "check-config",
-                        "--source-witness", str(witness)], cwd=stage, env=env, check=True)
-        build = subprocess.run(["cargo", "test", "--manifest-path", str(repository / "Cargo.toml"),
-                                "-p", "voom-ffmpeg-worker", "--test", "transcode_conformance",
-                                "--no-run", "--message-format=json"],
-                               cwd=repository, env=env, stdout=subprocess.PIPE, check=True)
-        artifacts = [json.loads(line) for line in build.stdout.splitlines()]
-        executables = [item["executable"] for item in artifacts
-                       if item.get("reason") == "compiler-artifact"
-                       and item["target"]["name"] == "transcode_conformance"
-                       and item.get("executable")]
-        if len(executables) != 1:
-            raise RuntimeError("cargo did not identify exactly one conformance test executable")
-        # Cargo runs tests in the crate directory. Invoke its exact artifact from the
-        # granted stage instead, with an explicit owned temp root for generated media.
-        subprocess.run([executables[0], args.filter, "--ignored", "--test-threads=1",
-                        "--nocapture"], cwd=stage, env={**env, "TMPDIR": str(stage)}, check=True)
-
+        installed = subprocess.run(
+            ["python3", str(tools / "install.py"), "--config", str(config),
+             "--destination", str(owned / "installed"), "--source-witness", str(witness)],
+            cwd=stage, stdout=subprocess.PIPE, check=True)
+        paths = json.loads(installed.stdout)
+        env = {**os.environ, "VOOM_FFMPEG_BIN": paths["ffmpeg_bin"],
+               "VOOM_FFPROBE_BIN": paths["ffprobe_bin"], "VOOM_TEST_PREBUILT_WORKERS": "1"}
+        env.pop("VOOM_MEDIA_CONTAINER_CONFIG", None)
+        subprocess.run(["cargo", "build", "-p", "voom-ffprobe-worker",
+                        "--bin", "voom-ffprobe-worker"], cwd=repository, env=env, check=True)
+        targets = [("voom-ffmpeg-worker", "transcode_conformance", args.filter),
+                   ("voom-node-agent", "container_audio", "installed_container_tools_")]
+        commands = []
+        for package, target, selection in targets:
+            build = subprocess.run(
+                ["cargo", "test", "-p", package, "--test", target,
+                 "--no-run", "--message-format=json"], cwd=repository, env=env,
+                stdout=subprocess.PIPE, check=True)
+            artifacts = [json.loads(line) for line in build.stdout.splitlines()]
+            executables = [item["executable"] for item in artifacts
+                           if item.get("reason") == "compiler-artifact"
+                           and item["target"]["name"] == target and item.get("executable")]
+            if len(executables) != 1:
+                raise RuntimeError(f"cargo did not identify exactly one {target} executable")
+            listing = subprocess.run([executables[0], selection, "--ignored", "--list"],
+                                     cwd=stage, env=env, capture_output=True, check=True)
+            if b": test" not in listing.stdout:
+                raise RuntimeError(f"required {target} selection matched no tests: {selection}")
+            commands.append([executables[0], selection, "--ignored", "--test-threads=1",
+                             "--nocapture"])
+        # Finish every build before media runs. Cargo's crate cwd is outside the
+        # grants, so invoke exact artifacts from the owned staging directory.
+        for command in commands:
+            subprocess.run(command, cwd=stage, env={**env, "TMPDIR": str(stage)}, check=True)
 
 
 if __name__ == "__main__":

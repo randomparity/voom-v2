@@ -129,21 +129,50 @@ without mapping it to the server user on some versions. Desktop mappings must
 produce files owned by the invoking host user;
 the check fails rather than chowning unexpected output.
 
+Install as the worker account, using its normal engine configuration. Choose an
+existing account-owned parent without group/other write permission. The new
+installation must be disjoint from **all** source/staging grants in both nesting
+directions: a same-user decoder must never mount its own runtime or configuration.
+The installer refuses existing destinations and symlinks, copies configuration and
+runtime privately, and checks access plus both tools under an empty environment.
+
 ```sh
-export VOOM_MEDIA_CONTAINER_CONFIG=/absolute/path/container.json
 cd /srv/staging
-python3 /absolute/checkout/containers/ffmpeg/runtime.py check-config \
+python3 /absolute/checkout/containers/ffmpeg/install.py \
+  --config /absolute/path/container.json \
+  --destination /absolute/private-parent/media-tools-v1 \
   --source-witness /srv/media/existing-small-file
-export VOOM_FFMPEG_BIN=/absolute/checkout/containers/ffmpeg/ffmpeg-container
-export VOOM_FFPROBE_BIN=/absolute/checkout/containers/ffmpeg/ffprobe-container
 ```
 
-Start the existing worker command with that environment and canonical cwd/TMPDIR.
-Do not select NVIDIA, VAAPI or VideoToolbox device environment settings with this
-CPU-only profile. Missing engine, local image, encoder or PCM mux capability fails
-before output staging; there is no pull, build, fallback or startup requirement
-for unrelated native PCM-unavailable workers. The source witness proves selected
-content/access, not unique filesystem identity. Recheck after changing shares.
+The single JSON result contains absolute `ffmpeg_bin` and `ffprobe_bin` paths.
+Use those values in the node agent's existing `[workers.dependencies]` fields.
+For direct workers or `voom worker run-local`, export those same paths as
+`VOOM_FFMPEG_BIN` and `VOOM_FFPROBE_BIN`. The node agent deliberately clears its
+child environment; the raw checkout launchers alone cannot cross that boundary.
+The installed tools retain their copied runtime/configuration after checkout
+removal, and exec the fixed host Python without changing PID, cwd or streams.
+Keep that Python installation and selected engine executable installed.
+
+The private shims capture `HOME`, a minimal PATH containing the selected engine's
+entry directory and system defaults, and explicitly set `DOCKER_CONFIG`,
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR` only when provided at install.
+These optional values must be canonical existing directories. Other nonempty
+`DOCKER_*`, `CONTAINER_*`, `CONTAINERS_*`, `PODMAN_*`, `STORAGE_DRIVER` and
+`STORAGE_OPTS` overrides are rejected; move supported configuration into the
+account's normal files instead. No generic environment inheritance is added.
+The installation directory and executable shims are mode 0700; copied files are
+0600. Setup failure removes the new installation. A killed installer can leave a
+partial private directory: inspect and remove only that owned directory, or use
+a new destination; subsequent installation never overwrites it.
+
+Start the existing worker command with a canonical granted cwd/TMPDIR. Do not
+select NVIDIA, VAAPI or VideoToolbox device settings with this CPU-only profile.
+Missing engine, local image, encoder or PCM mux capability fails before output
+staging; there is no pull, build, fallback or startup requirement for unrelated
+native PCM-unavailable workers. The source witness proves selected content/access,
+not unique filesystem identity. Re-run installation into a new private path after
+changing configuration, shares or engine context, then switch the dependency paths.
+Rollback selects the previous installation or existing native tool paths.
 
 Worker subprocess helpers set their own `VOOM_MEDIA_CALLER_PID` before spawning.
 For direct shell diagnostics, use an ordinary child invocation:
@@ -199,8 +228,10 @@ on `runtime_integration_test.py` and `worker_check.py`. Invoke those Python scri
 from this directory or by absolute path. The root must be newly owned test storage
 already shared/labeled for the selected engine. Tests remove their generated
 fixtures and exact containers; image/VM installation and removal remain operator
-operations. Native suites explicitly ignore four named PCM container cases;
-the required Linux Docker CI job executes all four. Hosted native macOS CI does
+operations. Native suites explicitly ignore four named PCM container cases and one owner-node
+integration case. The required Linux Docker CI job installs private tools and runs
+all five: the owner case starts both real workers through `ChildSupervisor`, then
+transcodes PCM16/24 and probes their facts and decoded samples under `env_clear`. Hosted native macOS CI does
 not claim Docker/Podman Desktop coverage; those arms require actual Desktop hosts.
 
 On the tested macOS Podman Desktop virtiofs share, host-side overwrite-rename of
