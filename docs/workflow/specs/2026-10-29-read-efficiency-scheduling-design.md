@@ -22,7 +22,7 @@ Stages 1–2 of the frozen [protocol](../../media-evidence-protocol.md) need res
   sorting after #788's. `compare`/`model` output lives only in the summary
   `stages-1-2.md`, which maps each record to its variant, command, and worker SHA-256.
 - Cells, 3 repetitions each: stage 1 local evicted full pass per variant. Stage 2 uses the
-  stage-1 selection: among non-failed variants without regression or guardrail breach, the
+  stage-1 selection: among non-failed variants without speed regression or guardrail breach, the
   best wall improvement, then best summed-hash improvement; else baseline. Local full pass at
   concurrency 8; local subset `f0004,f0025,f0022,f0005,f0009,f0015` at 1/2/4 (4 is the
   reference); network subset `f0049,f0074,f0063` at 1/2, plus 4 when the selection is not

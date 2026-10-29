@@ -10,8 +10,9 @@ its `model` subcommand.
 
 ## What ran
 
-Each cell is the unchanged #788 harness replay (HashFile, then ProbeFile; three whole-file
-reads per file), 3 repetitions, on the host and corpora described in the #788 summary.
+Each cell is the #788 harness replay, unchanged by this branch (HashFile, then ProbeFile;
+three whole-file reads per file), 3 repetitions, on the host and corpora described in the
+#788 summary.
 Variant workers were built by `media-evidence-candidates.py prepare` in a detached worktree
 of the named commit, with one edit to `crates/voom-hash-worker/src/hash.rs`. Each record's
 `git_changed_paths` names that file, and `hash_chunk_bytes` is read from the edited source.
@@ -92,8 +93,18 @@ Logical reads were 320.5 GB per repetition in every subset cell.
 
 **Network subset, concurrency 1 and 2 vs 4** (reference `stage2-c4-network`, as-found).
 Repetition 1 is reported separately, so each comparison rests on repetitions 2–3. The
-reference's wall CV is 22.8%, above the protocol's 20% limit, so every network concurrency
-verdict is **inconclusive**:
+reference's CV is above the protocol's 20% limit for wall (22.8%), first file done (30.6%)
+and physical read (20.5%), so those verdicts are inconclusive. Other metrics, medians of
+repetitions 2–3:
+
+| Metric | c4 | c2 | c1 |
+|---|---:|---:|---:|
+| Summed hash seconds | 24.5 | 31.0 regression | 21.0 inconclusive |
+| Hash / probe CPU (s) | 4.6 / 19.6 | 4.8 / 19.2 inconclusive | 4.7 / 20.7 inconclusive / regression |
+| Hash / probe peak RSS (MiB) | 9.8 / 5.4 | 7.8 / 5.5 improvement / inconclusive | 7.4 / 5.4 improvement / inconclusive |
+
+These cells are not cache-equivalent (below), which the failure model accepts, so their
+deltas mix concurrency with client cache state:
 
 | Cell | Wall rep 1 (s) | Wall reps 2–3 (s) | Host CIFS read per rep (GB) | Resident before reps (GB) |
 |---|---:|---:|---|---|
@@ -111,7 +122,8 @@ Network concurrency 8 is excluded: three files cap it at the concurrency-4 cell.
 
 Labelled **modelled**. First durable observation was not measured: the replay does not
 publish, so its comparison verdict is **inconclusive** in every cell. The model takes each file's
-completion as queue delay + hash + probe seconds, and reports the median over repetitions.
+completion as queue delay + hash + probe seconds, and reports the median over repetitions
+(repetitions 2 and later for `as-found` cells).
 
 | Cell | Barrier: first durable (s) | Per-file: first ready (s) | Per-file: median ready (s) | First batch at count 1 / 10 / 1000 (s) |
 |---|---:|---:|---:|---|
@@ -121,7 +133,7 @@ completion as queue delay + hash + probe seconds, and reports the median over re
 | stage2-subset-c4 | 78.1 | 10.8 | 33.1 | 10.8 / 78.1 / 78.1 |
 | stage2-subset-c2 | 74.2 | 7.0 | 22.8 | 7.0 / 74.2 / 74.2 |
 | stage2-subset-c1 | 98.6 | 5.7 | 28.1 | 5.7 / 98.6 / 98.6 |
-| stage2-c4-network | 16.1 | 9.5 | 14.0 | 9.5 / 16.1 / 16.1 |
+| stage2-c4-network (reps 2–3) | 19.3 | 7.8 | 14.0 | 7.8 / 19.3 / 19.3 |
 
 Boundaries of the model:
 
@@ -163,6 +175,10 @@ Boundaries of the model:
 
 ## Disclosures
 
+- The harness bytes (`harness_sha256` `07f3550d…`) are `main`'s and differ from those that
+  captured the #788 records (`e19c61f4…`). Between them, the replay's timed path changed
+  only in result validation (malformed-result checks) and in counting logical bytes by
+  outcome, which is equal for all-`observed` cells.
 - Every capture ran under an exclusive host-wide lock shared with concurrent benchmark
   workers, so no two captures overlapped. Builds by other workers took that lock in shared
   mode and did not run during a capture. Other host activity was not controlled or recorded.

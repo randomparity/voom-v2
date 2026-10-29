@@ -149,6 +149,13 @@ class CompareTests(unittest.TestCase):
         del results["hash"]
         self.assertEqual(candidates.select(results), "baseline")
 
+    def test_memory_growth_within_the_guardrail_does_not_disqualify_a_variant(self):
+        baseline = record([100.0] * 3, hash_seconds=[10.0] * 3)
+        larger_buffer = record([100.0] * 3, hash_seconds=[2.0] * 3, rss=40 * MIB)
+        result = candidates.compare(baseline, larger_buffer)
+        self.assertEqual(result["metrics"]["hash_peak_rss"]["verdict"], "regression")
+        self.assertEqual(candidates.select({"larger": result}), "larger")
+
 
 class ModelTests(unittest.TestCase):
     def test_barrier_readiness_and_flush_times_come_from_per_file_completion(self):
@@ -161,6 +168,12 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(model["per_file_median_ready_seconds"], 5.0)
         self.assertEqual(model["first_batch_sent_seconds"], {1: 3.0, 10: 8.0, 1000: 8.0})
 
+    def test_as_found_records_model_repetitions_after_the_first(self):
+        as_found = record([60.0, 10.0], evict=False)
+        as_found["repetitions"][0]["files"][0]["hash_seconds"] = 57.0
+        model = candidates.model(as_found)
+        self.assertEqual(model["barrier_first_durable_seconds"], 3.0)
+
     def test_failed_rows_count_their_completed_stages(self):
         timings = {"f0001": (1.0, 2.0, "unavailable")}
         model = candidates.model(record([10.0], completions=timings))
@@ -172,6 +185,16 @@ class PrepareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as existing:
             with self.assertRaises(candidates.CandidateError):
                 candidates.prepare("baseline", Path(existing))
+
+    def test_prepare_fails_on_drifted_source_before_creating_a_worktree(self):
+        with tempfile.TemporaryDirectory() as parent:
+            target = Path(parent) / "variant"
+            drifted = dict(candidates.VARIANTS, drifted=[("no such source text", "")])
+            original, candidates.VARIANTS = candidates.VARIANTS, drifted
+            self.addCleanup(setattr, candidates, "VARIANTS", original)
+            with self.assertRaises(candidates.CandidateError):
+                candidates.prepare("drifted", target)
+            self.assertFalse(target.exists())
 
     def test_prepare_refuses_an_unknown_variant(self):
         with tempfile.TemporaryDirectory() as parent:

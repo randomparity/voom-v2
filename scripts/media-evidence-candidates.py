@@ -118,13 +118,20 @@ def prepare(variant: str, directory: Path) -> Path:
         raise CandidateError(f"unknown variant {variant}; choose one of {', '.join(VARIANTS)}")
     if directory.exists():
         raise CandidateError(f"{directory} already exists; choose a new directory")
+    # Edit in memory first, so a drifted source fails before any worktree exists.
+    head = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"HEAD:{HASH_SOURCE}"],
+                          capture_output=True, text=True, check=True).stdout
+    edited = apply_edits(head, VARIANTS[variant])
     subprocess.run(["git", "-C", str(REPO_ROOT), "worktree", "add", "--detach", str(directory),
                     "HEAD"], check=True)
-    source = directory / HASH_SOURCE
-    source.write_text(apply_edits(source.read_text(encoding="utf-8"), VARIANTS[variant]),
-                      encoding="utf-8")
-    subprocess.run(["cargo", "build", "--release", "--locked", "-p", "voom-hash-worker",
-                    "-p", "voom-ffprobe-worker"], cwd=directory, check=True)
+    try:
+        (directory / HASH_SOURCE).write_text(edited, encoding="utf-8")
+        subprocess.run(["cargo", "build", "--release", "--locked", "-p", "voom-hash-worker",
+                        "-p", "voom-ffprobe-worker"], cwd=directory, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        subprocess.run(["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force",
+                        str(directory)], check=False)
+        raise
     return directory / "target" / "release"
 
 
@@ -244,10 +251,14 @@ def model(record: dict[str, Any]) -> dict[str, Any]:
     modelled). Per-file readiness is hypothetical and would need a superseding ADR; it
     never covers absence, which only a complete traversal can establish. Flush count k
     is when the first k-observation batch leaves the agent; batches are provisional.
+    Like `compare`, an `as-found` record uses repetitions 2 and later.
     """
     barrier, first, middle = [], [], []
     batches: dict[int, list[float]] = {count: [] for count in FLUSH_COUNTS}
-    for repetition in record["repetitions"]:
+    repetitions = record["repetitions"]
+    if not record["parameters"]["evict"]:
+        repetitions = repetitions[1:]
+    for repetition in repetitions:
         done = sorted(completion(row) for row in repetition["files"])
         barrier.append(done[-1])
         first.append(done[0])
