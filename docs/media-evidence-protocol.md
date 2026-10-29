@@ -222,8 +222,8 @@ Schema `media-evidence-baseline-run/1`, one JSON object per run, with the fields
 `validate_run` in the harness enforces the schema, every section, the identity and
 parameter keys, every metric, row outcomes and failures, and the absence of host paths.
 
-- `corpus`: `label`, `filesystem_type`, `storage_class` (`local`, `network`, or
-  `unavailable`), `manifest_files`, `selected_ids`, and `skipped_budget_ids`.
+- `corpus`: `label`, `filesystem_type`, `storage_class` (`local` or `network` from
+  allow-lists of filesystem types, else `unknown`; `unavailable` without a mount table), `manifest_files`, `selected_ids`, and `skipped_budget_ids`.
 - `build`: `git_commit`, `git_changed_paths` (tracked paths only), `harness_sha256`,
   `hash_worker_sha256`, `probe_worker_sha256`, and `ffprobe_version`.
 - `host`: `os`, `machine`, `cpu_count`, `memory_bytes`, and `python`.

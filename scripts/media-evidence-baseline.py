@@ -34,6 +34,11 @@ PROTOCOL_VERSION = "5"
 VIDEO_EXTENSIONS = {
     ".avi", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ts", ".webm",
 }
+# Storage classes are allow-lists: an unrecognized type (autofs, a FUSE remote) is
+# `unknown`, never `local`, so `--evict` refuses it.
+LOCAL_FILESYSTEMS = {
+    "bcachefs", "btrfs", "ext2", "ext3", "ext4", "f2fs", "jfs", "tmpfs", "xfs", "zfs",
+}
 NETWORK_FILESYSTEMS = {
     "9p", "afs", "ceph", "cifs", "fuse.sshfs", "glusterfs", "ncpfs", "nfs", "nfs4", "smb3",
     "smbfs",
@@ -144,17 +149,19 @@ def build_manifest(root: Path, label: str) -> dict[str, Any]:
     return {"label": label, "root": str(root), "files": files}
 
 
-def filesystem_type(path: Path) -> str:
+def filesystem_type(path: Path, mounts: Path = Path("/proc/mounts")) -> str:
+    """Type of the effective mount: longest prefix, and the later of equal mountpoints."""
     try:
-        lines = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
+        lines = mounts.read_text(encoding="utf-8").splitlines()
     except OSError:
         return UNAVAILABLE
     resolved = path.resolve()
     best, best_type = None, UNAVAILABLE
     for line in lines:
         fields = line.split()
-        mount = Path(fields[1].replace("\\040", " "))
-        if resolved.is_relative_to(mount) and (best is None or len(str(mount)) > len(str(best))):
+        point = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), fields[1])
+        mount = Path(point)
+        if resolved.is_relative_to(mount) and (best is None or len(str(mount)) >= len(str(best))):
             best, best_type = mount, fields[2]
     return best_type
 
@@ -170,7 +177,9 @@ def corpus_filesystem(root: Path, files: list[dict[str, Any]]) -> str:
 def storage_class(fs_type: str) -> str:
     if fs_type == UNAVAILABLE:
         return UNAVAILABLE
-    return "network" if fs_type in NETWORK_FILESYSTEMS else "local"
+    if fs_type in LOCAL_FILESYSTEMS:
+        return "local"
+    return "network" if fs_type in NETWORK_FILESYSTEMS else "unknown"
 
 
 def resident_bytes(path: Path) -> int | str:

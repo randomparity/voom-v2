@@ -185,8 +185,20 @@ class ReplayTests(HarnessFixture):
             harness.corpus_filesystem(self.root, manifest["files"])
         self.assertEqual(harness.corpus_filesystem(self.root, manifest["files"][:2]), "btrfs")
 
+    def test_effective_mount_is_the_last_longest_match_with_escapes_decoded(self):
+        mounts = self.base / "mounts"
+        mounts.write_text(
+            "/dev/a / btrfs rw 0 0\n"
+            "systemd-1 /srv/share autofs rw 0 0\n"
+            "//nas/media /srv/share cifs rw 0 0\n"
+            "/dev/b /srv/tab\\011dir ext4 rw 0 0\n"
+        )
+        self.assertEqual(harness.filesystem_type(Path("/srv/share/x.mkv"), mounts), "cifs")
+        self.assertEqual(harness.filesystem_type(Path("/srv/tab\tdir/x.mkv"), mounts), "ext4")
+        self.assertEqual(harness.filesystem_type(Path("/srv/other.mkv"), mounts), "btrfs")
+
     def test_evict_refuses_non_local_storage(self):
-        for fs_type in ("cifs", "nfs4", harness.UNAVAILABLE):
+        for fs_type in ("cifs", "nfs4", "autofs", "fuse.rclone", harness.UNAVAILABLE):
             with self.subTest(fs_type=fs_type), self.assertRaises(harness.HarnessError):
                 harness.evict(self.root / "a" / "Alpha Title (2001).mkv", fs_type)
 
