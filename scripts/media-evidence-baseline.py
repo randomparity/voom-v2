@@ -251,7 +251,9 @@ def host_identity() -> dict[str, Any]:
 
 def host_counters() -> dict[str, int | str]:
     """Host-wide counters; on a shared host they include unrelated traffic."""
-    counters: dict[str, int | str] = {"network_rx_bytes": UNAVAILABLE, "cifs_bytes_read": UNAVAILABLE}
+    counters: dict[str, int | str] = {
+        "network_rx_bytes": UNAVAILABLE, "cifs_bytes_read": UNAVAILABLE,
+    }
     try:
         lines = Path("/proc/net/dev").read_text(encoding="utf-8").splitlines()[2:]
         counters["network_rx_bytes"] = sum(
@@ -262,7 +264,8 @@ def host_counters() -> dict[str, int | str]:
         pass
     try:
         text = Path("/proc/fs/cifs/Stats").read_text(encoding="utf-8")
-        counters["cifs_bytes_read"] = sum(int(value) for value in re.findall(r"Bytes read: (\d+)", text))
+        reads = re.findall(r"Bytes read: (\d+)", text)
+        counters["cifs_bytes_read"] = sum(int(value) for value in reads)
     except OSError:
         pass
     return counters
@@ -474,6 +477,8 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
     constants = read_constants(REPO_ROOT)
     args.concurrency = args.concurrency or constants["max_in_flight"]
     fs_type = filesystem_type(Path(manifest["root"]))
+    # Identify the harness and workers before measuring, so the record names the bytes that ran.
+    build = build_identity(args.worker_dir)
     selected = select_files(manifest, args.ids)
     files, skipped = within_budget(selected, args.max_bytes)
     if not files:
@@ -489,7 +494,7 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
             "storage_class": storage_class(fs_type), "manifest_files": len(manifest["files"]),
             "selected_ids": [entry["id"] for entry in files], "skipped_budget_ids": skipped,
         },
-        "build": build_identity(args.worker_dir),
+        "build": build,
         "host": host_identity(),
         "parameters": {
             **constants, "concurrency": args.concurrency, "reads_per_file": READS_PER_FILE,
