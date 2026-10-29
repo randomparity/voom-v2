@@ -143,9 +143,10 @@ Before reporting installed paths, run the existing complete witness/staging/UID
 setup check using the captured context and installed runtime. Then invoke both
 installed shims with only the caller PID in their environment and require successful
 version probes. Setup failures remove the newly created installation and report
-an actionable error. The installed configuration is operator-editable; rerun its
-setup check after changing configuration/shares. Reinstallation uses a new path
-and explicit dependency-path switch; native rollback remains unchanged.
+an actionable error. Change source configuration, shares or engine context through
+reinstallation into a new private path, then explicitly switch dependency paths.
+Do not edit installed configuration in place: the standalone access check does not
+revalidate installation/media separation. Native rollback remains unchanged.
 
 Required proof uses the real node-agent ChildSupervisor to start both real workers
 with existing typed dependency paths and env_clear. Execute PCM16/24 requests and
@@ -445,7 +446,7 @@ original native executable paths and leaves PCM requests failing closed.
   choosing engine/config/image are trusted with their existing filesystem rights.
   A compromised privileged engine, image or operator is outside this containment
   promise; the launcher is not a sandbox against those trusted components.
-- Controls: strict JSON/root/image validation, fixed entrypoints, no shell/eval,
+- Controls: strict JSON/root/image validation, fixed entrypoints, argv-form engine calls,
   local-mode checks, least mount/UID authority, signed/pinned downloads, no network
   or privilege in runtime, bounded subprocesses, exact-owned removal, source hashes
   and strict observed facts. Error text contains actionable paths only locally;
