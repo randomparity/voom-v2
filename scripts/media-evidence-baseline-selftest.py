@@ -10,6 +10,7 @@ import argparse
 import importlib.util
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -166,6 +167,15 @@ class ReplayTests(HarnessFixture):
         with self.assertRaises(harness.HarnessError):
             harness.capture(self.run_args(max_bytes=1))
 
+    def test_selected_files_spanning_filesystems_are_refused(self):
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        real = harness.filesystem_type
+        harness.filesystem_type = lambda path: "cifs" if "trunc" in path.name else "btrfs"
+        self.addCleanup(setattr, harness, "filesystem_type", real)
+        with self.assertRaisesRegex(harness.HarnessError, "span filesystems"):
+            harness.corpus_filesystem(self.root, manifest["files"])
+        self.assertEqual(harness.corpus_filesystem(self.root, manifest["files"][:2]), "btrfs")
+
     def test_evict_refuses_non_local_storage(self):
         for fs_type in ("cifs", "nfs4", harness.UNAVAILABLE):
             with self.subTest(fs_type=fs_type), self.assertRaises(harness.HarnessError):
@@ -194,6 +204,16 @@ class ContractTests(unittest.TestCase):
         porcelain = " M justfile\0?? docs/new file.md\0R  new.py\0old.py\0"
         self.assertEqual(harness.changed_paths(porcelain),
                          ["docs/new file.md", "justfile", "new.py"])
+
+    def test_build_identity_never_records_untracked_file_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "tracked.txt").write_text("one")
+            subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+            (repo / "tracked.txt").write_text("two")
+            (repo / "Alpha Title (2001).mkv").write_bytes(b"x")
+            self.assertEqual(harness.tracked_changes(repo), ["tracked.txt"])
 
     def test_validation_rejects_host_paths_and_missing_metrics(self):
         self.assertIn("missing repetitions", harness.validate_run({"schema": harness.SCHEMA}))

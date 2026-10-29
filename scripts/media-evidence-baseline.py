@@ -154,6 +154,14 @@ def filesystem_type(path: Path) -> str:
     return best_type
 
 
+def corpus_filesystem(root: Path, files: list[dict[str, Any]]) -> str:
+    """One filesystem type for every selected file, so eviction and storage class hold."""
+    types = {filesystem_type(root / entry["relative"]) for entry in files}
+    if len(types) != 1:
+        raise HarnessError("selected files span filesystems; select ids from one mount")
+    return types.pop()
+
+
 def storage_class(fs_type: str) -> str:
     if fs_type == UNAVAILABLE:
         return UNAVAILABLE
@@ -194,11 +202,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def git_output(*arguments: str) -> str | None:
+def git_output(*arguments: str, repo_root: Path = REPO_ROOT) -> str | None:
     result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *arguments], capture_output=True, text=True, check=False
+        ["git", "-C", str(repo_root), *arguments], capture_output=True, text=True, check=False
     )
     return result.stdout if result.returncode == 0 else None
+
+
+def tracked_changes(repo_root: Path = REPO_ROOT) -> list[str] | str:
+    """Changed tracked paths only: untracked names are arbitrary and may not be public."""
+    status = git_output("status", "--porcelain", "-z", "--untracked-files=no", repo_root=repo_root)
+    return UNAVAILABLE if status is None else changed_paths(status)
 
 
 def changed_paths(porcelain_z: str) -> list[str]:
@@ -224,10 +238,9 @@ def ffprobe_version() -> str:
 
 def build_identity(worker_dir: Path) -> dict[str, Any]:
     commit = git_output("rev-parse", "HEAD")
-    status = git_output("status", "--porcelain", "-z", "--untracked-files=all")
     return {
         "git_commit": commit.strip() if commit else UNAVAILABLE,
-        "git_changed_paths": UNAVAILABLE if status is None else changed_paths(status),
+        "git_changed_paths": tracked_changes(),
         "harness_sha256": sha256_file(Path(__file__).resolve()),
         "hash_worker_sha256": sha256_file(worker_dir / "voom-hash-worker"),
         "probe_worker_sha256": sha256_file(worker_dir / "voom-ffprobe-worker"),
@@ -493,10 +506,10 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     constants = read_constants(REPO_ROOT)
     args.concurrency = args.concurrency or constants["max_in_flight"]
-    fs_type = filesystem_type(Path(manifest["root"]))
+    selected = select_files(manifest, args.ids)
+    fs_type = corpus_filesystem(Path(manifest["root"]), selected)
     # Identify the harness and workers before measuring, so the record names the bytes that ran.
     build = build_identity(args.worker_dir)
-    selected = select_files(manifest, args.ids)
     files, skipped = within_budget(selected, args.max_bytes)
     if not files:
         raise HarnessError("no selected file fits --max-bytes")
