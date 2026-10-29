@@ -1676,6 +1676,12 @@ fn assert_lossless_preservation(
             }
             assert_eq!(expected, actual, "copied stream {index} {field}");
         }
+        // Native codecs retain their existing payload check; #763 adds exact PCM timing.
+        let fields = if codec.starts_with("pcm_") {
+            &["data_hash", "pts", "dts", "duration"][..]
+        } else {
+            &["data_hash"][..]
+        };
         let hashes: Vec<Vec<_>> = [before, after]
             .into_iter()
             .map(|probe| {
@@ -1685,7 +1691,10 @@ fn assert_lossless_preservation(
                     .iter()
                     .filter(|packet| packet["stream_index"] == index)
                     .map(|packet| {
-                        ["data_hash", "pts", "dts", "duration"].map(|field| &packet[field])
+                        fields
+                            .iter()
+                            .map(|field| &packet[*field])
+                            .collect::<Vec<_>>()
                     })
                     .collect()
             })
