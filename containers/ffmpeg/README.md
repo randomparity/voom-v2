@@ -133,8 +133,10 @@ Install as the worker account, using its normal engine configuration. Choose an
 existing account-owned parent without group/other write permission. The new
 installation must be disjoint from **all** source/staging grants in both nesting
 directions: a same-user decoder must never mount its own runtime or configuration.
-The installer refuses existing destinations and symlinks, copies configuration and
-runtime privately, and checks access plus both tools under an empty environment.
+The installer validates source configuration bytes and mount separation before any
+destination write, refuses existing destinations and symlinks, then copies and
+revalidates configuration privately. It checks access plus both tools under an
+empty environment.
 
 ```sh
 cd /srv/staging

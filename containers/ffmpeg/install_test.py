@@ -95,6 +95,44 @@ sys.exit(23)
         with self.assertRaisesRegex(runtime.SetupError, "media grants"):
             install.validate_separation(self.root, runtime.load_config(str(self.config)))
 
+    def test_mounted_destination_rejected_before_copied_config_can_change(self):
+        replacement = self.root / "replacement-stage"
+        replacement.mkdir()
+        original = install.write_private
+
+        def decoder_write(path, data, mode):
+            if path.name == "config.json":
+                value = json.loads(data)
+                value["read_write_roots"] = [str(replacement)]
+                data = json.dumps(value).encode()
+            original(path, data, mode)
+
+        destination = self.stage / "installed"
+        with patch("os.getcwd", return_value=str(self.source)), \
+                patch.object(install, "write_private", side_effect=decoder_write) as writes:
+            with self.assertRaisesRegex(runtime.SetupError, "media grants"):
+                install.install(self.config, destination, [])
+            writes.assert_not_called()
+        self.assertFalse(destination.exists())
+
+    def test_private_copy_is_revalidated_before_setup(self):
+        original = install.write_private
+
+        def changed_copy(path, data, mode):
+            if path.name == "config.json":
+                value = json.loads(data)
+                value["read_write_roots"] = [str(self.destination)]
+                data = json.dumps(value).encode()
+            original(path, data, mode)
+
+        with patch("os.getcwd", return_value=str(self.source)), \
+                patch.object(install, "write_private", side_effect=changed_copy), \
+                patch.object(install, "validate_install") as validate:
+            with self.assertRaisesRegex(runtime.SetupError, "media grants"):
+                install.install(self.config, self.destination, [])
+            validate.assert_not_called()
+        self.assertFalse(self.destination.exists())
+
     def test_failed_setup_removes_only_new_installation(self):
         with patch.object(install, "validate_install", side_effect=runtime.SetupError("setup")):
             with self.assertRaisesRegex(runtime.SetupError, "setup"):

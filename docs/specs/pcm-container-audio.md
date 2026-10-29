@@ -113,9 +113,9 @@ or other write permission. Refuse existing destinations (including symlinks),
 nonabsolute paths and invalid source configuration. Never overwrite an installation.
 The installed directory must be disjoint from every configured media grant,
 including neither nesting direction. Mode0700 cannot protect code from a decoder
-running as the same host user through a writable mount. Validate the exact copied
-configuration before any setup engine call; reject overlap and test both RO/RW
-grants. Harness installations live beside source/staging roots, outside their mounts.
+running as the same host user through a writable mount. Snapshot and validate the source configuration bytes and reject destination
+overlap before creating or writing the installation. Then validate that exact private
+copied configuration again before any setup engine call; test both RO/RW grants. Harness installations live beside source/staging roots, outside their mounts.
 Create the directory mode0700 and files exclusively; remove only this newly owned
 installation on a handled failure. Process/host death can leave an incomplete
 private directory; report/refuse it on another install, never silently reuse it.
@@ -438,8 +438,9 @@ original native executable paths and leaves PCM requests failing closed.
 
 - Added boundaries: operator config into local engine argv; immutable source and
   base downloads into image builds; worker process lifetime into container lifetime;
-  declared host roots into container mounts. Existing media/probe boundary widens
-  to PCM. No new network listener, control-plane byte path or persisted schema.
+  declared host roots into container mounts; operator context and source configuration
+  into private installed files and literal shell exports. Existing media/probe boundary
+  widens to PCM. No new network listener, control-plane byte path or persisted schema.
 - Actors: policy/media may contain hostile facts and names; local operators
   choosing engine/config/image are trusted with their existing filesystem rights.
   A compromised privileged engine, image or operator is outside this containment
@@ -448,7 +449,12 @@ original native executable paths and leaves PCM requests failing closed.
   local-mode checks, least mount/UID authority, signed/pinned downloads, no network
   or privilege in runtime, bounded subprocesses, exact-owned removal, source hashes
   and strict observed facts. Error text contains actionable paths only locally;
-  public workflow artifacts omit host/user identifiers.
+  public workflow artifacts omit host/user identifiers. Installation snapshots and validates
+  config/mount separation before any destination write, then revalidates the private
+  copy. Exclusive files/private modes and disjoint installation/media grants prevent
+  a same-user decoder modifying installed host code through its mounts. Shims quote
+  literals, exec an absolute isolated Python, and restore only the documented
+  HOME/minimal PATH/Docker/XDG context; unsupported engine overrides are rejected.
 - Outside scope: defending against host-root/daemon compromise or whole-host loss,
   arbitrary remote filesystems, GPU/device delegation, registry distribution,
   persistent orphan recovery services and new transport authentication.

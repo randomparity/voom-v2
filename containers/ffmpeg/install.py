@@ -89,13 +89,15 @@ def install(config_path, destination, witnesses):
             parent.stat().st_mode & 0o022:
         raise runtime.SetupError("choose an existing account-owned private parent without "
                                  "group/other write permission")
+    contents = source.read_bytes()
+    validate_separation(destination, runtime.parse_config(contents))
     try:
         destination.mkdir(mode=0o700)
     except FileExistsError as error:
         raise runtime.SetupError("installation already exists; choose a new destination") from error
     try:
         destination.chmod(0o700)
-        write_private(destination / "config.json", source.read_bytes(), 0o600)
+        write_private(destination / "config.json", contents, 0o600)
         config = runtime.load_config(str(destination / "config.json"))
         validate_separation(destination, config)
         context = capture_context(config.engine)

@@ -54,9 +54,20 @@ def load_config(path, system=None, cwd=None):
     if not path or not os.path.isabs(path):
         raise SetupError("set VOOM_MEDIA_CONTAINER_CONFIG to an absolute JSON file")
     try:
-        with open(path, encoding="utf-8") as source:
-            value = json.load(source)
-    except (OSError, ValueError) as error:
+        with open(path, "rb") as source:
+            contents = source.read()
+    except OSError as error:
+        raise SetupError(f"cannot read container configuration: {error}") from error
+    return parse_config(contents, system, cwd)
+
+
+def parse_config(contents, system=None, cwd=None):
+    system = system or platform.system()
+    if system not in ("Linux", "Darwin"):
+        raise SetupError("container media tools require Linux or macOS")
+    try:
+        value = json.loads(contents.decode("utf-8"))
+    except ValueError as error:
         raise SetupError(f"cannot read container configuration: {error}") from error
     required = {"engine", "image", "read_only_roots", "read_write_roots"}
     allowed = required | ({"desktop"} if system == "Darwin" else set())
