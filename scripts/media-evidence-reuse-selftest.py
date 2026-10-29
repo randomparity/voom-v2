@@ -142,5 +142,38 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.guard("\n# content" + "_hash\n"), 1)
 
 
+class CommittedRecordTests(unittest.TestCase):
+    def test_committed_records_validate_and_cover_every_measurement(self):
+        records = [json.loads(path.read_text()) for path in sorted(reuse.RECORD_DIR.glob("*.json"))]
+        by_schema = {}
+        for record in records:
+            by_schema.setdefault(record["schema"], []).append(record)
+        validators = {
+            fingerprint.ORACLE_SCHEMA: fingerprint.validate_oracle,
+            fingerprint.RUN_SCHEMA: fingerprint.validate_run,
+            reuse.PROBABILITY_SCHEMA: reuse.validate_probability,
+            reuse.PROBE_SCHEMA: reuse.validate_probe,
+        }
+        self.assertEqual(set(by_schema), set(validators))
+        for schema, group in by_schema.items():
+            for record in group:
+                self.assertEqual(validators[schema](record), [], schema)
+        oracles = by_schema[fingerprint.ORACLE_SCHEMA]
+        self.assertEqual({record["parameters"]["scratch_filesystem_type"] for record in oracles},
+                         {"tmpfs", "btrfs"})
+        for record in oracles:
+            self.assertEqual(set(record["parameters"]["candidates"]),
+                             set(fingerprint.REUSE_CANDIDATES))
+            self.assertNotIn("invalid", {row["outcome"] for row in record["cases"]})
+        runs = by_schema[fingerprint.RUN_SCHEMA]
+        self.assertEqual({record["corpus"]["storage_class"] for record in runs},
+                         {"local", "network"})
+        for record in by_schema[reuse.PROBABILITY_SCHEMA]:
+            self.assertTrue(all(cell["within_bound"] for cell in record["cells"]))
+        probes = by_schema[reuse.PROBE_SCHEMA]
+        self.assertEqual({filesystem["storage_class"] for record in probes
+                          for filesystem in record["filesystems"]}, {"local", "network"})
+
+
 if __name__ == "__main__":
     unittest.main()

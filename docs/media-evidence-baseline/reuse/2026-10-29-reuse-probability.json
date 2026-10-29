@@ -1,0 +1,164 @@
+{
+  "analytic": [
+    {
+      "checks": 1,
+      "detection": 0.001,
+      "sampled_fraction": 0.001
+    },
+    {
+      "checks": 10,
+      "detection": 0.009955,
+      "sampled_fraction": 0.001
+    },
+    {
+      "checks": 100,
+      "detection": 0.095208,
+      "sampled_fraction": 0.001
+    },
+    {
+      "checks": 1,
+      "detection": 0.01,
+      "sampled_fraction": 0.01
+    },
+    {
+      "checks": 10,
+      "detection": 0.095618,
+      "sampled_fraction": 0.01
+    },
+    {
+      "checks": 100,
+      "detection": 0.633968,
+      "sampled_fraction": 0.01
+    },
+    {
+      "checks": 1,
+      "detection": 0.05,
+      "sampled_fraction": 0.05
+    },
+    {
+      "checks": 10,
+      "detection": 0.401263,
+      "sampled_fraction": 0.05
+    },
+    {
+      "checks": 100,
+      "detection": 0.994079,
+      "sampled_fraction": 0.05
+    },
+    {
+      "checks": 1,
+      "detection": 0.1,
+      "sampled_fraction": 0.1
+    },
+    {
+      "checks": 10,
+      "detection": 0.651322,
+      "sampled_fraction": 0.1
+    },
+    {
+      "checks": 100,
+      "detection": 0.999973,
+      "sampled_fraction": 0.1
+    },
+    {
+      "checks": 1,
+      "detection": 0.25,
+      "sampled_fraction": 0.25
+    },
+    {
+      "checks": 10,
+      "detection": 0.943686,
+      "sampled_fraction": 0.25
+    },
+    {
+      "checks": 100,
+      "detection": 1.0,
+      "sampled_fraction": 0.25
+    },
+    {
+      "checks": 1,
+      "detection": 0.5,
+      "sampled_fraction": 0.5
+    },
+    {
+      "checks": 10,
+      "detection": 0.999023,
+      "sampled_fraction": 0.5
+    },
+    {
+      "checks": 100,
+      "detection": 1.0,
+      "sampled_fraction": 0.5
+    }
+  ],
+  "build": {
+    "git_changed_paths": [],
+    "git_commit": "db8b90bd32517b79d3b30d19e26fa821ac3fa3e9",
+    "helper_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
+    "script_sha256": "7587d9b54158964c9c45b7d027c7d554443fd3c909a71b011d0d090170e25927"
+  },
+  "cells": [
+    {
+      "candidate": "rnd64-i32",
+      "detected": 273,
+      "fixture_bytes": 8388608,
+      "interior_blocks": 126,
+      "observed_rate": 0.273,
+      "sampled_blocks": 32,
+      "sampled_fraction": 0.253968,
+      "standard_error": 0.013765,
+      "trials": 1000,
+      "within_bound": true
+    },
+    {
+      "candidate": "rnd64-i8",
+      "detected": 71,
+      "fixture_bytes": 8388608,
+      "interior_blocks": 126,
+      "observed_rate": 0.071,
+      "sampled_blocks": 8,
+      "sampled_fraction": 0.063492,
+      "standard_error": 0.007711,
+      "trials": 1000,
+      "within_bound": true
+    },
+    {
+      "candidate": "rnd64-i32",
+      "detected": 20,
+      "fixture_bytes": 67108864,
+      "interior_blocks": 1022,
+      "observed_rate": 0.02,
+      "sampled_blocks": 32,
+      "sampled_fraction": 0.031311,
+      "standard_error": 0.005507,
+      "trials": 1000,
+      "within_bound": true
+    },
+    {
+      "candidate": "rnd64-i8",
+      "detected": 7,
+      "fixture_bytes": 67108864,
+      "interior_blocks": 1022,
+      "observed_rate": 0.007,
+      "sampled_blocks": 8,
+      "sampled_fraction": 0.007828,
+      "standard_error": 0.002787,
+      "trials": 1000,
+      "within_bound": true
+    }
+  ],
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "parameters": {
+    "sample_bytes": 65536,
+    "scratch_filesystem_type": "tmpfs",
+    "standard_errors": 3,
+    "trials": 1000
+  },
+  "schema": "media-evidence-reuse-probability/1"
+}
