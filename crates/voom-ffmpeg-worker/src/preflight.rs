@@ -291,10 +291,15 @@ pub fn preflight_with_paths(
     let alac_encoder = parse_token(&encoders, "alac").unwrap_or_default();
     let pcm_s16le_encoder = parse_token(&encoders, "pcm_s16le").unwrap_or_default();
     let pcm_s24le_encoder = parse_token(&encoders, "pcm_s24le").unwrap_or_default();
+    #[expect(
+        clippy::print_stderr,
+        reason = "the worker has no tracing subscriber and optional probe failures must be observable"
+    )]
     let pcm_wavex = command_text(
         "ffmpeg -hide_banner -h muxer=matroska",
         command_output(Command::new(ffmpeg_path).args(["-hide_banner", "-h", "muxer=matroska"])),
     )
+    .inspect_err(|error| eprintln!("optional PCM capability probe failed: {error}"))
     .is_ok_and(|help| has_pcm_wavex_option(&help));
     let muxers = command_text(
         "ffmpeg -hide_banner -muxers",

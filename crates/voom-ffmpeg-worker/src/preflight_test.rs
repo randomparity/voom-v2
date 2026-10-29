@@ -148,6 +148,38 @@ fn preflight_detects_all_three_video_encoders() {
 }
 
 #[test]
+fn failed_pcm_help_remains_observable_without_failing_native_preflight() {
+    const CHILD: &str = "VOOM_TEST_FAILED_PCM_HELP_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let temp = tempfile::tempdir().unwrap();
+        let ffmpeg = fake_ffmpeg_all_encoders(temp.path());
+        let script = std::fs::read_to_string(&ffmpeg).unwrap().replace(
+            "  *) exit 2 ;;",
+            "  *) echo 'mux help fixture failure' >&2; exit 23 ;;",
+        );
+        voom_test_support::executable::write_executable(&ffmpeg, &script).unwrap();
+        let report = preflight_with_paths(&ffmpeg, &fake_ffprobe(temp.path())).unwrap();
+        assert!(!report.pcm_wavex);
+        assert!(report.has_encoder("libx265"));
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "preflight::tests::failed_pcm_help_remains_observable_without_failing_native_preflight",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("muxer=matroska"), "{stderr}");
+    assert!(stderr.contains("status 23"), "{stderr}");
+    assert!(stderr.contains("mux help fixture failure"), "{stderr}");
+}
+
+#[test]
 fn preflight_rejects_missing_libsvtav1() {
     let temp = tempfile::tempdir().unwrap();
     let ffmpeg = fake_ffmpeg_without(temp.path(), "libsvtav1");
