@@ -35,7 +35,7 @@ source-checks: check-workflows check-workflows-selftest check-test-layout \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
     check-transaction-openers check-transaction-openers-selftest \
     check-adr-index check-adr-index-selftest acceptance-bootstrap-selftest \
-    media-inventory-selftest
+    media-inventory-selftest container-unit-check
 
 # Filename/path diversity must affect real canary recommendation membership.
 media-inventory-selftest:
@@ -329,3 +329,25 @@ stress:
         export VOOM_TEST_PREBUILT_WORKERS=1
     fi
     cargo test -p voom-fakes --lib distributed_stress_conserves_every_ticket -- --ignored --nocapture
+
+# Build the pinned PCM-capable image in the selected local engine.
+container-build ENGINE='docker' SOURCES='':
+    ./containers/ffmpeg/build.sh {{quote(ENGINE)}} {{quote(SOURCES)}}
+
+# Prove actual mux representation, decoded samples and software codecs.
+container-check ENGINE IMAGE:
+    python3 containers/ffmpeg/verify_pcm.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}}
+
+# Portable configuration and caller-identity checks; no container engine required.
+container-unit-check:
+    bash -n containers/ffmpeg/build.sh
+    ./target/workflow-tools/shellcheck containers/ffmpeg/build.sh
+    python3 -m unittest discover -s containers/ffmpeg -p '*_test.py'
+
+# Real launcher streams, mounts, ownership and cancellation on the selected engine.
+container-runtime-check ENGINE IMAGE:
+    python3 containers/ffmpeg/runtime_integration_test.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}}
+
+# Required PCM media arm; absence of engine/image/capability is a failure.
+container-worker-check ENGINE IMAGE:
+    python3 containers/ffmpeg/worker_check.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}}

@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Execute the configured container's paired FFprobe."""
+import sys
+import runtime
+
+sys.argv.insert(1, "ffprobe")
+sys.exit(runtime.main())

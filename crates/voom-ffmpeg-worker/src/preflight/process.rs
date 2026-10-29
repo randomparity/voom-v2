@@ -242,6 +242,7 @@ pub(super) fn command_output_within(
     deadline: Duration,
 ) -> io::Result<Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let mut attempts_remaining = 3;
     loop {
         attempts_remaining -= 1;

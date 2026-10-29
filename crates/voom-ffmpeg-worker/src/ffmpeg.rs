@@ -25,7 +25,16 @@ pub const ALL_VIDEO_ENCODERS: [&str; 7] = [
 ];
 
 /// Audio encoders recognized by the worker; availability is checked per operation.
-pub const ALL_AUDIO_ENCODERS: [&str; 6] = ["aac", "libopus", "eac3", "ac3", "flac", "alac"];
+pub const ALL_AUDIO_ENCODERS: [&str; 8] = [
+    "aac",
+    "libopus",
+    "eac3",
+    "ac3",
+    "flac",
+    "alac",
+    "pcm_s16le",
+    "pcm_s24le",
+];
 
 const VAAPI_HEVC_ENCODER: &str = "hevc_vaapi";
 
@@ -64,6 +73,7 @@ pub struct FfmpegConfig {
     accelerator: Option<AcceleratorBinding>,
     available_video_encoders: BTreeSet<String>,
     available_audio_encoders: BTreeSet<String>,
+    pcm_wavex: bool,
 }
 
 impl FfmpegConfig {
@@ -86,6 +96,7 @@ impl FfmpegConfig {
             provider_version,
             process_timeout,
             accelerator: None,
+            pcm_wavex: false,
             available_audio_encoders: ALL_AUDIO_ENCODERS
                 .iter()
                 .map(|item| (*item).to_owned())
@@ -127,6 +138,19 @@ impl FfmpegConfig {
     #[must_use]
     pub fn has_audio_encoder(&self, encoder: &str) -> bool {
         self.available_audio_encoders.contains(encoder)
+    }
+
+    /// Records the observed Matroska PCM WAVEX mux capability.
+    #[must_use]
+    pub const fn with_pcm_wavex(mut self, available: bool) -> Self {
+        self.pcm_wavex = available;
+        self
+    }
+
+    /// Whether PCM can retain explicit channel layout in Matroska.
+    #[must_use]
+    pub const fn has_pcm_wavex(&self) -> bool {
+        self.pcm_wavex
     }
 
     /// Binds this worker configuration to one accelerator descriptor.
@@ -1010,6 +1034,10 @@ pub async fn run_ffmpeg_transcode_audio(
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
     validate_ac3_source_facts(request, &selected)?;
     let mut command = Command::new(&config.ffmpeg_path);
+    if pcm_precision(&request.audio.target_codec).is_some() {
+        // Copied PCM with unknown layout must not acquire a channel-count guess.
+        command.arg("-guess_layout_max").arg("0");
+    }
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -1027,6 +1055,9 @@ pub async fn run_ffmpeg_transcode_audio(
             .arg(audio_encoder(&request.audio.target_codec)?);
         append_audio_encoding(&mut command, source.audio_ordinal, source, request)?;
         append_audio_metadata(&mut command, source.audio_ordinal, source);
+    }
+    if pcm_precision(&request.audio.target_codec).is_some() {
+        command.arg("-pcm_wavex").arg("1");
     }
     command
         .arg("-map_metadata")
@@ -1098,6 +1129,10 @@ async fn run_ffmpeg_synthesize_audio(
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
     validate_ac3_source_facts(request, &selected)?;
     let mut command = Command::new(&config.ffmpeg_path);
+    if pcm_precision(&request.audio.target_codec).is_some() {
+        // Copied PCM with unknown layout must not acquire a channel-count guess.
+        command.arg("-guess_layout_max").arg("0");
+    }
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -1130,6 +1165,9 @@ async fn run_ffmpeg_synthesize_audio(
     )?;
     if let Some(compatibility) = &request.audio.compatibility {
         append_compatibility_identities(&mut command, &input_probe, compatibility, request)?;
+    }
+    if pcm_precision(&request.audio.target_codec).is_some() {
+        command.arg("-pcm_wavex").arg("1");
     }
     command
         .arg("-map")
@@ -1735,6 +1773,7 @@ fn is_text_file_busy(err: &std::io::Error) -> bool {
 /// tests that stub the executable.
 async fn output_retrying_etxtbsy(command: &mut Command) -> std::io::Result<std::process::Output> {
     const MAX_ATTEMPTS: u32 = 5;
+    command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
@@ -2076,11 +2115,19 @@ fn resolve_lossless_audio(
         channels: source.channels,
         channel_layout: source.channel_layout.clone(),
     };
-    let mut resolved = request
-        .audio
-        .lossless
-        .clone()
-        .unwrap_or_default()
+    let mut settings = request.audio.lossless.clone().unwrap_or_default();
+    if let Some(bits) = pcm_precision(&request.audio.target_codec) {
+        if settings
+            .bits_per_sample
+            .is_some_and(|requested| requested != bits)
+        {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "PCM precision settings must match the canonical target codec".to_owned(),
+            ));
+        }
+        settings.bits_per_sample = Some(bits);
+    }
+    let mut resolved = settings
         .resolve(&facts)
         .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))?;
     if request.audio.target_codec == "flac" && resolved.sample_rate > 655_350 {
@@ -2119,7 +2166,10 @@ fn append_audio_encoding(
     source: &SourceAudioFact,
     request: &TranscodeAudioRequest,
 ) -> Result<(), FfmpegError> {
-    if matches!(request.audio.target_codec.as_str(), "flac" | "alac") {
+    if matches!(
+        request.audio.target_codec.as_str(),
+        "flac" | "alac" | "pcm_s16le" | "pcm_s24le"
+    ) {
         let resolved = resolve_lossless_audio(source, request)?;
         if request.audio.target_codec == "flac" {
             command
@@ -2173,7 +2223,10 @@ fn verify_lossless_output(
     request: &TranscodeAudioRequest,
     output: &AudioOutputStreamFact,
 ) -> Result<(), FfmpegError> {
-    if matches!(request.audio.target_codec.as_str(), "flac" | "alac") {
+    if matches!(
+        request.audio.target_codec.as_str(),
+        "flac" | "alac" | "pcm_s16le" | "pcm_s24le"
+    ) {
         let actual = voom_worker_protocol::AudioSampleFacts {
             sample_rate: output.sample_rate,
             sample_format: output.sample_format.clone(),
@@ -2214,6 +2267,14 @@ fn valid_ac3_layout(channels: Option<u64>, layout: Option<&str>) -> bool {
     )
 }
 
+pub(crate) fn pcm_precision(codec: &str) -> Option<u8> {
+    match codec {
+        "pcm_s16le" => Some(16),
+        "pcm_s24le" => Some(24),
+        _ => None,
+    }
+}
+
 pub(crate) fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
     match codec {
         "aac" => Ok("aac"),
@@ -2222,6 +2283,8 @@ pub(crate) fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
         "ac3" => Ok("ac3"),
         "flac" => Ok("flac"),
         "alac" => Ok("alac"),
+        "pcm_s16le" => Ok("pcm_s16le"),
+        "pcm_s24le" => Ok("pcm_s24le"),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unsupported audio codec: {other}"
         ))),

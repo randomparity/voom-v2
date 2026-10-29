@@ -1589,6 +1589,8 @@ async fn missing_audio_encoder_fails_before_input_access() {
         ("ac3", "ac3"),
         ("flac", "flac"),
         ("alac", "alac"),
+        ("pcm_s16le", "pcm_s16le"),
+        ("pcm_s24le", "pcm_s24le"),
     ] {
         let request = transcode_audio_request(
             dir.path(),
@@ -1655,4 +1657,57 @@ async fn lossless_settings_on_lossy_target_fail_before_mutation() {
     );
     assert!(!output_parent.exists());
     assert_eq!(tokio::fs::read(&input).await.unwrap(), b"original media");
+}
+
+#[tokio::test]
+async fn missing_pcm_mux_capability_fails_before_input_access() {
+    let dir = tempfile::tempdir().unwrap();
+    for codec in ["pcm_s16le", "pcm_s24le"] {
+        let request = transcode_audio_request(
+            dir.path(),
+            &dir.path().join("missing.mkv"),
+            AudioExpectedFacts {
+                size_bytes: 0,
+                content_hash: "unused".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+            codec,
+        );
+        let error = handle_transcode_audio(&request, &config(dir.path()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+        assert!(error.to_string().contains("pcm_wavex"), "{error}");
+        assert!(!Path::new(&request.output.path).exists());
+    }
+}
+
+#[tokio::test]
+async fn pcm_precision_conflict_precedes_encoder_and_input_access() {
+    let dir = tempfile::tempdir().unwrap();
+    for (codec, bits) in [("pcm_s16le", 24), ("pcm_s24le", 16)] {
+        let mut request = transcode_audio_request(
+            dir.path(),
+            &dir.path().join("missing.mkv"),
+            AudioExpectedFacts {
+                size_bytes: 0,
+                content_hash: "unused".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+            codec,
+        );
+        request.audio.lossless = Some(voom_worker_protocol::LosslessAudioSettings {
+            bits_per_sample: Some(bits),
+        });
+        let config = config(dir.path()).with_available_audio_encoders(Vec::new());
+        let error = handle_transcode_audio(&request, &config).await.unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+        assert!(
+            error.to_string().contains("PCM precision settings"),
+            "{error}"
+        );
+        assert!(!Path::new(&request.output.path).exists());
+    }
 }

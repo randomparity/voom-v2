@@ -298,3 +298,26 @@ fn preflight_audio_encoders_are_optional() {
         }
     }
 }
+
+#[test]
+fn pcm_mux_capability_requires_an_exact_boolean_option_row() {
+    assert!(has_pcm_wavex_option(
+        "  -pcm_wavex <boolean> E.......... retain layout"
+    ));
+    for help in [
+        "Unknown option pcm_wavex",
+        "-pcm_wavex_extra <boolean>",
+        "-pcm_wavex <string>",
+        "error: -pcm_wavex <boolean>",
+    ] {
+        assert!(!has_pcm_wavex_option(help));
+    }
+}
+
+#[test]
+fn synchronous_preflight_stamps_actual_caller_identity() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "test \"$VOOM_MEDIA_CALLER_PID\" = \"$PPID\""]);
+    command.env("VOOM_MEDIA_CALLER_PID", "wrong inherited identity");
+    assert!(command_output(&mut command).unwrap().status.success());
+}

@@ -648,3 +648,7 @@ A consumer can therefore read stdout as: one readiness line, then exactly one
 terminating envelope. This contract is enforced end-to-end by
 `crates/voom-cli/tests/run_local_stdout_contract.rs` and specified in
 `docs/specs/run-local-stdout-contract.md`.
+
+For opt-in PCM16/24 in Matroska, build and configure the paired
+[container FFmpeg tools](../../containers/ffmpeg/README.md). The storage-owning
+worker runs the containers; source/staging roots stay on that owner.

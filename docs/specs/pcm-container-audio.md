@@ -83,6 +83,8 @@ Default-off output and other codecs keep upstream routing. With the option on,
 unknown/unrepresentable copied PCM tracks also retain upstream routing; this
 preserves unaffected tracks without inventing their layout. Known-layout copied
 PCM16/24 tracks may gain WAVEX headers, with their packet bytes/facts preserved.
+PCM invocations disable FFmpeg input layout guessing with `-guess_layout_max 0`,
+so copied unknown-layout tracks cannot acquire channel-count-derived WAVEX masks.
 Selected PCM outputs never use that exception: strict source/output validation
 must succeed. Tests include mixed selected and untouched unknown-layout PCM.
 
@@ -173,7 +175,9 @@ an arbitrary SSH service. Reject remote endpoints and conflicting steering.
 Linux Podman remains explicitly local. No Docker Desktop installation, machine
 creation, engine switching or root provisioning occurs automatically.
 
-Docker runs with the caller's numeric UID/GID. Podman uses --userns=keep-id;
+Docker runs with the caller's numeric UID/GID. Podman uses
+`--userns=keep-id:uid=65532,gid=65532` plus `--user 65532:65532` to map the server
+user to the fixed image identity;
 on macOS that preserves the VM/server user, not necessarily the Mac UID. Do not
 force the Mac UID into a rootless VM namespace. Verify actual host output UID/GID
 through a newly owned staging probe on each engine; fail if ownership differs
@@ -384,3 +388,23 @@ original native executable paths and leaves PCM requests failing closed.
 [Podman on macOS](https://podman.io/docs/installation),
 [Docker Desktop permissions](https://docs.docker.com/desktop/setup/install/mac-permission-requirements/),
 [GitHub runner limitations](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
+
+## Clarified preservation and build transport
+
+The operator explicitly selected “Preserve user metadata and packet timing” in
+[the #763 implementation decision](https://github.com/randomparity/voom-v2/issues/763#issuecomment-6483835774).
+Arbitrary user tags, all dispositions and copied packet bytes/pts/dts/duration
+remain exact. The generated Matroska DURATION tag is the sole metadata exception:
+FFmpeg regenerates it from rounded packet endpoints, even in stock copy-only
+operations. Tests exclude that generated field only for copied integer PCM and
+continue comparing every other tag plus the actual packet tuples.
+
+The same decision record authorizes an optional directory containing exactly the
+three pinned FFmpeg source/signature/key files when a build host cannot reach the
+official endpoint. The build script rejects missing, extra, symlinked or
+wrong-digest inputs before engine access; the unchanged digest, signature and
+fingerprint checks run again inside the builder before extraction. The single
+Dockerfile supports both online and prefetched transport. No arbitrary URL,
+version, signing-key or patch override is introduced, and downloads stay outside
+Git. Native architecture and final image provenance requirements are unchanged.

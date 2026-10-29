@@ -743,6 +743,12 @@ fn validate_audio_encoder_available(
 ) -> Result<(), TranscodeVideoError> {
     let encoder = crate::ffmpeg::audio_encoder(codec)?;
     if config.has_audio_encoder(encoder) {
+        if crate::ffmpeg::pcm_precision(codec).is_some() && !config.has_pcm_wavex() {
+            return Err(config_invalid(
+                "pcm_muxer",
+                "integer PCM requires the pcm_wavex Matroska capability; configure the paired project container launchers".to_owned(),
+            ));
+        }
         return Ok(());
     }
     Err(config_invalid(
@@ -1084,12 +1090,28 @@ fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), Tran
 fn validate_transcode_audio_contract(
     request: &TranscodeAudioRequest,
 ) -> Result<(), TranscodeAudioError> {
-    if request.audio.lossless.is_some()
-        && !matches!(request.audio.target_codec.as_str(), "flac" | "alac")
+    if let Some(bits) = crate::ffmpeg::pcm_precision(&request.audio.target_codec)
+        && request
+            .audio
+            .lossless
+            .as_ref()
+            .and_then(|settings| settings.bits_per_sample)
+            .is_some_and(|requested| requested != bits)
     {
         return Err(config_invalid(
             "request",
-            "lossless audio settings require the FLAC or ALAC target".to_owned(),
+            "PCM precision settings must match the canonical target codec".to_owned(),
+        ));
+    }
+    if request.audio.lossless.is_some()
+        && !matches!(
+            request.audio.target_codec.as_str(),
+            "flac" | "alac" | "pcm_s16le" | "pcm_s24le"
+        )
+    {
+        return Err(config_invalid(
+            "request",
+            "lossless audio settings require the FLAC, ALAC or integer PCM target".to_owned(),
         ));
     }
     if request.output.container != "mkv" {
@@ -1101,7 +1123,7 @@ fn validate_transcode_audio_contract(
     if !voom_worker_protocol::is_supported_transcode_audio_codec(&request.audio.target_codec) {
         return Err(config_invalid(
             "request",
-            "transcode_audio target codec must be aac, opus, eac3, ac3, flac, or alac".to_owned(),
+            "transcode_audio target codec must be aac, opus, eac3, ac3, flac, alac, pcm_s16le, or pcm_s24le".to_owned(),
         ));
     }
     if request.audio.profile != voom_worker_protocol::AUDIO_PROFILE_DEFAULT {

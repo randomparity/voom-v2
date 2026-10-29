@@ -923,6 +923,10 @@ fn supported_transcode_audio_codecs_include_lossless_targets() {
     assert!(is_supported_transcode_audio_codec("ac3"));
     assert!(is_supported_transcode_audio_codec("flac"));
     assert!(is_supported_transcode_audio_codec("alac"));
+    assert!(is_supported_transcode_audio_codec("pcm_s16le"));
+    assert!(is_supported_transcode_audio_codec("pcm_s24le"));
+    assert!(!is_supported_transcode_audio_codec("pcm"));
+    assert!(!is_supported_transcode_audio_codec("pcm_f32le"));
     assert!(!is_supported_transcode_audio_codec("mp3"));
     assert!(!is_supported_transcode_audio_codec(""));
 }

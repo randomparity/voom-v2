@@ -984,3 +984,17 @@ fn flac_and_alac_transcode_and_downmix_synthesis_compile() {
         assert!(compile_policy(&alac).is_ok(), "{alac}");
     }
 }
+
+#[test]
+fn canonical_integer_pcm_archival_and_explicit_downmix_compile() {
+    for codec in ["pcm_s16le", "pcm_s24le"] {
+        for source in [
+            format!("policy \"p\" {{ phase a {{ transcode audio to {codec} }} }}"),
+            format!(
+                "policy \"p\" {{ phase a {{ synthesize audio from channels >= 8 {{ codec {codec} channels 6 }} }} }}"
+            ),
+        ] {
+            assert!(compile_policy(&source).is_ok(), "{source}");
+        }
+    }
+}

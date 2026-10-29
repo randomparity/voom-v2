@@ -316,6 +316,7 @@ fn try_reap_version_child_after_termination_failure(
 }
 
 async fn command_output(command: &mut Command) -> io::Result<std::process::Output> {
+    command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let mut attempts_remaining = 3;
     loop {
         attempts_remaining -= 1;
@@ -329,6 +330,7 @@ async fn command_output(command: &mut Command) -> io::Result<std::process::Outpu
 }
 
 fn spawn_with_retry(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let mut attempts_remaining = 3;
     loop {
         attempts_remaining -= 1;

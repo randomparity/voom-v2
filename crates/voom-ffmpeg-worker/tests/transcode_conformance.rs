@@ -135,6 +135,7 @@ fn ffmpeg_config(preflight: &voom_ffmpeg_worker::FfmpegPreflight) -> FfmpegConfi
         preflight.ffmpeg_version.clone(),
         DEFAULT_PROCESS_TIMEOUT,
     )
+    .with_pcm_wavex(preflight.pcm_wavex)
 }
 
 async fn observed_facts(path: &Path) -> TranscodeVideoExpectedFacts {
@@ -1451,6 +1452,7 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
 }
 
 async fn flac_command(command: &mut tokio::process::Command) -> std::process::Output {
+    command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         command.kill_on_drop(true).output(),
@@ -1520,10 +1522,14 @@ async fn generate_flac_source(
                 "language=eng",
                 "-metadata:s:a:0",
                 "title=Main",
+                "-metadata:s:a:0",
+                "fixture_user_note=preserve custom metadata",
                 "-disposition:a:0",
                 "default+forced+comment+hearing_impaired+visual_impaired",
                 "-metadata:s:a:1",
                 "language=jpn",
+                "-metadata:s:a:1",
+                "fixture_user_note=preserve copied metadata",
                 "-disposition:a:1",
                 "0",
                 "-metadata",
@@ -1600,6 +1606,10 @@ fn assert_lossless_preservation(
     assert_eq!(target["codec_name"], codec);
     assert_eq!(target["tags"]["language"], "eng");
     assert_eq!(target["tags"]["title"], "Main");
+    assert_eq!(
+        target["tags"]["FIXTURE_USER_NOTE"],
+        "preserve custom metadata"
+    );
     assert_eq!(target["disposition"]["default"], u8::from(!synthesis));
     assert_eq!(target["disposition"]["forced"], 1);
     assert_eq!(target["disposition"]["comment"], 1);
@@ -1611,10 +1621,19 @@ fn assert_lossless_preservation(
     assert_eq!(streams.len(), if synthesis { 4 } else { 3 });
     for index in if synthesis { vec![0, 1, 2] } else { vec![0, 2] } {
         for field in ["codec_name", "tags", "disposition"] {
-            assert_eq!(
-                before["streams"][index][field], streams[index][field],
-                "copied stream {index} {field}"
-            );
+            let mut expected = before["streams"][index][field].clone();
+            let mut actual = streams[index][field].clone();
+            if field == "tags"
+                && matches!(
+                    before["streams"][index]["codec_name"].as_str(),
+                    Some("pcm_s16le" | "pcm_s24le")
+                )
+            {
+                // #763's explicit operator decision permits only regenerated mux DURATION.
+                expected.as_object_mut().unwrap().remove("DURATION");
+                actual.as_object_mut().unwrap().remove("DURATION");
+            }
+            assert_eq!(expected, actual, "copied stream {index} {field}");
         }
         let hashes: Vec<Vec<_>> = [before, after]
             .into_iter()
@@ -1624,7 +1643,9 @@ fn assert_lossless_preservation(
                     .unwrap()
                     .iter()
                     .filter(|packet| packet["stream_index"] == index)
-                    .map(|packet| &packet["data_hash"])
+                    .map(|packet| {
+                        ["data_hash", "pts", "dts", "duration"].map(|field| &packet[field])
+                    })
                     .collect()
             })
             .collect();
@@ -1643,13 +1664,16 @@ async fn lossless_real_worker_preserves_integer_samples_and_streams() {
 async fn verify_lossless_integer_samples(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
-    let layouts = if codec == "flac" {
-        &["mono", "stereo", "5.1", "5.1(side)", "7.1"][..]
-    } else {
+    let layouts = if codec == "alac" {
         &["mono", "stereo", "5.1"][..]
+    } else {
+        &["mono", "stereo", "5.1", "5.1(side)", "7.1"][..]
     };
     for layout in layouts.iter().copied() {
         for bits in [16, 24] {
+            if (codec == "pcm_s16le" && bits != 16) || (codec == "pcm_s24le" && bits != 24) {
+                continue;
+            }
             for rate in [44_100, 96_000] {
                 let dir = tempfile::tempdir().unwrap();
                 let input = dir.path().join("source.mkv");
@@ -1709,6 +1733,11 @@ async fn verify_lossless_downmix(codec: &str) {
     use voom_test_support::audio_samples::canonical_decoded_audio;
     let preflight = preflight_from_process_env().unwrap();
     for (layout, bits, target) in [("7.1", 24, 6), ("5.1(side)", 16, 2), ("stereo", 24, 1)] {
+        let bits = match codec {
+            "pcm_s16le" => 16,
+            "pcm_s24le" => 24,
+            _ => bits,
+        };
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("source.mkv");
         let output = dir.path().join("downmix.mkv");
@@ -1744,6 +1773,11 @@ async fn verify_lossless_downmix(codec: &str) {
                     "-bits_per_raw_sample",
                     &bits.to_string(),
                 ])
+                .args(if codec.starts_with("pcm_") {
+                    &["-pcm_wavex", "1"][..]
+                } else {
+                    &[]
+                })
                 .arg(&reference),
         )
         .await;
@@ -1778,6 +1812,7 @@ async fn verify_lossless_downmix(codec: &str) {
         let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
         let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
         assert_lossless_preservation(codec, &before, &after, true);
+        let config = ffmpeg_config(&preflight);
         for target in [0, 3, 8] {
             let mut invalid = lossless_request(
                 codec,
@@ -1787,11 +1822,7 @@ async fn verify_lossless_downmix(codec: &str) {
             )
             .await;
             invalid.audio.target_channels = Some(target);
-            assert!(
-                handle_transcode_audio(&invalid, &ffmpeg_config(&preflight))
-                    .await
-                    .is_err()
-            );
+            assert!(handle_transcode_audio(&invalid, &config).await.is_err());
             assert!(!Path::new(&invalid.output.path).exists());
         }
     }
@@ -1809,6 +1840,9 @@ async fn verify_lossless_wave(codec: &str) {
     let preflight = preflight_from_process_env().unwrap();
     let dir = tempfile::tempdir().unwrap();
     for bits in [16_u16, 24] {
+        if codec == "pcm_s16le" && bits == 24 {
+            continue;
+        }
         let input = dir.path().join(format!("source-{bits}.wav"));
         let output = dir.path().join(format!("flac-{bits}.mkv"));
         let limit = 1_i32 << (bits - 1);
@@ -1900,8 +1934,8 @@ async fn verify_lossless_selected_streams(codec: &str) {
     generate_flac_source(
         &preflight,
         &input,
-        if codec == "flac" { "7.1" } else { "5.1" },
-        24,
+        if codec == "alac" { "5.1" } else { "7.1" },
+        if codec == "pcm_s16le" { 16 } else { 24 },
         96_000,
     )
     .await;
@@ -1916,9 +1950,15 @@ async fn verify_lossless_selected_streams(codec: &str) {
         ["flac-selected", "flac-second"]
     );
     assert_eq!(result.selected_output_streams[0].sample_rate, Some(96_000));
-    assert_eq!(result.selected_output_streams[0].bits_per_sample, Some(24));
+    assert_eq!(
+        result.selected_output_streams[0].bits_per_sample,
+        Some(if codec == "pcm_s16le" { 16 } else { 24 })
+    );
     assert_eq!(result.selected_output_streams[1].sample_rate, Some(48_000));
-    assert_eq!(result.selected_output_streams[1].bits_per_sample, Some(16));
+    assert_eq!(
+        result.selected_output_streams[1].bits_per_sample,
+        Some(if codec == "pcm_s24le" { 24 } else { 16 })
+    );
     for index in [1, 2] {
         let source = canonical_decoded_audio(
             &preflight.ffmpeg_path,
@@ -1937,7 +1977,11 @@ async fn verify_lossless_selected_streams(codec: &str) {
         .await
         .unwrap();
         source.compare_samples(&actual).unwrap();
-        assert_eq!(source.facts, actual.facts);
+        let mut expected_facts = source.facts;
+        if codec == "pcm_s24le" {
+            expected_facts.bits_per_sample = 24;
+        }
+        assert_eq!(expected_facts, actual.facts);
     }
     assert_eq!(audio_expected(&input).await, request.input.expected);
 }
@@ -2052,4 +2096,84 @@ async fn alac_rejects_unsupported_archival_layouts_before_output() {
         assert!(!output.exists());
         assert_eq!(audio_expected(&input).await, request.input.expected);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires project PCM container; explicitly run by just container-worker-check"]
+async fn pcm_container_real_worker_archival_matrix() {
+    assert!(preflight_from_process_env().unwrap().pcm_wavex);
+    for codec in ["pcm_s16le", "pcm_s24le"] {
+        verify_lossless_integer_samples(codec).await;
+        verify_lossless_wave(codec).await;
+        verify_lossless_selected_streams(codec).await;
+        verify_lossless_accessibility(codec).await;
+    }
+    verify_lossless_widening("pcm_s24le").await;
+}
+
+#[tokio::test]
+#[ignore = "requires project PCM container; explicitly run by just container-worker-check"]
+async fn pcm_container_real_worker_explicit_downmix() {
+    assert!(preflight_from_process_env().unwrap().pcm_wavex);
+    for codec in ["pcm_s16le", "pcm_s24le"] {
+        verify_lossless_downmix(codec).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires project PCM container; explicitly run by just container-worker-check"]
+async fn pcm_container_rejects_reduction_and_conflicting_precision_before_output() {
+    let preflight = preflight_from_process_env().unwrap();
+    assert!(preflight.pcm_wavex);
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.mkv");
+    generate_flac_source(&preflight, &input, "5.1(side)", 24, 48_000).await;
+    for (codec, precision) in [
+        ("pcm_s16le", None),
+        ("pcm_s16le", Some(24)),
+        ("pcm_s24le", Some(16)),
+    ] {
+        let output = dir.path().join("rejected.mkv");
+        let mut request = lossless_request(codec, &input, &output, None).await;
+        request.audio.lossless = Some(voom_worker_protocol::LosslessAudioSettings {
+            bits_per_sample: precision,
+        });
+        let error = handle_transcode_audio(&request, &ffmpeg_config(&preflight))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("precision"), "{error}");
+        assert!(!output.exists());
+        assert_eq!(audio_expected(&input).await, request.input.expected);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires project PCM container; explicitly run by just container-worker-check"]
+async fn pcm_container_preserves_untouched_unknown_layout_stream() {
+    let preflight = preflight_from_process_env().unwrap();
+    assert!(preflight.pcm_wavex);
+    let dir = tempfile::tempdir().unwrap();
+    let generated = dir.path().join("generated.mkv");
+    let input = dir.path().join("mixed.mkv");
+    let output = dir.path().join("encoded.mkv");
+    generate_flac_source(&preflight, &generated, "stereo", 24, 48_000).await;
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-v", "error", "-i"])
+            .arg(&generated)
+            .args(["-map", "0", "-c", "copy", "-c:a:1", "pcm_s16le"])
+            .arg(&input),
+    )
+    .await;
+    let before = flac_physical_probe(&preflight.ffprobe_path, &input).await;
+    assert!(before["streams"][2]["channel_layout"].is_null());
+    let request = lossless_request("pcm_s24le", &input, &output, None).await;
+    synthesize_through_worker(&request).await;
+    let after = flac_physical_probe(&preflight.ffprobe_path, &output).await;
+    assert!(
+        after["streams"][2]["channel_layout"].is_null(),
+        "untouched unknown layout cannot become a guessed fact"
+    );
+    assert_lossless_preservation("pcm_s24le", &before, &after, false);
+    assert_eq!(audio_expected(&input).await, request.input.expected);
 }
