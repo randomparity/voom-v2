@@ -1,0 +1,532 @@
+{
+  "build": {
+    "git_changed_paths": [
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-local-corpus-evicted.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-network-corpus-as-found.json",
+      "docs/media-evidence-baseline/fingerprint/2026-10-29-fingerprint-oracle.json",
+      "scripts/media-evidence-fingerprint-selftest.py",
+      "scripts/media-evidence-fingerprint.py"
+    ],
+    "git_commit": "205e6292b479ad58017ca694c41bc887756ca25d",
+    "helper_sha256": "07f3550d0c87650baa8d576c2ae581ecee485b695de92f9c2a03018813d08bc6",
+    "script_sha256": "e7a564464195c0bc26746f1499543adf5d9d5e5fa3e29f4ebb703ed80faa0eb1"
+  },
+  "cases": [
+    {
+      "candidate": "meta",
+      "case": "O1",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O1",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O1",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O1",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O1",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O2",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O2",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O2",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O2",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O2",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O3",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O3",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O3",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O3",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O3",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O4",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O4",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O4",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O4",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O4",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O5",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O5",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O5",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O5",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O5",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "meta",
+      "case": "O6",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O6",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O6",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O6",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O6",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O7",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O7",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O7",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O7",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O7",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O8",
+      "outcome": "equal",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O8",
+      "outcome": "equal",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O8",
+      "outcome": "equal",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O8",
+      "outcome": "equal",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O8",
+      "outcome": "equal",
+      "reason": null,
+      "reference": "unchanged"
+    },
+    {
+      "candidate": "meta",
+      "case": "O9",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O9",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O9",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O9",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O9",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O10",
+      "outcome": "not-applicable",
+      "reason": null,
+      "reference": "not-applicable"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O10",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O10",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O10",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O10",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O11",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O11",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O11",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O11",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O11",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O12",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O12",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O12",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O12",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O12",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "meta",
+      "case": "O13",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64",
+      "case": "O13",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht1m",
+      "case": "O13",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i8",
+      "case": "O13",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    },
+    {
+      "candidate": "ht64-i32",
+      "case": "O13",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed"
+    }
+  ],
+  "constructions": {
+    "O1": "large fixture; same-size edit at the first unread byte past 1 MiB; mtime restored",
+    "O10": "a byte already read is changed and mtime set 1 s later between two reads",
+    "O11": "fingerprint, then an interior edit with mtime set 1 s later, then re-fingerprint before use",
+    "O12": "4 KiB sidecar beside an unchanged primary; sidecar edit at the first unread byte; mtime restored",
+    "O13": "fingerprint-keyed cache of the reference; interior edit with mtime restored; lookup after the change",
+    "O2": "large fixture; same-size edit at the first unread byte of the first 64 KiB; mtime restored",
+    "O3": "large fixture; same-size edit at the first unread byte of the last 64 KiB; mtime restored",
+    "O4": "100 KiB fixture; same-size edit at the first unread byte; mtime restored",
+    "O5": "empty fixture; one byte appended and truncated; mtime set 1 s later",
+    "O6": "96 KiB fixture; edit at 48 KiB, inside the head/tail and sample overlap; mtime restored",
+    "O7": "large fixture; edit at the first unread interior byte; mtime moves +100 ns to +900 ns within one 2 s bucket",
+    "O8": "large fixture renamed within its directory; bytes unchanged",
+    "O9": "replacement written under a temporary name with an interior edit and the same size and mtime, renamed over the still-open original"
+  },
+  "excluded_cases": {
+    "O14": "#797 lazy hash lifecycle",
+    "O15": "#797 lazy hash lifecycle"
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "parameters": {
+    "candidates": {
+      "ht1m": {
+        "edge_bytes": 1048576,
+        "interior_samples": 0,
+        "sample_bytes": 0
+      },
+      "ht64": {
+        "edge_bytes": 65536,
+        "interior_samples": 0,
+        "sample_bytes": 0
+      },
+      "ht64-i32": {
+        "edge_bytes": 65536,
+        "interior_samples": 32,
+        "sample_bytes": 65536
+      },
+      "ht64-i8": {
+        "edge_bytes": 65536,
+        "interior_samples": 8,
+        "sample_bytes": 65536
+      },
+      "meta": {
+        "edge_bytes": 0,
+        "interior_samples": 0,
+        "sample_bytes": 0
+      }
+    },
+    "large_fixture_bytes": 8388608,
+    "overlap_fixture_bytes": 98304,
+    "scratch_filesystem_type": "tmpfs",
+    "short_fixture_bytes": 102400,
+    "sidecar_bytes": 4096
+  },
+  "schema": "media-evidence-fingerprint-oracle/1"
+}
