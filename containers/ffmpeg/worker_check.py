@@ -47,7 +47,8 @@ def main():
                 "pcm_container_real_worker_archival_matrix",
                 "pcm_container_real_worker_explicit_downmix",
                 "pcm_container_rejects_reduction_and_conflicting_precision_before_output",
-                "pcm_container_preserves_untouched_unknown_layout_stream"}),
+                "pcm_container_preserves_untouched_unknown_layout_stream",
+                "pcm_container_copied_audio_timing"}),
             ("voom-node-agent", "container_audio", "installed_container_tools_", {
                 "installed_container_tools_cross_owner_child_environment"})]
         commands = []

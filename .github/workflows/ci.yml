@@ -136,7 +136,7 @@ jobs:
       - name: Install fixture inspector
         run: |
           sudo apt-get update
-          sudo apt-get install -y mkvtoolnix
+          sudo apt-get install -y ffmpeg mkvtoolnix
       - name: Build pinned native image
         run: |
           image=$(just container-build docker)
@@ -147,3 +147,5 @@ jobs:
         run: just container-runtime-check docker "$PCM_IMAGE"
       - name: Exercise required PCM worker cases
         run: just container-worker-check docker "$PCM_IMAGE"
+      - name: Verify copied packet publication and native rejection
+        run: just copied-audio-check docker "$PCM_IMAGE"

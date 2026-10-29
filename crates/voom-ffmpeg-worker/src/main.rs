@@ -215,7 +215,8 @@ fn ffmpeg_config_from_preflight(
     )
     .with_available_video_encoders(available_video_encoders)
     .with_available_audio_encoders(available_audio_encoders)
-    .with_pcm_wavex(preflight.pcm_wavex);
+    .with_pcm_wavex(preflight.pcm_wavex)
+    .with_audio_duration(preflight.audio_duration);
     match binding {
         Some(AcceleratorBinding::Nvidia(nvidia)) => config.with_accelerator(nvidia),
         Some(AcceleratorBinding::Vaapi(vaapi)) => config.with_vaapi_device(vaapi),

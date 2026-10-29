@@ -351,3 +351,8 @@ container-runtime-check ENGINE IMAGE:
 # Required PCM media arm; absence of engine/image/capability is a failure.
 container-worker-check ENGINE IMAGE:
     python3 containers/ffmpeg/worker_check.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}}
+
+# Required authenticated copied-packet preservation and native rejection proof.
+copied-audio-check ENGINE IMAGE DESKTOP='':
+    cargo build --workspace --all-features --bins
+    python3 scripts/issue-786-copied-audio-regression.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}} --desktop {{quote(DESKTOP)}}

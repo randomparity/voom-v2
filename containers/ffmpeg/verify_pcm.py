@@ -119,7 +119,8 @@ def check_packet_timing(tools, directory):
     tools.run("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000",
                          "-t", "0.1", "-c:a", "flac", str(source)], directory=directory)
     packets = []
-    for name, options in (("source", None), ("native", []), ("preserved", ["-pcm_wavex", "1"])):
+    for name, options in (("source", None), ("native", []), ("preserved", ["-pcm_wavex", "1"]),
+                          ("duration-only", ["-preserve_audio_duration", "1"])):
         path = source if options is None else directory / ("timing-" + name + ".mkv")
         if options is not None:
             tools.run("ffmpeg", ["-v", "error", "-i", str(source), "-c", "copy"] +
@@ -130,7 +131,8 @@ def check_packet_timing(tools, directory):
         packets.append([[packet.get(key) for key in ("data_hash", "pts", "dts", "duration")]
                         for packet in observed])
     assert packets[0][-1][-1] == 15 and packets[1][-1][-1] == 14, "native timing control changed"
-    assert packets[0] == packets[2], "opt-in mux lost copied audio packet timing"
+    assert packets[0] == packets[2], "opt-in PCM mux lost copied audio packet timing"
+    assert packets[0] == packets[3], "duration-only mux lost copied audio packet timing"
 
 
 def check_profile(tools, directory):

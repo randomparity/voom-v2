@@ -1,9 +1,11 @@
 """Contract tests for the opt-in container boundary; no engine is required."""
+import importlib.util
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import runtime
@@ -89,6 +91,42 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(runtime.SetupError):
                     runtime.check_config(config, witnesses)
                 run.assert_not_called()
+
+
+    def test_copied_audio_proof_passes_platform_configuration_to_installer(self):
+        repository = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location(
+            "copied_audio_regression", repository / "scripts/issue-786-copied-audio-regression.py")
+        proof = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(proof)
+
+        class InstallationObserved(Exception):
+            pass
+
+        for engine, system, desktop in [("docker", "Linux", ""),
+                                        ("docker", "Darwin", "desktop-linux"),
+                                        ("podman", "Darwin", "owned-machine")]:
+            with self.subTest(engine=engine, system=system):
+                root = self.root / f"proof-{engine}-{system}"
+                root.mkdir()
+                args = SimpleNamespace(engine=engine, image="sha256:" + "1" * 64,
+                                       desktop=desktop, bin_dir=root / "unused")
+
+                def external_command(arguments, cwd=None):
+                    if Path(arguments[1]).name == "install.py":
+                        config = runtime.parse_config((root / "container.json").read_bytes(),
+                                                      system=system, cwd=str(root / "staging"))
+                        self.assertEqual(config.desktop, desktop)
+                        raise InstallationObserved
+                    destination = (arguments[arguments.index("-o") + 1]
+                                   if arguments[0] == "mkvmerge" else arguments[-1])
+                    Path(destination).write_bytes(b"generated media fixture")
+                    return b""
+
+                with patch.object(proof.shutil, "which", return_value="/native/tool"), \
+                        patch.object(proof, "run", side_effect=external_command), \
+                        self.assertRaises(InstallationObserved):
+                    proof.regression(args, root)
 
 
 class EngineTests(unittest.TestCase):
