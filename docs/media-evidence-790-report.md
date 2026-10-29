@@ -30,13 +30,17 @@ shared with an active rehearsal.
    0–76 MB per local pass, against 2,805.9 GB.
 3. **Change time closes the O1 construction only on local storage.** On tmpfs and btrfs,
    `meta-ctime` detected every mtime-restored edit (O1, O13), because the `utime()` that
-   restores mtime moves ctime and an unprivileged writer cannot set ctime. On the network
-   mount the reported ctime follows the mtime, so the same edit is missed there.
+   restores mtime moves ctime and an unprivileged writer cannot set ctime. This was measured
+   on a kernel with fine-grained ctime; where ctime comes from a coarse clock, an edit in the
+   same tick as the previous change can leave it unchanged. On the network mount the
+   reported ctime follows the mtime, so the same edit is missed there.
 4. **Seeded-random sampling detects an interior edit with probability equal to the fraction
    sampled.** At corpus scale that is under 0.04% per check. Its benefit is that an editor
    without the seed cannot aim at unread bytes, not detection power.
-5. **Silent corruption is undetectable by every candidate except a full read.** Only periodic
-   full verification (a scrub) catches it.
+5. **No candidate cheaper than a full read reliably detects silent corruption.** Metadata
+   candidates never do; sampling candidates only when the damage falls in sampled bytes
+   (fixed positions for `ht*`, probability f per check for `rnd64`). Only periodic full
+   verification (a scrub) reliably catches it.
 
 ## Candidates and cost
 
@@ -109,8 +113,11 @@ apart all 34 local and all 3 network files on size and sampled bytes. In #797 ev
 verified in every repetition. No file changed during any run, so no mutation-detection rate
 was observed, and a clean finite corpus is no general guarantee.
 
-The detection probability of random sampling was measured on synthetic fixtures, 1000 trials
-per cell, and matched the sampled fraction f = k/M within 3 standard errors (for example
+## Random-sampling detection (synthetic fixtures, seed hidden)
+
+This is neither a constructed miss nor a corpus-observed rate under the protocol: it is
+constructed edits on synthetic fixtures, checked under a seed drawn after the edit. The
+detection probability was measured over 1000 trials per cell and matched the sampled fraction f = k/M within 3 standard errors (for example
 0.273 observed against f = 0.254 for `rnd64-i32` on 8 MiB). n checks with fresh seeds detect
 one edited block with probability 1 − (1 − f)^n. At the median local file, f = 7.0 × 10⁻⁵ for
 `rnd64-i32`, so a 50% chance takes about 9,900 checks.
@@ -119,8 +126,8 @@ one edited block with probability 1 − (1 − f)^n. At the median local file, f
 
 | Candidate | Saving | Deployment assumption | Threat assumption |
 |---|---|---|---|
-| R1. The probe reuses the owner hash and compares metadata before and after ffprobe, instead of re-hashing twice | Local: 2,805.9 → 935.3 GB logical per pass (−66.7%); #788's probe workers fetched about 1.83 TB per pass. Network: 74.0 → 24.7 GB logical; the wire saving was not observed (cache) | The probe runs on the storage-owner node (ADR 0050), against the same file the owner hashed, shortly afterwards | A change in the gap is ordinary (moves mtime) or local-adversarial (moves ctime). On the network mount an mtime-restored edit in the gap is missed. Today's probe re-hash catches any change in the gap |
-| R2. A repeat scan reuses cached full evidence keyed by file key, size, mtime ns and ctime ns | A repeat scan of unchanged files costs a stat instead of three full reads (0 logical bytes and about 1–3 ms for 34 files) | Cache keyed per storage node; a key mismatch, including a false change (rename, `chmod`, append-then-truncate), costs one full re-hash | Detects ordinary and local unprivileged edits. Misses the O13 construction on the network mount and any silent corruption, indefinitely |
+| R1. The probe reuses the owner hash and compares metadata before and after ffprobe, instead of re-hashing twice | Local: 2,805.9 → 935.3 GB logical per pass (−66.7%); #788's probe workers fetched about 1.83 TB per pass. Network: 74.0 → 24.7 GB logical; the wire saving was not observed (cache) | The probe runs on the storage-owner node (ADR 0050), against the same file the owner hashed, shortly afterwards; ctime is fine-grained, or the gap spans a clock tick | A change in the gap is ordinary (moves mtime) or local-adversarial (moves ctime). On the network mount an mtime-restored edit in the gap is missed. Today's probe re-hash catches any change in the gap |
+| R2. A repeat scan reuses cached full evidence keyed by file key, size, mtime ns and ctime ns | A repeat scan of unchanged files costs a stat instead of three full reads (0 logical bytes and about 1–3 ms for 34 files) | Cache keyed per storage node; ctime fine-grained or coarse-tick misses accepted; a key mismatch, including a false change (rename, `chmod`, append-then-truncate), costs one full re-hash | Detects ordinary and local unprivileged edits. Misses the O13 construction on the network mount and any silent corruption, indefinitely |
 | R3. Transform workers reuse verified input evidence instead of hashing the input before and after the operation | Two full input reads per transform; not measured (#788 does not replay transforms) | Transform and observation on the same node | As R1 for the operation's window |
 
 Each reuse candidate trades a full re-read for a metadata guard, so its detection is exactly
@@ -150,7 +157,7 @@ reopen that only where storage semantics justify it.
 | Adversarial edit, network storage | the same edit through the share | missed by every metadata and sampling candidate; whether a client-sent ChangeTime is honoured was not measured |
 | Adversarial edit with seed knowledge | an editor who knows the sampling seed | missed by `rnd64` |
 | Privileged forgery | root sets the clock or writes the block device | missed by every candidate except a full read |
-| **Silent corruption** | media or controller damage with same size, mtime and ctime unchanged | **missed by every metadata and sampling candidate; caught only by a full read** |
+| **Silent corruption** | media or controller damage with same size, mtime and ctime unchanged | **missed by every metadata candidate; caught by sampling only in sampled bytes; reliably caught only by a full read** |
 
 Silent corruption is the residual class no cheaper-than-full-read candidate detects. Random
 sampling catches it only at the rate f per check, and the full hash today catches it only when
