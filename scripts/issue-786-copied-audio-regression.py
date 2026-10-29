@@ -165,9 +165,12 @@ def regression(args, root):
     sources = {(codec, synthesis): generate(root, codec, synthesis, video, short)
                for codec in CODECS for synthesis in (False, True)}
     config = root / "container.json"
-    config.write_text(json.dumps({"engine": args.engine, "image": args.image,
-                                 "read_only_roots": [str(root / "input")],
-                                 "read_write_roots": [str(stage), str(output)]}))
+    configuration = {"engine": args.engine, "image": args.image,
+                     "read_only_roots": [str(root / "input")],
+                     "read_write_roots": [str(stage), str(output)]}
+    if args.desktop:
+        configuration["desktop"] = args.desktop
+    config.write_text(json.dumps(configuration))
     tools = json.loads(run([sys.executable, REPO / "containers/ffmpeg/install.py", "--config", config,
                            "--destination", root / "installed", "--source-witness", sources[("aac", False)]], stage))
     spec = importlib.util.spec_from_file_location("bootstrap", REPO / "scripts/acceptance-bootstrap.py")
@@ -209,6 +212,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=("docker", "podman"), required=True)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--desktop", help="existing macOS Docker context or Podman machine")
     parser.add_argument("--workdir", type=Path)
     parser.add_argument("--bin-dir", type=Path,
                         default=Path(os.environ.get("CARGO_TARGET_DIR", REPO / "target")) / "debug")

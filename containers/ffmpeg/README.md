@@ -258,13 +258,18 @@ copied packet payloads and observed timing before returning a publishable result
 a native build that changes those observations fails with an actionable preservation
 error. Such failure can leave existing owned staging data, but cannot publish it.
 Operations with copied audio perform additional streaming packet reads; operations
-without copied audio avoid those scans. Build the current project image and install its paired launchers in a fresh private
+without copied audio avoid those scans. Build the current project image and install
+its paired launchers in a fresh private
 destination to preserve the rounded Matroska durations that stock muxing can discard.
 An existing installation retains its immutable older image until the operator selects
 a newly built installation; no automatic replacement occurs.
 
 `just container-worker-check ENGINE IMAGE` includes the six-target, ordinary and
-synthesis timing regression alongside strict PCM checks. `just copied-audio-check
-ENGINE IMAGE` exercises the authenticated CLI, inspects twelve committed outputs,
+synthesis timing regression alongside strict PCM checks.
+`just copied-audio-check ENGINE IMAGE [DESKTOP]` exercises the authenticated CLI,
+inspects twelve committed outputs,
 and proves native unsafe-output rejection before publication. It also requires the
 native FFmpeg/FFprobe and MKVToolNix fixture tools already used by media CI.
+On macOS, pass the existing Docker context or Podman machine as `DESKTOP`, for
+example `just copied-audio-check docker IMAGE desktop-linux`. The proof passes
+that explicit selector through the existing installer configuration.
