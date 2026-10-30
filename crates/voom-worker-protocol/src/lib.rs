@@ -53,8 +53,8 @@ pub use operations::dispatch::{
 };
 pub use operations::hash_file::{HashFileRequest, HashFileResult, HashedSidecar};
 pub use operations::probe_file::{
-    ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
-    ProbeGuard,
+    ExpectedFileFacts, MAX_PROBE_SNAPSHOT_BYTES, ObservedFileFacts, ProbeFileRequest,
+    ProbeFileResult, ProbeFileStatus, ProbeGuard,
 };
 pub use operations::publication::{
     CommitGroupCompleteOutcome, CommitGroupIdentity, CommitGroupMemberProof, CommitGroupProof,
@@ -114,4 +114,4 @@ pub use wire::identity::{
     WorkerIdentityRequest, WorkerIdentityResponse, generate_identity_challenge, identity_response,
     verify_identity_response,
 };
-pub use wire::ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
+pub use wire::ndjson::{MAX_FRAME_BYTES, NdjsonOutcome, NdjsonReader, NdjsonWriter};

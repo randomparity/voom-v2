@@ -137,3 +137,78 @@ fn guard_rejects_unknown_fields() {
     .unwrap_err();
     assert!(err.to_string().contains("unknown field"), "{err}");
 }
+
+const WORST_TIMESTAMP: &str = "2026-10-30T23:59:59.999999999Z";
+
+fn snapshot_at_bound() -> serde_json::Value {
+    let empty = serde_json::to_vec(&serde_json::json!({"pad": ""}))
+        .unwrap()
+        .len();
+    let snapshot = serde_json::json!({"pad": "x".repeat(MAX_PROBE_SNAPSHOT_BYTES - empty)});
+    assert_eq!(
+        serde_json::to_vec(&snapshot).unwrap().len(),
+        MAX_PROBE_SNAPSHOT_BYTES
+    );
+    snapshot
+}
+
+fn worst_facts() -> ObservedFileFacts {
+    // The ffprobe worker never sets `local_file_key`.
+    ObservedFileFacts {
+        size_bytes: u64::MAX,
+        content_hash: format!("blake3:{}", "f".repeat(64)),
+        modified_at: Some(WORST_TIMESTAMP.to_owned()),
+        local_file_key: None,
+    }
+}
+
+/// ADR 0122: a probe result whose snapshot sits at the producer bound still
+/// fits one NDJSON frame, so no conforming probe can fail its reader.
+#[test]
+fn result_frame_with_snapshot_at_bound_fits_one_frame() {
+    let result = ProbeFileResult {
+        status: ProbeFileStatus::Probed,
+        provider: "ffprobe".to_owned(),
+        provider_version: "v".repeat(64),
+        pre_probe: worst_facts(),
+        post_probe: worst_facts(),
+        snapshot: snapshot_at_bound(),
+        hash_source: Some(HashSource::Reused),
+    };
+    let frame = crate::ProgressFrame::Result {
+        lease_id: voom_core::LeaseId(u64::MAX),
+        seq: u64::MAX,
+        emitted_at: time::OffsetDateTime::parse(
+            WORST_TIMESTAMP,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap(),
+        payload: serde_json::to_value(&result).unwrap(),
+    };
+    let bytes = serde_json::to_vec(&frame).unwrap().len();
+    assert!(
+        bytes <= crate::MAX_FRAME_BYTES,
+        "{bytes} > {}",
+        crate::MAX_FRAME_BYTES
+    );
+}
+
+/// ADR 0122: the same snapshot as scan evidence stays within the ADR 0077
+/// per-observation budget, so the scan pump keeps its identity evidence.
+#[test]
+fn scan_evidence_with_snapshot_at_bound_fits_the_evidence_budget() {
+    let evidence = voom_core::ScanObservationEvidence {
+        content_hash: format!("blake3:{}", "f".repeat(64)),
+        size_bytes: u64::MAX,
+        modified_at: WORST_TIMESTAMP.to_owned(),
+        file_key: Some(voom_core::FileKeyFacts {
+            dev: u64::MAX,
+            ino: u64::MAX,
+            nlink: u64::MAX,
+        }),
+        sidecars: Vec::new(),
+        probe_snapshot: snapshot_at_bound(),
+        hash_source: Some(HashSource::Reused),
+    };
+    assert!(evidence.validate().is_ok(), "{:?}", evidence.validate());
+}

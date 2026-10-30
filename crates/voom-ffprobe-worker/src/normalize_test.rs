@@ -1,3 +1,7 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "tests use direct assertions and bounded fixture setup"
+)]
 use super::*;
 
 fn compatibility_tag_probe(tags: &Value) -> Result<Value, WorkerError> {
@@ -552,4 +556,75 @@ fn normalizes_audio_sample_evidence_without_guessing() {
     let mut malformed = raw;
     malformed["streams"][0]["bits_per_sample"] = serde_json::json!(40);
     assert!(normalize_ffprobe_json(malformed, "8", "now").is_err());
+}
+
+fn padded_probe(pad: usize) -> Value {
+    serde_json::json!({"format": {"format_name": "matroska,webm", "x_pad": "p".repeat(pad)}})
+}
+
+fn snapshot_len(snapshot: &Value) -> usize {
+    serde_json::to_vec(snapshot).unwrap().len()
+}
+
+/// The pad length that makes the full snapshot exactly `MAX_PROBE_SNAPSHOT_BYTES`.
+fn exact_pad() -> usize {
+    let base = normalize_ffprobe_json(padded_probe(0), "8.1.3", "2026-10-30T00:00:00Z").unwrap();
+    voom_worker_protocol::MAX_PROBE_SNAPSHOT_BYTES - snapshot_len(&base)
+}
+
+/// ADR 0122: raw provider JSON is kept whenever the whole snapshot fits the bound.
+#[test]
+fn raw_kept_at_exact_bound() {
+    let raw = padded_probe(exact_pad());
+    let snapshot = normalize_ffprobe_json(raw.clone(), "8.1.3", "2026-10-30T00:00:00Z").unwrap();
+    assert_eq!(
+        snapshot_len(&snapshot),
+        voom_worker_protocol::MAX_PROBE_SNAPSHOT_BYTES
+    );
+    assert_eq!(snapshot["raw"]["ffprobe_json"], raw);
+}
+
+/// ADR 0122: one byte over the bound, raw is replaced by its size marker.
+#[test]
+fn raw_omitted_one_byte_over_bound() {
+    let raw = padded_probe(exact_pad() + 1);
+    let raw_len = snapshot_len(&raw);
+    let snapshot = normalize_ffprobe_json(raw, "8.1.3", "2026-10-30T00:00:00Z").unwrap();
+    assert_eq!(
+        snapshot["raw"],
+        serde_json::json!({"ffprobe_json_omitted_bytes": raw_len})
+    );
+    assert_eq!(snapshot["container"]["format_name"], "matroska,webm");
+}
+
+/// #816: a densely subtitled file keeps every normalized stream fact, so its
+/// scan still publishes identity evidence.
+#[test]
+fn dense_streams_keep_normalized_facts_without_raw() {
+    let streams: Vec<Value> = (0..64)
+        .map(|index| {
+            serde_json::json!({"index": index, "codec_type": "subtitle",
+                "codec_name": "subrip", "tags": {"language": "eng", "title": format!("t{index}"),
+                "_STATISTICS_WRITING_APP": "w".repeat(1200)}})
+        })
+        .collect();
+    let raw = serde_json::json!({"format": {"format_name": "matroska,webm"}, "streams": streams});
+    let snapshot = normalize_ffprobe_json(raw, "8.1.3", "2026-10-30T00:00:00Z").unwrap();
+    assert!(snapshot_len(&snapshot) <= voom_worker_protocol::MAX_PROBE_SNAPSHOT_BYTES);
+    assert!(snapshot["raw"].get("ffprobe_json").is_none());
+    let normalized = snapshot["streams"].as_array().unwrap();
+    assert_eq!(normalized.len(), 64);
+    assert_eq!(normalized[63]["title"], "t63");
+    assert_eq!(normalized[63]["language"], "eng");
+}
+
+/// ADR 0122: normalized facts are never truncated; a snapshot that cannot fit
+/// is refused as a permanent per-file failure.
+#[test]
+fn oversized_normalized_snapshot_is_malformed_media() {
+    let title = "t".repeat(voom_worker_protocol::MAX_PROBE_SNAPSHOT_BYTES);
+    let raw = serde_json::json!({"streams": [{"index": 0, "codec_type": "subtitle",
+        "tags": {"title": title}}]});
+    let error = normalize_ffprobe_json(raw, "8.1.3", "2026-10-30T00:00:00Z").unwrap_err();
+    assert_eq!(error.failure_class(), FailureClass::MalformedMedia);
 }

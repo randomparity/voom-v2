@@ -114,3 +114,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0118](0118-automatic-lease-recovery-and-scan-terminality.md) | Automatic lease recovery and scan terminality |
 | [0119](0119-container-pcm-muxing.md) | Preserve PCM layout with an opt-in FFmpeg container |
 | [0120](0120-phase-specific-media-evidence.md) | Phase-specific media identity evidence |
+| [0122](0122-bounded-probe-snapshot.md) | Bound the probe snapshot below the worker frame cap |
