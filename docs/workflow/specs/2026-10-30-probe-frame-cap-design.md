@@ -36,7 +36,7 @@ a 64,143-byte frame today) also crosses the new 60 KiB bound and loses `raw`.
   JSON. It is exported from `lib.rs`.
 - The 4 KiB of headroom covers the frame envelope and facts, and the evidence fields, with
   room for sidecars. Two tests in `probe_file_test.rs` pin it with worst-case values:
-  `u64::MAX` sizes and seq, full nanosecond RFC 3339 timestamps, a 64-character provider
+  `u64::MAX` sizes and seq, nanosecond RFC 3339 timestamps (a fixed one for `emitted_at`), a 64-character provider
   version, a full `FileKeyFacts`, `hash_source: reused`, and a snapshot of exactly
   `MAX_PROBE_SNAPSHOT_BYTES`.
   1. The serialized `ProgressFrame::Result` is ≤ `MAX_FRAME_BYTES`.
@@ -74,6 +74,11 @@ There is no code change. `classify_single_file_error` already maps
   `voom-mkvtoolnix-worker::identify_json` reduce it to per-stream facts.
 - `OwnerObservedOutput` (`publication.rs`) copies the bounded snapshot into an HTTP body that
   the API's ~1 MiB cap governs, not the frame cap.
+- Readers of the `raw` shape are CLI test support only (`observed_state.rs`,
+  `structural_matrix.rs`). They see an oversized file as missing raw evidence (ADR 0122).
+- The scan pump drops its private `MAX_EVIDENCE_BYTES` and `MAX_SIDECAR_ENTRIES` copies for
+  `voom_core::{MAX_EVIDENCE_BYTES, MAX_EVIDENCE_SIDECARS}`, so the evidence pin covers the
+  value it enforces.
 
 ## Failure model
 
@@ -89,9 +94,10 @@ There is no code change. `classify_single_file_error` already maps
      degrade to evidence-less, as it does today (ADR 0077).
    - `provider_version` length comes from the operator-installed ffprobe binary, which is
      trusted, and is not bounded here.
-4. **Covered elsewhere:** content-driven normalizer errors that remain
-   `MalformedWorkerResult` (for example, conflicting compatibility tags) still fail the
-   session. This is a follow-up candidate, outside #816's frame-cap scope.
+   - Content-driven normalizer errors that remain `MalformedWorkerResult` (for example,
+     conflicting compatibility tags) still fail the session. They are outside #816's
+     frame-cap charter and are reported as a follow-up candidate.
+4. **Covered elsewhere:** none.
 
 ### Threat model
 

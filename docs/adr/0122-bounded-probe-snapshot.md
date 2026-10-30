@@ -45,9 +45,12 @@ Policy and planning read only the normalized fields. The Sprint 10 design keeps
 - `MalformedMedia` here means "beyond the size VOOM accepts", not "corrupt bytes". The
   message names the byte count and the bound.
 - Changing the bound means editing one constant. Its pinning tests fail if the change would
-  break the frame cap or the evidence budget.
-- Operators lose `raw.ffprobe_json` only for oversized files, and the marker records how
-  large it was.
+  break the frame cap or `voom_core::MAX_EVIDENCE_BYTES`, which the scan pump now uses in
+  place of its private copy.
+- `raw.ffprobe_json` is lost only for oversized files, and the marker records how large it
+  was. Container tags (title, year) appear only in raw, so these files do not persist them.
+  The CLI test-support readers of raw (`tests/support/observed_state.rs`,
+  `tests/support/structural_matrix.rs`) report such a file as missing raw evidence.
 
 ## Considered & rejected
 
@@ -62,4 +65,9 @@ Policy and planning read only the normalized fields. The Sprint 10 design keeps
   goes beyond the defect.
 - **Trim `raw` piecewise (drop stream tags first).** judgment: a partial raw copy is no longer
   provider output, and diagnostics would show a shape ffprobe never produced.
+- **Have the frame writer refuse an over-cap frame.** judgment: `NdjsonWriter::emit`
+  (`wire/ndjson.rs`) returning an error leaves the stream with no terminal frame, and the pump
+  still reads that as a worker crash. Every worker would need a size-aware error path, which
+  this defect does not justify, because no other operation result embeds tool JSON (spec,
+  Sibling sweep).
 - **Do nothing.** verified: #816's G3 run, where every whole-root scan of the corpus fails.

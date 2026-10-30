@@ -32,7 +32,7 @@ Expected implementation size: 220–320 changed lines (M) — file map: ~60 prod
 | `crates/voom-ffprobe-worker/src/normalize.rs` (+`_test.rs`) | `MalformedMedia` variant, `bound_snapshot`, unit tests |
 | `crates/voom-ffprobe-worker/src/handler.rs` | one `From` arm |
 | `crates/voom-ffprobe-worker/tests/probe_worker.rs` | HTTP success and refusal tests |
-| `crates/voom-node-agent/src/scan_session_test.rs` | mixed-session test |
+| `crates/voom-node-agent/src/scan_session.rs` (+`_test.rs`) | use the voom-core evidence bounds; mixed-session test |
 
 ## Task 1 — Protocol constants and headroom pins
 
@@ -81,7 +81,11 @@ fn result_frame_with_snapshot_at_bound_fits_one_frame() {
     let frame = crate::ProgressFrame::Result {
         lease_id: voom_core::LeaseId(u64::MAX),
         seq: u64::MAX,
-        emitted_at: time::OffsetDateTime::now_utc(),
+        emitted_at: time::OffsetDateTime::parse(
+            WORST_TIMESTAMP,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap(),
         payload: serde_json::to_value(&result).unwrap(),
     };
     let bytes = serde_json::to_vec(&frame).unwrap().len();
@@ -297,13 +301,21 @@ Steps:
    `"scripted oversized snapshot"`; and
    `(OperationKind::ProbeFile, SingleFileBehavior::RefuseDense) =>` the same `Result` frame as
    the `Agree` arm.
-3. Expect `1 passed`. Commit with
-   `test(node-agent): pin per-file degradation of a refused probe`.
+3. Expect `1 passed`.
+4. In `scan_session.rs`, delete the private `MAX_SIDECAR_ENTRIES` and `MAX_EVIDENCE_BYTES`
+   consts and import `voom_core::{MAX_EVIDENCE_BYTES, MAX_EVIDENCE_SIDECARS}`. Rename the
+   uses of `MAX_SIDECAR_ENTRIES`; the values are equal (64, 64 KiB). Run
+   `cargo test -p voom-node-agent scan_session` and expect it to pass.
+5. Commit with `test(node-agent): pin per-file degradation of a refused probe`.
 
 ## Task 4 — Corpus check and full guardrails
 
 Verification: task-test-not-applicable — the real-corpus check reads private local media CI
-cannot reach. Out of tree and under `flock -x` on the corpus lock, drive the ffprobe handler
-on both oversized files through the guarded no-read path. Record frame bytes, stream count and
-the omitted-bytes marker in the PR body; leave the corpus unmodified. Then run `just ci` bare,
-which must exit 0, and record its duration.
+cannot reach. Out of tree and under `flock -x` on the corpus lock, build the ffprobe handler
+in release mode and dispatch it over the HTTP client (default-cap reader) on both oversized
+files. Assert the frame is ≤ `MAX_FRAME_BYTES`, `raw` is the marker, and the stream count
+equals ffprobe's own count. Use the guarded path: it skips about 140 GB of hash reads, and
+it calls the same `normalize_ffprobe_json` as the unguarded path (`guard.rs:100`,
+`handler.rs:74`). The fake-ffprobe HTTP test covers the unguarded path. Record the results in
+the PR body and leave the corpus unmodified. Then run `just ci` bare, which must exit 0, and
+record its duration.
