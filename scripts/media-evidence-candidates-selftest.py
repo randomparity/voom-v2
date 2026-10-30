@@ -68,17 +68,23 @@ class VariantEditTests(unittest.TestCase):
         self.assertEqual(candidates.VARIANTS["baseline"], {})
 
     def test_buffer_variants_change_only_the_hash_worker_chunk_size(self):
-        files = candidates.VARIANTS["buf1m"]
+        files = candidates.VARIANTS["buf8k"]
         self.assertEqual(list(files), [candidates.HASH_SOURCE])
         edited = candidates.apply_edits(candidates.HASH_SOURCE, current(candidates.HASH_SOURCE),
                                         files[candidates.HASH_SOURCE])
-        self.assertIn("pub const HASH_CHUNK_BYTES: usize = 1024 * 1024;", edited)
+        self.assertIn("pub const HASH_CHUNK_BYTES: usize = 8 * 1024;", edited)
         self.assertIn("vec![0_u8; HASH_CHUNK_BYTES]", edited)
 
-    def test_single_read_builds_on_buf1m_and_drops_both_probe_rereads(self):
+    def test_batch8k_runs_an_8k_stack_buffer_loop_in_one_blocking_task(self):
+        edited = candidates.apply_edits(candidates.HASH_SOURCE, current(candidates.HASH_SOURCE),
+                                        candidates.VARIANTS["batch8k"][candidates.HASH_SOURCE])
+        self.assertIn("pub const HASH_CHUNK_BYTES: usize = 8 * 1024;", edited)
+        self.assertIn("tokio::task::spawn_blocking", edited)
+        self.assertIn("let mut buffer = [0_u8; HASH_CHUNK_BYTES];", edited)
+
+    def test_single_read_edits_only_the_probe_to_drop_both_rereads(self):
         files = candidates.VARIANTS["single-read"]
-        buf1m = candidates.VARIANTS["buf1m"][candidates.HASH_SOURCE]
-        self.assertEqual(files[candidates.HASH_SOURCE], buf1m)
+        self.assertEqual(list(files), [candidates.PROBE_SOURCE])
         source = current(candidates.PROBE_SOURCE)
         self.assertEqual(source.count("observe_file_facts(&path)"), 2)
         edited = candidates.apply_edits(candidates.PROBE_SOURCE, source,
@@ -92,7 +98,7 @@ class VariantEditTests(unittest.TestCase):
         hash_edits = candidates.VARIANTS["buf64k"][candidates.HASH_SOURCE]
         with self.assertRaises(candidates.CandidateError):
             candidates.apply_edits(candidates.HASH_SOURCE, "fn main() {}\n", hash_edits)
-        old = candidates.VARIANTS["batch8k"][candidates.HASH_SOURCE][1][0]
+        old = candidates.ASYNC_LOOP
         with self.assertRaises(candidates.CandidateError):
             candidates.apply_edits(candidates.HASH_SOURCE, old + old,
                                    candidates.VARIANTS["batch8k"][candidates.HASH_SOURCE])
@@ -238,7 +244,7 @@ class PrepareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as parent:
             target = Path(parent) / "variant"
             drifted = dict(candidates.VARIANTS, drifted={
-                candidates.HASH_SOURCE: candidates.VARIANTS["buf1m"][candidates.HASH_SOURCE],
+                candidates.HASH_SOURCE: candidates.VARIANTS["buf64k"][candidates.HASH_SOURCE],
                 candidates.PROBE_SOURCE: [("no such source text", "")],
             })
             original, candidates.VARIANTS = candidates.VARIANTS, drifted

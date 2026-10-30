@@ -24,7 +24,7 @@ use voom_worker_protocol::{HashFileRequest, HashFileResult};
 use crate::descent::{DescentError, resolve_in_root};
 
 /// Streaming chunk size for BLAKE3 over the candidate bytes.
-pub const HASH_CHUNK_BYTES: usize = 8 * 1024;
+pub const HASH_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HashWorkerError {
@@ -210,7 +210,7 @@ pub fn assert_stable(pre: &StatFacts, post: &StatFacts) -> Result<(), HashWorker
 /// mid-stream.
 pub async fn read_hash(file: &mut tokio::fs::File) -> Result<String, HashWorkerError> {
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; HASH_CHUNK_BYTES];
+    let mut buffer = vec![0_u8; HASH_CHUNK_BYTES];
     loop {
         let count =
             file.read(&mut buffer)

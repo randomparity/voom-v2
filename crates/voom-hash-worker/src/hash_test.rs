@@ -195,3 +195,25 @@ fn stat_facts_capture_ctime_in_nanoseconds() {
     let expected = i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
     assert_eq!(stat_facts(&metadata).changed_at_ns, Some(expected));
 }
+
+#[tokio::test]
+async fn file_spanning_several_chunks_hashes_across_chunk_boundaries() {
+    // Two full chunks plus a partial third, with a per-chunk-varying pattern so a
+    // dropped, repeated, or truncated chunk changes the digest.
+    let dir = tempfile::tempdir().unwrap();
+    let len = HASH_CHUNK_BYTES * 2 + 17;
+    let bytes: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+    std::fs::write(dir.path().join("big.bin"), &bytes).unwrap();
+    let resolved = resolve_in_root(dir.path(), "big.bin").unwrap();
+    let mut file = tokio::fs::File::from(resolved.file);
+
+    let digest = read_hash(&mut file).await.unwrap();
+
+    assert_eq!(digest, blake3::hash(&bytes).to_hex().to_string());
+}
+
+#[test]
+fn hash_chunk_is_one_mebibyte() {
+    // ADR 0120 contract 1: the owner hash reads 1 MiB per read (#789's buf1m).
+    assert_eq!(HASH_CHUNK_BYTES, 1024 * 1024);
+}

@@ -25,12 +25,12 @@ PROBE_SOURCE = "crates/voom-ffprobe-worker/src/handler.rs"
 UNAVAILABLE = "unavailable"
 MIB = 1024 * 1024
 
-CHUNK_CONSTANT = "pub const HASH_CHUNK_BYTES: usize = 8 * 1024;"
-STACK_BUFFER = "    let mut buffer = [0_u8; HASH_CHUNK_BYTES];\n    loop {\n        let count =\n"
-HEAP_BUFFER = "    let mut buffer = vec![0_u8; HASH_CHUNK_BYTES];\n    loop {\n        let count =\n"
+# Since #810 the hash worker reads 1 MiB per call into a heap buffer, so `baseline` is the
+# former `buf1m` and `buf8k` restores the original 8 KiB read for old-versus-new comparison.
+CHUNK_CONSTANT = "pub const HASH_CHUNK_BYTES: usize = 1024 * 1024;"
 ASYNC_LOOP = """pub async fn read_hash(file: &mut tokio::fs::File) -> Result<String, HashWorkerError> {
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; HASH_CHUNK_BYTES];
+    let mut buffer = vec![0_u8; HASH_CHUNK_BYTES];
     loop {
         let count =
             file.read(&mut buffer)
@@ -127,11 +127,8 @@ async fn stat_facts(
 
 
 def buffer_variant(size: str) -> list[tuple[str, str]]:
-    """A larger hash-worker chunk; heap-allocated so a multi-MiB buffer never sits on a stack."""
-    return [
-        (CHUNK_CONSTANT, f"pub const HASH_CHUNK_BYTES: usize = {size};"),
-        (STACK_BUFFER, HEAP_BUFFER),
-    ]
+    """A different hash-worker chunk size in the production heap buffer."""
+    return [(CHUNK_CONSTANT, f"pub const HASH_CHUNK_BYTES: usize = {size};")]
 
 
 # The probe worker checks size and mtime by stat before and after ffprobe instead of reading
@@ -149,12 +146,14 @@ STAT_ONLY_PROBE = [
 # exactly once, so a drifted source fails rather than building something unmeasured.
 VARIANTS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "baseline": {},
+    "buf8k": {HASH_SOURCE: buffer_variant("8 * 1024")},
     "buf64k": {HASH_SOURCE: buffer_variant("64 * 1024")},
-    "buf1m": {HASH_SOURCE: buffer_variant("1024 * 1024")},
     "buf4m": {HASH_SOURCE: buffer_variant("4 * 1024 * 1024")},
-    "batch8k": {HASH_SOURCE: [("use tokio::io::AsyncReadExt;\n", ""),
+    # The blocking loop keeps its 8 KiB stack buffer, as #789 measured it.
+    "batch8k": {HASH_SOURCE: [*buffer_variant("8 * 1024"),
+                              ("use tokio::io::AsyncReadExt;\n", ""),
                               (ASYNC_LOOP, BLOCKING_LOOP)]},
-    "single-read": {HASH_SOURCE: buffer_variant("1024 * 1024"), PROBE_SOURCE: STAT_ONLY_PROBE},
+    "single-read": {PROBE_SOURCE: STAT_ONLY_PROBE},
 }
 
 # Lower is better for every compared metric. Resource metrics are judged by the protocol's

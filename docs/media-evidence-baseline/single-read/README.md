@@ -176,6 +176,8 @@ verification as in #797) covers the window, or whether the risk is accepted.
 
 ## Reproduce
 
+Since #810 the 1 MiB buffer is production source, so `single-read` now edits only the probe worker.
+
 With private manifests from the #788 `manifest` command:
 
 ```sh
