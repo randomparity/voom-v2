@@ -98,9 +98,12 @@ pub fn stream_facts(
         };
         let kind = match required_string(stream.get("kind"))?.as_str() {
             // ADR 0125: ffprobe reports cover art as video; mkvmerge carries it as an
-            // attachment. Matroska attachments always carry both tags, which recovers
-            // covers from snapshots probed before `attached_pic` was recorded.
-            "video" if attached_picture || (mime_type.is_some() && filename.is_some()) => {
+            // attachment. A Matroska image attachment's filename and image MIME tags
+            // recover covers from snapshots probed before `attached_pic` was recorded.
+            "video"
+                if attached_picture
+                    || legacy_matroska_image(mime_type.as_deref(), filename.as_deref()) =>
+            {
                 TrackTarget::Attachment
             }
             "video" => TrackTarget::Video,
@@ -131,6 +134,10 @@ pub fn stream_facts(
     }
 
     Ok(facts)
+}
+
+fn legacy_matroska_image(mime_type: Option<&str>, filename: Option<&str>) -> bool {
+    filename.is_some() && mime_type.is_some_and(|mime_type| mime_type.starts_with("image/"))
 }
 
 pub fn evaluate_filter(

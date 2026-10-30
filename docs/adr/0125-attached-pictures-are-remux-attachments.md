@@ -19,9 +19,9 @@ flag lists it was sent (#820).
    is true. A missing key means "not an attached picture, or probed before this change".
 2. `voom-plan`'s remux `stream_facts`, shared by the planner and the control-plane request
    builder, classifies a `video`-kind stream as `TrackTarget::Attachment` when `attached_pic`
-   is true, or when the stream carries both `mime_type` and `filename`. Every Matroska
-   attachment carries both, and the pair recovers covers from snapshots taken before this
-   change. An attached picture is never a font.
+   is true, or when the stream carries a `filename` and an `image/` `mime_type`. Every
+   Matroska attachment carries both tags, so the pair recovers covers from snapshots taken
+   before this change. An attached picture is never a font.
 3. The request builder refuses a selection whose default, clear-default, forced,
    clear-forced or head list names an attachment, before dispatch.
 
@@ -34,6 +34,9 @@ flag lists it was sent (#820).
 - An MP4 cover in a snapshot ingested before this change still reads as video. A rescan
   of an unchanged file writes no new snapshot, so that file fails at the worker, as before,
   until its content changes. A re-probe or backfill path is follow-up work (#825).
+- The tag fallback trusts the media file's own tags. If a file's author tags a real video
+  track with a filename and an image MIME type, remux treats that track as an attachment
+  in that file only. A file with no other video track is refused.
 - Readers outside remux that count `kind == "video"` streams (`video_stream_count`,
   first-video lookups) keep the raw ffprobe kind.
 
@@ -49,8 +52,10 @@ flag lists it was sent (#820).
   planning gain.
 - **Fall back to `raw.ffprobe_json` for old snapshots.** verified: ADR 0122 records that
   planning never reads `raw`, and `raw` is omitted above the snapshot bound.
-- **Classify on any single tag.** judgment: a stray `FILENAME` track tag folds to `filename`
-  and would demote a real video track.
+- **Classify on any single tag, or on any MIME type.** judgment: a stray `FILENAME` track
+  tag folds to `filename` and would demote a real video track. Track tags are
+  author-controlled, so the fallback accepts only image MIME types, and a deliberately
+  mis-tagged track affects only its own file.
 - **Drop attachments in the mkvtoolnix worker.** judgment: the worker's refusal is the
   correct last gate, and the planner owns what it plans.
 - **Infer covers from the codec (`mjpeg`/`png`).** judgment: Matroska carries real MJPEG

@@ -15,9 +15,9 @@ and `clear_forced_streams`, which the worker refuses.
 - **Normalizer:** `insert_disposition` parses `attached_pic` like `default`, writing it only
   when true; other snapshots are unchanged and older ones stay valid.
 - **Classification:** `stream_facts` maps a `video`-kind stream to Attachment when
-  `attached_pic` is true, or when both `mime_type` and `filename` are present (pre-change
-  Matroska snapshots). It records `attached_picture`, and the `font` filter is false for an
-  attached picture, never blocking. Planner and request builder share `stream_facts`.
+  `attached_pic` is true, or it has a `filename` and an `image/` `mime_type` (pre-change
+  Matroska snapshots). It records `attached_picture`; `font` is false for an attached
+  picture, never blocking. Planner and request builder share `stream_facts`.
 - **Invariant:** the flag lists exist only in the control-plane builder, so the guard lives
   there: it destructures `RemuxSelection` without `..` and refuses an attachment-kind stream in
   the five default/forced/head lists as a config error naming the list. A new field fails
@@ -57,4 +57,4 @@ and `clear_forced_streams`, which the worker refuses.
 - Repeat scan — `task-test-not-applicable`: unchanged; identity resolves by content facts and a
   snapshot is written only in `ingest_new_scanned_file` (`scan/publish.rs`).
 - Consumer sweep — `task-test-not-applicable`: `rg '"disposition"'` readers (audio
-  publication, audio selection, ffmpeg worker) read named keys only.
+  publication, audio selection, ffmpeg worker) read named keys.
