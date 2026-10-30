@@ -46,9 +46,23 @@ curl --fail --silent --show-error \
 
 Authenticated execution routes use a node bearer token. Read it without echo,
 send it only over verified HTTPS, and keep it out of process arguments. Set
-`VOOM_NODE_ID` to the registered remote node ID. This Bash subshell writes the
-header to a mode-0600 temporary file, removes it on every exit, and supplies an
-idempotency key because the heartbeat is a mutation:
+`VOOM_NODE_ID` to the registered remote node ID. Every node route also requires
+`X-Voom-Protocol-Version` equal to the server's protocol version
+([ADR 0123](../adr/0123-control-plane-node-agent-protocol-match.md)). The API reports that
+version in the same header on every node-route response, including its refusal of a request
+that omits it, so set `VOOM_PROTOCOL_VERSION` from that response:
+
+```sh
+VOOM_PROTOCOL_VERSION=$(
+  curl --silent --show-error --output /dev/null --dump-header - \
+    --cacert /etc/voom/client-ca.pem --request POST \
+    "https://api.example.test:7443/v1/execution/node/${VOOM_NODE_ID}/heartbeat" |
+    awk -F': ' 'tolower($1) == "x-voom-protocol-version" { sub(/\r$/, "", $2); print $2 }'
+)
+```
+
+This Bash subshell writes the header to a mode-0600 temporary file, removes it on every
+exit, and supplies an idempotency key because the heartbeat is a mutation:
 
 ```bash
 (
@@ -66,6 +80,7 @@ idempotency key because the heartbeat is a mutation:
     --header "@$auth_header" \
     --header 'Content-Type: application/json' \
     --header 'X-Voom-Idempotency-Key: operator-heartbeat-001' \
+    --header "X-Voom-Protocol-Version: ${VOOM_PROTOCOL_VERSION}" \
     --data '{}' \
     "https://api.example.test:7443/v1/execution/node/${VOOM_NODE_ID}/heartbeat"
 )
@@ -103,9 +118,10 @@ restart it with SIGTERM-driven draining so the new identity is loaded.
 
 Remote execution is driven by the pull client documented in
 [operator-node-agent.md](operator-node-agent.md). Start the API and verify health before
-starting agents. An agent uses the registered node token over HTTPS, and every mutation
-must carry `X-Voom-Idempotency-Key`; operators should not place a reverse proxy in front of
-the API if it removes either header.
+starting agents. An agent uses the registered node token over HTTPS, every mutation
+must carry `X-Voom-Idempotency-Key`, and every request and response carries
+`X-Voom-Protocol-Version`; operators should not place a reverse proxy in front of the API if it
+removes any of these headers.
 
 ## Troubleshooting
 

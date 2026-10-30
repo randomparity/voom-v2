@@ -891,6 +891,10 @@ impl RemoteSyntheticRunner {
                 .client
                 .post(&url)
                 .bearer_auth(self.config.token.expose_secret())
+                .header(
+                    "x-voom-protocol-version",
+                    voom_core::PROTOCOL_VERSION.to_string(),
+                )
                 .header("x-voom-idempotency-key", idempotency_key)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body.clone())

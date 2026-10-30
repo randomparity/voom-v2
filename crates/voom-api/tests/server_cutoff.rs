@@ -74,9 +74,10 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
     let request_bytes = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\
          Content-Type: application/json\r\nX-Voom-Idempotency-Key: {idempotency_key}\r\n\
-         Content-Length: {}\r\n\r\n{request_body}",
+         X-Voom-Protocol-Version: {protocol}\r\nContent-Length: {}\r\n\r\n{request_body}",
         registered.token.expose_secret(),
-        request_body.len()
+        request_body.len(),
+        protocol = voom_core::PROTOCOL_VERSION,
     );
     // The two directions are sized independently on purpose. The request pipe holds the
     // whole request, so `write_all` below completes in one poll without the server reading
@@ -104,6 +105,10 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
     let replay = replay_router
         .oneshot(
             Request::post(&path)
+                .header(
+                    "x-voom-protocol-version",
+                    voom_core::PROTOCOL_VERSION.to_string(),
+                )
                 .header("content-type", "application/json")
                 .header(
                     "authorization",

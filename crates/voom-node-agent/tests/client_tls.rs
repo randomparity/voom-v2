@@ -88,21 +88,27 @@ async fn custom_ca_trust_is_hostname_bound() -> Result<(), Box<dyn Error>> {
 async fn authenticated_heartbeat(
     headers: HeaderMap,
     Json(body): Json<JsonValue>,
-) -> Json<JsonValue> {
+) -> ([(&'static str, String); 1], Json<JsonValue>) {
+    let version = voom_core::PROTOCOL_VERSION.to_string();
     assert_eq!(headers["authorization"], "Bearer secret-token");
     assert_eq!(headers["x-voom-idempotency-key"], "heartbeat-key");
+    assert_eq!(headers["x-voom-protocol-version"], version.as_str());
     assert_eq!(
         body,
         json!({"incarnation_id": "0123456789abcdef0123456789abcdef"})
     );
-    Json(json!({
-        "schema_version": "0",
-        "command": "execution.node_heartbeat",
-        "status": "ok",
-        "data": {"node_id": 7, "status": "active"},
-        "warnings": [],
-        "error": null
-    }))
+    let stamp = [("x-voom-protocol-version", version)];
+    (
+        stamp,
+        Json(json!({
+            "schema_version": "0",
+            "command": "execution.node_heartbeat",
+            "status": "ok",
+            "data": {"node_id": 7, "status": "active"},
+            "warnings": [],
+            "error": null
+        })),
+    )
 }
 
 async fn assert_unbounded_request_keeps_retrying(

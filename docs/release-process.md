@@ -86,7 +86,9 @@ Persisted `media_dispatch.schema` advances from 5 to 6 with the worker protocol:
 operator-disposition unfinished schema-5 media work exactly as for protocol 5 above. Upgrade
 the control plane, every node agent and every bundled worker together with
 `probe_hash_reuse` off, and turn it on only after the whole fleet runs protocol 6; a
-protocol-5 control plane rejects reused evidence at the scan-batch decode. The rollback is
+protocol-5 control plane rejects reused evidence at the scan-batch decode. A control plane and
+node agent built with ADR 0123 refuse each other at activation, before any lease, unless both
+are on the same protocol version and include ADR 0123. The rollback is
 the setting. Rows written with recomputed hashes stay byte-identical, but a fleet-wide binary
 downgrade still needs the same drain or operator disposition of unfinished schema-6 media work,
 because a protocol-5 binary rejects every schema-6 envelope; once reused evidence rows exist it
