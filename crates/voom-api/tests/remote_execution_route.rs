@@ -80,6 +80,10 @@ impl ApiFixture {
         body: Value,
     ) -> Response<Body> {
         let mut request = Request::post(path)
+            .header(
+                "x-voom-protocol-version",
+                voom_core::PROTOCOL_VERSION.to_string(),
+            )
             .header("content-type", "application/json")
             .header("x-voom-idempotency-key", idempotency_key)
             .body(Body::from(body.to_string()))
@@ -95,6 +99,10 @@ impl ApiFixture {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header("content-type", "application/json")
                     .header("authorization", format!("Bearer {}", self.token))
                     .header("x-voom-idempotency-key", idempotency_key)
@@ -170,6 +178,10 @@ async fn acquire_requires_idempotency_key() {
         .clone()
         .oneshot(
             Request::post("/v1/execution/lease/acquire")
+                .header(
+                    "x-voom-protocol-version",
+                    voom_core::PROTOCOL_VERSION.to_string(),
+                )
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", fixture.token))
                 .body(Body::from(r#"{"node_id":1,"worker_id":1}"#))
@@ -182,6 +194,57 @@ async fn acquire_requires_idempotency_key() {
     let json = response_json(res).await;
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+/// ADR 0120 gate G7 / ADR 0123: a node agent that predates the protocol header, or speaks
+/// another protocol version, is refused before its activation or lease request has any effect.
+#[tokio::test]
+async fn unversioned_requests_take_no_lease() {
+    let fixture = api_fixture().await;
+    let ticket_id = fixture.ready_ticket().await;
+    let fresh: NodeIncarnationId = "fedcba9876543210fedcba9876543210".parse().unwrap();
+    let requests = [
+        (
+            format!("/v1/execution/node/{}/activate", fixture.node_id.0),
+            json!({"incarnation_id": fresh.to_string(), "workers": []}),
+        ),
+        (
+            "/v1/execution/lease/acquire".to_owned(),
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "incarnation_id": fixture.incarnation_id.to_string(),
+            }),
+        ),
+    ];
+    let skewed = (voom_core::PROTOCOL_VERSION - 1).to_string();
+    for offered in [None, Some(skewed.as_str())] {
+        for (index, (path, body)) in requests.iter().enumerate() {
+            let mut request = Request::post(path.as_str())
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", fixture.token))
+                .header("x-voom-idempotency-key", format!("unversioned-{index}"));
+            if let Some(offered) = offered {
+                request = request.header("x-voom-protocol-version", offered);
+            }
+            let res = fixture
+                .app
+                .clone()
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            assert_bad_args_envelope(res, "api.request").await;
+        }
+    }
+
+    assert_eq!(fixture.ticket_state(ticket_id).await, TicketState::Ready);
+    let incarnations = fixture
+        .cp
+        .list_node_incarnations(fixture.node_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(incarnations.len(), 1);
+    assert_eq!(incarnations[0].id, fixture.incarnation_id);
 }
 
 #[tokio::test]
@@ -475,6 +538,10 @@ async fn unconfigured_execution_routes_reject_invalid_bearer_syntax() {
     for (authorization_name, authorization) in authorization_cases {
         for (path, command, body) in &routes {
             let mut request = Request::post(*path)
+                .header(
+                    "x-voom-protocol-version",
+                    voom_core::PROTOCOL_VERSION.to_string(),
+                )
                 .header("content-type", "application/json")
                 .header(
                     "x-voom-idempotency-key",
@@ -882,6 +949,10 @@ async fn unconfigured_remote_execution_route_returns_api_error_envelope() {
     let res = app
         .oneshot(
             Request::post("/v1/execution/lease/acquire")
+                .header(
+                    "x-voom-protocol-version",
+                    voom_core::PROTOCOL_VERSION.to_string(),
+                )
                 .header("content-type", "application/json")
                 .header("authorization", "Bearer test-token")
                 .header("x-voom-idempotency-key", "unconfigured-acquire")

@@ -23,6 +23,7 @@ pub const SCHEMA_VERSION: &str = "0";
 mod commit;
 pub mod config;
 mod execution;
+mod protocol;
 pub mod recovery;
 mod scan;
 pub mod server;
@@ -60,11 +61,14 @@ pub fn router_with_control_plane(
 }
 
 fn base_router(state: AppState) -> axum::Router {
-    axum::Router::new()
-        .route("/health", get(health))
+    let node_routes = axum::Router::new()
         .merge(commit::routes())
         .merge(execution::routes())
         .merge(scan::routes())
+        .route_layer(axum::middleware::from_fn(protocol::gate));
+    axum::Router::new()
+        .route("/health", get(health))
+        .merge(node_routes)
         .with_state(state)
 }
 
