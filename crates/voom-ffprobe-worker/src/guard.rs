@@ -20,7 +20,7 @@ use crate::normalize_ffprobe_json;
 use crate::observe::{modified_at, open_regular_file};
 
 /// Filesystems whose ctime detected every constructed same-size edit (#798).
-pub(crate) fn reuse_listed(filesystem_type: i64) -> bool {
+fn reuse_listed(filesystem_type: i64) -> bool {
     filesystem_type == libc::BTRFS_SUPER_MAGIC || filesystem_type == libc::TMPFS_MAGIC
 }
 
