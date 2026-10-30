@@ -79,6 +79,18 @@ settings/facts are written. Rollback after new writes requires restoring the
 pre-upgrade database snapshot. FLAC/ALAC/PCM encoding targets remain unimplemented
 by this prerequisite; see issues #761–#763.
 
+**Probe hash reuse / protocol 6 (ADR 0120).** The hash result's `changed_at_ns`, the probe
+request's `guard`, the probe result's `hash_source` and the scan evidence's `hash_source` are
+optional and omitted when unused, so old result and evidence JSON remains readable.
+Persisted `media_dispatch.schema` advances from 5 to 6 with the worker protocol: drain or
+operator-disposition unfinished schema-5 media work exactly as for protocol 5 above. Upgrade
+the control plane, every node agent and every bundled worker together with
+`probe_hash_reuse` off, and turn it on only after the whole fleet runs protocol 6; a
+protocol-5 control plane rejects reused evidence at the scan-batch decode. Rows written with
+recomputed hashes stay byte-identical, so a fleet-wide binary downgrade is supported until
+reused rows exist. After that it needs the pre-upgrade database snapshot; the rollback is
+the setting.
+
 `tickets.payload` carries a breaking change under this contract (ADR 0069): a
 byte-touching workflow ticket now requires a `declared_artifact_access` declaration, and a
 row written before that binary no longer decodes. No backfill is possible — the

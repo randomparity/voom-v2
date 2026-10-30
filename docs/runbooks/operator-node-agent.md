@@ -165,6 +165,24 @@ the input, staging, output and backup roots it must continue serving. Worker-onl
 may use an empty list. Restart the agent after changing bindings; startup validation
 does not implement continuous filesystem monitoring.
 
+### Probe hash reuse
+
+`probe_hash_reuse` is a top-level boolean, `false` when absent:
+
+```toml
+probe_hash_reuse = true
+```
+
+With it on, each scan probe sends the owner hash's ctime and file key as a guard
+(ADR 0120). On btrfs and tmpfs roots the probe worker then compares size, mtime,
+ctime and file key before and after ffprobe instead of re-reading the file twice,
+and the scan evidence records `"hash_source": "reused"`. Any other filesystem,
+and every non-Linux host, re-reads as before. A guard difference records the file
+without identity, and the next scan re-observes it. A same-size edit in the same
+ctime tick, or a forged ctime, can leave probe facts that describe other bytes;
+the transform input's full hash still refuses to act on such a file. Turning the
+setting off and restarting the agent is the rollback.
+
 The repository's local acceptance bootstrap also requires Python 3 (`just setup`
 already provisions Python 3.13), FFmpeg/FFprobe and MKVToolNix on the
 owner host. Build the API, node agent and bundled workers as well as the CLI. Its
