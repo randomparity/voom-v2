@@ -148,7 +148,7 @@ class PublicationTimingTests(unittest.TestCase):
         self.later(0.3, ["INSERT INTO file_locations VALUES (1, 7, 'rooted', NULL)"])
         self.later(0.6, ["UPDATE scan_sessions SET status = 'succeeded'"])
         first, complete, states = rollout.wait_for_publication(
-            self.database, [7], [1], time.monotonic(), 10)
+            self.database, [7], [1], time.monotonic(), 10, lambda: None)
         self.assertGreaterEqual(first, 0.3)
         self.assertLess(first, complete)
         self.assertEqual(states, {1: "succeeded"})
@@ -158,13 +158,20 @@ class PublicationTimingTests(unittest.TestCase):
                          "INSERT INTO file_locations VALUES (2, 8, 'rooted', NULL)"])
         self.later(0.3, ["UPDATE scan_sessions SET status = 'failed'"])
         first, _, states = rollout.wait_for_publication(
-            self.database, [7], [1], time.monotonic(), 10)
+            self.database, [7], [1], time.monotonic(), 10, lambda: None)
         self.assertEqual(first, rollout.UNAVAILABLE)
         self.assertEqual(states, {1: "failed"})
 
+    def test_a_dead_stack_stops_the_wait(self):
+        def dead():
+            raise RuntimeError("voom-node-agent exited")
+        with self.assertRaises(RuntimeError):
+            rollout.wait_for_publication(self.database, [7], [1], time.monotonic(), 10, dead)
+
     def test_a_session_that_never_ends_fails_loudly(self):
         with self.assertRaises(rollout.HarnessError):
-            rollout.wait_for_publication(self.database, [7], [1], time.monotonic(), 0.2)
+            rollout.wait_for_publication(self.database, [7], [1], time.monotonic(), 0.2,
+                                         lambda: None)
 
 
 class StackTests(unittest.TestCase):

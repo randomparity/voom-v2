@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -181,12 +181,17 @@ TERMINAL = {"succeeded", "failed", "cancelled", "stale"}
 
 
 def wait_for_publication(database: Path, root_ids: list[int], session_ids: list[int],
-                         started: float, limit: float) -> tuple[Any, Any, dict[int, str]]:
-    """Poll until every session is terminal; return first-durable and complete seconds."""
+                         started: float, limit: float,
+                         alive: Callable[[], None]) -> tuple[Any, Any, dict[int, str]]:
+    """Poll until every session is terminal; return first-durable and complete seconds.
+
+    `alive` raises when the stack has exited or a stop was requested.
+    """
     first = complete = UNAVAILABLE
     connection = read_only(database)
     try:
         while True:
+            alive()
             elapsed = time.monotonic() - started
             if first == UNAVAILABLE and published_locations(connection, root_ids) > 0:
                 first = round(elapsed, 3)
@@ -292,7 +297,8 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
         sessions = request_scans(stack)
         timer = kill_later(pids[args.kill], args.kill_after) if args.kill else None
         first, complete, states = wait_for_publication(
-            workdir / "voom.db", list(set(by_root.values())), sessions, started, args.limit)
+            workdir / "voom.db", list(set(by_root.values())), sessions, started, args.limit,
+            stack.require_alive)
         if timer:
             timer.cancel()
         counters = baseline.counter_delta(counters, baseline.host_counters())
@@ -590,7 +596,7 @@ def main(argv: list[str]) -> int:
         if problems:
             raise HarnessError("record failed validation: " + ", ".join(problems))
         baseline.write_new(args.output, record, 0o644)
-    except (HarnessError, RuntimeError, OSError, ValueError, KeyError,
+    except (HarnessError, RuntimeError, OSError, ValueError, KeyError, InterruptedError,
             subprocess.SubprocessError, sqlite3.Error) as error:
         print(f"media-evidence-rollout: {error}", file=sys.stderr)
         return 1
