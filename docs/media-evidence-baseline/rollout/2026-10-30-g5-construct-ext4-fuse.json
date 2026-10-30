@@ -1,0 +1,54 @@
+{
+  "build": {
+    "binaries_sha256": {
+      "voom-ffprobe-worker": "5e6d4788e2bd1529a030ca5b506600758017aff40aec1efc0a45266cbebf898b",
+      "voom-hash-worker": "6369c014ab936f7c88005de58d916dc5d9199eef0a63271bcab016c1f9c190ca"
+    },
+    "ffprobe_version": "8.1.3",
+    "git_commit": "20b91edc4044b3d4c61c6e8c32634fe4aa1afdd4",
+    "instrument_sha256": "cf4f3c393eb86b050f21bec6bc1f534ba2b06eaab227fb47b83198d046d2d0bb"
+  },
+  "cases": [
+    {
+      "case": "unchanged",
+      "detected": null,
+      "hash_source": null,
+      "result": "result",
+      "stage": "probe"
+    },
+    {
+      "case": "a_restored_mtime_edit_before_probe",
+      "class": "artifact_checksum_mismatch",
+      "code": "ARTIFACT_CHECKSUM_MISMATCH",
+      "detected": true,
+      "marker": "pre_probe",
+      "result": "failure",
+      "stage": "probe"
+    },
+    {
+      "case": "b_restored_mtime_edit_during_hash",
+      "class": "artifact_checksum_mismatch",
+      "code": "ARTIFACT_CHECKSUM_MISMATCH",
+      "detected": true,
+      "marker": "hash_drift",
+      "result": "failure",
+      "stage": "hash"
+    },
+    {
+      "case": "c_mtime_moving_write_before_probe",
+      "class": "artifact_checksum_mismatch",
+      "code": "ARTIFACT_CHECKSUM_MISMATCH",
+      "detected": true,
+      "marker": "pre_probe",
+      "result": "failure",
+      "stage": "probe"
+    }
+  ],
+  "schema": "media-evidence-rollout-construct/1",
+  "scratch": {
+    "filesystem_type": "fuse.ext4",
+    "source_bytes": 6080870033,
+    "source_label": "local-corpus-f0004",
+    "storage_class": "unknown"
+  }
+}

@@ -1,0 +1,190 @@
+{
+  "build": {
+    "binaries_sha256": {
+      "voom": "0c8960e06f714010b85915927a63997d6a592128d659b6a3fdffafb244e1409f",
+      "voom-api": "2a40945a1378ada716b7ccb8d6b23df81b39c6cb24e6d892ff8d466b2b772a1d",
+      "voom-ffprobe-worker": "5e6d4788e2bd1529a030ca5b506600758017aff40aec1efc0a45266cbebf898b",
+      "voom-hash-worker": "6369c014ab936f7c88005de58d916dc5d9199eef0a63271bcab016c1f9c190ca",
+      "voom-node-agent": "b3eea4b3b924e7ac00189b12267a2a57b812088f4271463fee33a5e8b68241e7",
+      "voom-scan-worker": "40c8f72158771be649a460552aed75bb2550579f923959b26d789479d5276c06"
+    },
+    "bootstrap_sha256": "4ee1b3a344ef51afac7b1cf96e5183acd7a4794dd21b089fcb59bcbda43b19de",
+    "ffprobe_version": "8.1.3",
+    "git_changed_paths": [],
+    "git_commit": "b007fb03324f111b0f6ad97b63d569d407836d7a",
+    "instrument_sha256": "796f4aaec12d0eb652a67ddf4b7af9afcd9ba5c66663b817a4ad19bfc1127093"
+  },
+  "cell": {
+    "evict": false,
+    "kill": null,
+    "probe_hash_reuse": true,
+    "repetitions": 3
+  },
+  "corpus": {
+    "filesystem_type": "cifs",
+    "label": "network-corpus",
+    "manifest_files": 121,
+    "roots": 3,
+    "selected_bytes": 24662518120,
+    "selected_ids": [
+      "f0049",
+      "f0074",
+      "f0063"
+    ],
+    "storage_class": "network"
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "not_measured": {
+    "discovery": "the scan worker's enumeration is not separated from the session",
+    "ffprobe_child": "ffprobe child memory and I/O are not attributed to the probe worker",
+    "first_actionable_plan": "no policy is applied by a scan cell",
+    "first_transformation_start": "no policy is applied by a scan cell",
+    "first_verified_output": "no policy is applied by a scan cell",
+    "per_file_stage_seconds": "the stack does not expose per-file hash and probe timings",
+    "retries": "the stack does not expose per-operation retries"
+  },
+  "repetitions": [
+    {
+      "complete_seconds": 63.364,
+      "corpus_unchanged": true,
+      "evicted": false,
+      "evidence": {
+        "hash_set_sha256": "07e763812528b526b2c45f36fe788d31dc563b75de6db73efda07f305f75062a",
+        "observations": 3,
+        "other_source": 0,
+        "recomputed_without_source": 3,
+        "reused": 0,
+        "unmatched": 0,
+        "with_evidence": 3
+      },
+      "first_durable_observation_seconds": 15.19,
+      "host_counters": {
+        "cifs_bytes_read": 73987546168,
+        "network_rx_bytes": 77363592392
+      },
+      "index": 1,
+      "resident_bytes_before": {
+        "f0049": 0,
+        "f0063": 0,
+        "f0074": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 4.75,
+          "peak_rss_bytes": 7864320,
+          "rchar": 24662518120,
+          "read_bytes": 0
+        },
+        "probe": {
+          "cpu_seconds": 23.52,
+          "peak_rss_bytes": 5591040,
+          "rchar": 49333877198,
+          "read_bytes": 0
+        }
+      }
+    },
+    {
+      "complete_seconds": 37.255,
+      "corpus_unchanged": true,
+      "evicted": false,
+      "evidence": {
+        "hash_set_sha256": "07e763812528b526b2c45f36fe788d31dc563b75de6db73efda07f305f75062a",
+        "observations": 3,
+        "other_source": 0,
+        "recomputed_without_source": 3,
+        "reused": 0,
+        "unmatched": 0,
+        "with_evidence": 3
+      },
+      "first_durable_observation_seconds": 8.99,
+      "host_counters": {
+        "cifs_bytes_read": 24662518120,
+        "network_rx_bytes": 25788404779
+      },
+      "index": 2,
+      "resident_bytes_before": {
+        "f0049": 0,
+        "f0063": 3808169984,
+        "f0074": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 4.79,
+          "peak_rss_bytes": 8044544,
+          "rchar": 24662518120,
+          "read_bytes": 0
+        },
+        "probe": {
+          "cpu_seconds": 19.97,
+          "peak_rss_bytes": 5554176,
+          "rchar": 49333877198,
+          "read_bytes": 0
+        }
+      }
+    },
+    {
+      "complete_seconds": 37.286,
+      "corpus_unchanged": true,
+      "evicted": false,
+      "evidence": {
+        "hash_set_sha256": "07e763812528b526b2c45f36fe788d31dc563b75de6db73efda07f305f75062a",
+        "observations": 3,
+        "other_source": 0,
+        "recomputed_without_source": 3,
+        "reused": 0,
+        "unmatched": 0,
+        "with_evidence": 3
+      },
+      "first_durable_observation_seconds": 8.954,
+      "host_counters": {
+        "cifs_bytes_read": 24662518120,
+        "network_rx_bytes": 25787756960
+      },
+      "index": 3,
+      "resident_bytes_before": {
+        "f0049": 0,
+        "f0063": 11607478272,
+        "f0074": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 4.67,
+          "peak_rss_bytes": 7917568,
+          "rchar": 24662518120,
+          "read_bytes": 0
+        },
+        "probe": {
+          "cpu_seconds": 20.1,
+          "peak_rss_bytes": 5611520,
+          "rchar": 49333877198,
+          "read_bytes": 0
+        }
+      }
+    }
+  ],
+  "schema": "media-evidence-rollout-scan/1"
+}

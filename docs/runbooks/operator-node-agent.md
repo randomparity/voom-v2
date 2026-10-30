@@ -183,6 +183,30 @@ ctime tick, or a forged ctime, can leave probe facts that describe other bytes;
 the transform input's full hash still refuses to act on such a file. Turning the
 setting off and restarting the agent is the rollback.
 
+**Keep it off for now.** The #794 rollout gates did not all pass. G1, G4, G5, G6 and G8
+passed. G2 and G3 are inconclusive because a whole-root scan of the local corpus fails
+on an oversized probe result
+([#816](https://github.com/randomparity/voom-v2/issues/816)). G7 failed: the control
+plane and node agent do not refuse each other across protocol versions
+([#817](https://github.com/randomparity/voom-v2/issues/817)). G9 failed on remux defects
+([#819](https://github.com/randomparity/voom-v2/issues/819),
+[#820](https://github.com/randomparity/voom-v2/issues/820)). See the
+[rollout report](../media-evidence-rollout-report.md). Enable the setting only after those
+issues close and the blocked gates pass on a rerun with `scripts/media-evidence-rollout.py`.
+Then roll it out in this order:
+
+1. Upgrade the control plane, every node agent and every bundled worker to the same
+   release with the setting off (protocol 6 is a flag day; see
+   [release process](../release-process.md)).
+2. Turn it on for one owner node whose roots are btrfs or tmpfs. Restart that agent, then
+   scan one root. `scan_observations.evidence_json` should show `"hash_source": "reused"`
+   on its rows, and scans of other filesystems should show no hash source.
+3. Widen to the remaining btrfs and tmpfs owners. Rows on other filesystems keep
+   recomputing; the setting has no effect there.
+4. To roll back, turn it off and restart the agent. The next scan writes recomputed
+   rows. Rows that already say `reused` stay valid evidence. Once they exist, a binary
+   downgrade below protocol 6 is unsupported (ADR 0120 contract 9).
+
 The repository's local acceptance bootstrap also requires Python 3 (`just setup`
 already provisions Python 3.13), FFmpeg/FFprobe and MKVToolNix on the
 owner host. Build the API, node agent and bundled workers as well as the CLI. Its

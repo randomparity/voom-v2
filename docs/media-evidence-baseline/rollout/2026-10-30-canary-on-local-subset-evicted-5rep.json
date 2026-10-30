@@ -1,0 +1,313 @@
+{
+  "build": {
+    "binaries_sha256": {
+      "voom": "0c8960e06f714010b85915927a63997d6a592128d659b6a3fdffafb244e1409f",
+      "voom-api": "2a40945a1378ada716b7ccb8d6b23df81b39c6cb24e6d892ff8d466b2b772a1d",
+      "voom-ffprobe-worker": "5e6d4788e2bd1529a030ca5b506600758017aff40aec1efc0a45266cbebf898b",
+      "voom-hash-worker": "6369c014ab936f7c88005de58d916dc5d9199eef0a63271bcab016c1f9c190ca",
+      "voom-node-agent": "b3eea4b3b924e7ac00189b12267a2a57b812088f4271463fee33a5e8b68241e7",
+      "voom-scan-worker": "40c8f72158771be649a460552aed75bb2550579f923959b26d789479d5276c06"
+    },
+    "bootstrap_sha256": "4ee1b3a344ef51afac7b1cf96e5183acd7a4794dd21b089fcb59bcbda43b19de",
+    "ffprobe_version": "8.1.3",
+    "git_changed_paths": [],
+    "git_commit": "b007fb03324f111b0f6ad97b63d569d407836d7a",
+    "instrument_sha256": "796f4aaec12d0eb652a67ddf4b7af9afcd9ba5c66663b817a4ad19bfc1127093"
+  },
+  "cell": {
+    "evict": true,
+    "kill": null,
+    "probe_hash_reuse": true,
+    "repetitions": 5
+  },
+  "corpus": {
+    "filesystem_type": "btrfs",
+    "label": "local-corpus",
+    "manifest_files": 34,
+    "roots": 6,
+    "selected_bytes": 106827559559,
+    "selected_ids": [
+      "f0004",
+      "f0025",
+      "f0022",
+      "f0005",
+      "f0009",
+      "f0015"
+    ],
+    "storage_class": "local"
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "not_measured": {
+    "discovery": "the scan worker's enumeration is not separated from the session",
+    "ffprobe_child": "ffprobe child memory and I/O are not attributed to the probe worker",
+    "first_actionable_plan": "no policy is applied by a scan cell",
+    "first_transformation_start": "no policy is applied by a scan cell",
+    "first_verified_output": "no policy is applied by a scan cell",
+    "per_file_stage_seconds": "the stack does not expose per-file hash and probe timings",
+    "retries": "the stack does not expose per-operation retries"
+  },
+  "repetitions": [
+    {
+      "complete_seconds": 27.155,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "12b190eea03be1a0a96aa1666cdbfd704ff796b6337c436352134d8131bb45b5",
+        "observations": 6,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 6,
+        "unmatched": 0,
+        "with_evidence": 6
+      },
+      "first_durable_observation_seconds": 1.742,
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 587026
+      },
+      "index": 1,
+      "resident_bytes_before": {
+        "f0004": 0,
+        "f0005": 0,
+        "f0009": 0,
+        "f0015": 0,
+        "f0022": 0,
+        "f0025": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 15.74,
+          "peak_rss_bytes": 7811072,
+          "rchar": 106827559559,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 0.4,
+          "peak_rss_bytes": 6631424,
+          "rchar": 28024454,
+          "read_bytes": 23064576
+        }
+      }
+    },
+    {
+      "complete_seconds": 26.011,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "12b190eea03be1a0a96aa1666cdbfd704ff796b6337c436352134d8131bb45b5",
+        "observations": 6,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 6,
+        "unmatched": 0,
+        "with_evidence": 6
+      },
+      "first_durable_observation_seconds": 1.653,
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 295847
+      },
+      "index": 2,
+      "resident_bytes_before": {
+        "f0004": 0,
+        "f0005": 0,
+        "f0009": 0,
+        "f0015": 0,
+        "f0022": 0,
+        "f0025": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 16.01,
+          "peak_rss_bytes": 6774784,
+          "rchar": 106827559559,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 0.41,
+          "peak_rss_bytes": 6836224,
+          "rchar": 28024454,
+          "read_bytes": 23007232
+        }
+      }
+    },
+    {
+      "complete_seconds": 26.073,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "12b190eea03be1a0a96aa1666cdbfd704ff796b6337c436352134d8131bb45b5",
+        "observations": 6,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 6,
+        "unmatched": 0,
+        "with_evidence": 6
+      },
+      "first_durable_observation_seconds": 1.693,
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 403391
+      },
+      "index": 3,
+      "resident_bytes_before": {
+        "f0004": 0,
+        "f0005": 0,
+        "f0009": 0,
+        "f0015": 0,
+        "f0022": 0,
+        "f0025": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 16.04,
+          "peak_rss_bytes": 8835072,
+          "rchar": 106827559559,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 0.4,
+          "peak_rss_bytes": 6692864,
+          "rchar": 28024454,
+          "read_bytes": 23068672
+        }
+      }
+    },
+    {
+      "complete_seconds": 26.151,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "12b190eea03be1a0a96aa1666cdbfd704ff796b6337c436352134d8131bb45b5",
+        "observations": 6,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 6,
+        "unmatched": 0,
+        "with_evidence": 6
+      },
+      "first_durable_observation_seconds": 1.692,
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 355229
+      },
+      "index": 4,
+      "resident_bytes_before": {
+        "f0004": 0,
+        "f0005": 0,
+        "f0009": 0,
+        "f0015": 0,
+        "f0022": 0,
+        "f0025": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 15.94,
+          "peak_rss_bytes": 7761920,
+          "rchar": 106827559559,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 0.41,
+          "peak_rss_bytes": 6881280,
+          "rchar": 28024454,
+          "read_bytes": 23068672
+        }
+      }
+    },
+    {
+      "complete_seconds": 27.408,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "12b190eea03be1a0a96aa1666cdbfd704ff796b6337c436352134d8131bb45b5",
+        "observations": 6,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 6,
+        "unmatched": 0,
+        "with_evidence": 6
+      },
+      "first_durable_observation_seconds": 1.692,
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 604807
+      },
+      "index": 5,
+      "resident_bytes_before": {
+        "f0004": 0,
+        "f0005": 0,
+        "f0009": 0,
+        "f0015": 0,
+        "f0022": 0,
+        "f0025": 0
+      },
+      "session_status": [
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 15.99,
+          "peak_rss_bytes": 7811072,
+          "rchar": 106827559559,
+          "read_bytes": 106784509952
+        },
+        "probe": {
+          "cpu_seconds": 0.4,
+          "peak_rss_bytes": 7028736,
+          "rchar": 28024454,
+          "read_bytes": 23052288
+        }
+      }
+    }
+  ],
+  "schema": "media-evidence-rollout-scan/1"
+}
