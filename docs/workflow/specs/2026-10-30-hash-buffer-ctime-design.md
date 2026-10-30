@@ -18,11 +18,11 @@ ADR 0120 is still `Proposed` although the maintainer accepted it on 2026-10-30.
   guarded probe-reuse trust change on 2026-10-30; implementation is #810 and #811." The index
   row stays as it is.
 - `scripts/media-evidence-candidates.py` and its selftest anchor the #789 variants on the
-  8 KiB stack-buffer text, which this change removes. Re-anchor them on the 1 MiB heap source.
-  `buf1m` is now `baseline`, and a new `buf8k` restores 8 KiB reads (heap buffer) for #794.
-  `buf64k` and `buf4m` change only the constant. `batch8k` also sets 8 KiB and keeps its
-  blocking loop's stack buffer. `single-read` keeps only its probe edits. Measurement logic and
-  record schemas are unchanged. The two baseline READMEs get a one-line note each.
+  8 KiB stack-buffer text, which this change removes. #791 decided those variants, so `buf64k`,
+  `buf1m`, `buf4m` and `batch8k` are deleted with their anchors and tests; `buf1m` is now
+  `baseline`. A new `buf8k` swaps the constant back to 8 KiB (heap buffer) for #794's comparison.
+  `single-read` keeps only its probe edits. Measurement logic and record schemas are unchanged.
+  The two baseline READMEs get a one-line note each.
 - Excluded: the probe guard, reporting ctime in the hash result, the protocol bump and the
   owner-node setting (#811), and G1 rollout measurement (#794).
 

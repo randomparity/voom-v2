@@ -35,7 +35,7 @@ in that order. The network subset is #788's `f0049,f0074,f0063`. Every row of ev
 ended `observed`. No file was skipped for budget. Every evicted repetition started with 0
 resident bytes for every file.
 
-Since #810 (1 MiB buffer), use `baseline` for `buf1m` below; `buf8k` reads 8 KiB (heap buffer).
+Since #810 `baseline` is `buf1m`; rebuild the other cells from their commit above.
 
 Reproduce one cell, with private manifests from the #788 `manifest` command:
 
