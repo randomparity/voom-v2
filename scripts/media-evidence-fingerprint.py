@@ -2,11 +2,12 @@
 """Experiment-only partial-fingerprint evaluation for issue #796.
 
 `oracle` runs mutation-oracle cases O1-O13 of docs/media-evidence-protocol.md against each
-stage-3 candidate on synthetic fixtures in a scratch directory it creates and removes. `run`
-measures each candidate's cost over a private #788 manifest and writes a committed-safe
-record. A `Fingerprint` is experiment evidence only: nothing here converts it into, stores it
-as, or compares it with production identity evidence. Records carry ids, booleans, counts and
-metrics, never digests, inode numbers, paths or file names.
+stage-3 candidate, and on request #798's additions, on synthetic fixtures in a scratch
+directory it creates and removes. `run` measures each candidate's cost over a private #788
+manifest and writes a committed-safe record. A `Fingerprint` is experiment evidence only:
+nothing here converts it into, stores it as, or compares it with production identity
+evidence. Records carry ids, booleans, counts and metrics, never digests, inode numbers,
+paths or file names.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import os
 import random
 import re
 import resource
+import secrets
 import shutil
 import sys
 import tempfile
@@ -50,6 +52,18 @@ CANDIDATES = {
     "ht64-i8": (64 * KIB, 8),
     "ht64-i32": (64 * KIB, 32),
 }
+# #798 additions, made after the protocol freeze at the operator's direction; not #796 defaults.
+# `meta-ctime` adds the change time to `meta`. `rnd64-*` sample interior blocks chosen by a
+# per-check seed, which models comparing them against a stored per-block digest table.
+REUSE_CANDIDATES = {
+    "meta-ctime": (0, 0),
+    "rnd64-i8": (64 * KIB, 8),
+    "rnd64-i32": (64 * KIB, 32),
+}
+ALL_CANDIDATES = {**CANDIDATES, **REUSE_CANDIDATES}
+METADATA_CANDIDATES = {"meta", "meta-ctime"}
+CTIME_CANDIDATES = {"meta-ctime"}
+RANDOM_CANDIDATES = {"rnd64-i8", "rnd64-i32"}
 NETWORK_MAX_FILES = 3
 # Larger than every candidate's coverage (ht64-i32 reads 34 x 64 KiB, ht1m 2 MiB), so each
 # sampling candidate has unread interior bytes for a constructed miss.
@@ -57,6 +71,9 @@ LARGE_BYTES = 8 * MIB
 SHORT_BYTES = 100 * KIB
 OVERLAP_BYTES = 96 * KIB
 SIDECAR_BYTES = 4 * KIB
+# Kernels without fine-grained timestamps stamp ctime from a clock that ticks every few ms. A
+# construction waits this long so it never shares a tick with the observation before it.
+CLOCK_TICK_SECONDS = 0.02
 # An even whole second, so +100 ns and +900 ns share their 1 s and 2 s buckets (O7).
 BASE_MTIME_NS = 1_600_000_000 * 1_000_000_000
 BUMPED_MTIME_NS = BASE_MTIME_NS + 1_000_000_000
@@ -92,7 +109,8 @@ NOT_MEASURED = {
     "peak_memory": "fingerprints run in the harness process, which has no worker to sample",
     "probe": "fingerprints replace no probe; ffprobe is not run",
 }
-PRIVATE_KEYS = {"sample_digest", "file_key", "mtime_ns", "dev", "ino", "relative", "root", "path"}
+PRIVATE_KEYS = {"sample_digest", "file_key", "mtime_ns", "ctime_ns", "dev", "ino", "generation",
+                "seed", "mount_source", "mount_options", "relative", "root", "path"}
 DIGEST_LIKE = re.compile(r"[0-9a-f]{32,}")
 
 
@@ -103,6 +121,7 @@ class Fingerprint:
     candidate: str
     size: int
     mtime_ns: int
+    ctime_ns: int  # 0 unless the candidate is in CTIME_CANDIDATES
     file_key: tuple[int, int]
     sample_digest: str
 
@@ -115,16 +134,40 @@ class PreconditionFailed(Exception):
     """An oracle case was not constructed as its definition requires."""
 
 
-def sample_plan(candidate: str, size: int) -> list[tuple[int, int]]:
-    """Merged, clipped [start, end) ranges a candidate reads from a file of `size` bytes."""
-    edge, interior = CANDIDATES[candidate]
+def interior_block_count(size: int) -> int:
+    """M: aligned SAMPLE_BYTES blocks of a file, less the first and the last."""
+    return max(0, -(-size // SAMPLE_BYTES) - 2)
+
+
+def random_blocks(size: int, count: int, seed: int) -> list[tuple[int, int]]:
+    """`count` distinct interior blocks (at most M) drawn by `seed`; the edges read the rest."""
+    pool = range(1, interior_block_count(size) + 1)
+    chosen = random.Random(seed).sample(pool, min(count, len(pool)))
+    return [(block * SAMPLE_BYTES, min(size, (block + 1) * SAMPLE_BYTES)) for block in chosen]
+
+
+def evenly_spaced_blocks(size: int, count: int) -> list[tuple[int, int]]:
+    ranges = []
+    for index in range(1, count + 1):
+        start = index * size // (count + 1) - SAMPLE_BYTES // 2
+        start = min(max(0, start), max(0, size - SAMPLE_BYTES))
+        ranges.append((start, min(size, start + SAMPLE_BYTES)))
+    return ranges
+
+
+def sample_plan(candidate: str, size: int, seed: int = 0) -> list[tuple[int, int]]:
+    """Merged, clipped [start, end) ranges a candidate reads from a file of `size` bytes.
+
+    `seed` selects the interior blocks of a RANDOM_CANDIDATES entry and is ignored otherwise.
+    """
+    edge, interior = ALL_CANDIDATES[candidate]
     if edge == 0 or size == 0:
         return []
     ranges = [(0, min(edge, size)), (max(0, size - edge), size)]
-    for index in range(1, interior + 1):
-        start = index * size // (interior + 1) - SAMPLE_BYTES // 2
-        start = min(max(0, start), max(0, size - SAMPLE_BYTES))
-        ranges.append((start, min(size, start + SAMPLE_BYTES)))
+    if candidate in RANDOM_CANDIDATES:
+        ranges += random_blocks(size, interior, seed)
+    else:
+        ranges += evenly_spaced_blocks(size, interior)
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
         if merged and start <= merged[-1][1]:
@@ -150,17 +193,21 @@ def read_range(descriptor: int, start: int, end: int) -> bytes:
     return b"".join(chunks)
 
 
-def fingerprint(path: Path, candidate: str,
-                between_reads: Callable[[], None] | None = None) -> tuple[Fingerprint, int]:
-    """Return the fingerprint and the bytes read; `between_reads` runs after the first range."""
-    if candidate == "meta":
+def fingerprint(path: Path, candidate: str, between_reads: Callable[[], None] | None = None,
+                seed: int = 0) -> tuple[Fingerprint, int]:
+    """Return the fingerprint and the bytes read; `between_reads` runs after the first range.
+
+    A before/after pair compared under one `seed` reads the same blocks, so for a random
+    candidate it is equivalent to checking those blocks against a stored per-block table.
+    """
+    if candidate in METADATA_CANDIDATES:
         facts = os.stat(path)
         return make_fingerprint(candidate, facts, ""), 0
     descriptor = os.open(path, os.O_RDONLY)
     try:
         before = os.fstat(descriptor)
         digest, total = hashlib.blake2b(digest_size=32), 0
-        for start, end in sample_plan(candidate, before.st_size):
+        for start, end in sample_plan(candidate, before.st_size, seed):
             data = read_range(descriptor, start, end)
             digest.update(start.to_bytes(8, "little") + len(data).to_bytes(8, "little"))
             digest.update(data)
@@ -177,7 +224,8 @@ def fingerprint(path: Path, candidate: str,
 
 
 def make_fingerprint(candidate: str, facts: os.stat_result, digest: str) -> Fingerprint:
-    return Fingerprint(candidate, facts.st_size, facts.st_mtime_ns,
+    ctime_ns = facts.st_ctime_ns if candidate in CTIME_CANDIDATES else 0
+    return Fingerprint(candidate, facts.st_size, facts.st_mtime_ns, ctime_ns,
                        (facts.st_dev, facts.st_ino), digest)
 
 
@@ -202,10 +250,10 @@ def write_fixture(path: Path, data: bytes) -> None:
     set_mtime(path, BASE_MTIME_NS)
 
 
-def first_unread(candidate: str, size: int, low: int, high: int) -> int:
-    """First offset in [low, high) the candidate does not read, else `low`."""
+def first_unread(candidate: str, size: int, low: int, high: int, seed: int = 0) -> int:
+    """First offset in [low, high) the candidate does not read under `seed`, else `low`."""
     offset = low
-    for start, end in sample_plan(candidate, size):
+    for start, end in sample_plan(candidate, size, seed):
         if start <= offset < end:
             offset = end
     return offset if offset < high else low
@@ -237,6 +285,7 @@ class Oracle:
     def __init__(self, scratch: Path, large: bytes):
         self.scratch = scratch
         self.large = large
+        self.seed = 0
         self.cases = {
             "O1": self.interior_edit, "O2": self.head_edit, "O3": self.tail_edit,
             "O4": self.short_file, "O5": self.empty_file, "O6": self.overlap,
@@ -246,6 +295,8 @@ class Oracle:
         }
 
     def run(self, case: str, candidate: str) -> dict[str, Any]:
+        # The constructor knows each check's seed, so a random candidate's miss is constructed.
+        self.seed = random.Random(f"{case}-{candidate}").getrandbits(64)
         directory = self.scratch / f"{case}-{candidate}"
         directory.mkdir()
         try:
@@ -262,12 +313,19 @@ class Oracle:
     def compare(self, path: Path, candidate: str, change: Callable[[Path], Path],
                 expect_change: bool) -> tuple[str, str]:
         """Fingerprint, apply `change` (which returns the path to re-observe), and classify."""
-        before, reference = fingerprint(path, candidate)[0], reference_digest(path)
+        before, reference = self.fingerprint(path, candidate), reference_digest(path)
+        time.sleep(CLOCK_TICK_SECONDS)
         after_path = change(path)
-        after = fingerprint(after_path, candidate)[0]
+        after = self.fingerprint(after_path, candidate)
         changed = reference_digest(after_path) != reference
         require(changed == expect_change, "reference_mismatch")
         return classify(changed, before == after), "changed" if changed else "unchanged"
+
+    def fingerprint(self, path: Path, candidate: str) -> Fingerprint:
+        return fingerprint(path, candidate, seed=self.seed)[0]
+
+    def first_unread(self, candidate: str, size: int, low: int, high: int) -> int:
+        return first_unread(candidate, size, low, high, self.seed)
 
     def large_fixture(self, directory: Path) -> Path:
         path = directory / "primary.mkv"
@@ -276,7 +334,7 @@ class Oracle:
 
     def region_edit(self, directory: Path, candidate: str, low: int, high: int) -> tuple:
         path = self.large_fixture(directory)
-        offset = first_unread(candidate, len(self.large), low, high)
+        offset = self.first_unread(candidate, len(self.large), low, high)
         return self.compare(path, candidate, lambda p: edit_and_return(p, offset), True)
 
     def interior_edit(self, directory, candidate):
@@ -292,7 +350,7 @@ class Oracle:
     def short_file(self, directory, candidate):
         path = directory / "short.mkv"
         write_fixture(path, self.large[:SHORT_BYTES])
-        offset = first_unread(candidate, SHORT_BYTES, 0, SHORT_BYTES)
+        offset = self.first_unread(candidate, SHORT_BYTES, 0, SHORT_BYTES)
         return self.compare(path, candidate, lambda p: edit_and_return(p, offset), True)
 
     def empty_file(self, directory, candidate):
@@ -316,7 +374,7 @@ class Oracle:
     def timestamp_precision(self, directory, candidate):
         path = self.large_fixture(directory)
         set_mtime(path, BASE_MTIME_NS + 100)
-        offset = first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
+        offset = self.first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
 
         def edit_within_bucket(target: Path) -> Path:
             flip_byte(target, offset)
@@ -339,7 +397,7 @@ class Oracle:
 
     def replacement(self, directory, candidate):
         path = self.large_fixture(directory)
-        offset = first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
+        offset = self.first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
         held = os.open(path, os.O_RDONLY)
         try:
             def replace(target: Path) -> Path:
@@ -358,7 +416,7 @@ class Oracle:
             os.close(held)
 
     def change_during_observation(self, directory, candidate):
-        if candidate == "meta":
+        if candidate in METADATA_CANDIDATES:
             return "not-applicable", "not-applicable"
         path = self.large_fixture(directory)
         reference = reference_digest(path)
@@ -368,7 +426,7 @@ class Oracle:
             set_mtime(path, BUMPED_MTIME_NS)
 
         try:
-            fingerprint(path, candidate, between_reads=write_behind_reader)
+            fingerprint(path, candidate, between_reads=write_behind_reader, seed=self.seed)
             outcome = "missed"
         except Drift:
             outcome = "detected"
@@ -377,7 +435,7 @@ class Oracle:
 
     def change_during_use(self, directory, candidate):
         path = self.large_fixture(directory)
-        offset = first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
+        offset = self.first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
 
         def ordinary_write(target: Path) -> Path:
             flip_byte(target, offset)
@@ -391,18 +449,19 @@ class Oracle:
         primary = self.large_fixture(directory)
         sidecar = directory / "primary.srt"
         write_fixture(sidecar, self.large[:SIDECAR_BYTES])
-        primary_before = fingerprint(primary, candidate)[0]
-        offset = first_unread(candidate, SIDECAR_BYTES, 0, SIDECAR_BYTES)
+        primary_before = self.fingerprint(primary, candidate)
+        offset = self.first_unread(candidate, SIDECAR_BYTES, 0, SIDECAR_BYTES)
         result = self.compare(sidecar, candidate, lambda p: edit_and_return(p, offset), True)
-        require(fingerprint(primary, candidate)[0] == primary_before, "primary_changed")
+        require(self.fingerprint(primary, candidate) == primary_before, "primary_changed")
         return result
 
     def stale_cache(self, directory, candidate):
         path = self.large_fixture(directory)
-        cache = {fingerprint(path, candidate)[0]: reference_digest(path)}
-        offset = first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
+        cache = {self.fingerprint(path, candidate): reference_digest(path)}
+        offset = self.first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
+        time.sleep(CLOCK_TICK_SECONDS)
         edit_restoring_mtime(path, offset)
-        cached = cache.get(fingerprint(path, candidate)[0])
+        cached = cache.get(self.fingerprint(path, candidate))
         current = reference_digest(path)
         require(current not in cache.values(), "reference_mismatch")
         return ("missed" if cached is not None else "detected"), "changed"
@@ -485,14 +544,16 @@ def cpu_seconds() -> float:
     return usage.ru_utime + usage.ru_stime
 
 
-def observe(entry: dict[str, Any], root: Path, candidate: str) -> tuple[dict[str, Any], Any]:
+def observe(entry: dict[str, Any], root: Path, candidate: str,
+            seed: int) -> tuple[dict[str, Any], Any]:
     row: dict[str, Any] = {
         "id": entry["id"], "size_bytes": entry["size_bytes"], "ext": entry["ext"],
         "outcome": "observed", "failure": None, "logical_bytes": 0,
     }
     begin = time.monotonic()
     try:
-        observed, row["logical_bytes"] = fingerprint(root / entry["relative"], candidate)
+        observed, row["logical_bytes"] = fingerprint(root / entry["relative"], candidate,
+                                                     seed=seed)
     except (Drift, OSError) as error:
         observed = None
         failure_class = "drift" if isinstance(error, Drift) else "io"
@@ -504,7 +565,8 @@ def observe(entry: dict[str, Any], root: Path, candidate: str) -> tuple[dict[str
 
 
 def run_repetition(index: int, candidate: str, root: Path, files: list[dict[str, Any]],
-                   args: argparse.Namespace, fs_type: str) -> tuple[dict[str, Any], list]:
+                   args: argparse.Namespace, fs_type: str,
+                   seeds: dict[str, int]) -> tuple[dict[str, Any], list]:
     paths = {entry["id"]: root / entry["relative"] for entry in files}
     if args.evict:
         for path in paths.values():
@@ -513,7 +575,8 @@ def run_repetition(index: int, candidate: str, root: Path, files: list[dict[str,
     counters, io_before, cpu_before = baseline.host_counters(), process_io(), cpu_seconds()
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        results = list(pool.map(lambda entry: observe(entry, root, candidate), files))
+        results = list(pool.map(
+            lambda entry: observe(entry, root, candidate, seeds[entry["id"]]), files))
     wall = time.monotonic() - started
     cpu = cpu_seconds() - cpu_before
     io_delta = baseline.counter_delta(io_before, process_io())
@@ -559,9 +622,13 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
     build = build_identity()
     cells = []
     for candidate in args.candidates:
+        # One secret seed per file for the whole cell, so stability compares like with like.
+        seeds = {entry["id"]: secrets.randbits(64) if candidate in RANDOM_CANDIDATES else 0
+                 for entry in files}
         repetitions, observations = [], []
         for index in range(1, args.repetitions + 1):
-            repetition, observed = run_repetition(index, candidate, root, files, args, fs_type)
+            repetition, observed = run_repetition(
+                index, candidate, root, files, args, fs_type, seeds)
             repetitions.append(repetition)
             observations.append(observed)
         cells.append({"candidate": candidate, "repetitions": repetitions,
@@ -588,21 +655,31 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
 # ---- identity, validation, CLI ---------------------------------------------------------
 
 
-def candidate_parameters(candidates: list[str]) -> dict[str, dict[str, int]]:
+def sampling_kind(candidate: str) -> str:
+    if candidate in RANDOM_CANDIDATES:
+        return "random"
+    return "none" if candidate in METADATA_CANDIDATES else "fixed"
+
+
+def candidate_parameters(candidates: list[str]) -> dict[str, dict[str, Any]]:
     return {
-        name: {"edge_bytes": CANDIDATES[name][0], "interior_samples": CANDIDATES[name][1],
-               "sample_bytes": SAMPLE_BYTES if CANDIDATES[name][1] else 0}
+        name: {"edge_bytes": ALL_CANDIDATES[name][0],
+               "interior_samples": ALL_CANDIDATES[name][1],
+               "sample_bytes": SAMPLE_BYTES if ALL_CANDIDATES[name][1] else 0,
+               "sampling": sampling_kind(name), "ctime": name in CTIME_CANDIDATES}
         for name in candidates
     }
 
 
-def build_identity() -> dict[str, Any]:
+def build_identity(script: Path = Path(__file__), helper: Path = Path(_spec.origin)
+                   ) -> dict[str, Any]:
+    """Commit, changed paths, and the hashes of the script that ran and the module it imports."""
     commit = baseline.git_output("rev-parse", "HEAD")
     return {
         "git_commit": commit.strip() if commit else UNAVAILABLE,
         "git_changed_paths": baseline.tracked_changes(),
-        "script_sha256": baseline.sha256_file(Path(__file__).resolve()),
-        "helper_sha256": baseline.sha256_file(Path(_spec.origin).resolve()),
+        "script_sha256": baseline.sha256_file(script.resolve()),
+        "helper_sha256": baseline.sha256_file(helper.resolve()),
     }
 
 
@@ -652,7 +729,7 @@ def validate_oracle(record: dict[str, Any]) -> list[str]:
     problems += baseline.missing("build", record["build"], BUILD_KEYS)
     problems += baseline.missing("host", record["host"], HOST_KEYS)
     candidates = set(record["parameters"].get("candidates", {}))
-    if not candidates <= set(CANDIDATES):
+    if not candidates <= set(ALL_CANDIDATES):
         problems.append("candidates")
     for row in record["cases"]:
         problems += case_problems(row, candidates)
@@ -710,7 +787,7 @@ def repetition_problems(repetition: dict[str, Any]) -> list[str]:
 
 def cell_problems(cell: dict[str, Any]) -> list[str]:
     problems = baseline.missing("observed", cell.get("observed"), OBSERVED_KEYS)
-    if cell.get("candidate") not in CANDIDATES:
+    if cell.get("candidate") not in ALL_CANDIDATES:
         problems.append("cell candidate")
     if not cell.get("repetitions"):
         problems.append("cell repetitions")
@@ -747,6 +824,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     oracle = commands.add_parser("oracle", help="run mutation-oracle cases O1-O13")
     oracle.add_argument("--output", type=Path, required=True)
     oracle.add_argument("--scratch-parent", type=Path, default=Path(tempfile.gettempdir()))
+    oracle.add_argument("--candidates", type=lambda text: text.split(","),
+                        default=list(CANDIDATES))
     run = commands.add_parser("run", help="measure candidate cost over a manifest subset")
     run.add_argument("manifest", type=Path)
     run.add_argument("--output", type=Path, required=True)
@@ -758,7 +837,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run.add_argument("--evict", action="store_true",
                      help="drop page cache for selected files first (local storage only)")
     args = parser.parse_args(argv)
-    unknown = set(getattr(args, "candidates", [])) - set(CANDIDATES)
+    unknown = set(args.candidates) - set(ALL_CANDIDATES)
     if unknown:
         parser.error(f"unknown candidates: {','.join(sorted(unknown))}")
     return args
@@ -768,7 +847,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         if args.command == "oracle":
-            record = run_oracle(args.scratch_parent)
+            record = run_oracle(args.scratch_parent, args.candidates)
             problems = validate_oracle(record)
         else:
             record = capture(args)
