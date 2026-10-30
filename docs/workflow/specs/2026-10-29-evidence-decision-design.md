@@ -58,9 +58,13 @@ The decision itself is fixed in ADR 0120; the report must not contradict it.
    tied to a record or README citation.
 2. The phase table fills all seven columns for all six phases.
 3. Every rollout gate has a numeric or protocol threshold and a named corpus.
-4. The contracts name every protocol, payload and setting change in ADR 0120's Consequences.
+4. The contracts name every changed wire struct (hash result, probe request, probe result),
+   every durable payload whose type embeds one (`scan_observations.evidence_json`,
+   `artifact_verifications.report`), the owner-node setting, and the guard-mismatch failure
+   shape.
 5. Re-scope drafts cover #792, #793 and #794 in both approval outcomes.
-6. `just ci` passes, including `check-adr-index`.
+6. The not-measured section lists each record's `not_measured` entries and exclusions.
+7. `just ci` passes, including `check-adr-index`.
 
 ## Validation
 
@@ -68,5 +72,6 @@ The decision itself is fixed in ADR 0120; the report must not contradict it.
   with it.
 - Report and ADR content — task-test-not-applicable: human-readable decision text with no
   executable consumer; reviewed by the design and branch reviews against the cited records.
-- Public safety — task-test-not-applicable: no structural checker exists; the author greps
-  the diff for host paths, user names and mount or server names before push.
+- Public safety — task-test-not-applicable: no structural checker exists. The author runs
+  `rg` directly over the changed files for host-path patterns, and separately searches for
+  the private mount, server and user names; the PR body records pass or fail, never the names.

@@ -14,13 +14,14 @@ three times (owner hash, then the probe's BLAKE3 re-reads before and after ffpro
 ADR 0077 publishes identity only at scan completion. The evidence is summarised in the
 [decision report](../media-evidence-decision-report.md):
 
-- A 1 MiB owner hash buffer cut hash CPU 67–77% with no trust change (#789).
+- A 1 MiB owner hash buffer cut hash CPU 77% (684.5 to 157.1 s) and summed hash time 11%,
+  raising hash peak RSS from 5.2 to 14.9 MiB, with no trust change (#789).
 - Removing the probe's two re-reads cut a local full pass from 619.2 s to 212.5 s and
   physical reads from 2.93× to 1.00× the corpus (#801, #797). On the network subset the
   re-reads were served by the client cache, so only probe CPU fell.
-- A stat guard of size and mtime misses a same-size edit with mtime restored between hash
-  and probe (#801). Adding ctime detects it on btrfs and tmpfs, not on the network mount,
-  where the reported ctime follows mtime (#798).
+- A metadata guard of size, mtime ns and file key misses a same-size interior edit with
+  mtime restored (#796 oracle, case O1). Adding ctime detects it on btrfs and tmpfs, not on
+  the network mount, where the reported ctime follows mtime (#798).
 - Every fingerprint and sampling candidate has constructed misses (#796, #798). Lazy
   hashing defers the one full read without removing it (#797). No storage here exposes a
   content version.
@@ -39,10 +40,15 @@ Per phase, with the full table, frozen gates and contracts in the decision repor
 | Promotion/commit | Unchanged: commit authorization against verified facts. |
 | Repeat scan | Unchanged: full rescan; no cached evidence is reused. |
 
-The guarded reuse amends ADR 0077's agreement predicate for scan probes only. The probe
-result says whether its content hash was recomputed or reused, and the pump accepts a reused
-hash only when the guard held. A guard mismatch fails closed, as a hash mismatch does today,
-leaving the observation without evidence. Fingerprints, sampled digests and the reuse guard
+The guarded reuse amends ADR 0077's agreement predicate for scan probes only. The hash
+worker adds ctime to its pre/post stability check and reports the pre-read ctime. The scan
+pump alone may send the guard (that ctime and file key) as a new optional field of the probe
+request; `ExpectedFileFacts` and `ObservedFileFacts` are unchanged, and output probes never
+send it. With a guard, the worker reads no file bytes, compares the guard before and after
+ffprobe, echoes the expected hash and marks the result's hash source `reused`. The source is
+omitted when the hash was recomputed. The pump accepts a reused hash only from a guarded
+request. A guard mismatch fails closed with the existing fact-free `hash_drift` class and
+payload, leaving the observation without evidence. Fingerprints, sampled digests and the reuse guard
 are never stored as, or compared as, a content hash. ADR 0050 byte ownership, ticket and
 lease authority, and absence reconciliation at completion are unchanged.
 
@@ -59,19 +65,23 @@ only the 1 MiB buffer proceeds.
   such a file. A file that is never transformed keeps the mismatched facts until the next
   full rescan.
 - The worker protocol changes (ADR 0016 version bump): the hash result gains ctime ns, the
-  probe request a guard mode, the probe result its hash source. The durable evidence records
-  the hash source as an additive field (ADR 0013), so a binary downgrade after such rows exist
-  is unsupported; rollback is the owner-node setting.
-- Adding a filesystem to the reuse list requires the O1 and O10 constructions to pass on it.
+  probe request an optional guard, the probe result an optional hash source. Scan evidence
+  (`scan_observations.evidence_json`) records the source as an optional field (ADR 0013), read
+  by #794's gates and operator audit to count reused observations. Rows written with
+  recomputed hashes, including every output probe in `artifact_verifications.report`, stay
+  byte-identical. A binary downgrade is unsupported only once reused rows exist; rollback is
+  the owner-node setting.
+- Adding a filesystem to the reuse list requires the hash-to-probe O1 and mid-read O10
+  constructions to be detected on it; #794 gates both on btrfs and tmpfs.
 
 ## Considered & rejected
 
 - **Keep all three reads (no-go).** judgment: forgoes the measured two-thirds cut on local
   storage, where the ctime guard detected every constructed mtime-restored edit; it remains
   the fallback if this record is not accepted.
-- **Reuse with a size and mtime guard only.** verified: #801's manual construction (one
-  interior byte flipped, mtime restored) was probed as unchanged, recorded in
-  `media-evidence-baseline/single-read/README.md`.
+- **Reuse with a size and mtime guard only.** verified: the committed #796 oracle
+  (`fingerprint/2026-10-29-fingerprint-oracle.json`) records `meta` missing O1; #801's
+  operator-recorded manual check in `single-read/README.md` corroborates it for the probe.
 - **Reuse on the network mount.** verified: `reuse/README.md` records ctime following mtime
   there, so O1 and O13 are missed; `lazy/README.md` records no wire saving (24.66 GB fetched
   in repetition 1 under both).
@@ -79,6 +89,11 @@ only the 1 MiB buffer proceeds.
   lists constructed O1 and O13 misses for every `ht*` and `rnd64` candidate.
 - **Lazy provisional evidence.** verified: `lazy/README.md` shows deferral leaves eventual
   logical bytes at one full read and misses interior O13 and O15 constructions.
+- **Transform input reuse (R3).** verified: `media-evidence-790-report.md` records its cost
+  as not measured (#788 does not replay transforms); the input's full hash is also the
+  backstop for the probe-reuse residual.
+- **64 KiB, 4 MiB or batched 8 KiB hash reads.** verified: `stages-1-2.md` records buf1m's
+  summed-hash improvement as the best of the four and selects it.
 - **Cached evidence for repeat scans.** judgment: needs a durable cache and a scrub interval
   no measurement supports; silent corruption would persist until the scrub.
 - **Per-file publication readiness.** verified: first durable observation is `not_measured`
