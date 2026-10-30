@@ -176,7 +176,7 @@ verification as in #797) covers the window, or whether the risk is accepted.
 
 ## Reproduce
 
-Since #810 the 1 MiB buffer is production source, so `single-read` now edits only the probe worker.
+Since #810, run this block from a checkout of `805f1729` to rebuild the recorded binaries.
 
 With private manifests from the #788 `manifest` command:
 
