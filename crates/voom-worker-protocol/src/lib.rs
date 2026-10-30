@@ -54,6 +54,7 @@ pub use operations::dispatch::{
 pub use operations::hash_file::{HashFileRequest, HashFileResult, HashedSidecar};
 pub use operations::probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
+    ProbeGuard,
 };
 pub use operations::publication::{
     CommitGroupCompleteOutcome, CommitGroupIdentity, CommitGroupMemberProof, CommitGroupProof,

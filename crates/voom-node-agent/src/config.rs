@@ -31,6 +31,11 @@ pub struct AgentConfig {
     /// byte work for (ADR 0074 commit-intent executor).
     #[serde(default)]
     pub storage_roots: Vec<StorageRootBinding>,
+    /// Lets scan probes reuse the owner hash under the ADR 0120 ctime guard
+    /// on btrfs and tmpfs roots instead of re-reading each file twice. Off
+    /// unless set; turning it off is the rollback.
+    #[serde(default)]
+    pub probe_hash_reuse: bool,
     pub workers: Vec<WorkerConfig>,
 }
 

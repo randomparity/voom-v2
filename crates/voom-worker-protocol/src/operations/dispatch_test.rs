@@ -150,13 +150,13 @@ fn transcode_audio_additive_settings_round_trip() {
 #[test]
 fn decode_rejects_previous_persisted_schema() {
     let dispatch = MediaDispatch::Probe(MediaProbeDispatch {
-        schema: 4,
+        schema: 5,
         source: source(7, "movies/a.mkv"),
         expected: expected(),
     });
     let error = decode_media_dispatch(&serde_json::to_value(dispatch).unwrap()).unwrap_err();
     assert!(
-        error.contains("schema 4 does not match protocol version 5"),
+        error.contains("schema 5 does not match protocol version 6"),
         "{error}"
     );
 }

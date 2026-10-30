@@ -55,6 +55,14 @@ async fn probe_file(
     request: &ProbeFileRequest,
     config: &FfprobeConfig,
 ) -> Result<ProbeFileResult, FfprobeError> {
+    // ADR 0120: a guarded scan probe on btrfs or tmpfs reuses the owner hash;
+    // everywhere else, and on other platforms, the hash is recomputed below.
+    #[cfg(target_os = "linux")]
+    if let Some(guard) = &request.guard
+        && let Some(result) = Box::pin(crate::guard::probe_reused(request, guard, config)).await?
+    {
+        return Ok(result);
+    }
     let path = PathBuf::from(&request.path);
     let pre_probe = Box::pin(observe_file_facts(&path))
         .await
@@ -79,6 +87,7 @@ async fn probe_file(
         pre_probe,
         post_probe,
         snapshot,
+        hash_source: None,
     })
 }
 

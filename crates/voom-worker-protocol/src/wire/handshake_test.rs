@@ -2,17 +2,17 @@ use super::*;
 use crate::ProtocolError;
 
 #[test]
-fn protocol_version_is_five_for_lossless_audio_facts() {
-    assert_eq!(voom_core::PROTOCOL_VERSION, 5);
+fn protocol_version_is_six_for_probe_hash_reuse() {
+    assert_eq!(voom_core::PROTOCOL_VERSION, 6);
 }
 
 #[test]
-fn previous_worker_cannot_negotiate_without_audio_facts_contract() {
+fn previous_worker_cannot_negotiate_without_probe_reuse_contract() {
     assert!(matches!(
-        negotiate(4),
+        negotiate(5),
         Err(ProtocolError::UnsupportedProtocolVersion {
-            offered: 4,
-            expected: 5
+            offered: 5,
+            expected: 6
         })
     ));
 }

@@ -510,6 +510,7 @@ async fn probe_request(path: &Path, lease_id: LeaseId) -> OperationRequest {
             modified_at: observed.modified_at,
             local_file_key: observed.local_file_key,
         },
+        guard: None,
     };
     let payload_result = serde_json::to_value(request);
     assert!(payload_result.is_ok());

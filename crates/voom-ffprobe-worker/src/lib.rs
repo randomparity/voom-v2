@@ -4,6 +4,8 @@
 //! facts, and exposes worker-protocol handlers for probe-file dispatch.
 
 pub mod ffprobe;
+#[cfg(target_os = "linux")]
+mod guard;
 pub mod handler;
 pub mod normalize;
 pub mod observe;

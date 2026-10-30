@@ -13,6 +13,7 @@ fn result() -> HashFileResult {
             ino: 2,
             nlink: 1,
         }),
+        changed_at_ns: None,
         stability_started_at: "2026-08-22T00:00:00Z".to_owned(),
         stability_confirmed_at: "2026-08-22T00:00:01Z".to_owned(),
         sidecars: vec![HashedSidecar {
@@ -69,4 +70,27 @@ fn empty_sidecar_list_omits_the_field_on_encode() {
     bare.sidecars = Vec::new();
     let encoded = serde_json::to_value(&bare).unwrap();
     assert!(encoded.get("sidecars").is_none());
+}
+
+#[test]
+fn result_round_trips_changed_at_ns_and_omits_it_when_absent() {
+    let with_ctime = HashFileResult {
+        changed_at_ns: Some(1_793_000_000_123_456_789),
+        ..result()
+    };
+    let encoded = serde_json::to_value(&with_ctime).unwrap();
+    assert_eq!(
+        encoded["changed_at_ns"],
+        json!(1_793_000_000_123_456_789_i64)
+    );
+    assert_eq!(
+        serde_json::from_value::<HashFileResult>(encoded).unwrap(),
+        with_ctime
+    );
+    assert!(
+        serde_json::to_value(result())
+            .unwrap()
+            .get("changed_at_ns")
+            .is_none()
+    );
 }

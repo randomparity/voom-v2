@@ -157,7 +157,7 @@ pub use taxonomy::execution_vocab::{
 };
 pub use taxonomy::scan::{ScanSessionStatus, ScanTerminalReason};
 pub use taxonomy::scan_evidence::{
-    FileKeyFacts, MAX_EVIDENCE_BYTES, MAX_EVIDENCE_SIDECARS, ScanObservationEvidence,
+    FileKeyFacts, HashSource, MAX_EVIDENCE_BYTES, MAX_EVIDENCE_SIDECARS, ScanObservationEvidence,
     ScanSidecarEvidence,
 };
 pub use ticket_operation::{
@@ -187,4 +187,4 @@ pub use version::VersionInfo;
 /// flag day: every worker and the control plane move together because they
 /// are the same release. See ADR-0016
 /// (`docs/adr/0016-worker-protocol-exact-version-match.md`).
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;

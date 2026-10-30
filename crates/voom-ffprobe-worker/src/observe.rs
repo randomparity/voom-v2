@@ -9,25 +9,7 @@ use voom_worker_protocol::ObservedFileFacts;
 use crate::WorkerError;
 
 pub async fn observe_file_facts(path: &Path) -> Result<ObservedFileFacts, WorkerError> {
-    // Do not follow symlinks: symlink_metadata rejects a symlink up front, and
-    // the open uses O_NOFOLLOW so a symlink swapped in after the stat is also
-    // refused. Matches the ffmpeg / mkvtoolnix / verify-artifact workers so a
-    // symlinked path cannot redirect the probe to a different file.
-    let path_metadata = tokio::fs::symlink_metadata(path)
-        .await
-        .map_err(|err| artifact_unavailable(path, err))?;
-    if !path_metadata.is_file() {
-        return Err(artifact_not_regular(path));
-    }
-
-    let mut file = open_regular_file_no_follow(path).await?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|err| artifact_unavailable(path, err))?;
-    if !metadata.is_file() {
-        return Err(artifact_not_regular(path));
-    }
+    let (mut file, metadata) = open_regular_file(path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
@@ -57,6 +39,34 @@ pub async fn observe_file_facts(path: &Path) -> Result<ObservedFileFacts, Worker
         modified_at: modified_at(&metadata),
         local_file_key: None,
     })
+}
+
+/// Open `path` as a regular file and return it with its opened-descriptor
+/// metadata.
+///
+/// Do not follow symlinks: `symlink_metadata` rejects a symlink up front, and
+/// the open uses `O_NOFOLLOW` so a symlink swapped in after the stat is also
+/// refused. Matches the ffmpeg / mkvtoolnix / verify-artifact workers so a
+/// symlinked path cannot redirect the probe to a different file.
+pub(crate) async fn open_regular_file(
+    path: &Path,
+) -> Result<(tokio::fs::File, std::fs::Metadata), WorkerError> {
+    let path_metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|err| artifact_unavailable(path, err))?;
+    if !path_metadata.is_file() {
+        return Err(artifact_not_regular(path));
+    }
+
+    let file = open_regular_file_no_follow(path).await?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|err| artifact_unavailable(path, err))?;
+    if !metadata.is_file() {
+        return Err(artifact_not_regular(path));
+    }
+    Ok((file, metadata))
 }
 
 #[cfg(unix)]
@@ -100,7 +110,7 @@ fn metadata_changed(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bo
     before.len() != after.len() || before.modified().ok() != after.modified().ok()
 }
 
-fn modified_at(metadata: &std::fs::Metadata) -> Option<String> {
+pub(crate) fn modified_at(metadata: &std::fs::Metadata) -> Option<String> {
     let modified = metadata.modified().ok()?;
     Some(format_iso8601(OffsetDateTime::from(modified)))
 }

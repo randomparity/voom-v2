@@ -18,12 +18,12 @@ use serde_json::{Value as JsonValue, json};
 use tokio::time::Instant;
 use voom_core::{
     ArtifactAccessDeclaration, ArtifactAccessRight, ArtifactAccessTarget, ErrorCode, FailureClass,
-    LeaseId, NodeIncarnationId, OperationKind, ScanObservationEvidence, ScanSessionId,
+    HashSource, LeaseId, NodeIncarnationId, OperationKind, ScanObservationEvidence, ScanSessionId,
     ScanSidecarEvidence, StorageRootId,
 };
 use voom_worker_protocol::{
     ClientHandle, HashFileRequest, HashFileResult, NdjsonOutcome, ObservedFileFacts,
-    OperationRequest, ProbeFileRequest, ProbeFileResult, ProgressFrame, ScanCandidate,
+    OperationRequest, ProbeFileRequest, ProbeFileResult, ProbeGuard, ProgressFrame, ScanCandidate,
     ScanCandidateFile, ScanLibraryResult, WorkerCredentials,
 };
 
@@ -58,6 +58,8 @@ pub(crate) struct ScanPumpContext {
     pub lease_ttl_ms: u32,
     pub progress_timeout: Duration,
     pub storage_roots: HashMap<u64, PathBuf>,
+    /// Send the ADR 0120 reuse guard with each primary probe.
+    pub probe_hash_reuse: bool,
 }
 
 /// What one candidate contributed to the run counters.
@@ -705,8 +707,9 @@ async fn hash_one(
 
 /// Probe outcome for the primary file.
 enum ProbeOutcome {
-    /// Probe agreed with the hash facts; the snapshot is identity evidence.
-    Snapshot(JsonValue),
+    /// Probe agreed with the hash facts; the snapshot is identity evidence,
+    /// and the source says whether the probe reused the owner hash.
+    Snapshot(JsonValue, Option<HashSource>),
     /// Real absence: the primary is gone.
     Vanished,
     /// Probe ran but the facts disagree: identity unusable.
@@ -715,7 +718,8 @@ enum ProbeOutcome {
 
 /// Probe the primary against the agreed hash facts. The ffprobe worker
 /// verifies size/hash at both probe points itself; the pump re-checks the
-/// full fact set including modification time.
+/// full fact set including modification time. With the reuse setting on, the
+/// request carries the hash result's ctime and file key as the ADR 0120 guard.
 async fn probe_primary(
     registry: &ChildEndpointRegistry,
     root: &std::path::Path,
@@ -738,6 +742,7 @@ async fn probe_primary(
         path.is_absolute() && !path_text.starts_with('-'),
         "probe paths must be absolute canonical-root joins, got {path_text}"
     );
+    let guard = probe_guard(context, hash);
     let request = OperationRequest {
         operation: OperationKind::ProbeFile,
         lease_id: context.lease_id,
@@ -749,6 +754,7 @@ async fn probe_primary(
                 modified_at: Some(hash.modified_at.clone()),
                 local_file_key: None,
             },
+            guard,
         }),
         heartbeat_deadline_ms: context.lease_ttl_ms,
         progress_idle_deadline_ms: duration_millis_u32(context.progress_timeout),
@@ -770,8 +776,12 @@ async fn probe_primary(
                     format!("decode probe_file result: {error}"),
                 )
             })?;
-            if agrees(&result.pre_probe, hash) && agrees(&result.post_probe, hash) {
-                Ok(ProbeOutcome::Snapshot(result.snapshot))
+            // ADR 0120 amends the ADR 0077 predicate: a reused hash counts
+            // only when this pump asked for reuse by sending the guard.
+            let reuse_allowed = result.hash_source.is_none() || guard.is_some();
+            if reuse_allowed && agrees(&result.pre_probe, hash) && agrees(&result.post_probe, hash)
+            {
+                Ok(ProbeOutcome::Snapshot(result.snapshot, result.hash_source))
             } else {
                 Ok(ProbeOutcome::Disagree)
             }
@@ -784,6 +794,18 @@ async fn probe_primary(
         }
         Err(message) => Err(PumpFailure::new(FailureClass::WorkerCrash, message)),
     }
+}
+
+/// The reuse guard for a primary probe: only with the owner-node setting on
+/// and only when the hash result carried both the ctime and the file key.
+fn probe_guard(context: &ScanPumpContext, hash: &HashFileResult) -> Option<ProbeGuard> {
+    if !context.probe_hash_reuse {
+        return None;
+    }
+    Some(ProbeGuard {
+        changed_at_ns: hash.changed_at_ns?,
+        file_key: hash.file_key?,
+    })
 }
 
 /// The exact agreement predicate: probe-observed facts equal the agreed hash
@@ -873,14 +895,15 @@ async fn process_candidate(
         }
     }
 
-    let snapshot = match probe_primary(&registry, &root, primary, &hash, &context, &tag).await {
-        Ok(ProbeOutcome::Snapshot(snapshot)) => snapshot,
-        Ok(ProbeOutcome::Vanished) => return Ok(contribution),
-        Ok(ProbeOutcome::Disagree) => {
-            return Ok(evidence_less(&mut contribution, primary));
-        }
-        Err(failure) => return Err(failure),
-    };
+    let (snapshot, hash_source) =
+        match probe_primary(&registry, &root, primary, &hash, &context, &tag).await {
+            Ok(ProbeOutcome::Snapshot(snapshot, hash_source)) => (snapshot, hash_source),
+            Ok(ProbeOutcome::Vanished) => return Ok(contribution),
+            Ok(ProbeOutcome::Disagree) => {
+                return Ok(evidence_less(&mut contribution, primary));
+            }
+            Err(failure) => return Err(failure),
+        };
 
     let evidence = ScanObservationEvidence {
         content_hash: hash.content_hash,
@@ -889,6 +912,7 @@ async fn process_candidate(
         file_key: hash.file_key,
         sidecars,
         probe_snapshot: snapshot,
+        hash_source,
     };
     let over_bound = evidence.sidecars.len() > MAX_SIDECAR_ENTRIES
         || serde_json::to_vec(&evidence).is_ok_and(|bytes| bytes.len() > MAX_EVIDENCE_BYTES);

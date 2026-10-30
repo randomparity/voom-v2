@@ -2,9 +2,8 @@
 
 This report holds the comparison, phase table, rollout gates, implementation contracts and
 re-scope drafts behind [ADR 0120](adr/0120-phase-specific-media-evidence.md), for epic
-[#787](https://github.com/randomparity/voom-v2/issues/787). ADR 0120 is **Proposed**. Nothing
-here changes production behaviour, and until a maintainer accepts the ADR every phase keeps
-today's full-hash evidence. Measurements follow the frozen
+[#787](https://github.com/randomparity/voom-v2/issues/787). ADR 0120 is **Accepted**
+(2026-10-30); the selected changes land in #810 and #811. Measurements follow the frozen
 [protocol](media-evidence-protocol.md). They come from one host, on a local btrfs corpus
 (34 files, 935.3 GB) and a three-file subset (24.7 GB) of a network corpus shared with an
 active rehearsal. Every figure is copied from the committed records and READMEs named in each

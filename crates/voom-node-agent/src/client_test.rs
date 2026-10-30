@@ -279,6 +279,7 @@ fn loaded_config(url: &str) -> LoadedAgentConfig {
             node_token: TokenSource::Env {
                 name: "VOOM_NODE_TOKEN".to_owned(),
             },
+            probe_hash_reuse: false,
             workers: vec![WorkerConfig {
                 name: "echo".to_owned(),
                 program: PathBuf::from("/bin/echo"),

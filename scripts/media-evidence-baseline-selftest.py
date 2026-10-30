@@ -9,6 +9,7 @@ baseline runs, which are validated here too.
 import argparse
 import importlib.util
 import json
+import re
 import socket
 import stat
 import subprocess
@@ -242,6 +243,13 @@ class ContractTests(unittest.TestCase):
         constants = harness.read_constants(harness.REPO_ROOT)
         self.assertEqual(constants["max_in_flight"], 4)
         self.assertEqual(constants["flush_observation_count"], 1000)
+
+    def test_offered_protocol_version_is_the_checked_out_constant(self):
+        # Workers refuse any other version (ADR 0016); a hard-coded value went stale at #811.
+        source = (harness.REPO_ROOT / "crates/voom-core/src/lib.rs").read_text(encoding="utf-8")
+        declared = re.search(r"^pub const PROTOCOL_VERSION: u32 = (\d+);$", source, re.M)
+        self.assertIsNotNone(declared)
+        self.assertEqual(harness.protocol_version(), declared.group(1))
 
     def test_renamed_source_constant_fails_instead_of_recording_a_stale_value(self):
         with tempfile.TemporaryDirectory() as temporary:

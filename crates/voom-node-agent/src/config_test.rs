@@ -81,6 +81,35 @@ fn valid_file_token_config_loads_without_exposing_the_secret() {
     assert!(debug.contains("[REDACTED]"));
 }
 
+// ADR 0120 contract 8: reuse stays off unless the operator turns it on, and
+// the key is a strict boolean.
+#[test]
+fn probe_hash_reuse_defaults_off_and_is_a_strict_boolean() {
+    let fixture = ConfigFixture::new("token");
+    assert!(
+        !AgentConfig::load(&fixture.config_path)
+            .unwrap()
+            .config
+            .probe_hash_reuse
+    );
+
+    let enabled = fixture.document.replace(
+        "shutdown_grace_seconds = 10\n",
+        "shutdown_grace_seconds = 10\nprobe_hash_reuse = true\n",
+    );
+    fixture.rewrite(&enabled);
+    assert!(
+        AgentConfig::load(&fixture.config_path)
+            .unwrap()
+            .config
+            .probe_hash_reuse
+    );
+
+    fixture.rewrite(&enabled.replace("probe_hash_reuse = true", "probe_hash_reuse = \"yes\""));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+}
+
 #[test]
 fn worker_accelerator_config_is_structured_and_rejects_unknown_fields() {
     let fixture = ConfigFixture::new("token");

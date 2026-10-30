@@ -100,6 +100,17 @@ fn validate_blake3_hash(value: &str) -> Result<(), VoomError> {
     Ok(())
 }
 
+/// How the probe leg obtained the content hash it agreed with (ADR 0120).
+///
+/// Absent means the probe recomputed the hash from the file bytes. `Reused`
+/// means the probe echoed the owner's hash under the ctime reuse guard and read
+/// no file bytes itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HashSource {
+    Reused,
+}
+
 /// Evidence attached to a scan observation when hash and probe agree (ADR 0077).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +126,10 @@ pub struct ScanObservationEvidence {
     pub sidecars: Vec<ScanSidecarEvidence>,
     /// Normalized ffprobe snapshot, verbatim from the probe worker result.
     pub probe_snapshot: Value,
+    /// Omitted when the probe recomputed the hash, so those rows keep their
+    /// pre-ADR-0120 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_source: Option<HashSource>,
 }
 
 /// Upper bounds mirroring ADR 0077's per-observation evidence budget.
@@ -165,3 +180,7 @@ impl ScanObservationEvidence {
             .map_err(|error| VoomError::database(format!("scan observation evidence: {error}")))
     }
 }
+
+#[cfg(test)]
+#[path = "scan_evidence_test.rs"]
+mod tests;

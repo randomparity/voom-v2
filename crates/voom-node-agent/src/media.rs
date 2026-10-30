@@ -381,6 +381,7 @@ fn child_request(
             json!(ProbeFileRequest {
                 path: source,
                 expected: dispatch.expected.clone(),
+                guard: None,
             }),
         ),
         MediaDispatch::TranscodeAudio(dispatch) => (
@@ -833,6 +834,7 @@ async fn probe_output(
                 modified_at: None,
                 local_file_key: None,
             },
+            guard: None,
         }),
         heartbeat_deadline_ms: duration_millis_u32(context.lease_ttl),
         progress_idle_deadline_ms: duration_millis_u32(context.progress_timeout),

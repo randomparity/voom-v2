@@ -217,3 +217,85 @@ fn hash_chunk_is_one_mebibyte() {
     // ADR 0120 contract 1: the owner hash reads 1 MiB per read (#789's buf1m).
     assert_eq!(HASH_CHUNK_BYTES, 1024 * 1024);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hash_result_reports_pre_read_ctime() {
+    // ADR 0120 contract 2: the pump copies this value into the probe's reuse
+    // guard, so it must be the agreeing pre-read stat's ctime, not absent.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ctime.mkv");
+    std::fs::write(&path, b"ctime reported").unwrap();
+    let expected = stat_facts(&std::fs::metadata(&path).unwrap()).changed_at_ns;
+
+    let result = hash_file_in_root(
+        dir.path(),
+        &HashFileRequest {
+            provider_locator: dir.path().display().to_string(),
+            provider_relative_locator: "ctime.mkv".to_owned(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(expected.is_some());
+    assert_eq!(result.changed_at_ns, expected);
+}
+
+/// Rewrite one interior byte in place (same size), then put mtime back, as
+/// gate G4's constructions do. The 20 ms wait keeps the edit out of the
+/// pre-stat's ctime tick on coarse-clock kernels, as the #798 oracle did.
+#[cfg(unix)]
+fn same_size_edit_with_mtime_restored(path: &std::path::Path) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let original_mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(3)).unwrap();
+    file.write_all(b"X").unwrap();
+    file.set_modified(original_mtime).unwrap();
+}
+
+/// G4(b): an edit during the hash read whose mtime is restored before the
+/// post-read stat still fails the stability check, because ctime moved.
+#[cfg(unix)]
+fn assert_restored_mtime_edit_during_hash_is_drift(dir: &std::path::Path) {
+    let path = dir.join("edited.mkv");
+    std::fs::write(&path, b"interior bytes under edit").unwrap();
+    let opened = std::fs::File::open(&path).unwrap();
+    let pre = stat_facts(&opened.metadata().unwrap());
+
+    same_size_edit_with_mtime_restored(&path);
+    let post = stat_facts(&opened.metadata().unwrap());
+
+    assert_eq!(post.size_bytes, pre.size_bytes);
+    assert_eq!(post.modified_at, pre.modified_at, "mtime was restored");
+    let err = assert_stable(&pre, &post).unwrap_err();
+    assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
+    assert_eq!(err.payload(), &serde_json::json!({ "stage": "hash_drift" }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restored_mtime_edit_during_hash_is_drift_on_tmpfs() {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+    assert!(
+        mounts
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) == Some("/dev/shm")
+                && line.split_whitespace().nth(2) == Some("tmpfs")),
+        "gate G4 needs /dev/shm mounted as tmpfs"
+    );
+    let dir = tempfile::tempdir_in("/dev/shm").unwrap();
+    assert_restored_mtime_edit_during_hash_is_drift(dir.path());
+}
+
+/// The pinned test root is btrfs on developer hosts and ext4 on Linux CI;
+/// detection does not depend on which.
+#[cfg(unix)]
+#[test]
+fn restored_mtime_edit_during_hash_is_drift_on_the_test_root() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_restored_mtime_edit_during_hash_is_drift(dir.path());
+}

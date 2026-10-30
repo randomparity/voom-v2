@@ -39,6 +39,11 @@ pub struct HashFileResult {
     pub modified_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_key: Option<FileKeyFacts>,
+    /// Inode change time from the agreeing pre-read stat, in ns since the
+    /// epoch (absent on platforms without ctime). The scan pump copies it into
+    /// the probe's reuse guard (ADR 0120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_at_ns: Option<i128>,
     /// RFC 3339 timestamp of the stat taken before the first byte was read.
     pub stability_started_at: String,
     /// RFC 3339 timestamp of the stat taken after the last byte was read.

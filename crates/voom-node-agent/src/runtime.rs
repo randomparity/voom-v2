@@ -582,6 +582,7 @@ impl AgentRuntime {
                 budgets: self.budgets,
                 worker: (*worker).clone(),
                 storage_roots: storage_roots.clone(),
+                probe_hash_reuse: self.config.config.probe_hash_reuse,
                 fatal_tx: fatal_tx.clone(),
             };
             let coordinator_rng = derive_schedule_rng(schedule_rng);
@@ -757,6 +758,8 @@ pub(crate) struct CoordinatorContext {
     /// index shared with the commit coordinator); media dispatch resolves
     /// location handles against it.
     pub(crate) storage_roots: HashMap<u64, PathBuf>,
+    /// Owner-node `probe_hash_reuse` setting, consumed by the scan pump.
+    pub(crate) probe_hash_reuse: bool,
     pub(crate) fatal_tx: mpsc::UnboundedSender<RuntimeFatal>,
 }
 
@@ -1332,6 +1335,7 @@ async fn scan_library_outcome(
             lease_ttl_ms: duration_millis_u32(context.lease_ttl),
             progress_timeout: context.progress_timeout,
             storage_roots: context.storage_roots.clone(),
+            probe_hash_reuse: context.probe_hash_reuse,
         },
     )
     .await
