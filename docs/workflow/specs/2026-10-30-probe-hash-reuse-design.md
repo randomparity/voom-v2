@@ -80,8 +80,10 @@ byte-identical. The inventory rows for both columns are updated.
 ### Dependency
 
 `rustix` (`fs` feature) becomes a Linux-only normal dependency of `voom-ffprobe-worker`.
-`unsafe_code = "forbid"` rules out `libc::fstatfs`, and std has no `statfs`. rustix 1.1.4 is
-already in `Cargo.lock` through `tempfile`, so no new crate enters the build.
+`unsafe_code = "forbid"` rules out `libc::fstatfs`, and std has no `statfs`. rustix 1.1.4 and
+linux-raw-sys are already locked and audited as test-only dependencies (through `tempfile`);
+this makes them production dependencies of the Linux ffprobe worker, with no new crate in
+`Cargo.lock`.
 
 ### Docs
 
@@ -112,10 +114,15 @@ lines of `docs/media-evidence-decision-report.md` (lines 5–7 only).
    - A ctime-only change (chmod, xattr) between hash and probe fails closed; the next scan
      re-observes. Bounded cost.
    - `fstatfs` failure recomputes, the safe direction.
+   - Control-plane version skew on the scan path: no scan-batch version check exists. A
+     protocol-5 control plane rejects reused evidence at the batch decode (`deny_unknown_fields`;
+     loud, nothing published), and a downgraded control plane cannot read reused rows. The
+     control is the flag-day release note with the setting off through the swap.
 4. **Covered elsewhere**
    - Rollout measurement and real-storage gates G1–G3, G9 and the network-subset arm of G5: #794.
    - Transform input, output verification, promotion: unchanged (ADR 0120 table).
-   - Protocol mismatch refusal: ADR 0016 handshake and operation-path middleware.
+   - Agent-to-worker protocol mismatch refusal: ADR 0016 handshake and operation-path
+     middleware.
 
 ### Threat model
 
@@ -153,7 +160,7 @@ lines of `docs/media-evidence-decision-report.md` (lines 5–7 only).
 | Guarded reuse on tmpfs/btrfs (4) | ffprobe worker: `guarded_probe_reuses_hash_without_reading_bytes` | — |
 | G4(a) between hash and probe | `guard_detects_restored_mtime_edit_before_probe` (tmpfs; btrfs where available) | — |
 | G4(a) during ffprobe | `guard_detects_restored_mtime_edit_during_probe` (fake ffprobe edits) | — |
-| G4(b) during hash read | hash worker: `restored_mtime_edit_is_drift_on_tmpfs` (+ btrfs where available) | — |
+| G4(b) during hash read | hash worker: `restored_mtime_edit_during_hash_is_drift` (`/dev/shm` on Linux, and the test temp root) | — |
 | G4(c) ordinary write | `guard_detects_mtime_moving_write` | — |
 | G5 fallback | `guarded_probe_recomputes_outside_reuse_list` (filesystem of the test temp root when not listed) + `reuse_list_is_btrfs_and_tmpfs_only` | — |
 | Fact-free failure (5) | guard tests assert payload equals `{"stage": ...}` and message has no path | — |
@@ -164,6 +171,13 @@ lines of `docs/media-evidence-decision-report.md` (lines 5–7 only).
 | Setting default (8) | config: absent key parses `false` | — |
 | Docs and report status | — | prose; no executable consumer |
 
+Test environments: tmpfs arms run on Linux (`/dev/shm`); the temp-root arm takes the reuse
+assertions when the pinned test root is btrfs (developer hosts) and the G5 fallback assertions
+when it is not listed (ext4 on Ubuntu CI); on macOS the non-Linux path always recomputes, so the
+fallback arm runs there. No arm skips silently: each asserts the behaviour its detected
+filesystem requires.
+
 Not executable in CI, left to #794: G4 and G5 on the operator's btrfs corpus and network
-subset, G6 end to end through a real control-plane transform, and G7's mixed-version fleet
-refusal on real hosts (the handshake refusal itself is already tested).
+subset, G6 end to end through a real control-plane transform, and G7's mixed-version agent and
+worker refusal on real hosts (the handshake refusal itself is already tested). G7 has no
+control-plane arm on the scan path: no scan-batch version refusal exists (failure model).

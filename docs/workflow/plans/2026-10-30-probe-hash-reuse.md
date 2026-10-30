@@ -30,6 +30,13 @@ lines across 12 files, 350–500 test lines, 40 doc lines.
   `let pre_probe/post_probe = Box::pin(observe_file_facts(&path))` blocks, and
   `fn verify_expected_facts(` (`just media-evidence-candidates-selftest`).
 - Builds and tests run under `flock -s /home/dave/src/voom-v2/.agent/corpus.lock`.
+- Filesystem-dependent tests: tmpfs arms are `#[cfg(target_os = "linux")]` on
+  `tempfile::tempdir_in("/dev/shm")`. The temp-root arm (`tempfile::tempdir()`, pinned to
+  `.test-tmp/`) branches on `crate::guard::reuse_listed` of its `fstatfs` type on Linux: listed →
+  reuse assertions, not listed → G5 fallback assertions; on non-Linux it always takes the
+  fallback assertions. The hash-worker G4(b) test has no `statfs`; it asserts `/dev/shm` is tmpfs
+  by reading `/proc/self/mounts` and runs the same body on the temp root, where detection does
+  not depend on the filesystem type.
 - Guard failure payload is exactly `{"stage": "pre_probe_guard"}` or `{"stage": "post_probe_guard"}`.
 
 ## File map
@@ -153,8 +160,8 @@ Green: `cargo test -p voom-ffprobe-worker guard`. Commit
 
 File: `crates/voom-hash-worker/src/hash_test.rs`.
 
-- Mode: focused-test — `restored_mtime_edit_during_hash_is_drift` on `/dev/shm` (and the temp root
-  when btrfs): `stat_facts` before, same-size rewrite + mtime restore, `stat_facts` after;
+- Mode: focused-test — `restored_mtime_edit_during_hash_is_drift` on `/dev/shm` (Linux, asserted
+  tmpfs via `/proc/self/mounts`) and on the temp root: `stat_facts` before, same-size rewrite + mtime restore, `stat_facts` after;
   `assert_stable` fails with payload `{"stage":"hash_drift"}`. This exercises #810's existing
   check on the gate filesystems; no production change. Green: `cargo test -p voom-hash-worker
   restored_mtime`. Commit `test(hash-worker): prove ctime drift detection on tmpfs and btrfs`.
@@ -225,4 +232,5 @@ through the swap; rollback is the setting until reused rows exist); runbook docu
 
 `just ci` under the corpus lock; record duration. Gates not executable in CI (for #794): G4/G5
 on the operator's real btrfs corpus and network subset, G6 through a real control-plane transform,
-G7 mixed-version refusal on real hosts.
+G7 mixed-version agent/worker refusal on real hosts. G7 has no control-plane arm on the scan
+path (no scan-batch version refusal exists; spec failure model).
