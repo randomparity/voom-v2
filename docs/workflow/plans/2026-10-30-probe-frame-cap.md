@@ -22,6 +22,9 @@ Expected implementation size: 220–320 changed lines (M) — file map: ~60 prod
   `just media-evidence-candidates-selftest` checks this.
 - Builds and tests run under the shared corpus lock (`flock -s`); guardrail before push: `just ci`.
 
+Deferred: content-driven normalizer errors that still fail a session (owner #818). Not proven
+here: a full scan session over the corpus (#794's G3 run).
+
 ## File map
 
 | File | Change |

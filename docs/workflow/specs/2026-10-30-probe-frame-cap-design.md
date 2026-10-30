@@ -96,7 +96,7 @@ There is no code change. `classify_single_file_error` already maps
      trusted, and is not bounded here.
    - Content-driven normalizer errors that remain `MalformedWorkerResult` (for example,
      conflicting compatibility tags) still fail the session. They are outside #816's
-     frame-cap charter and are reported as a follow-up candidate.
+     frame-cap charter and are owned by #818.
 4. **Covered elsewhere:** none.
 
 ### Threat model
