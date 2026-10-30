@@ -145,7 +145,75 @@ fn identical_facts_pass_stability_check() {
         dev: Some(1),
         ino: Some(2),
         nlink: Some(1),
+        changed_at_ns: Some(1_000),
     };
 
     assert!(assert_stable(&facts.clone(), &facts.clone()).is_ok());
+}
+
+#[test]
+fn ctime_only_change_is_hash_drift_without_facts() {
+    // A same-size interior edit with mtime restored leaves every other fact
+    // equal; only ctime moves, and that alone must fail stability.
+    let pre = StatFacts {
+        size_bytes: 12,
+        modified_at: SystemTime::UNIX_EPOCH,
+        dev: Some(1),
+        ino: Some(2),
+        nlink: Some(1),
+        changed_at_ns: Some(1_000),
+    };
+    let post = StatFacts {
+        changed_at_ns: Some(1_001),
+        ..pre.clone()
+    };
+
+    let err = assert_stable(&pre, &post).unwrap_err();
+
+    assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
+    assert!(
+        err.to_string().contains("hash_drift"),
+        "message must name stage hash_drift: {err}"
+    );
+    assert_eq!(
+        err.payload(),
+        &serde_json::json!({ "stage": "hash_drift" }),
+        "payload must carry no facts"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stat_facts_capture_ctime_in_nanoseconds() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ctime.bin");
+    std::fs::write(&path, b"ctime").unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+
+    let expected = i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
+    assert_eq!(stat_facts(&metadata).changed_at_ns, Some(expected));
+}
+
+#[tokio::test]
+async fn file_spanning_several_chunks_hashes_across_chunk_boundaries() {
+    // Two full chunks plus a partial third, with a per-chunk-varying pattern so a
+    // dropped, repeated, or truncated chunk changes the digest.
+    let dir = tempfile::tempdir().unwrap();
+    let len = HASH_CHUNK_BYTES * 2 + 17;
+    let bytes: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+    std::fs::write(dir.path().join("big.bin"), &bytes).unwrap();
+    let resolved = resolve_in_root(dir.path(), "big.bin").unwrap();
+    let mut file = tokio::fs::File::from(resolved.file);
+
+    let digest = read_hash(&mut file).await.unwrap();
+
+    assert_eq!(digest, blake3::hash(&bytes).to_hex().to_string());
+}
+
+#[test]
+fn hash_chunk_is_one_mebibyte() {
+    // ADR 0120 contract 1: the owner hash reads 1 MiB per read (#789's buf1m).
+    assert_eq!(HASH_CHUNK_BYTES, 1024 * 1024);
 }
