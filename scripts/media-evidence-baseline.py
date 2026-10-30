@@ -31,6 +31,10 @@ SCHEMA = "media-evidence-baseline-run/1"
 UNAVAILABLE = "unavailable"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "5"
+PROGRESS_IDLE_DEADLINE_MS = 600_000
+# The socket waits this long past the deadline the worker was told, so a worker
+# that honours its own idle deadline reports it before the client gives up.
+CALL_TIMEOUT_MARGIN_SECONDS = 30
 VIDEO_EXTENSIONS = {
     ".avi", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ts", ".webm",
 }
@@ -334,9 +338,11 @@ class Worker:
             lease = self.lease
         body = json.dumps({
             "operation": operation, "lease_id": lease, "payload": payload,
-            "heartbeat_deadline_ms": 600_000, "progress_idle_deadline_ms": 600_000,
+            "heartbeat_deadline_ms": PROGRESS_IDLE_DEADLINE_MS,
+            "progress_idle_deadline_ms": PROGRESS_IDLE_DEADLINE_MS,
         })
-        connection = http.client.HTTPConnection(self.host, self.port, timeout=None)
+        timeout = PROGRESS_IDLE_DEADLINE_MS / 1000 + CALL_TIMEOUT_MARGIN_SECONDS
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
         try:
             connection.request("POST", "/v1/operations", body, {
                 "Authorization": f"Bearer {self.secret}", "x-voom-worker-id": "1",
@@ -346,6 +352,8 @@ class Worker:
             })
             response = connection.getresponse()
             text = response.read().decode("utf-8", "replace")
+        except TimeoutError:
+            return {"kind": "failure", "code": "transport_timeout"}
         except (OSError, http.client.HTTPException) as error:
             return {"kind": "failure", "code": f"transport_{type(error).__name__}"}
         finally:

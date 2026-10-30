@@ -9,10 +9,14 @@ baseline runs, which are validated here too.
 import argparse
 import importlib.util
 import json
+import socket
 import stat
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
@@ -201,6 +205,36 @@ class ReplayTests(HarnessFixture):
         for fs_type in ("cifs", "nfs4", "autofs", "fuse.rclone", harness.UNAVAILABLE):
             with self.subTest(fs_type=fs_type), self.assertRaises(harness.HarnessError):
                 harness.evict(self.root / "a" / "Alpha Title (2001).mkv", fs_type)
+
+
+class StalledWorkerTests(unittest.TestCase):
+    def test_a_worker_that_accepts_and_never_replies_ends_in_a_named_timeout_failure(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            held = []
+            threading.Thread(target=lambda: held.append(listener.accept()), daemon=True).start()
+            worker = object.__new__(harness.Worker)
+            worker.host, worker.port = listener.getsockname()
+            worker.secret, worker.lease, worker.lock = "secret", 0, threading.Lock()
+            with mock.patch.object(harness, "PROGRESS_IDLE_DEADLINE_MS", 100), \
+                    mock.patch.object(harness, "CALL_TIMEOUT_MARGIN_SECONDS", 0.1):
+                started = time.monotonic()
+                frame = worker.call("hash", {})
+                elapsed = time.monotonic() - started
+        self.assertEqual(frame, {"kind": "failure", "code": "transport_timeout"})
+        self.assertLess(elapsed, 5)
+
+    def test_other_transport_errors_keep_their_error_class_name(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            host, port = listener.getsockname()
+        worker = object.__new__(harness.Worker)
+        worker.host, worker.port = host, port
+        worker.secret, worker.lease, worker.lock = "secret", 0, threading.Lock()
+        self.assertEqual(
+            worker.call("hash", {}), {"kind": "failure", "code": "transport_ConnectionRefusedError"}
+        )
 
 
 class ContractTests(unittest.TestCase):
