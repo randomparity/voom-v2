@@ -39,7 +39,7 @@ source-checks: check-workflows check-workflows-selftest check-test-layout \
     media-evidence-fingerprint-selftest check-media-evidence-fingerprint-guard \
     check-media-evidence-fingerprint-guard-selftest container-unit-check \
     media-evidence-lazy-selftest media-evidence-candidates-selftest \
-    media-evidence-reuse-selftest
+    media-evidence-reuse-selftest media-evidence-rollout-selftest
 
 # Filename/path diversity must affect real canary recommendation membership.
 media-inventory-selftest:
@@ -48,6 +48,10 @@ media-inventory-selftest:
 # Media evidence baselines must stay redacted and record every required measurement.
 media-evidence-baseline-selftest:
     python3 scripts/media-evidence-baseline-selftest.py
+
+# The #794 rollout instrument must time real publication and commit nothing private.
+media-evidence-rollout-selftest:
+    python3 scripts/media-evidence-rollout-selftest.py
 
 # The #796 fingerprint experiment must measure what it claims and commit nothing private.
 media-evidence-fingerprint-selftest:
