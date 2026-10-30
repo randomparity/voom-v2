@@ -219,6 +219,42 @@ class UsageTests(unittest.TestCase):
             rollout.worker_pids(os.getpid())
 
 
+def cell(first_durable, evict=True, storage="local", ids=("f0001",)):
+    """A scan record reduced to what `compare_scans` reads."""
+    repetitions = []
+    for value in first_durable:
+        workers = {name: {"cpu_seconds": 1.0, "rchar": 10, "read_bytes": 5}
+                   for name in rollout.WORKER_PROGRAMS}
+        repetitions.append({"first_durable_observation_seconds": value,
+                            "complete_seconds": value, "workers": workers,
+                            "host_counters": {"cifs_bytes_read": 7}})
+    return {"corpus": {"label": "c", "selected_ids": list(ids), "storage_class": storage},
+            "cell": {"evict": evict}, "repetitions": repetitions}
+
+
+class CompareTests(unittest.TestCase):
+    def test_a_clearly_faster_cell_improves(self):
+        result = rollout.compare_scans(cell([10.0, 10.1, 9.9]), cell([2.0, 2.1, 2.0]))
+        self.assertEqual(result["first_durable_observation"]["verdict"], "improvement")
+        self.assertEqual(result["physical_bytes"]["baseline_median"], 10)
+
+    def test_a_noisy_baseline_is_inconclusive(self):
+        result = rollout.compare_scans(cell([10.0, 5.0, 6.0]), cell([1.0, 1.0, 1.0]))
+        self.assertEqual(result["first_durable_observation"]["verdict"], "inconclusive")
+
+    def test_as_found_cells_drop_repetition_one_and_use_host_cifs_reads(self):
+        # Repetition 1 of an as-found cell is reported separately by the protocol.
+        base = cell([100.0, 10.0, 10.0], evict=False, storage="network")
+        result = rollout.compare_scans(base, cell([1.0, 2.0, 2.0], evict=False,
+                                                   storage="network"))
+        self.assertEqual(result["first_durable_observation"]["baseline_median"], 10.0)
+        self.assertEqual(result["physical_bytes"]["baseline_median"], 7)
+
+    def test_cells_over_different_files_do_not_compare(self):
+        with self.assertRaises(rollout.HarnessError):
+            rollout.compare_scans(cell([1.0]), cell([1.0], ids=("f0002",)))
+
+
 class ConstructionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

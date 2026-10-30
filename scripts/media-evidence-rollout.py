@@ -6,10 +6,11 @@
 repetition from the request to its first durable observation: the first live rooted file
 location the completion transaction publishes (ADR 0077). It records worker CPU, memory and
 I/O, the stored evidence's hash sources, and a digest of the published content hashes, so
-repeat scans compare without committing hashes. `construct` drives the release hash and
-probe workers on a scratch copy to build the ADR 0120 guard cases on the filesystem that
-holds the copy. Records name files by manifest id only; host paths stay in private
-manifests and stack work directories outside the checkout.
+repeat scans compare without committing hashes. `serve` holds such a stack for the
+CLI-driven transform gates. `construct` drives the release hash and probe workers on a
+scratch copy to build the ADR 0120 guard cases on the filesystem that holds the copy.
+Records name files by manifest id only; host paths stay in private manifests and stack work
+directories outside the checkout.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import importlib.util
 import json
 import os
 import re
+import select
 import sqlite3
 import subprocess
 import sys
@@ -41,6 +43,7 @@ def load(name: str, filename: str) -> Any:
 
 baseline = load("media_evidence_baseline", "media-evidence-baseline.py")
 bootstrap = load("acceptance_bootstrap", "acceptance-bootstrap.py")
+candidates = load("media_evidence_candidates", "media-evidence-candidates.py")
 
 UNAVAILABLE = baseline.UNAVAILABLE
 HarnessError = baseline.HarnessError
@@ -249,11 +252,26 @@ def corpus_unchanged(manifest: dict[str, Any], files: list[dict[str, Any]]) -> b
     return True
 
 
-def stack_args(workdir: Path, roots: list[Path], bin_dir: Path) -> argparse.Namespace:
+def stack_args(workdir: Path, roots: list[Path], bin_dir: Path,
+               output: Path | None = None) -> argparse.Namespace:
     arguments = ["serve", "--workdir", str(workdir), "--bin-dir", str(bin_dir)]
     for root in roots:
         arguments += ["--input", str(root)]
+    if output is not None:
+        arguments += ["--output", str(output)]
     return bootstrap.parser().parse_args(arguments)
+
+
+def serve(args: argparse.Namespace) -> None:
+    """Hold a stack with the reuse setting until stdin closes, for CLI-driven gates."""
+    with Stack(stack_args(args.workdir, args.input, args.bin_dir, args.output),
+               args.reuse == "on") as stack:
+        print(json.dumps(stack.receipt), flush=True)
+        while not stack.stopping:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.2)
+            if readable and not os.read(sys.stdin.fileno(), 1):
+                break
+            stack.require_alive()
 
 
 def request_scans(stack: Stack) -> list[int]:
@@ -405,6 +423,36 @@ def validate_scan(record: dict[str, Any]) -> list[str]:
 def host_path_problems(record: dict[str, Any]) -> list[str]:
     text = json.dumps(record)
     return ["host path"] if re.search(r'"/|\\\\|/home/|/Users/|/mnt/', text) else []
+
+
+def scan_metrics(record: dict[str, Any], repetition: dict[str, Any]) -> dict[str, Any]:
+    workers = repetition["workers"]
+    physical = [worker["read_bytes"] for worker in workers.values()]
+    if record["corpus"]["storage_class"] == "network":
+        physical = [repetition["host_counters"]["cifs_bytes_read"]]
+    return {
+        "first_durable_observation": repetition["first_durable_observation_seconds"],
+        "complete": repetition["complete_seconds"],
+        "physical_bytes": UNAVAILABLE if UNAVAILABLE in physical else sum(physical),
+        "probe_rchar": workers["probe"]["rchar"],
+        "hash_cpu": workers["hash"]["cpu_seconds"],
+        "probe_cpu": workers["probe"]["cpu_seconds"],
+    }
+
+
+def compare_scans(baseline_record: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    """Protocol verdicts per metric; an as-found cell compares repetitions 2 and later."""
+    for section, key in (("corpus", "label"), ("corpus", "selected_ids"), ("cell", "evict")):
+        if baseline_record[section][key] != candidate[section][key]:
+            raise HarnessError(f"cells differ in {section} {key}; they do not compare")
+    skip = 0 if baseline_record["cell"]["evict"] else 1
+    series = []
+    for record in (baseline_record, candidate):
+        rows = [scan_metrics(record, repetition) for repetition in record["repetitions"][skip:]]
+        series.append({name: [row[name] for row in rows] for name in rows[0]} if rows else {})
+    if not series[0] or not series[1]:
+        raise HarnessError("a cell has no compared repetition; as-found cells need two or more")
+    return {name: candidates.classify(series[0][name], series[1][name]) for name in series[0]}
 
 
 def same_size_edit(path: Path, restore_mtime: bool) -> None:
@@ -570,6 +618,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                       help="SIGKILL this worker --kill-after seconds into each repetition")
     scan.add_argument("--kill-after", type=float, default=5.0)
     scan.add_argument("--output", type=Path, required=True)
+    judge = commands.add_parser("compare", help="judge a scan cell against its stage-0 cell")
+    judge.add_argument("baseline", type=Path)
+    judge.add_argument("candidate", type=Path)
+    hold = commands.add_parser("serve", help="hold a stack for CLI-driven gates (G6, G9)")
+    hold.add_argument("--reuse", choices=["on", "off"], required=True)
+    hold.add_argument("--input", type=Path, action="append", required=True)
+    hold.add_argument("--output", type=Path, help="output root (default: inside --workdir)")
+    hold.add_argument("--workdir", type=Path, required=True)
+    hold.add_argument("--bin-dir", type=Path, default=baseline.REPO_ROOT / "target" / "release")
     construct = commands.add_parser("construct", help="build the ADR 0120 guard cases")
     construct.add_argument("source", type=Path, help="media file to copy for each case")
     construct.add_argument("--label", required=True, help="public label for the source file")
@@ -588,6 +645,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
+        if args.command == "compare":
+            records = [json.loads(path.read_text(encoding="utf-8"))
+                       for path in (args.baseline, args.candidate)]
+            print(json.dumps(compare_scans(*records), indent=2))
+            return 0
+        if args.command == "serve":
+            serve(args)
+            return 0
         if args.command == "scan":
             record, validate = capture_scan(args), validate_scan
         else:
