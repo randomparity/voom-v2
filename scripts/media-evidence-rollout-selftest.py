@@ -99,6 +99,21 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(summary["recomputed_without_source"], 1)
         self.assertEqual(summary["other_source"], 0)
 
+    def test_a_null_hash_source_is_not_an_absent_one(self):
+        summary = self.summary([("a/one.mkv", json.dumps({"content_hash": HASH_A,
+                                                           "hash_source": None}))])
+        self.assertEqual(summary["other_source"], 1)
+
+    def test_a_database_path_with_uri_characters_opens_read_only(self):
+        database = Path(self.temp.name) / "odd#dir?" / "voom.db"
+        database.parent.mkdir()
+        self.database = database
+        self.summary([("a/one.mkv", evidence(HASH_A))])
+        connection = rollout.read_only(database)
+        with self.assertRaises(sqlite3.OperationalError):
+            connection.execute("CREATE TABLE t (x)")
+        connection.close()
+
     def test_an_unknown_hash_source_is_counted_separately(self):
         # G8: a recomputed row must carry no source; any other value is a visible anomaly.
         summary = self.summary([("a/one.mkv", evidence(HASH_A, "recomputed"))])
@@ -219,7 +234,7 @@ class UsageTests(unittest.TestCase):
             rollout.worker_pids(os.getpid())
 
 
-def cell(first_durable, evict=True, storage="local", ids=("f0001",)):
+def cell(first_durable, evict=True, storage="local", ids=("f0001",), reuse=False, kill=None):
     """A scan record reduced to what `compare_scans` reads."""
     repetitions = []
     for value in first_durable:
@@ -229,30 +244,45 @@ def cell(first_durable, evict=True, storage="local", ids=("f0001",)):
                             "complete_seconds": value, "workers": workers,
                             "host_counters": {"cifs_bytes_read": 7}})
     return {"corpus": {"label": "c", "selected_ids": list(ids), "storage_class": storage},
-            "cell": {"evict": evict}, "repetitions": repetitions}
+            "cell": {"evict": evict, "probe_hash_reuse": reuse, "kill": kill},
+            "build": {"binaries_sha256": {"voom": "1"}}, "repetitions": repetitions}
 
 
 class CompareTests(unittest.TestCase):
     def test_a_clearly_faster_cell_improves(self):
-        result = rollout.compare_scans(cell([10.0, 10.1, 9.9]), cell([2.0, 2.1, 2.0]))
+        result = rollout.compare_scans(cell([10.0, 10.1, 9.9]),
+                                       cell([2.0, 2.1, 2.0], reuse=True))
         self.assertEqual(result["first_durable_observation"]["verdict"], "improvement")
         self.assertEqual(result["physical_bytes"]["baseline_median"], 10)
 
     def test_a_noisy_baseline_is_inconclusive(self):
-        result = rollout.compare_scans(cell([10.0, 5.0, 6.0]), cell([1.0, 1.0, 1.0]))
+        result = rollout.compare_scans(cell([10.0, 5.0, 6.0]), cell([1.0, 1.0, 1.0], reuse=True))
         self.assertEqual(result["first_durable_observation"]["verdict"], "inconclusive")
 
     def test_as_found_cells_drop_repetition_one_and_use_host_cifs_reads(self):
         # Repetition 1 of an as-found cell is reported separately by the protocol.
         base = cell([100.0, 10.0, 10.0], evict=False, storage="network")
         result = rollout.compare_scans(base, cell([1.0, 2.0, 2.0], evict=False,
-                                                   storage="network"))
+                                                   storage="network", reuse=True))
         self.assertEqual(result["first_durable_observation"]["baseline_median"], 10.0)
         self.assertEqual(result["physical_bytes"]["baseline_median"], 7)
 
-    def test_cells_over_different_files_do_not_compare(self):
+    def test_cells_that_differ_in_files_cache_or_build_do_not_compare(self):
+        on = cell([1.0], reuse=True)
+        for baseline in (cell([1.0], ids=("f0002",)), cell([1.0], evict=False)):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.compare_scans(baseline, on)
+        rebuilt = cell([1.0])
+        rebuilt["build"]["binaries_sha256"] = {"voom": "2"}
         with self.assertRaises(rollout.HarnessError):
-            rollout.compare_scans(cell([1.0]), cell([1.0], ids=("f0002",)))
+            rollout.compare_scans(rebuilt, on)
+
+    def test_only_an_off_baseline_against_an_on_candidate_compares(self):
+        # A reversed pair or a kill cell would report a meaningless "improvement".
+        for baseline, candidate in ((cell([1.0], reuse=True), cell([1.0])),
+                                    (cell([1.0]), cell([1.0], reuse=True, kill={"w": 1}))):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.compare_scans(baseline, candidate)
 
 
 class ConstructionTests(unittest.TestCase):
@@ -287,6 +317,107 @@ class ConstructionTests(unittest.TestCase):
         self.assertNotIn("/private/path", json.dumps(result))
 
 
+class FakeWorker:
+    """Hash and probe workers reduced to the stat checks the real ones make."""
+
+    def __init__(self, binary):
+        self.program = Path(binary).name
+        self.payloads = []
+
+    @staticmethod
+    def facts(path):
+        stat = path.stat()
+        return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+
+    def call(self, operation, payload):
+        self.payloads.append(payload)
+        if operation == "hash_file":
+            path = Path(payload["provider_locator"], payload["provider_relative_locator"])
+            before = self.facts(path)
+            time.sleep(0.3)
+            if self.facts(path) != before:
+                return {"kind": "error", "code": rollout.MISMATCH,
+                        "payload": {"stage": "hash_drift"}}
+            FakeWorker.hashed = before
+            return {"kind": "result", "payload": {
+                "size_bytes": before[0], "content_hash": HASH_A, "modified_at": "t",
+                "changed_at_ns": before[2], "file_key": {"dev": 1, "ino": before[3]}}}
+        if "guard" not in payload or self.facts(Path(payload["path"])) != FakeWorker.hashed:
+            return {"kind": "error", "code": rollout.MISMATCH,
+                    "payload": {"stage": "pre_probe_guard"}}
+        return {"kind": "result", "payload": {"hash_source": "reused"}}
+
+    def stop(self):
+        pass
+
+
+class CaseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.source = root / "source.mkv"
+        self.source.write_bytes(bytes(range(256)) * 64)
+        os.utime(self.source, ns=(1_000_000_000, 2_000_000_000))
+        self.scratch = root / "scratch"
+        self.scratch.mkdir()
+        self.args = rollout.parse_args(["construct", str(self.source), "--label", "fixture",
+                                        "--scratch", str(self.scratch), "--edit-delay", "0.1",
+                                        "--output", str(root / "out.json")])
+        patcher = patch.object(rollout.baseline, "Worker", FakeWorker)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_every_case_behaves_as_its_gate_defines(self):
+        before = self.source.read_bytes()
+        results = {name: rollout.run_case(name, self.args, "tmpfs") for name in rollout.CASES}
+        self.assertEqual(results["unchanged"]["hash_source"], "reused")
+        self.assertTrue(results["unchanged"]["guard_sent"])
+        self.assertEqual(results["a_restored_mtime_edit_before_probe"]["marker"],
+                         "pre_probe_guard")
+        self.assertEqual(results["b_restored_mtime_edit_during_hash"]["marker"], "hash_drift")
+        for name in list(rollout.CASES)[1:]:
+            self.assertTrue(results[name]["detected"], name)
+        # The source is never edited and every copy is removed.
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(self.source.stat().st_mtime_ns, 2_000_000_000)
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_restored_mtime_cases_keep_the_mtime_at_probe_time(self):
+        seen = []
+        original = FakeWorker.call
+
+        def spy(worker, operation, payload):
+            if operation == "probe_file":
+                stat = Path(payload["path"]).stat()
+                seen.append((stat.st_mtime_ns, stat.st_ctime_ns))
+            return original(worker, operation, payload)
+
+        with patch.object(FakeWorker, "call", spy):
+            result = rollout.run_case("a_restored_mtime_edit_before_probe", self.args, "tmpfs")
+        # Same mtime as the hash saw, so only the ctime can reveal the edit.
+        self.assertEqual(seen[0][0], FakeWorker.hashed[1])
+        self.assertNotEqual(seen[0][1], FakeWorker.hashed[2])
+        self.assertTrue(result["detected"])
+
+    def test_only_a_checksum_mismatch_counts_as_detected(self):
+        failing = {"kind": "error", "code": "EXTERNAL_SYSTEM_UNAVAILABLE", "payload": {}}
+        with patch.object(FakeWorker, "call", lambda *_: failing):
+            result = rollout.run_case("c_mtime_moving_write_before_probe", self.args, "tmpfs")
+        self.assertFalse(result["detected"])
+
+    def test_an_edit_after_the_hash_read_refuses_case_b(self):
+        self.args.edit_delay = 1.0
+        with self.assertRaises(rollout.HarnessError):
+            rollout.run_case("b_restored_mtime_edit_during_hash", self.args, "tmpfs")
+
+    def test_a_label_naming_the_host_or_user_is_refused(self):
+        for label in ("Upper", "/abs", rollout.getpass.getuser().lower() + "-media"):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.public_label(label)
+        self.assertEqual(rollout.public_label("local-corpus-f0004"), "local-corpus-f0004")
+
+
 class RecordTests(unittest.TestCase):
     def scan_record(self):
         repetition = {
@@ -302,6 +433,7 @@ class RecordTests(unittest.TestCase):
                   "not_measured": dict(rollout.NOT_MEASURED)}
         for section, keys in rollout.SCAN_KEYS.items():
             record[section] = dict.fromkeys(keys, "x")
+        record["cell"]["kill"] = None
         return record
 
     def test_a_complete_scan_record_validates(self):
@@ -311,6 +443,23 @@ class RecordTests(unittest.TestCase):
         record = self.scan_record()
         record["corpus"]["label"] = "/home/someone/media"
         self.assertIn("host path", rollout.validate_scan(record))
+
+    def test_any_absolute_path_is_refused(self):
+        record = self.scan_record()
+        record["corpus"]["filesystem_type"] = "/srv/media"
+        self.assertIn("host path", rollout.validate_scan(record))
+
+    def test_a_kill_cell_whose_worker_never_restarted_is_refused(self):
+        record = self.scan_record()
+        record["cell"]["kill"] = {"worker": "hash", "after_seconds": 3}
+        self.assertIn("kill not delivered", rollout.validate_scan(record))
+        record["repetitions"][0]["worker_restarted"] = True
+        self.assertEqual(rollout.validate_scan(record), [])
+
+    def test_not_measured_must_be_complete(self):
+        record = self.scan_record()
+        del record["not_measured"]["retries"]
+        self.assertIn("not_measured", rollout.validate_scan(record))
 
     def test_a_missing_metric_is_refused(self):
         record = self.scan_record()

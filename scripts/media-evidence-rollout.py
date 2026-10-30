@@ -16,12 +16,15 @@ directories outside the checkout.
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import select
+import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -61,7 +64,8 @@ NOT_MEASURED = {
     "first_verified_output": "no policy is applied by a scan cell",
     "per_file_stage_seconds": "the stack does not expose per-file hash and probe timings",
     "retries": "the stack does not expose per-operation retries",
-    "ffprobe_child": "ffprobe child memory and I/O are not attributed to the probe worker",
+    "ffprobe_child": "ffprobe's memory is not attributed to the probe worker; its CPU and "
+                     "I/O are, once reaped",
 }
 
 
@@ -129,7 +133,7 @@ def worker_pids(agent_pid: int) -> dict[str, int]:
 
 
 def process_usage(pid: int) -> dict[str, int | float | str]:
-    """CPU includes reaped children such as ffprobe; memory and I/O are this process only."""
+    """CPU and I/O include reaped children such as ffprobe; memory is this process only."""
     usage: dict[str, int | float | str] = dict.fromkeys(baseline.WORKER_KEYS, UNAVAILABLE)
     proc = Path("/proc", str(pid))
     try:
@@ -162,7 +166,8 @@ def usage_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]
 
 
 def read_only(database: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+    # `as_uri` percent-encodes `#`, `?` and `%`, which would otherwise end the path early.
+    return sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
 
 
 def published_locations(connection: sqlite3.Connection, root_ids: list[int]) -> int:
@@ -235,9 +240,13 @@ def stored_evidence(database: Path, session_ids: list[int],
             continue
         evidence = json.loads(evidence_json)
         summary["with_evidence"] += 1
-        source = evidence.get("hash_source", None)
-        key = {"reused": "reused", None: "recomputed_without_source"}.get(source, "other_source")
-        summary[key] += 1
+        # G8: a recomputed row carries no hash source field at all, not even a null one.
+        if "hash_source" not in evidence:
+            summary["recomputed_without_source"] += 1
+        elif evidence["hash_source"] == "reused":
+            summary["reused"] += 1
+        else:
+            summary["other_source"] += 1
         pairs.append(f"{file_id} {evidence['content_hash']}\n")
     summary["hash_set_sha256"] = hashlib.sha256("".join(sorted(pairs)).encode()).hexdigest()
     return summary
@@ -283,9 +292,22 @@ def request_scans(stack: Stack) -> list[int]:
     return sessions
 
 
-def kill_later(pid: int, delay: float) -> threading.Timer:
-    """SIGKILL a worker mid-scan (O14); the agent restarts it, so usage is unavailable."""
-    timer = threading.Timer(delay, os.kill, (pid, 9))
+def start_time(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def kill_at(pid: int, at: float) -> threading.Timer:
+    """SIGKILL a worker at monotonic time `at` (O14), only if the PID is still that worker."""
+    identity = start_time(pid)
+
+    def kill() -> None:
+        if identity is not None and start_time(pid) == identity:
+            os.kill(pid, signal.SIGKILL)
+
+    timer = threading.Timer(max(0.0, at - time.monotonic()), kill)
     timer.start()
     return timer
 
@@ -312,13 +334,15 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
         before = {name: process_usage(pid) for name, pid in pids.items()}
         counters = baseline.host_counters()
         started = time.monotonic()
-        sessions = request_scans(stack)
-        timer = kill_later(pids[args.kill], args.kill_after) if args.kill else None
-        first, complete, states = wait_for_publication(
-            workdir / "voom.db", list(set(by_root.values())), sessions, started, args.limit,
-            stack.require_alive)
-        if timer:
-            timer.cancel()
+        timer = kill_at(pids[args.kill], started + args.kill_after) if args.kill else None
+        try:
+            sessions = request_scans(stack)
+            first, complete, states = wait_for_publication(
+                workdir / "voom.db", list(set(by_root.values())), sessions, started,
+                args.limit, stack.require_alive)
+        finally:
+            if timer:
+                timer.cancel()
         counters = baseline.counter_delta(counters, baseline.host_counters())
         restarted = worker_pids(agent.pid) != pids
         workers = {name: dict.fromkeys(baseline.WORKER_KEYS, UNAVAILABLE) if restarted
@@ -409,6 +433,10 @@ def validate_scan(record: dict[str, Any]) -> list[str]:
     if record.get("schema") != SCAN_SCHEMA:
         return ["schema"]
     problems = []
+    # A kill that never landed would pass a clean scan off as an interruption cell.
+    if record.get("cell", {}).get("kill") and not all(
+            repetition.get("worker_restarted") for repetition in record.get("repetitions", [])):
+        problems.append("kill not delivered")
     for section, keys in SCAN_KEYS.items():
         problems += baseline.missing(section, record.get(section, {}), keys)
     if set(record.get("not_measured", {})) != set(NOT_MEASURED):
@@ -442,9 +470,14 @@ def scan_metrics(record: dict[str, Any], repetition: dict[str, Any]) -> dict[str
 
 def compare_scans(baseline_record: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     """Protocol verdicts per metric; an as-found cell compares repetitions 2 and later."""
-    for section, key in (("corpus", "label"), ("corpus", "selected_ids"), ("cell", "evict")):
+    for section, key in (("corpus", "label"), ("corpus", "selected_ids"), ("cell", "evict"),
+                         ("build", "binaries_sha256")):
         if baseline_record[section][key] != candidate[section][key]:
             raise HarnessError(f"cells differ in {section} {key}; they do not compare")
+    pairing = [(record["cell"]["probe_hash_reuse"], record["cell"]["kill"])
+               for record in (baseline_record, candidate)]
+    if pairing != [(False, None), (True, None)]:
+        raise HarnessError("compare a setting-off baseline with a setting-on candidate, no kills")
     skip = 0 if baseline_record["cell"]["evict"] else 1
     series = []
     for record in (baseline_record, candidate):
@@ -457,17 +490,17 @@ def compare_scans(baseline_record: dict[str, Any], candidate: dict[str, Any]) ->
 
 def same_size_edit(path: Path, restore_mtime: bool) -> None:
     """Invert one interior block in place; optionally restore the mtime (not the ctime)."""
-    facts = path.stat()
-    offset = facts.st_size // 2
-    with path.open("r+b") as handle:
-        handle.seek(offset)
-        block = handle.read(EDIT_BYTES)
-        handle.seek(offset)
-        handle.write(bytes(byte ^ 0xFF for byte in block))
-        handle.flush()
-        os.fsync(handle.fileno())
-    if restore_mtime:
-        os.utime(path, ns=(facts.st_atime_ns, facts.st_mtime_ns))
+    descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        facts = os.fstat(descriptor)
+        offset = facts.st_size // 2
+        block = os.pread(descriptor, EDIT_BYTES, offset)
+        os.pwrite(descriptor, bytes(byte ^ 0xFF for byte in block), offset)
+        os.fsync(descriptor)
+        if restore_mtime:
+            os.utime(descriptor, ns=(facts.st_atime_ns, facts.st_mtime_ns))
+    finally:
+        os.close(descriptor)
 
 
 def ordinary_write(path: Path) -> None:
@@ -492,10 +525,12 @@ def probe(workers: dict[str, Any], path: Path, facts: dict[str, Any]) -> dict[st
         "expected": {"size_bytes": facts["size_bytes"], "content_hash": facts["content_hash"],
                      "modified_at": facts["modified_at"], "local_file_key": None},
     }
-    if facts.get("changed_at_ns") is not None and facts.get("file_key") is not None:
-        payload["guard"] = {"changed_at_ns": facts["changed_at_ns"],
-                            "file_key": facts["file_key"]}
-    return outcome("probe", workers["probe"].call("probe_file", payload))
+    if facts.get("changed_at_ns") is None or facts.get("file_key") is None:
+        raise HarnessError("the hash result lacks ctime or file key; no guard can be sent")
+    payload["guard"] = {"changed_at_ns": facts["changed_at_ns"], "file_key": facts["file_key"]}
+    result = outcome("probe", workers["probe"].call("probe_file", payload))
+    result["guard_sent"] = True
+    return result
 
 
 def hash_file(workers: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -542,8 +577,15 @@ CASES = {
 
 
 def copy_source(source: Path, destination: Path) -> None:
-    """A private copy: a reflink where the filesystem allows one, else a byte copy."""
+    """A private copy: a reflink where the filesystem allows one, else a byte copy.
+
+    Edits go only to the copy, so it must be a regular file that is not the source's inode.
+    """
     subprocess.run(["cp", "--reflink=auto", "--", str(source), str(destination)], check=True)
+    copy, original = destination.lstat(), source.stat()
+    if not destination.is_file() or destination.is_symlink() or \
+            (copy.st_dev, copy.st_ino) == (original.st_dev, original.st_ino):
+        raise HarnessError("the scratch copy is not a separate regular file; refusing to edit")
 
 
 def run_case(name: str, args: argparse.Namespace, fs_type: str) -> dict[str, Any]:
@@ -552,8 +594,8 @@ def run_case(name: str, args: argparse.Namespace, fs_type: str) -> dict[str, Any
     try:
         if args.evict:
             baseline.evict(copy, fs_type)
-        workers = {name: baseline.Worker(args.bin_dir / program)
-                   for name, program in WORKER_PROGRAMS.items()}
+        workers = {role: baseline.Worker(args.bin_dir / program)
+                   for role, program in WORKER_PROGRAMS.items()}
         try:
             result = CASES[name](workers, copy, args)
         finally:
@@ -567,7 +609,18 @@ def run_case(name: str, args: argparse.Namespace, fs_type: str) -> dict[str, Any
     return result
 
 
+def public_label(label: str) -> str:
+    """Labels reach committed records, so they may not name this host or user."""
+    host = socket.gethostname().split(".")[0].lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", label) or \
+            any(name and name in label for name in (host, getpass.getuser().lower())):
+        raise HarnessError("--label must be lowercase letters, digits and hyphens, "
+                           "and must not name this host or user")
+    return label
+
+
 def capture_construct(args: argparse.Namespace) -> dict[str, Any]:
+    public_label(args.label)
     if not args.scratch.is_dir() or any(args.scratch.iterdir()):
         raise HarnessError("--scratch must be an existing empty directory")
     fs_type = baseline.filesystem_type(args.scratch)
@@ -615,7 +668,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     scan.add_argument("--limit", type=float, default=3600.0,
                       help="seconds to wait for every session to end")
     scan.add_argument("--kill", choices=list(WORKER_PROGRAMS),
-                      help="SIGKILL this worker --kill-after seconds into each repetition")
+                      help="SIGKILL this worker --kill-after seconds after each scan request")
     scan.add_argument("--kill-after", type=float, default=5.0)
     scan.add_argument("--output", type=Path, required=True)
     judge = commands.add_parser("compare", help="judge a scan cell against its stage-0 cell")
