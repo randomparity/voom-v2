@@ -6,7 +6,8 @@
 //! roles itself (`HashFileRequest` carries no sidecar list).
 //!
 //! Stability protocol: record `stability_started_at`, stat the opened file,
-//! hash the bytes in fixed-size chunks, re-stat, then record
+//! hash the bytes in fixed-size chunks, re-stat (size, mtime, ctime, and
+//! file key), then record
 //! `stability_confirmed_at`. Any fact difference between the two stats is
 //! terminal drift reported with the stage marker `hash_drift` and **no**
 //! observed facts, so a file mutated mid-hash can never publish stale
@@ -132,6 +133,10 @@ pub struct StatFacts {
     pub dev: Option<u64>,
     pub ino: Option<u64>,
     pub nlink: Option<u64>,
+    /// Inode change time in nanoseconds since the epoch. A same-size edit
+    /// that restores mtime still moves ctime, so the stability check must
+    /// compare it.
+    pub changed_at_ns: Option<i128>,
 }
 
 #[cfg(unix)]
@@ -149,6 +154,20 @@ fn inode_facts(_metadata: &std::fs::Metadata) -> (Option<u64>, Option<u64>, Opti
     (None, None, None)
 }
 
+// Non-Unix platforms expose no ctime, so the Unix implementation keeps the
+// shared `Option` shape even though it always succeeds.
+#[cfg(unix)]
+#[expect(clippy::unnecessary_wraps)]
+fn changed_at_ns(metadata: &std::fs::Metadata) -> Option<i128> {
+    use std::os::unix::fs::MetadataExt;
+    Some(i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()))
+}
+
+#[cfg(not(unix))]
+fn changed_at_ns(_metadata: &std::fs::Metadata) -> Option<i128> {
+    None
+}
+
 #[must_use]
 pub fn stat_facts(metadata: &std::fs::Metadata) -> StatFacts {
     let (dev, ino, nlink) = inode_facts(metadata);
@@ -158,6 +177,7 @@ pub fn stat_facts(metadata: &std::fs::Metadata) -> StatFacts {
         dev,
         ino,
         nlink,
+        changed_at_ns: changed_at_ns(metadata),
     }
 }
 
