@@ -5,7 +5,8 @@ stage 5, "combined owner-side hash and probe in one pass". Design:
 [the #801 spec](../../workflow/specs/2026-10-29-single-read-design.md). These are measurements
 of one host and one bench-only variant, not a decision. #791 owns the decision. Production
 source and defaults are unchanged. The raw records are the two JSON files beside this note.
-Every number below comes from them, rounded for display. The verdicts are output of
+Every measured number below comes from them, rounded for display. Capture times and the
+manual correctness check are operator-recorded, not in the records. The verdicts are output of
 `scripts/media-evidence-candidates.py compare`, and the modelled timings are output of its
 `model` subcommand.
 
@@ -41,8 +42,9 @@ skipped for budget.
 
 The harness records `reads_per_file: 3` and counts `logical_bytes_read` as three whole-file
 reads per `observed` row (2805.9 GB per local repetition). That is the replayed sequence's
-constant, not what this variant read. This variant does one full read per file, against
-three for #788 and #789:
+constant, not what this variant read. Likewise `probe_observe_buffer_bytes: 16384` is read
+from the unchanged `observe.rs`, a read path this variant's probe worker no longer runs.
+This variant does one full read per file, against three for #788 and #789:
 
 | | #788 / #789 | single-read |
 |---|---:|---:|

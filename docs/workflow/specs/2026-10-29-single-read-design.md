@@ -21,9 +21,8 @@ unchanged; #791 decides.
 - One full read per file is the owner-side hash pass. Piping those bytes into ffprobe is
   excluded (operator), so "single read" here means one full read plus ffprobe's own reads.
 - The #788 harness runs unchanged; its records keep `reads_per_file: 3` and count
-  `logical_bytes_read` as three reads. The candidate script and summary record the variant's
-  full reads per file (1 vs 3) and report physical bytes, which the harness measures, as the
-  I/O result.
+  `logical_bytes_read` as three reads. The summary records the variant's full reads per file
+  (1 vs 3) and reports physical bytes, which the harness measures, as the I/O result.
 - Cells, 3 repetitions, concurrency 4: local corpus, evicted, all files; network subset
   `f0049,f0074,f0063` as-found if the rehearsal budget allows, else `not_measured`.
 - `compare` against the #788 record and the #789 `stage1-buf1m` record (and

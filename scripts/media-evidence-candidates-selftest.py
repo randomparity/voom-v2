@@ -6,10 +6,10 @@ are the ones docs/media-evidence-protocol.md froze before any candidate ran.
 """
 
 import importlib.util
-import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def load_script(name, filename):
@@ -21,7 +21,8 @@ def load_script(name, filename):
 
 candidates = load_script("media_candidates", "media-evidence-candidates.py")
 harness = load_script("media_baseline", "media-evidence-baseline.py")
-SINGLE_READ_DIR = candidates.REPO_ROOT / "docs" / "media-evidence-baseline" / "single-read"
+BASELINE_DIR = candidates.REPO_ROOT / "docs" / "media-evidence-baseline"
+SINGLE_READ_DIR = BASELINE_DIR / "single-read"
 
 MIB = 1024 * 1024
 
@@ -242,8 +243,19 @@ class PrepareTests(unittest.TestCase):
             })
             original, candidates.VARIANTS = candidates.VARIANTS, drifted
             self.addCleanup(setattr, candidates, "VARIANTS", original)
-            with self.assertRaises(candidates.CandidateError):
-                candidates.prepare("drifted", target)
+            commands = []
+            real_run = candidates.subprocess.run
+
+            def recording_run(command, *args, **kwargs):
+                commands.append(command)
+                if "worktree" in command:
+                    self.fail("prepare created a worktree before every edit applied")
+                return real_run(command, *args, **kwargs)
+
+            with mock.patch.object(candidates.subprocess, "run", recording_run):
+                with self.assertRaises(candidates.CandidateError):
+                    candidates.prepare("drifted", target)
+            self.assertEqual(len(commands), 2)
             self.assertFalse(target.exists())
 
     def test_prepare_refuses_an_unknown_variant(self):
@@ -256,14 +268,26 @@ class SingleReadRecordTests(unittest.TestCase):
     """The #788 self-test reads only the top-level baseline directory, so check these here."""
 
     def test_committed_records_are_valid_runs_of_the_single_read_build(self):
+        buf1m = candidates.load(BASELINE_DIR / "2026-10-29-stage1-buf1m-local-corpus.json")
+        current = candidates.load(BASELINE_DIR / "2026-10-29-local-corpus-evicted.json")
         paths = sorted(SINGLE_READ_DIR.glob("*.json"))
         self.assertTrue(paths)
         for path in paths:
             with self.subTest(record=path.name):
-                record = json.loads(path.read_text(encoding="utf-8"))
+                record = candidates.load(path)
                 self.assertEqual(harness.validate_run(record), [])
-                self.assertEqual(record["build"]["git_changed_paths"],
-                                 sorted(candidates.VARIANTS["single-read"]))
+                self.assertEqual(record["build"]["git_changed_paths"], [
+                    "crates/voom-ffprobe-worker/src/handler.rs",
+                    "crates/voom-hash-worker/src/hash.rs",
+                ])
+                # The buf1m hash binary with a rebuilt probe worker that reads no corpus bytes.
+                self.assertEqual(record["build"]["hash_worker_sha256"],
+                                 buf1m["build"]["hash_worker_sha256"])
+                self.assertNotEqual(record["build"]["probe_worker_sha256"],
+                                    current["build"]["probe_worker_sha256"])
+                for repetition in record["repetitions"]:
+                    corpus = sum(row["size_bytes"] for row in repetition["files"])
+                    self.assertLess(repetition["workers"]["probe"]["rchar"], corpus / 100)
 
 
 if __name__ == "__main__":
