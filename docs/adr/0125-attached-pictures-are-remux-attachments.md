@@ -33,7 +33,7 @@ flag lists it was sent (#820).
   valid.
 - An MP4 cover in a snapshot ingested before this change still reads as video. A rescan
   of an unchanged file writes no new snapshot, so that file fails at the worker, as before,
-  until its content changes. A re-probe or backfill path is follow-up work.
+  until its content changes. A re-probe or backfill path is follow-up work (#825).
 - Readers outside remux that count `kind == "video"` streams (`video_stream_count`,
   first-video lookups) keep the raw ffprobe kind.
 

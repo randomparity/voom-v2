@@ -33,7 +33,7 @@ and `clear_forced_streams`, which the worker refuses.
   attachment-list validation; ADR 0122's 60 KiB snapshot bound.
 - Accepted: MP4 covers in snapshots ingested before this change stay video, and fail
   closed at the worker as today, until the file's content changes. No re-probe path exists
-  for unchanged files, and planning may not read `raw` (ADR 0122). Follow-up issue filed.
+  for unchanged files, and planning may not read `raw` (ADR 0122); follow-up #825.
 - Covered elsewhere: worker validation remains the last gate (ADR 0040).
 
 ## Success
