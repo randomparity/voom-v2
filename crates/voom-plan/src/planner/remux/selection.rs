@@ -28,6 +28,8 @@ pub struct SnapshotStreamFact {
     pub title: Option<String>,
     pub mime_type: Option<String>,
     pub filename: Option<String>,
+    /// The provider reported an attached picture (cover art) (ADR 0125).
+    pub attached_picture: bool,
     pub commentary: SnapshotFact<bool>,
     pub is_default: SnapshotFact<bool>,
     pub is_forced: SnapshotFact<bool>,
@@ -87,7 +89,28 @@ pub fn stream_facts(
         if !provider_indexes.insert(provider_stream_index) {
             return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
         }
+        let codec_name = optional_string(stream.get("codec_name"));
+        let mime_type = optional_string(stream.get("mime_type"));
+        let filename = optional_string(stream.get("filename"));
+        let attached_picture = match disposition_fact(stream.get("disposition"), "attached_pic") {
+            SnapshotFact::Value(value) => value,
+            SnapshotFact::Missing => false,
+            SnapshotFact::Malformed => return Err(RemuxPlanningBlock::InsufficientSnapshotFacts),
+        };
         let kind = match required_string(stream.get("kind"))?.as_str() {
+            // ADR 0125: ffprobe reports cover art as video; mkvmerge carries it as an
+            // attachment. A Matroska image attachment's filename and image MIME tags
+            // recover covers from snapshots probed before `attached_pic` was recorded.
+            "video"
+                if attached_picture
+                    || legacy_matroska_image(
+                        codec_name.as_deref(),
+                        mime_type.as_deref(),
+                        filename.as_deref(),
+                    ) =>
+            {
+                TrackTarget::Attachment
+            }
             "video" => TrackTarget::Video,
             "audio" => TrackTarget::Audio,
             "subtitle" => TrackTarget::Subtitle,
@@ -99,15 +122,16 @@ pub fn stream_facts(
             snapshot_stream_id,
             provider_stream_index,
             kind,
-            codec_name: optional_string(stream.get("codec_name")),
+            codec_name,
             language: optional_string_fact(stream.get("language")),
             channels: stream
                 .get("channels")
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok()),
             title: optional_string(stream.get("title")),
-            mime_type: optional_string(stream.get("mime_type")),
-            filename: optional_string(stream.get("filename")),
+            mime_type,
+            filename,
+            attached_picture,
             commentary: disposition_fact(stream.get("disposition"), "commentary"),
             is_default: disposition_fact(stream.get("disposition"), "default"),
             is_forced: disposition_fact(stream.get("disposition"), "forced"),
@@ -115,6 +139,18 @@ pub fn stream_facts(
     }
 
     Ok(facts)
+}
+
+/// Track tags are author-controlled, so the fallback also requires an image codec as
+/// assigned by the ffmpeg Matroska demuxer; a real `h264` or `hevc` track never matches.
+fn legacy_matroska_image(
+    codec_name: Option<&str>,
+    mime_type: Option<&str>,
+    filename: Option<&str>,
+) -> bool {
+    matches!(codec_name, Some("mjpeg" | "png" | "gif" | "tiff"))
+        && filename.is_some()
+        && mime_type.is_some_and(|mime_type| mime_type.starts_with("image/"))
 }
 
 pub fn evaluate_filter(
@@ -293,7 +329,8 @@ fn required_bool_fact(fact: &SnapshotFact<bool>) -> Result<bool, RemuxPlanningBl
 }
 
 fn evaluate_font_filter(stream: &SnapshotStreamFact) -> Result<bool, RemuxPlanningBlock> {
-    if stream.kind != TrackTarget::Attachment {
+    // An attached picture is an image, never a font, even without a MIME fact.
+    if stream.kind != TrackTarget::Attachment || stream.attached_picture {
         return Ok(false);
     }
     let mime_type = stream

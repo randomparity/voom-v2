@@ -47,6 +47,7 @@ fn remux_stream_facts_parse_normalized_streams() {
                 title: None,
                 mime_type: None,
                 filename: None,
+                attached_picture: false,
                 commentary: SnapshotFact::Missing,
                 is_default: SnapshotFact::Value(true),
                 is_forced: SnapshotFact::Missing,
@@ -61,11 +62,88 @@ fn remux_stream_facts_parse_normalized_streams() {
                 title: Some("Main".to_owned()),
                 mime_type: None,
                 filename: None,
+                attached_picture: false,
                 commentary: SnapshotFact::Missing,
                 is_default: SnapshotFact::Missing,
                 is_forced: SnapshotFact::Value(true),
             },
         ]
+    );
+}
+
+/// #820 / ADR 0125: ffprobe reports cover art as a `video` stream, but mkvmerge
+/// carries it as an attachment. Classifying it as video put it in default and
+/// forced flag lists the worker must refuse.
+#[test]
+fn remux_stream_facts_classify_attached_pictures_as_attachments() {
+    let streams = json!([
+        {"id": "main", "index": 0, "kind": "video", "codec_name": "hevc",
+         "disposition": {"default": true}},
+        {"id": "mp4-cover", "index": 1, "kind": "video", "codec_name": "mjpeg",
+         "disposition": {"default": false, "attached_pic": true}},
+        {"id": "mkv-cover", "index": 2, "kind": "video", "codec_name": "mjpeg",
+         "filename": "cover.jpg", "mime_type": "image/jpeg",
+         "disposition": {"default": false}},
+        {"id": "stray-filename-tag", "index": 3, "kind": "video", "codec_name": "h264",
+         "filename": "feature.mkv"},
+        {"id": "non-image-tags", "index": 4, "kind": "video", "codec_name": "mjpeg",
+         "filename": "feature.mkv", "mime_type": "video/x-matroska"},
+        {"id": "author-tagged-video", "index": 5, "kind": "video", "codec_name": "h264",
+         "filename": "poster.png", "mime_type": "image/png"}
+    ]);
+
+    let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
+    let kinds = facts
+        .iter()
+        .map(|stream| (stream.snapshot_stream_id.as_str(), stream.kind))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        kinds,
+        [
+            ("main", TrackTarget::Video),
+            ("mp4-cover", TrackTarget::Attachment),
+            ("mkv-cover", TrackTarget::Attachment),
+            ("stray-filename-tag", TrackTarget::Video),
+            ("non-image-tags", TrackTarget::Video),
+            ("author-tagged-video", TrackTarget::Video),
+        ]
+    );
+    assert!(facts[1].attached_picture);
+    assert!(!facts[2].attached_picture);
+}
+
+#[test]
+fn remux_stream_facts_block_on_malformed_attached_pic() {
+    let streams = json!([
+        {"id": "cover", "index": 0, "kind": "video", "disposition": {"attached_pic": 1}}
+    ]);
+
+    assert_eq!(
+        stream_facts(&snapshot_with_streams(&streams)),
+        Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+/// An MP4 cover has no MIME fact; it is an image, never a font, so a font
+/// filter must decide rather than block the file.
+#[test]
+fn remux_font_filter_is_false_for_attached_picture_without_mime_type() {
+    let mut stream = attachment_stream(None);
+    stream.filename = None;
+    stream.attached_picture = true;
+
+    let font = TrackFilter::Font(voom_policy::compiled::FontTrackFilter {});
+
+    assert_eq!(evaluate_filter(&font, &stream), Ok(false));
+    assert_eq!(
+        evaluate_filter(
+            &TrackFilter::Not(voom_policy::compiled::NotTrackFilter {
+                inner: Box::new(font)
+            }),
+            &stream
+        ),
+        Ok(true)
     );
 }
 
@@ -269,6 +347,7 @@ fn remux_title_contains_is_case_sensitive() {
         title: Some("Main Audio".to_owned()),
         mime_type: None,
         filename: None,
+        attached_picture: false,
         commentary: SnapshotFact::Missing,
         is_default: SnapshotFact::Value(false),
         is_forced: SnapshotFact::Value(false),
@@ -297,6 +376,7 @@ fn remux_channels_filter_uses_comparison_op() {
         title: None,
         mime_type: None,
         filename: None,
+        attached_picture: false,
         commentary: SnapshotFact::Missing,
         is_default: SnapshotFact::Value(false),
         is_forced: SnapshotFact::Value(false),
@@ -326,6 +406,7 @@ fn remux_font_filter_is_false_for_non_font_attachment() {
         title: None,
         mime_type: Some("image/jpeg".to_owned()),
         filename: Some("cover.jpg".to_owned()),
+        attached_picture: false,
         commentary: SnapshotFact::Missing,
         is_default: SnapshotFact::Value(false),
         is_forced: SnapshotFact::Value(false),
@@ -468,6 +549,7 @@ fn attachment_stream(mime_type: Option<&str>) -> SnapshotStreamFact {
         title: None,
         mime_type: mime_type.map(str::to_owned),
         filename: Some("OpenSans.ttf".to_owned()),
+        attached_picture: false,
         commentary: SnapshotFact::Missing,
         is_default: SnapshotFact::Value(false),
         is_forced: SnapshotFact::Value(false),
@@ -487,6 +569,7 @@ fn audio_stream(language: Option<&str>) -> SnapshotStreamFact {
         title: None,
         mime_type: None,
         filename: None,
+        attached_picture: false,
         commentary: SnapshotFact::Missing,
         is_default: SnapshotFact::Value(false),
         is_forced: SnapshotFact::Value(false),
