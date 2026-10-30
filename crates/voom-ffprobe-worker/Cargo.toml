@@ -19,6 +19,9 @@ thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "rt-multi-thread", "macros", "net", "sync"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 voom-test-support.workspace = true
 secrecy.workspace = true
