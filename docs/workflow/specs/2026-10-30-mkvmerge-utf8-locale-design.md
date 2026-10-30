@@ -52,8 +52,8 @@ exits 2, "could not be opened" (Fedora 44, v102). The locale fixes both; no ADR.
   `mkvmerge_test` re-executes itself with `env_clear()` and real mkvmerge on a
   fixture named `Director’s cut`, built from a UTF-8 JSON option file, at an
   ASCII path (red: truncated JSON) and a non-ASCII path (red: open failure).
-  Green on the ubuntu-latest and macos-latest CI test jobs is the criterion-5
-  evidence; if macOS is red, it uses `en_US.UTF-8` there instead.
+  It passed on the ubuntu-latest and macos-latest (Homebrew) CI test jobs with
+  `C.UTF-8`; that is the criterion-5 evidence (PR #826).
 - Truncated output error — Mode: focused-test. A stub prints truncated JSON and
   exits 0; the error names the cause, action, and byte count.
 - Locale on preflight and remux — Mode: focused-test. Stubs succeed only when
