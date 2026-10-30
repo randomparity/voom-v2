@@ -22,7 +22,7 @@ production code, ~250 of tests, ~30 of test-helper header lines, ~25 of docs and
 - Unit tests in sibling `<source>_test.rs` files (`just check-test-layout`).
 - Workspace lints: no `unwrap`/`expect`/`panic` in production code.
 - Guardrails: focused `cargo test -p <crate> <name>`, then `just ci` before push, all under
-  `flock -s /home/dave/src/voom-v2/.agent/corpus.lock`.
+  the shared corpus lock (`flock -s .agent/corpus.lock`).
 
 ## File map
 
