@@ -1,6 +1,7 @@
 use serde_json::{Map, Value};
 use thiserror::Error;
 use voom_core::FailureClass;
+use voom_worker_protocol::MAX_PROBE_SNAPSHOT_BYTES;
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -10,6 +11,8 @@ pub enum WorkerError {
     ArtifactChecksumMismatch(String),
     #[error("malformed worker result: {0}")]
     MalformedWorkerResult(String),
+    #[error("malformed media: {0}")]
+    MalformedMedia(String),
 }
 
 impl WorkerError {
@@ -19,6 +22,7 @@ impl WorkerError {
             Self::ArtifactUnavailable(_) => FailureClass::ArtifactUnavailable,
             Self::ArtifactChecksumMismatch(_) => FailureClass::ArtifactChecksumMismatch,
             Self::MalformedWorkerResult(_) => FailureClass::MalformedWorkerResult,
+            Self::MalformedMedia(_) => FailureClass::MalformedMedia,
         }
     }
 }
@@ -50,11 +54,37 @@ pub fn normalize_ffprobe_json(
         snapshot.insert("streams".to_owned(), Value::Array(stream_objects(streams)?));
     }
 
+    bound_snapshot(snapshot, raw)
+}
+
+/// Keeps the snapshot within `MAX_PROBE_SNAPSHOT_BYTES` (ADR 0122). The raw ffprobe JSON
+/// goes first; a snapshot still over the bound is refused, never truncated.
+fn bound_snapshot(mut snapshot: Map<String, Value>, raw: Value) -> Result<Value, WorkerError> {
+    let raw_bytes = compact_len(&raw)?;
     let mut raw_object = Map::new();
     raw_object.insert("ffprobe_json".to_owned(), raw);
     snapshot.insert("raw".to_owned(), Value::Object(raw_object));
-
+    if compact_len(&snapshot)? <= MAX_PROBE_SNAPSHOT_BYTES {
+        return Ok(Value::Object(snapshot));
+    }
+    snapshot.insert(
+        "raw".to_owned(),
+        serde_json::json!({"ffprobe_json_omitted_bytes": raw_bytes}),
+    );
+    let bytes = compact_len(&snapshot)?;
+    if bytes > MAX_PROBE_SNAPSHOT_BYTES {
+        return Err(WorkerError::MalformedMedia(format!(
+            "probe snapshot is {bytes} bytes without the raw ffprobe JSON, above the \
+             {MAX_PROBE_SNAPSHOT_BYTES}-byte bound"
+        )));
+    }
     Ok(Value::Object(snapshot))
+}
+
+fn compact_len(value: &impl serde::Serialize) -> Result<usize, WorkerError> {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .map_err(|error| malformed(format!("snapshot encode: {error}")))
 }
 
 fn probe_object(provider_version: &str, probed_at: &str) -> Map<String, Value> {

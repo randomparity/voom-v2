@@ -23,7 +23,8 @@ use voom_core::LeaseId;
 
 use crate::{ProgressFrame, ProtocolError};
 
-const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Largest NDJSON frame payload a reader accepts; every worker result must fit one frame.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 /// One outcome from `NdjsonReader::next_frame`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +67,7 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
             expected_lease_id,
             last_seq: None,
             terminal_seen: false,
-            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            max_frame_bytes: MAX_FRAME_BYTES,
             line_buf: Vec::new(),
         }
     }

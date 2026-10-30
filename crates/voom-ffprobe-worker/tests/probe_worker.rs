@@ -203,6 +203,79 @@ async fn ffprobe_success_returns_progress_and_probe_result() {
     stop_server(running).await;
 }
 
+/// ffprobe JSON with `streams` subtitle streams, each carrying `bulk` bytes of a tag the
+/// normalizer drops and a title of `title_len` bytes, which it keeps.
+fn dense_ffprobe_json(streams: usize, bulk: usize, title_len: usize) -> serde_json::Value {
+    let streams: Vec<serde_json::Value> = (0..streams)
+        .map(|index| {
+            serde_json::json!({"index": index, "codec_type": "subtitle", "codec_name": "subrip",
+                "tags": {"title": "t".repeat(title_len), "_STATISTICS_WRITING_APP": "w".repeat(bulk)}})
+        })
+        .collect();
+    serde_json::json!({"format": {"format_name": "matroska,webm"}, "streams": streams})
+}
+
+async fn dispatch_with_ffprobe_output(
+    dir: &Path,
+    output: &serde_json::Value,
+    idempotency_key: &str,
+) -> ProgressFrame {
+    let media_path = write_wav(dir);
+    let json_path = dir.join("probe.json");
+    std::fs::write(&json_path, output.to_string()).expect("probe JSON should be written");
+    let fake_ffprobe =
+        write_fake_ffprobe(dir, &format!("cat \"{}\"\nexit 0\n", json_path.display()));
+    Box::pin(dispatch_terminal_frame(
+        &media_path,
+        configured_ffprobe(&fake_ffprobe),
+        idempotency_key,
+    ))
+    .await
+}
+
+/// #816: a 64-stream probe whose raw JSON alone exceeds the frame cap still reaches the
+/// default-cap reader as one result frame, with every normalized stream intact.
+#[tokio::test]
+async fn dense_ffprobe_output_returns_bounded_snapshot_over_http() {
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let output = dense_ffprobe_json(64, 1200, 8);
+    assert!(output.to_string().len() > voom_worker_protocol::MAX_FRAME_BYTES);
+
+    let terminal = dispatch_with_ffprobe_output(dir.path(), &output, "dense-probe").await;
+
+    let frame_bytes = serde_json::to_vec(&terminal)
+        .expect("frame should encode")
+        .len();
+    assert!(frame_bytes <= voom_worker_protocol::MAX_FRAME_BYTES);
+    assert!(
+        matches!(terminal, ProgressFrame::Result { .. }),
+        "expected a result frame, got {terminal:?}"
+    );
+    let ProgressFrame::Result { payload, .. } = terminal else {
+        return;
+    };
+    let snapshot = &payload["snapshot"];
+    assert_eq!(snapshot["streams"].as_array().map(Vec::len), Some(64));
+    assert!(snapshot["raw"]["ffprobe_json_omitted_bytes"].is_u64());
+    assert!(snapshot["raw"].get("ffprobe_json").is_none());
+}
+
+/// ADR 0122: normalized facts too large for any frame are refused as a permanent
+/// per-file `MalformedMedia` failure instead of an oversized frame.
+#[tokio::test]
+async fn oversized_normalized_snapshot_returns_malformed_media_over_http() {
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let output = dense_ffprobe_json(1, 0, voom_worker_protocol::MAX_PROBE_SNAPSHOT_BYTES);
+
+    let terminal = dispatch_with_ffprobe_output(dir.path(), &output, "oversized-probe").await;
+
+    assert_terminal_error(
+        terminal,
+        FailureClass::MalformedMedia,
+        ErrorCode::MalformedMedia,
+    );
+}
+
 #[tokio::test]
 async fn binary_prints_bound_address_and_stops_on_stdin_close() {
     let binary = env!("CARGO_BIN_EXE_voom-ffprobe-worker");
