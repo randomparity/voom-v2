@@ -184,8 +184,8 @@ the transform input's full hash still refuses to act on such a file. Turning the
 setting off and restarting the agent is the rollback.
 
 **Keep it off for now.** On the #794 rollout, G2 and G3 passed: reuse cut a full local
-pass from 673 s to 224 s at 1.00× physical reads. The guard gates G4–G6 and G8 also
-passed. Two gates failed:
+pass from 673 s to 224 s at 1.00× physical reads. The guard gates G4, G6 and G8 also
+passed, and so did G5 (ext4 through a FUSE stand-in). Two gates failed:
 
 - G7: the control plane and node agent do not refuse each other across protocol
   versions ([#817](https://github.com/randomparity/voom-v2/issues/817)).

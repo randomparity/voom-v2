@@ -364,6 +364,7 @@ def binary_identity(bin_dir: Path) -> dict[str, str]:
 
 def capture_scan(args: argparse.Namespace) -> dict[str, Any]:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    public_label(manifest["label"])
     files = baseline.select_files(manifest, args.ids)
     fs_type = baseline.corpus_filesystem(Path(manifest["root"]), files)
     if args.workdir.exists():
@@ -649,6 +650,9 @@ def validate_construct(record: dict[str, Any]) -> list[str]:
     for case in record.get("cases", []):
         problems += baseline.missing(f"case {case.get('case')}", case,
                                      {"case", "stage", "result", "detected"})
+        # A probe without the guard would test the recompute path, not reuse.
+        if case.get("stage") == "probe" and case.get("guard_sent") is not True:
+            problems.append(f"case {case.get('case')} guard")
     return problems + host_path_problems(record)
 
 

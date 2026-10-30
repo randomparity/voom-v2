@@ -411,6 +411,29 @@ class CaseTests(unittest.TestCase):
         with self.assertRaises(rollout.HarnessError):
             rollout.run_case("b_restored_mtime_edit_during_hash", self.args, "tmpfs")
 
+    def test_a_hash_result_without_guard_facts_refuses_the_probe(self):
+        def no_guard_facts(worker, operation, payload):
+            return {"kind": "result", "payload": {"size_bytes": 1, "content_hash": HASH_A,
+                                                  "modified_at": "t"}}
+        with patch.object(FakeWorker, "call", no_guard_facts):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.run_case("unchanged", self.args, "tmpfs")
+
+    def test_a_copy_that_is_the_source_is_refused(self):
+        def link(command, check):
+            # A hard link passes every file-type check; only the inode comparison refuses it.
+            os.link(command[-2], command[-1])
+        with patch.object(rollout.subprocess, "run", link):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.copy_source(self.source, self.scratch / "copy.mkv")
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "needs Linux /proc")
+    def test_a_kill_spares_a_pid_that_is_no_longer_the_worker(self):
+        with patch.object(rollout, "start_time", side_effect=["1", "2"]), \
+                patch.object(rollout.os, "kill") as kill:
+            rollout.kill_at(os.getpid(), time.monotonic()).join()
+        kill.assert_not_called()
+
     def test_a_label_naming_the_host_or_user_is_refused(self):
         for label in ("Upper", "/abs", rollout.getpass.getuser().lower() + "-media"):
             with self.assertRaises(rollout.HarnessError):
@@ -470,12 +493,14 @@ class RecordTests(unittest.TestCase):
         self.assertIn("worker probe metric", rollout.validate_scan(record))
 
     def test_a_construct_record_needs_every_case_in_order(self):
-        cases = [{"case": name, "stage": "probe", "result": "failure", "detected": True}
-                 for name in rollout.CASES]
+        cases = [{"case": name, "stage": "probe", "result": "failure", "detected": True,
+                  "guard_sent": True} for name in rollout.CASES]
         record = {"schema": rollout.CONSTRUCT_SCHEMA, "cases": cases}
         self.assertEqual(rollout.validate_construct(record), [])
         record["cases"] = cases[1:]
         self.assertIn("cases", rollout.validate_construct(record))
+        record["cases"] = [dict(case, guard_sent=False) for case in cases]
+        self.assertIn("case unchanged guard", rollout.validate_construct(record))
 
     def test_committed_records_validate(self):
         # G1's harness cells keep the #788 schema and its validator.

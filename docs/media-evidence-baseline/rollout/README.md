@@ -51,8 +51,9 @@ SLOs.
   below. Their databases hold host paths, so they stay private.
 
 Every corpus run held the corpus lock exclusively, and every local cell evicted its files
-first. Recorded residency was 0 for every file and repetition except one file at 768 KiB in
-repetition 3 of the #816-fixed stage-0 cell.
+first. Recorded residency in local cells was 0 for every file and repetition except one file
+at 768 KiB in repetition 3 of the #816-fixed stage-0 cell. Network cells are as-found and
+were not evicted.
 
 Every `scan` repetition re-read the selected files' metadata afterwards and found size and
 mtime unchanged. A final listing of both corpora matched the manifests.
@@ -74,6 +75,8 @@ mtime unchanged. A final listing of both corpora matched the manifests.
 
 Every full-local repetition, off and on, published the same `(file, content hash)` set, and
 so did every canary repetition. No stored scan row carried a hash source other than `reused`.
+The pre-#816 records' classifier counted a null `hash_source` as absent. Later records count
+it as a source, and serde never writes a null.
 Every setting-off cell wrote no reused row. Each repetition uses a fresh database, so these
 cells do not exercise turning the setting off on a database that already holds reused rows.
 
@@ -153,7 +156,11 @@ counters include rehearsal traffic.
   generated fixtures on tmpfs. Those were not corpus cells.
 - Ordering rule: on each build, the full-local stage-0 cell was captured before any
   setting-on cell. Setting-on cells on the pre-#816 build exist, but they predate the
-  #816-fixed build that G2 and G3 are judged on.
+  #816-fixed build that G2 and G3 are judged on. On the fixed build, the order of runs was:
+  stage-0, the full setting-on cell, the canary and kill cells, the G4/G5 constructs, then
+  G1. The fixed-build scan records list the three superseded construct records in
+  `git_changed_paths`, because those records were staged for deletion before that batch
+  started.
 - Records committed before the review fixes say in `not_measured.ffprobe_child` that ffprobe
   I/O is not attributed to the probe worker. It is: Linux folds a reaped child's I/O into
   its parent's `/proc/<pid>/io`. Later records state this correctly.
