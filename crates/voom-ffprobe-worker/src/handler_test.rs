@@ -110,6 +110,7 @@ fn sample_result() -> ProbeFileResult {
         pre_probe: facts.clone(),
         post_probe: facts,
         snapshot: serde_json::json!({}),
+        hash_source: None,
     }
 }
 

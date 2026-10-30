@@ -98,6 +98,7 @@ fn owner_config(
                 storage_root_id: root_id.0,
                 provider_locator: root.to_path_buf(),
             }],
+            probe_hash_reuse: false,
             workers,
         },
         node_token: SecretString::from(token.to_owned()),

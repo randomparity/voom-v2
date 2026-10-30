@@ -860,6 +860,7 @@ fn sample_agent_config() -> AgentConfig {
             storage_root_id: 1,
             provider_locator: PathBuf::from("/tmp/voom-root"),
         }],
+        probe_hash_reuse: false,
         workers: vec![crate::config::WorkerConfig {
             name: "echo".to_owned(),
             program: PathBuf::from("/bin/echo"),

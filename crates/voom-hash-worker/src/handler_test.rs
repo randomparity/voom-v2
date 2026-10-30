@@ -229,6 +229,7 @@ fn sample_result() -> HashFileResult {
         size_bytes: 7,
         modified_at: "2026-10-22T00:00:00Z".into(),
         file_key: None,
+        changed_at_ns: None,
         stability_started_at: "2026-10-22T00:00:00Z".into(),
         stability_confirmed_at: "2026-10-22T00:00:00Z".into(),
         sidecars: vec![],

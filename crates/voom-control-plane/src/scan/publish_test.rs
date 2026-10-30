@@ -168,6 +168,7 @@ fn evidence_with_inode(
             "format": "publish-v1",
             "streams": [{ "index": 0, "codec_name": "h264", "disposition": { "default": true } }],
         }),
+        hash_source: None,
     }
 }
 

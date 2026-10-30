@@ -79,6 +79,7 @@ async fn probe_file(
         pre_probe,
         post_probe,
         snapshot,
+        hash_source: None,
     })
 }
 

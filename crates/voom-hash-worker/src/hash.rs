@@ -279,6 +279,7 @@ pub async fn hash_file_in_root(
         size_bytes: pre.size_bytes,
         modified_at: format_iso8601(OffsetDateTime::from(pre.modified_at)),
         file_key: file_key(&pre),
+        changed_at_ns: pre.changed_at_ns,
         stability_started_at: format_iso8601(stability_started_at),
         stability_confirmed_at: format_iso8601(stability_confirmed_at),
         // Sidecars are separate HashFile dispatches; the pump fills this in.

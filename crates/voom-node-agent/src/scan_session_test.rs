@@ -38,6 +38,8 @@ const SESSION: u64 = 1;
 /// `1970-01-01T00:00:00Z` — the shared fixture timestamp.
 const T0: &str = "1970-01-01T00:00:00Z";
 const HASH: &str = "blake3:0000000000000000000000000000000000000000000000000000000000000000";
+/// Pre-read ctime the scripted hash worker reports; the guard must echo it.
+const CTIME_NS: i128 = 1_793_000_000_123_456_789;
 
 // ---------------------------------------------------------------- fixtures --
 
@@ -250,6 +252,7 @@ async fn pump_fixture() -> PumpFixture {
             node_token: TokenSource::Env {
                 name: "VOOM_TEST_TOKEN".to_owned(),
             },
+            probe_hash_reuse: false,
             workers: Vec::new(),
             storage_roots: Vec::new(),
         },
@@ -306,6 +309,7 @@ fn pump_context(node_id: NodeId, incarnation_id: NodeIncarnationId) -> ScanPumpC
         lease_ttl_ms: 30_000,
         progress_timeout: Duration::from_secs(5),
         storage_roots: std::collections::HashMap::new(),
+        probe_hash_reuse: false,
     }
 }
 
@@ -397,6 +401,7 @@ fn agreeing_hash_result() -> HashFileResult {
             ino: 2,
             nlink: 1,
         }),
+        changed_at_ns: Some(CTIME_NS),
         stability_started_at: T0.to_owned(),
         stability_confirmed_at: T0.to_owned(),
         sidecars: Vec::new(),
@@ -420,6 +425,7 @@ fn agreeing_probe_result(snapshot: JsonValue) -> ProbeFileResult {
         pre_probe: observed_agreeing(),
         post_probe: observed_agreeing(),
         snapshot,
+        hash_source: None,
     }
 }
 
@@ -625,6 +631,7 @@ impl ClientHandle for ScriptedSingleFileWorker {
                         pre_probe: drifted.clone(),
                         post_probe: drifted,
                         snapshot: json!({"format": "publish-v1"}),
+                        hash_source: None,
                     };
                     ProgressFrame::Result {
                         lease_id: request.lease_id,

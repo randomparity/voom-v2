@@ -243,6 +243,7 @@ async fn submit_batch(
                 file_key,
                 sidecars: sidecar_evidence(&file.sidecars)?,
                 probe_snapshot: file.probe_snapshot.clone(),
+                hash_source: None,
             }),
         });
     }

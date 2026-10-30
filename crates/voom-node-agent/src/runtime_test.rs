@@ -2138,6 +2138,7 @@ fn loaded_config_with_worker(worker: WorkerConfig) -> LoadedAgentConfig {
             node_token: TokenSource::Env {
                 name: "VOOM_NODE_TOKEN".to_owned(),
             },
+            probe_hash_reuse: false,
             workers: vec![worker],
         },
         node_token: SecretString::from("node-secret"),
@@ -2160,6 +2161,7 @@ fn context(control: Arc<FakeControlPlane>) -> CoordinatorContext {
         worker: worker(),
         fatal_tx: mpsc::unbounded_channel().0,
         storage_roots: HashMap::new(),
+        probe_hash_reuse: false,
     }
 }
 

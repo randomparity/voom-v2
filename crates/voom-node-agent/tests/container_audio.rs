@@ -190,6 +190,7 @@ async fn verify_probe_and_samples(child: &RunningChild, input: &Path, output: &P
             modified_at: observed.modified_at.clone(),
             local_file_key: None,
         },
+        guard: None,
     };
     let probe: ProbeFileResult = serde_json::from_value(
         dispatch(
