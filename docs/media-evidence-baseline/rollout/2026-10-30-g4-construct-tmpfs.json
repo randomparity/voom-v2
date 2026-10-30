@@ -1,17 +1,18 @@
 {
   "build": {
     "binaries_sha256": {
-      "voom-ffprobe-worker": "5e6d4788e2bd1529a030ca5b506600758017aff40aec1efc0a45266cbebf898b",
-      "voom-hash-worker": "6369c014ab936f7c88005de58d916dc5d9199eef0a63271bcab016c1f9c190ca"
+      "voom-ffprobe-worker": "92c784cc8b56f598bb3aec09c69c262fae3626ab163b5c2c0960b9794d885dbc",
+      "voom-hash-worker": "a203ea44466c067a5e2a0969e09c7552f1bca51d7aefbc17a11162504bf36b1f"
     },
     "ffprobe_version": "8.1.3",
-    "git_commit": "20b91edc4044b3d4c61c6e8c32634fe4aa1afdd4",
-    "instrument_sha256": "cf4f3c393eb86b050f21bec6bc1f534ba2b06eaab227fb47b83198d046d2d0bb"
+    "git_commit": "2ca5dc668cd1bf431386d9216ba51685fb0319a7",
+    "instrument_sha256": "08797f6368abf1954560534ce77f9bd0ce04c9172498316ab2a2ce772c0d30be"
   },
   "cases": [
     {
       "case": "unchanged",
       "detected": null,
+      "guard_sent": true,
       "hash_source": "reused",
       "result": "result",
       "stage": "probe"
@@ -21,6 +22,7 @@
       "class": "artifact_checksum_mismatch",
       "code": "ARTIFACT_CHECKSUM_MISMATCH",
       "detected": true,
+      "guard_sent": true,
       "marker": "pre_probe_guard",
       "result": "failure",
       "stage": "probe"
@@ -39,6 +41,7 @@
       "class": "artifact_checksum_mismatch",
       "code": "ARTIFACT_CHECKSUM_MISMATCH",
       "detected": true,
+      "guard_sent": true,
       "marker": "pre_probe_guard",
       "result": "failure",
       "stage": "probe"
