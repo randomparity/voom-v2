@@ -46,9 +46,10 @@ the agent.
 - Builds from before this decision send no header and check none. They refuse every build that
   has this decision, even at the same protocol number. That is the intended flag day, not a
   regression.
-- A protocol-5 control plane still records the activation it accepted before the protocol-6
-  agent refuses the response. The agent exits, so that incarnation expires like any agent that
-  stops after activation. No lease is taken.
+- A control plane without this decision still applies a request before the agent refuses its
+  answer. At startup that is only the activation; the agent exits and the incarnation expires
+  like any agent that stops after activation, so no lease is taken. Swapped under a running
+  agent, it can also record that agent's last lease failure or commit step.
 - A request refused by the middleware reveals the control plane's protocol version to an
   unauthenticated caller, as the worker gate already does. The version is not a secret.
 - Any relay between agent and control plane must pass the response header through.

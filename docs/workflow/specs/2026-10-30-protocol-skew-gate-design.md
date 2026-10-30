@@ -17,11 +17,11 @@ workers. Both sides compare it with `voom_core::PROTOCOL_VERSION`.
 
 **Control plane (`crates/voom-api`).** `protocol.rs` (new) holds `PROTOCOL_VERSION_HEADER` and
 one `axum::middleware::from_fn` gate. `base_router` merges the commit, execution and scan
-routers, applies the gate with `.layer`, then adds `/health` outside it. The gate:
+routers, applies the gate with `.route_layer` (matched routes only), then adds `/health` outside it. The gate:
 
-1. reads the request header: absent or not UTF-8 → `400 BAD_ARGS` "missing
-   x-voom-protocol-version (control plane speaks protocol N)"; not a `u32` → `400 BAD_ARGS`
-   "malformed x-voom-protocol-version: <value>"; unequal → `400 BAD_ARGS` "unsupported protocol
+1. reads the request header: absent → `400 BAD_ARGS` "missing x-voom-protocol-version
+   (control plane speaks protocol N)"; not UTF-8 or not a `u32` → `400 BAD_ARGS` "malformed
+   x-voom-protocol-version; expected a decimal version" (the value is not echoed); unequal → `400 BAD_ARGS` "unsupported protocol
    version: offered=O, expected N". All three carry the hint "run the control plane and every
    node agent from one release; mixed protocol versions are refused (ADR 0123)" and command
    `api.request`. The handler does not run.
@@ -38,12 +38,14 @@ decision 3). `scan_client.rs` sends through `ControlPlaneClient::send`, so it ne
 **Other callers of the node routes (sweep).** Searched `scripts/`, `docs/runbooks/`,
 `docs/*.md`, `crates/voom-fakes`, `crates/voom-conformance`, `crates/voom-test-support`,
 `crates/voom-cli` and `.github/` for the node routes and `x-voom-idempotency-key`, and
-`scripts/` for relays (`http.server`, `urlopen`, `proxy`, `curl`). Hits:
+`scripts/` for relays (`http.server`, `urlopen`, `proxy`, `curl`), case-insensitively
+(`rg -i`). Hits:
 
 | Caller | Change |
 |---|---|
 | `crates/voom-fakes/src/remote_runner.rs` `post_request` | sends the header |
-| `scripts/issue-733-group-proof-fixture.py` relay | copies the response header back to the agent |
+| `scripts/issue-733-group-proof-fixture.py` relay (`do_POST`) | copies the response header back to the agent |
+| same fixture, self-built requests in `check_reuse_acquire` and `check_late_publication_rollback` (also driven by `scripts/issue-733-reuse-clone-regression.py`) | send the header, read from `crates/voom-core/src/lib.rs` in the checkout the binaries are built from |
 | `crates/voom-api` route tests, `crates/voom-node-agent/tests/{client_tls,lifecycle}.rs` mocks | send / return the header |
 | `docs/runbooks/operator-control-plane-api.md` curl example and reverse-proxy sentence | add the header |
 
@@ -67,14 +69,17 @@ activation, so it is gated like the first.
 1. **Actors and deployments.** An operator deploying control plane and node agents from release
    builds over TLS or loopback HTTP; the node agent as the only production caller of node
    routes; the synthetic remote runner and acceptance fixtures in tests.
-2. **Invariants and assets.** No lease, scan session or commit runs across a protocol skew; the
-   public `BAD_ARGS` code and envelope shape; existing same-version behavior unchanged.
+2. **Invariants and assets.** A gated control plane refuses every node-route request from
+   another version before it has any effect; an agent stops on the first 2xx answer from another
+   version, so no lease is acquired after an activation that crossed skew; the public `BAD_ARGS`
+   code and envelope shape; existing same-version behavior unchanged.
 3. **Accepted failure classes.**
    - A protocol-5 control plane records the activation the protocol-6 agent then refuses; the
      agent exits and the incarnation expires as after any post-activation stop. No lease runs.
-   - A control plane replaced mid-lease is refused on the agent's next call, which may be that
-     lease's heartbeat or completion; the lease then recovers as after an agent crash (ADR 0118).
-     G7 concerns skew at activation.
+   - An older, ungated control plane swapped in under a running agent applies whatever request
+     reaches it before the agent reads the answer and exits. That can be a lease failure that
+     spends a ticket attempt, a lease held until its TTL, or an applied commit step. The swap is
+     an operator error outside the flag-day procedure; G7 concerns skew at activation.
    - The remote runner sends the header but does not check responses: it is a test driver run
      against a control plane from the same build.
    - The version is visible to unauthenticated callers (ADR 0123 consequences).
@@ -88,8 +93,7 @@ activation, so it is gated like the first.
 - **Actors.** Network callers reaching the API listener (unauthenticated until the bearer check);
   the control plane as seen by the agent (trusted over TLS, but possibly another release).
 - **Controls.** Request: header read with `to_str` and `parse::<u32>`, compared, refusal before
-  any body read or database access; the echoed value in "malformed" is bounded by the server's
-  header limits and serialized as JSON. Response: same parse; refusal is terminal and logged
+  any body read or database access; no refusal echoes the received value. Response: same parse; refusal is terminal and logged
   through the existing error path.
 - **Pre-auth disclosure.** Without a token, a caller can already read the version: the gate
   stamps it on the 401 that any authenticated node route returns to a tokenless request. The
@@ -110,10 +114,13 @@ activation, so it is gated like the first.
   missing or malformed header → `Config` after exactly one attempt; the gate's own 400 refusal
   body → `Config` after exactly one attempt (terminal, not retried, even with retries
   unbounded); error responses without the header keep their existing classification.
-- `crates/voom-node-agent/tests/protocol_skew.rs` (new): a real `ControlPlaneClient` against the
-  real `voom_api` router activates; the same router behind a layer that rewrites the response
-  header to `N-1` (an older control plane) refuses activation; a raw request without the header
-  (an older agent) is refused and creates no incarnation, so no lease is acquirable.
+- `crates/voom-node-agent/tests/lifecycle.rs`: the real agent runtime against the real router
+  behind a layer that rewrites the response header to `N-1` (an older control plane) exits with
+  the agent-side refusal, takes no lease and leaves the ticket `Ready`.
+- `crates/voom-api/tests/remote_execution_route.rs`: an unversioned activation and acquire (an
+  older agent) are refused, create no incarnation and leave the ticket `Ready`.
 - `just ci` green. `just check-owner-publication <fresh workdir>` (default `chain` mode, which
   routes the agent through the relay; synthetic lavfi media) runs once and its result is
-  reported.
+  reported. Extract mode and the reuse-clone regression, which reach the self-built requests,
+  are not run: the operator asked for one chain run. Their header comes from the same helper,
+  which the chain run imports.
