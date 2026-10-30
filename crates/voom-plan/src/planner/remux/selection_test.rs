@@ -86,8 +86,10 @@ fn remux_stream_facts_classify_attached_pictures_as_attachments() {
          "disposition": {"default": false}},
         {"id": "stray-filename-tag", "index": 3, "kind": "video", "codec_name": "h264",
          "filename": "feature.mkv"},
-        {"id": "non-image-tags", "index": 4, "kind": "video", "codec_name": "h264",
-         "filename": "feature.mkv", "mime_type": "video/x-matroska"}
+        {"id": "non-image-tags", "index": 4, "kind": "video", "codec_name": "mjpeg",
+         "filename": "feature.mkv", "mime_type": "video/x-matroska"},
+        {"id": "author-tagged-video", "index": 5, "kind": "video", "codec_name": "h264",
+         "filename": "poster.png", "mime_type": "image/png"}
     ]);
 
     let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
@@ -104,6 +106,7 @@ fn remux_stream_facts_classify_attached_pictures_as_attachments() {
             ("mkv-cover", TrackTarget::Attachment),
             ("stray-filename-tag", TrackTarget::Video),
             ("non-image-tags", TrackTarget::Video),
+            ("author-tagged-video", TrackTarget::Video),
         ]
     );
     assert!(facts[1].attached_picture);

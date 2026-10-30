@@ -102,7 +102,7 @@ pub fn stream_facts(
             // recover covers from snapshots probed before `attached_pic` was recorded.
             "video"
                 if attached_picture
-                    || legacy_matroska_image(mime_type.as_deref(), filename.as_deref()) =>
+                    || legacy_matroska_image(stream, mime_type.as_deref(), filename.as_deref()) =>
             {
                 TrackTarget::Attachment
             }
@@ -136,8 +136,20 @@ pub fn stream_facts(
     Ok(facts)
 }
 
-fn legacy_matroska_image(mime_type: Option<&str>, filename: Option<&str>) -> bool {
-    filename.is_some() && mime_type.is_some_and(|mime_type| mime_type.starts_with("image/"))
+/// Track tags are author-controlled, so the fallback also requires an image codec as
+/// assigned by the ffmpeg Matroska demuxer; a real `h264` or `hevc` track never matches.
+fn legacy_matroska_image(
+    stream: &serde_json::Map<String, Value>,
+    mime_type: Option<&str>,
+    filename: Option<&str>,
+) -> bool {
+    let image_codec = stream
+        .get("codec_name")
+        .and_then(Value::as_str)
+        .is_some_and(|codec| matches!(codec, "mjpeg" | "png" | "gif" | "tiff"));
+    image_codec
+        && filename.is_some()
+        && mime_type.is_some_and(|mime_type| mime_type.starts_with("image/"))
 }
 
 pub fn evaluate_filter(
