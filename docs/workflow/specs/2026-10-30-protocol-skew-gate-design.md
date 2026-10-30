@@ -8,7 +8,10 @@ enforces that. #794 ran mixed protocol 5/6 control planes and agents through the
 acceptance stack: both directions activated and executed leases, and with `probe_hash_reuse` on
 a protocol-5 control plane failed the session at batch decode after the lease ran (#817).
 
-Decision: [ADR 0123](../../adr/0123-control-plane-node-agent-protocol-match.md).
+Decision: [ADR 0123](../../adr/0123-control-plane-node-agent-protocol-match.md). It needs its own
+record: it adds a public header contract on the 20 node routes and a refusal ahead of
+authentication, which neither ADR 0016 (worker wire only) nor ADR 0120 (states the flag day,
+enforces nothing) decides.
 
 ## Design
 

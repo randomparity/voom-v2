@@ -167,9 +167,9 @@ Steps:
    non-panicking lookup); make `write_response` stamp `PROTOCOL_VERSION`; add
    Copy-compatible variants `RawResponse::SuccessWithVersion(Option<u32>)` (`None` omits the
    header), `RawResponse::SuccessMalformedVersion` (header `x`) and `RawResponse::ProtocolRefusal`
-   (400 with body `{"schema_version":"0","command":"api.request","status":"error","data":null,
-   "warnings":[],"error":{"code":"BAD_ARGS","message":"unsupported protocol version: offered=5,
-   expected 6","hint":"... (ADR 0123)"}}`).
+   (400 `BAD_ARGS` envelope, command `api.request`, message built with `format!` as
+   `unsupported protocol version: offered={PROTOCOL_VERSION + 1}, expected {PROTOCOL_VERSION}`,
+   hint ending `(ADR 0123)`; no literal version numbers).
    Tests: `requests_offer_the_agent_protocol_version`; `skewed_success_is_refused_without_retry`
    for `SuccessWithVersion(Some(PROTOCOL_VERSION + 1))`, `SuccessWithVersion(None)` and
    `SuccessMalformedVersion`, each

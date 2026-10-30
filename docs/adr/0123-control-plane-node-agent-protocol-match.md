@@ -36,7 +36,7 @@ the agent.
 4. **Activation is the handshake.** Activation is the agent's first call, and an activation
    error ends the agent before it reads any lease. Either skew direction therefore stops the
    agent at startup. A control plane replaced under a running agent is refused on the agent's
-   next request; that error is fatal to the agent too.
+   next request.
 
 ## Consequences
 
