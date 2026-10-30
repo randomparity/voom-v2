@@ -2,9 +2,8 @@
 
 ## Status
 
-Proposed (2026-10-29). Maintainer approval is required before any production trust change.
-Until this record is Accepted, production keeps the conservative full-hash behaviour in every
-phase.
+Accepted (2026-10-30). The maintainer accepted the guarded probe-reuse trust change on 2026-10-30;
+implementation is #810 and #811.
 
 ## Context
 
