@@ -14,10 +14,12 @@ ADR 0120 is still `Proposed` although the maintainer accepted it on 2026-10-30.
   `changed_at_ns: Option<i128>` (Unix `ctime * 1e9 + ctime_nsec`, `None` elsewhere). The derived
   equality in `assert_stable` then covers ctime. A mismatch keeps the `hash_drift` failure and its
   fact-free payload. `HashFileResult` and the protocol do not change.
-- `docs/adr/0120-...md`: the Status becomes Accepted (2026-10-30). The index row stays as it is.
+- `docs/adr/0120-...md`: the Status becomes "Accepted (2026-10-30). The maintainer accepted the
+  guarded probe-reuse trust change on 2026-10-30; implementation is #810 and #811." The index
+  row stays as it is.
 - `scripts/media-evidence-candidates.py` and its selftest anchor the #789 variants on the
   8 KiB stack-buffer text, which this change removes. Re-anchor them on the 1 MiB heap source.
-  `buf1m` is now `baseline`, and a new `buf8k` restores the 8 KiB read for #794's comparison.
+  `buf1m` is now `baseline`, and a new `buf8k` restores 8 KiB reads (heap buffer) for #794.
   `buf64k` and `buf4m` change only the constant. `batch8k` also sets 8 KiB and keeps its
   blocking loop's stack buffer. `single-read` keeps only its probe edits. Measurement logic and
   record schemas are unchanged. The two baseline READMEs get a one-line note each.
@@ -30,10 +32,9 @@ ADR 0120 is still `Proposed` although the maintainer accepted it on 2026-10-30.
   `ARTIFACT_CHECKSUM_MISMATCH` with payload `{"stage":"hash_drift"}`. Nothing is published.
 - A filesystem whose ctime follows mtime (the network mount in #798) adds no detection there.
   It also adds no false drift, because an unchanged file keeps its ctime.
-- A metadata-only change during the hash (chmod, link count) now fails as drift. This is
+- A ctime-only change during the hash (chmod, chown, xattr) now fails as drift. This is
   intended, and the next scan re-observes the file.
-- The heap buffer is allocated once per file and freed when the hash ends. #789 measured hash
-  peak RSS at 14.9 MiB at concurrency 4.
+- One heap buffer per file; #789 measured 14.9 MiB peak hash RSS at concurrency 4.
 
 ## Success
 
@@ -53,3 +54,5 @@ ADR 0120 is still `Proposed` although the maintainer accepted it on 2026-10-30.
 | ctime drift is `hash_drift` | `ctime_only_change_is_hash_drift_without_facts` | — |
 | Variants apply to live source | `media-evidence-candidates-selftest` | — |
 | ADR Status | — | Prose status line; `just check-adr-index` covers the index |
+
+Each focused test was shown to fail under a deliberate break of the code it covers.
