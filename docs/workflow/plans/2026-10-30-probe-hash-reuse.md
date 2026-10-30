@@ -197,6 +197,8 @@ Verification (`scan_session_test.rs`, extending `ScriptedSingleFileWorker` with
   (`reused_result_without_guard_is_refused`).
 - Mode: focused-test — G7 mid-probe kill: setting on + probe stream ends before a terminal
   frame → lease `Failure(WorkerCrash)`, no evidence (`guarded_probe_crash_publishes_nothing`).
+- Mode: focused-test — G7 mid-hash kill: hash stream ends before a terminal frame → lease
+  `Failure(WorkerCrash)`, no evidence (`hash_crash_publishes_nothing`).
 - Mode: focused-test — config: absent key parses `false`; `probe_hash_reuse = true` parses
   (`config_test.rs::probe_hash_reuse_defaults_off`).
 
@@ -213,6 +215,8 @@ Files: `crates/voom-node-agent/src/media.rs` (`guard: None` at `child_request` a
   (write source, pin its hash, same-size rewrite with mtime restored, run → `Failure(
   ArtifactChecksumMismatch, ..)`, no child dispatch). Red: none expected (backstop already
   exists); bite check by pinning the post-edit hash, which must then dispatch.
+- Mode: focused-test — contract 3: `media_test.rs::media_probes_send_no_guard` (the recorded
+  media-child probe request and the staged-output probe request carry no `guard` key).
 - Mode: focused-test — G8: `guard_test.rs::unguarded_probe_sets_no_hash_source` (no guard on a
   tmpfs file → `hash_source == None` and the encoded result has no `hash_source` key).
 

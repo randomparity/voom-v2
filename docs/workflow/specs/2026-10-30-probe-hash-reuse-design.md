@@ -65,9 +65,10 @@ type or path appears in either.
   request sent without a guard is `Disagree` (evidence-less). Otherwise `agrees` compares as
   today. The accepted source is copied into `ScanObservationEvidence.hash_source`.
 - Media-child probes (`media.rs::child_request`) and output probes (`media.rs::probe_output`)
-  send `guard: None`, so the worker recomputes and never sets `hash_source` for them. An
-  agent-side refusal of a `hash_source` on those paths is outside the approved surface and is
-  recorded as a follow-up candidate.
+  send `guard: None`, so the worker recomputes and never sets `hash_source` for them; a test
+  pins that their dispatched payloads carry no `guard` key. An extra agent-side refusal of
+  `hash_source` on those paths is not added: the worker's guarded branch is the only writer.
+  It is offered to the campaign as a defence-in-depth follow-up candidate.
 
 ### Durable evidence
 
@@ -165,7 +166,8 @@ lines of `docs/media-evidence-decision-report.md` (lines 5–7 only).
 | G5 fallback | `guarded_probe_recomputes_outside_reuse_list` (filesystem of the test temp root when not listed) + `reuse_list_is_btrfs_and_tmpfs_only` | — |
 | Fact-free failure (5) | guard tests assert payload equals `{"stage": ...}` and message has no path | — |
 | Pump predicate (6), G7 | pump: setting off sends no guard; setting on sends guard; reused without guard is evidence-less; reused with guard persists `hash_source` | — |
-| G7 mid-probe kill | pump: guarded probe stream ending early fails the session with no evidence | — |
+| G7 mid-hash and mid-probe kill | pump: a hash or guarded probe stream ending before its terminal frame fails the session with no evidence | — |
+| Media probes unguarded (3) | node agent: media-child and output probe payloads carry no `guard` key | — |
 | G6 transform backstop | node agent: restored-mtime edit before a transform fails `ARTIFACT_CHECKSUM_MISMATCH` with no dispatch | — |
 | G8 unchanged readers (7) | evidence and probe-result encodings without the field match the protocol-5 bytes; an unguarded probe result carries no `hash_source` | — |
 | Setting default (8) | config: absent key parses `false` | — |
