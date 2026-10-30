@@ -51,13 +51,8 @@ SLOs.
   below. Their databases hold host paths, so they stay private.
 
 Every corpus run held the corpus lock exclusively, and every local cell evicted its files
-first. Recorded residency was 0 for every file and repetition except one file in each of
-two repetitions:
-
-| Cell | Repetition | Resident |
-|---|---|---:|
-| stage-0 (#816 fixed) | 3 | 768 KiB |
-| G1 *(fill after rerun)* | | |
+first. Recorded residency was 0 for every file and repetition except one file at 768 KiB in
+repetition 3 of the #816-fixed stage-0 cell.
 
 Every `scan` repetition re-read the selected files' metadata afterwards and found size and
 mtime unchanged. A final listing of both corpora matched the manifests.
@@ -70,7 +65,7 @@ mtime unchanged. A final listing of both corpora matched the manifests.
 | `…-g3-stage0-off-local-corpus-evicted-after-816` | G3 stage-0: full local, off | 3 | First durable observation and complete: 670.8, 674.6, 673.1 s. 34/34 published. |
 | `…-g2-g3-on-local-corpus-evicted-after-816` | full local, on | 3 | 224.1, 223.7, 222.8 s. 34/34 reused. Physical reads 1.0003× the corpus. Probe `rchar` 0.016% of the corpus. |
 | `…-canary-off/on-…-after-816` | 6-file subset, off / on | 5 + 5 | First durable 5.90 → 1.69 s. Complete 103.4 → 26.0 s. Physical 308.2 → 106.8 GB. |
-| `…-g1-buf8k-…`, `…-g1-buf1m-…` | G1: harness, full local | 3 + 3 | *(fill after rerun)* |
+| `…-g1-buf8k-…`, `…-g1-buf1m-…` | G1: harness, full local | 3 + 3 | Hash CPU 688.8 → 162.6 s. Summed hash 965.2 → 870.8 s. Wall 669.3 → 676.6 s. Hash peak RSS 5.1 → 16.2 MiB. First file done 16.0 → 18.2 s. All rows observed. |
 | `…-g7-kill-hash-on-…` / `…-probe-on-…` | subset, on, worker SIGKILLed 3 s / 8 s after the request | 1 + 1 | Hash kill: one session failed with nothing published; 5 published with clean-run hashes. Probe kill: 6/6 published with clean-run hashes. |
 | `…-g7-kill-hash-off-…` / `…-probe-off-…` *(pre-#816)* | subset, off, same kills | 1 + 1 | Hash kill: 6/6 published with clean-run hashes. Probe kill: one session failed with nothing published. |
 | `…-g4-construct-btrfs`, `…-tmpfs` | G4, reflink copy (evicted) and tmpfs copy | 1 | Guard sent each time. Unchanged: reused. (a) `pre_probe_guard`, (b) `hash_drift`, (c) `pre_probe_guard`, all `ARTIFACT_CHECKSUM_MISMATCH`. |
@@ -129,13 +124,13 @@ Corpus time under the lock (local clock):
 
 | Work | Time |
 |---|---|
-| Pre-#816 G1 (since superseded) | 09:10–10:12 |
+| Pre-#816 G1 (superseded: its `buf8k` record carried the harness checkout's constants) | 09:10–10:12 |
 | Pre-#816 stage-0 | 09:04–09:08 and 10:28–10:37 |
 | Pre-#816 canary and kill cells | 10:14–10:25 and 10:38–12:04 |
 | Pre-#816 G4/G5 | 10:41–10:56 |
 | G6 and G9 | 10:57–11:50 |
 | #816-fixed full-local, canary, kill, G4 and G5 cells | 12:19–13:34 |
-| G1 rerun | from 13:34 |
+| G1 rerun | 13:34–14:42 |
 
 The network corpus was touched at three times:
 - 10:26: a manifest walk and three ffprobe header reads.
