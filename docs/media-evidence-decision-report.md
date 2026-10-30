@@ -43,7 +43,7 @@ compared as one.
 | Phase | Required evidence | Permitted before full verification | Revalidation triggers | Mismatch handling | Supported deployments | Residual risk | Performance tradeoff |
 |---|---|---|---|---|---|---|---|
 | Discovery | None; metadata-only enumeration | Listing candidates only | n/a | n/a | All | None added | Unchanged |
-| Probe and plan | Owner full hash (1 MiB buffer) with a pre/post stat including ctime. Probe: full hash before and after ffprobe; or, with the setting on and the root on btrfs or tmpfs, the reused owner hash plus the guard (size, mtime ns, ctime ns, file key) before and after ffprobe | Nothing: evidence attaches only when hash and probe agree, and publishes at session completion (ADR 0077) | Any guard field change; stat drift during the hash read; a filesystem outside the reuse list | Fail closed: fact-free `hash_drift` class, observation recorded without evidence | Reuse: btrfs and tmpfs owner roots with the setting on. All others: re-hash | Same-tick ctime edit, privileged forgery, or damage keeping size, mtime and ctime: probe facts may describe other bytes. The transform input full hash refuses to act on such a file; an untransformed file keeps them until the next full rescan | Local: one full read instead of three, wall about −65%, physical 1.00× corpus. Network: CPU only |
+| Probe and plan | Owner full hash (1 MiB buffer) with a pre/post stat including ctime. Probe: full hash before and after ffprobe; or, with the setting on and the root on btrfs or tmpfs, the reused owner hash plus the guard (size, mtime ns, ctime ns, file key) before and after ffprobe | Nothing: evidence attaches only when hash and probe agree, and publishes at session completion (ADR 0077) | Any guard field change; stat drift during the hash read; a filesystem outside the reuse list | Fail closed: `ARTIFACT_CHECKSUM_MISMATCH` with a fact-free payload; observation recorded without evidence | Reuse: btrfs and tmpfs owner roots with the setting on. All others: re-hash | Same-tick ctime edit, privileged forgery, or damage keeping size, mtime and ctime: probe facts may describe other bytes. The transform input full hash refuses to act on such a file; an untransformed file keeps them until the next full rescan | Local: one full read instead of three, wall about −65%, physical 1.00× corpus. Network: CPU only |
 | Transform input | Full hash before and after the operation, equal to the planned facts | None | Every operation | Existing `ARTIFACT_CHECKSUM_MISMATCH`; no output | All | Unchanged | Unchanged: two input reads per transform |
 | Output verification | Full hash by the verify-artifact worker; output probes always re-read | None | Every output | Existing verification failure; output not committed | All | Unchanged | Unchanged |
 | Promotion/commit | Commit authorization against verified facts | None | Every commit | Existing commit-gate refusal | All; relocation is #413/#528 | Unchanged | Unchanged |
@@ -65,9 +65,11 @@ and cache state. Constructions use fixtures or copies only.
    seconds and wall do not regress; hash peak RSS stays within baseline + 256 MiB.
 2. **G2 Reuse I/O.** Local corpus, evicted, full pass, setting on: physical reads at most
    1.05× corpus bytes; the probe worker's `rchar` below 1% of corpus bytes; wall improves.
-3. **G3 First durable observation.** Capture a stage-0 cell with a publishing instrument
-   through the control plane, setting off, *before* any setting-on cell, then the same cell
-   with the setting on. It must improve. Without the stage-0 cell the metric is inconclusive,
+3. **G3 First durable observation.** Local corpus, evicted, full pass, through a real
+   control-plane scan session timed to its first durable observation (the publishing
+   instrument #794 builds). Capture the stage-0 cell, setting off, *before* any setting-on
+   cell, then the same cell with the setting on. It must improve. The network subset is
+   reported, not gating. Without the stage-0 cell the metric is inconclusive,
    and the setting stays off.
 4. **G4 Constructed detection, btrfs and tmpfs.** At least 3 cases each: (a) same-size
    interior edit with mtime restored between hash and probe fails closed with no evidence;
@@ -79,10 +81,10 @@ and cache state. Constructions use fixtures or copies only.
 6. **G6 Transform backstop.** An edit with mtime restored after a reused observation and
    before a transform fails at transform input with `ARTIFACT_CHECKSUM_MISMATCH` and commits
    no output.
-7. **G7 Recovery.** Setting off: the next scan writes no reused rows. A node whose agent and
-   workers differ in protocol version is refused (ADR 0016). A worker killed mid-hash or
-   mid-probe publishes no partial evidence (O14). The pump refuses a `reused` result from a
-   request that carried no guard.
+7. **G7 Recovery.** Setting off: the next scan writes no reused rows. A control plane, node
+   agent or worker on a different protocol version is refused before lease execution
+   (ADR 0016). A worker killed mid-hash or mid-probe publishes no partial evidence (O14).
+   The pump refuses a `reused` result from a request that carried no guard.
 8. **G8 Unchanged readers.** Output-probe rows in `artifact_verifications.report` and scan
    rows with recomputed hashes carry no hash source field.
 9. **G9 Acceptance.** Canary on the 6-file local subset, then complete-library separate-output
@@ -90,7 +92,7 @@ and cache state. Constructions use fixtures or copies only.
    unchanged library yields identical content hashes for every file, and the repeat
    application dispatches no new transform.
 
-If the trust change is rejected, only G1, G7's version check and G9 apply.
+If the trust change is rejected, only G1 and G9 apply.
 
 ## Implementation contracts
 
@@ -98,8 +100,8 @@ Each takes effect only after ADR 0120 is accepted.
 
 1. **Hash buffer.** The hash worker reads 1 MiB per read, as #789's `buf1m` cell (hash worker
    SHA-256 `f73aa370…`). No wire change.
-2. **Hash stability.** The hash worker adds ctime ns to its pre/post stat comparison and
-   reports the pre-read ctime ns in its result.
+2. **Hash stability.** The hash worker adds ctime ns to its pre/post stat comparison (no
+   wire change) and reports the pre-read ctime ns in its result (wire change, contract 9).
 3. **Probe guard.** `ProbeFileRequest` gains an optional guard carrying ctime ns and the file
    key (device, inode) from the hash result. Only the scan pump sends it, and only when the
    setting is on. Output probes and media-child probes never send it. `ExpectedFileFacts` and
@@ -111,18 +113,22 @@ Each takes effect only after ADR 0120 is accepted.
    ctime ns and file key before and after ffprobe, echoes the expected hash, and sets the
    result's optional hash source to `reused`. The source is omitted when the hash was
    recomputed.
-5. **Guard failure.** A guard mismatch uses the existing fact-free `hash_drift` failure class
-   and payload. No stat value, filesystem type or path enters the failure detail.
+5. **Guard failure.** A guard mismatch uses the existing `ARTIFACT_CHECKSUM_MISMATCH`
+   failure class with a fact-free payload (a stage marker only, like `hash_drift`). No stat
+   value, filesystem type or path enters the failure detail.
 6. **Pump predicate.** ADR 0077's agreement predicate accepts `reused` only from a request it
    sent with a guard; otherwise it compares as today.
-7. **Durable evidence.** `scan_observations.evidence_json` gains the optional hash source
-   under ADR 0013 (inventory row updated), omitted when recomputed. Its readers are #794's
-   gates and operator audit. `artifact_verifications.report` rows are unchanged.
+7. **Durable evidence.** `ScanObservationEvidence` gains the optional hash source under
+   ADR 0013 (inventory row updated), omitted when recomputed. Its readers are the batch route
+   (`voom-api/src/scan.rs::typed_observation`) and `scan_observations.evidence_json`; its
+   consumers are #794's gates and operator audit. `artifact_verifications.report` rows are
+   unchanged.
 8. **Setting.** One owner-node setting enables guarded reuse, default off.
-9. **Compatibility.** Bump the worker protocol version (ADR 0016); a node's agent and
-   bundled workers upgrade together. Upgrade the control plane before any node enables the
-   setting. Rows with recomputed hashes stay byte-identical, so a binary downgrade is
-   supported until reused rows exist and unsupported afterwards. Rollback is the setting.
+9. **Compatibility.** All wire changes (contracts 2–4 and 7) ship under one protocol version
+   bump (ADR 0016). That is a flag day: the control plane, every node agent and every bundled
+   worker upgrade together, with the setting off. Rows with recomputed hashes stay
+   byte-identical, so a fleet-wide binary downgrade is supported until reused rows exist and
+   unsupported afterwards. Rollback is the setting.
    A crash or restart publishes nothing partial, and the next scan re-observes.
 
 ## Re-scope drafts for #792–#794
@@ -132,20 +138,22 @@ Drafts only; the campaign orchestrator applies them after operator approval.
 **If ADR 0120 is accepted:**
 
 - **#792 → split into two PR-sized issues, then close #792 as superseded by them.**
-  - *A. Adopt the 1 MiB hash buffer and report ctime from the hash stability check*
-    (`type:feature`, `effort:S`): contracts 1–2 and the protocol version bump; tests for the
-    stability failure on a ctime change. Depends on ADR 0120 acceptance.
+  - *A. Adopt the 1 MiB hash buffer and check ctime for hash stability* (`type:feature`,
+    `effort:S`): contract 1 and contract 2's stability check, with no wire change; a test
+    for the stability failure on a ctime-only change. Depends on ADR 0120 acceptance.
   - *B. Probe reuses the owner hash under a local ctime guard* (`type:feature`, `effort:M`):
-    contracts 3–9, with G4–G8 implemented as tests where executable. Depends on A.
+    contract 2's reported ctime and contracts 3–9 under the single protocol bump, with G4–G8
+    implemented as tests where executable. Depends on A.
 - **#793 → close as not planned.** ADR 0120 selects no change for transform input, output
   verification, promotion or repeat scan, and rejects R2 and R3. Reconsider if a later
   decision selects either after measuring it.
-- **#794 → rewrite body** to gates G1–G9 above, in order: G3's stage-0 publishing cell first,
-  canary, full local pass, network subset. Depends on #792's A and B; drop #793.
+- **#794 → rewrite body** to gates G1–G9 above, including building G3's publishing
+  instrument, in order: G3's stage-0 cell first, canary, full local pass, network subset.
+  Depends on #792's A and B; drop #793.
 
 **If the trust change is rejected:** #792 is rewritten to the 1 MiB hash buffer alone
-(contract 1, `effort:S`), #793 closes as not planned, and #794 is rewritten to G1, G7's
-version check and G9, depending on #792.
+(contract 1, `effort:S`), #793 closes as not planned, and #794 is rewritten to G1 and G9,
+depending on #792.
 
 ## Not measured and exclusions
 

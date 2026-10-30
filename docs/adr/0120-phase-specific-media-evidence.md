@@ -47,10 +47,11 @@ request; `ExpectedFileFacts` and `ObservedFileFacts` are unchanged, and output p
 send it. With a guard, the worker reads no file bytes, compares the guard before and after
 ffprobe, echoes the expected hash and marks the result's hash source `reused`. The source is
 omitted when the hash was recomputed. The pump accepts a reused hash only from a guarded
-request. A guard mismatch fails closed with the existing fact-free `hash_drift` class and
-payload, leaving the observation without evidence. Fingerprints, sampled digests and the reuse guard
-are never stored as, or compared as, a content hash. ADR 0050 byte ownership, ticket and
-lease authority, and absence reconciliation at completion are unchanged.
+request. A guard mismatch fails closed with the existing `ARTIFACT_CHECKSUM_MISMATCH` class
+and a fact-free payload, leaving the observation without evidence. Fingerprints, sampled
+digests and the reuse guard are never stored as, or compared as, a content hash. ADR 0050
+byte ownership, ticket and lease authority, and absence reconciliation at completion are
+unchanged.
 
 If the maintainer rejects the trust change, the probe-and-plan row keeps both re-reads and
 only the 1 MiB buffer proceeds.
@@ -64,13 +65,14 @@ only the 1 MiB buffer proceeds.
   bytes other than the hashed ones. The transform input's full hash still refuses to act on
   such a file. A file that is never transformed keeps the mismatched facts until the next
   full rescan.
-- The worker protocol changes (ADR 0016 version bump): the hash result gains ctime ns, the
-  probe request an optional guard, the probe result an optional hash source. Scan evidence
-  (`scan_observations.evidence_json`) records the source as an optional field (ADR 0013), read
-  by #794's gates and operator audit to count reused observations. Rows written with
+- One worker protocol version bump (ADR 0016), a flag day for the control plane, every
+  node agent and every bundled worker: the hash result gains ctime ns, the probe request an
+  optional guard, the probe result an optional hash source. Scan evidence (the batch route
+  and `scan_observations.evidence_json`) records the source as an optional field (ADR 0013),
+  read by #794's gates and operator audit to count reused observations. Rows written with
   recomputed hashes, including every output probe in `artifact_verifications.report`, stay
-  byte-identical. A binary downgrade is unsupported only once reused rows exist; rollback is
-  the owner-node setting.
+  byte-identical. A fleet-wide binary downgrade is unsupported only once reused rows exist;
+  rollback is the owner-node setting.
 - Adding a filesystem to the reuse list requires the hash-to-probe O1 and mid-read O10
   constructions to be detected on it; #794 gates both on btrfs and tmpfs.
 
