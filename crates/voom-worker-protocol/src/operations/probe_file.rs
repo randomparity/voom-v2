@@ -49,6 +49,11 @@ pub enum ProbeFileStatus {
     Probed,
 }
 
+/// Producer bound on `ProbeFileResult.snapshot` as compact JSON (ADR 0122). The 4 KiB below
+/// `MAX_FRAME_BYTES` and `voom_core::MAX_EVIDENCE_BYTES` holds the result envelope and the
+/// scan evidence fields; `probe_file_test.rs` pins both.
+pub const MAX_PROBE_SNAPSHOT_BYTES: usize = 60 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProbeFileResult {
