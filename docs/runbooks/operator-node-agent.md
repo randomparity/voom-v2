@@ -185,13 +185,13 @@ setting off and restarting the agent is the rollback.
 
 **Keep it off for now.** On the #794 rollout, G2 and G3 passed: reuse cut a full local
 pass from 673 s to 224 s at 1.00× physical reads. The guard gates G4, G6 and G8 also
-passed, and so did G5 (ext4 through a FUSE stand-in). Two gates failed:
+passed, and so did G5 (ext4 through a FUSE stand-in). Two gates are still open:
 
-- G7: the control plane and node agent do not refuse each other across protocol
+- G7 failed: the control plane and node agent do not refuse each other across protocol
   versions ([#817](https://github.com/randomparity/voom-v2/issues/817)).
-- G9: repeat application does not converge because of two remux defects
+- G9 is waiting on two remux fixes
   ([#819](https://github.com/randomparity/voom-v2/issues/819),
-  [#820](https://github.com/randomparity/voom-v2/issues/820)).
+  [#820](https://github.com/randomparity/voom-v2/issues/820)) before it reruns.
 
 See the [rollout report](../media-evidence-rollout-report.md). Enable the setting only
 after those issues close and G7 and G9 pass on a rerun with

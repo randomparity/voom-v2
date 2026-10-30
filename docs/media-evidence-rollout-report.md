@@ -14,13 +14,29 @@ the records and README in
 
 **Recommendation: keep `probe_hash_reuse` off.** Reuse delivers its modelled gain on real
 storage: first durable observation over the full local corpus fell from 673.1 s to 223.7 s,
-and the guard caught every constructed edit. The setting still stays off, because two gates
-fail:
+and the guard caught every constructed edit. The setting still stays off until two gates
+pass on reruns:
 
-- G7: the control plane and node agent run leases across protocol versions.
-- G9: two remux defects keep repeat application from converging.
+- G7: the control plane and node agent run leases across protocol versions. Its
+  mixed-version arm reruns once the #817 fix merges.
+- G9: two remux defects kept the canary's repeat application from converging. The canary
+  and complete-library arms rerun once the #819 and #820 fixes merge.
 
-Neither failure comes from the reuse path. The 1 MiB buffer (G1) needs no setting.
+Neither open failure comes from the reuse path. The 1 MiB buffer (G1) needs no setting.
+
+**Ordering rule.** The stage-0 cell precedes its paired setting-on cell per scan
+configuration, and worker-level constructions are not scan cells (operator-approved
+2026-10-30). Each off/on pair below ran on one build, with a fresh control-plane store and
+an evicted cache for every repetition.
+
+**Builds.**
+- G1 through G5, G7's kill arms, and G8's scan rows ran on `main` at `3092e7c3`, which
+  includes #821.
+- G6, the G9 canary so far, the network cells and G7's version pairings ran on
+  `f8be728c`.
+- #821 (ADR 0122) caps the probe snapshot at 60 KiB. On the post-#821 build, 3 of the 34
+  local files (`f0010`, `f0011`, `f0012`) carry `ffprobe_json_omitted_bytes` in place of
+  their raw ffprobe JSON. The rest of their evidence is unchanged.
 
 ## Verdicts
 
@@ -32,9 +48,9 @@ Neither failure comes from the reuse path. The 1 MiB buffer (G1) needs no settin
 | G4 Constructed detection | **pass** | Real-media copies on btrfs (reflink, evicted) and on tmpfs, with the guard sent. (a) restored-mtime edit before probe: `pre_probe_guard`. (b) edit during the hash read: `hash_drift`. (c) mtime-moving write: `pre_probe_guard`. All six are `ARTIFACT_CHECKSUM_MISMATCH` with no evidence. #813's tests cover the same cases with a fake ffprobe. |
 | G5 Fallback | **pass, FUSE stand-in** | An ext4 image mounted through `fuse2fs` (the kernel reports `fuse`; no native ext4 mount was writable without privileges). With the guard sent, the unchanged copy recomputes with no hash source, and case (a) is detected by the recomputed hash. Network subset with the setting on: 0 of 3 reused in each of 3 repetitions. The native-ext4 arm is #813's CI only. |
 | G6 Transform backstop | **pass** | Setting on: a reused observation, then a restored-mtime edit, then a remux policy. The transform input failed with `ArtifactChecksumMismatch`. There was no remux file version, no commit intent, and no staged or output file. |
-| G7 Recovery | **fail** | Arms that held: every setting-off cell wrote no reused rows. A worker SIGKILLed 3 or 8 s into a canary scan, with the setting on or off, published nothing partial: affected sessions either failed whole or published clean-run hashes. Only the pre-#816 setting-off probe kill demonstrably hit an in-flight probe (its session failed). With the setting on the probe is nearly idle, so the 8 s kill most likely landed between operations. A guardless `reused` is refused (#813's test). **Arm that failed:** the control plane and node agent run leases across protocols 5 and 6 in both directions ([#817](https://github.com/randomparity/voom-v2/issues/817)); only the agent refuses a worker on another protocol. Not exercised: turning the setting off on a database that already holds reused rows (each cell uses a fresh database; #813's pump test covers it). |
+| G7 Recovery | **fail (mixed-version arm; rerun after #817)** | Arms that held: every setting-off cell wrote no reused rows. A worker SIGKILLed 3 or 8 s into a canary scan, with the setting on or off, published nothing partial: affected sessions either failed whole or published clean-run hashes. Only the pre-#816 setting-off probe kill demonstrably hit an in-flight probe (its session failed). With the setting on the probe is nearly idle, so the 8 s kill most likely landed between operations. A guardless `reused` is refused (#813's test). **Arm that failed:** the control plane and node agent run leases across protocols 5 and 6 in both directions ([#817](https://github.com/randomparity/voom-v2/issues/817)); only the agent refuses a worker on another protocol. Not exercised: turning the setting off on a database that already holds reused rows (each cell uses a fresh database; #813's pump test covers it). |
 | G8 Unchanged readers | **pass** | In the #816-fixed cells, recomputed scan rows carry no hash source field at all, and no row carries a value other than `reused`. The pre-#816 cells' classifier counted a null as absent; serde omits the field (`skip_serializing_if`), so none can occur. The four G9 output-verification reports carry no hash source. #813's tests pin the encodings. |
-| G9 Acceptance | **fail** | Repeat scan: six full-library scans and every canary repetition published identical content-hash sets. Repeat application on the canary: the four completed files were never re-dispatched, but two files fail every application on remux defects unrelated to reuse ([#819](https://github.com/randomparity/voom-v2/issues/819), [#820](https://github.com/randomparity/voom-v2/issues/820)), so the repeat still dispatches transforms. The flagship policy's `defaults` block all six canary files, so the canary used a defaults-free normalize phase. The complete-library separate-output application was not started, because the canary did not pass (#339's procedure runs the full library only after the canary). |
+| G9 Acceptance | **pending (rerun after #819 and #820)** | Approved scope: the canary runs `reference-user` without its two `defaults` lines (accepted by the operator; evidence in [#827](https://github.com/randomparity/voom-v2/issues/827)), including transcode, on copies of the six files, then re-applies it. The complete library gets a read-only scan, a normalize-only remux into a separate output root outside the corpus, a re-apply, and a repeat-scan hash identity check. Transcode is proven on the canary only; the full library runs remux-only. Evidence so far: six full-library scans and every canary repetition published identical content-hash sets. On `f8be728c` a defaults-free normalize canary completed four files and never re-dispatched them, while two files failed every application on [#819](https://github.com/randomparity/voom-v2/issues/819) and [#820](https://github.com/randomparity/voom-v2/issues/820). |
 
 ## Before and after
 
@@ -53,11 +69,10 @@ physical 1.00× the corpus). On CIFS the setting changes nothing, as designed.
 
 ## Path to enabling the setting
 
-1. Fix #817, so that protocol skew between the control plane and an agent is refused before
-   lease execution.
-2. Fix #819 and #820, so that repeat application on the canary converges.
-3. Rerun G7's mixed-version arm and G9 with `scripts/media-evidence-rollout.py`: canary,
-   then complete-library separate-output application and repeat. Then follow the
+1. Merge #817's fix, then rerun G7's mixed-version pairings.
+2. Merge #819's and #820's fixes, then rerun G9 on that build: canary first, then the
+   complete-library remux and its repeat.
+3. If both pass, follow the
    [node-agent runbook](runbooks/operator-node-agent.md#probe-hash-reuse).
 
 ## Exclusions and limits

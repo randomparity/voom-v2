@@ -85,6 +85,9 @@ killed worker was mid-operation at that moment.
 
 ## CLI-driven gates *(pre-#816 build)*
 
+The G9 canary below predates the operator's approved G9 scope. G9 reruns after the #819 and #820
+fixes merge; see the [report](../../media-evidence-rollout-report.md).
+
 - **G6 transform backstop.**
   - Setup: a stack with the setting on and one root holding a reflink copy of `f0004`. The
     scan reused the owner hash.
