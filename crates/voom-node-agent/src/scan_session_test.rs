@@ -557,6 +557,8 @@ enum SingleFileBehavior {
     Reused,
     /// The stream ends before any terminal frame, as when the worker dies.
     StreamEnd,
+    /// Probe-only: refuses `dense.mkv` as oversized media and agrees on every other path.
+    RefuseDense,
 }
 
 #[derive(Debug)]
@@ -611,6 +613,9 @@ impl ClientHandle for ScriptedSingleFileWorker {
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
         let operation = self.operation;
         let behavior = self.behavior;
+        let dense = request.payload["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("dense.mkv"));
         tokio::spawn(async move {
             if behavior == SingleFileBehavior::StreamEnd {
                 drop(writer);
@@ -623,7 +628,21 @@ impl ClientHandle for ScriptedSingleFileWorker {
                     emitted_at: time::OffsetDateTime::UNIX_EPOCH,
                     payload: json!(agreeing_hash_result()),
                 },
-                (OperationKind::ProbeFile, SingleFileBehavior::Agree) => ProgressFrame::Result {
+                (OperationKind::ProbeFile, SingleFileBehavior::RefuseDense) if dense => {
+                    ProgressFrame::Error {
+                        lease_id: request.lease_id,
+                        seq: 0,
+                        emitted_at: time::OffsetDateTime::UNIX_EPOCH,
+                        class: FailureClass::MalformedMedia,
+                        code: ErrorCode::MalformedMedia,
+                        message: "scripted oversized snapshot".to_owned(),
+                        payload: None,
+                    }
+                }
+                (
+                    OperationKind::ProbeFile,
+                    SingleFileBehavior::Agree | SingleFileBehavior::RefuseDense,
+                ) => ProgressFrame::Result {
                     lease_id: request.lease_id,
                     seq: 0,
                     emitted_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -1123,6 +1142,55 @@ async fn drift_candidate_yields_evidence_less_observation() {
     assert!(
         only_evidence(&fixture).await.is_none(),
         "drift must publish no identity"
+    );
+}
+
+/// #816: a probe refused as oversized media degrades only its own file; the
+/// session still completes and every other file publishes its evidence.
+#[tokio::test]
+async fn oversized_probe_refusal_degrades_only_that_file() {
+    let fixture = pump_fixture().await;
+    let context = fixture.context();
+    let registry = registry_with(
+        ScriptedScanWorker::new(vec![
+            ScanFrame::Candidates(vec![candidate("plain.mkv"), candidate("dense.mkv")]),
+            ScanFrame::Result(2, 0),
+        ]),
+        ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree),
+        ScriptedSingleFileWorker::new(OperationKind::ProbeFile, SingleFileBehavior::RefuseDense),
+    );
+    let scan_worker = registry.resolve(OperationKind::ScanLibrary).unwrap();
+
+    let outcome = pump_scan_session(
+        &fixture.dispatch,
+        scan_worker.client.clone(),
+        &scan_worker.credentials,
+        &registry,
+        &fixture.client,
+        &context,
+    )
+    .await;
+
+    let LeaseOutcome::Complete(summary) = outcome else {
+        unreachable!("one refused probe must not fail the session")
+    };
+    assert_eq!(summary["observed_count"], 2);
+    assert_eq!(summary["failed_content_count"], 1);
+    assert_eq!(session_status(&fixture).await, "succeeded");
+    let evidence: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT provider_relative_locator, evidence_json IS NOT NULL FROM scan_observations \
+         WHERE scan_session_id = ? ORDER BY provider_relative_locator",
+    )
+    .bind(i64::try_from(SESSION).unwrap())
+    .fetch_all(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        evidence,
+        vec![
+            ("dense.mkv".to_owned(), false),
+            ("plain.mkv".to_owned(), true)
+        ]
     );
 }
 
