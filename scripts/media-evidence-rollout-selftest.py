@@ -293,8 +293,10 @@ class RecordTests(unittest.TestCase):
         self.assertIn("cases", rollout.validate_construct(record))
 
     def test_committed_records_validate(self):
+        # G1's harness cells keep the #788 schema and its validator.
         validators = {rollout.SCAN_SCHEMA: rollout.validate_scan,
-                      rollout.CONSTRUCT_SCHEMA: rollout.validate_construct}
+                      rollout.CONSTRUCT_SCHEMA: rollout.validate_construct,
+                      rollout.baseline.SCHEMA: rollout.baseline.validate_run}
         for path in sorted(RECORDS.glob("*.json")):
             record = json.loads(path.read_text(encoding="utf-8"))
             with self.subTest(path.name):
