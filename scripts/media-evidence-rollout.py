@@ -23,6 +23,7 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import socket
 import sqlite3
@@ -577,12 +578,18 @@ CASES = {
 }
 
 
-def copy_source(source: Path, destination: Path) -> None:
-    """A private copy: a reflink where the filesystem allows one, else a byte copy.
+def copy_bytes(source: Path, destination: Path) -> None:
+    """A reflink where the filesystem allows one (GNU cp), else a byte copy."""
+    if sys.platform.startswith("linux"):
+        subprocess.run(["cp", "--reflink=auto", "--", str(source), str(destination)],
+                       check=True)
+    else:
+        shutil.copyfile(source, destination)
 
-    Edits go only to the copy, so it must be a regular file that is not the source's inode.
-    """
-    subprocess.run(["cp", "--reflink=auto", "--", str(source), str(destination)], check=True)
+
+def copy_source(source: Path, destination: Path) -> None:
+    """A private copy; edits go only to it, so it must not be the source's inode."""
+    copy_bytes(source, destination)
     copy, original = destination.lstat(), source.stat()
     if not destination.is_file() or destination.is_symlink() or \
             (copy.st_dev, copy.st_ino) == (original.st_dev, original.st_ino):

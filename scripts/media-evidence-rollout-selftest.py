@@ -420,10 +420,8 @@ class CaseTests(unittest.TestCase):
                 rollout.run_case("unchanged", self.args, "tmpfs")
 
     def test_a_copy_that_is_the_source_is_refused(self):
-        def link(command, check):
-            # A hard link passes every file-type check; only the inode comparison refuses it.
-            os.link(command[-2], command[-1])
-        with patch.object(rollout.subprocess, "run", link):
+        # A hard link passes every file-type check; only the inode comparison refuses it.
+        with patch.object(rollout, "copy_bytes", os.link):
             with self.assertRaises(rollout.HarnessError):
                 rollout.copy_source(self.source, self.scratch / "copy.mkv")
 
