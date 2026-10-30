@@ -293,6 +293,42 @@ fn normalizes_stream_title_and_commentary_disposition() {
     );
 }
 
+/// #820: cover art reaches ffprobe as a `video` stream whose only attachment
+/// signal in MP4 is `attached_pic`; remux planning needs it to classify the
+/// stream as an attachment. Written only when true, so snapshots of files
+/// without cover art keep their shape.
+#[test]
+fn records_attached_pic_only_when_true() {
+    // Stream shapes captured from ffprobe 8.1.3 on an MP4 with a JPEG `covr`.
+    let raw = serde_json::json!({
+        "format": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2" },
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "h264",
+             "disposition": {"default": 1, "forced": 0, "comment": 0, "attached_pic": 0}},
+            {"index": 2, "codec_type": "video", "codec_name": "mjpeg",
+             "disposition": {"default": 0, "forced": 0, "comment": 0, "attached_pic": 1}}
+        ]
+    });
+
+    let snapshot = normalize_ffprobe_json(raw, "8.1.3", "2026-10-30T00:00:00Z").unwrap();
+
+    assert_eq!(
+        snapshot["streams"][0]["disposition"],
+        serde_json::json!({"default": true, "forced": false, "commentary": false})
+    );
+    assert_eq!(snapshot["streams"][1]["disposition"]["attached_pic"], true);
+}
+
+#[test]
+fn rejects_malformed_attached_pic_disposition() {
+    let raw = serde_json::json!({"streams": [{"index": 0, "codec_type": "video",
+        "disposition": {"attached_pic": 2}}]});
+
+    let error = normalize_ffprobe_json(raw, "8.1.3", "2026-10-30T00:00:00Z").unwrap_err();
+
+    assert_eq!(error.failure_class(), FailureClass::MalformedWorkerResult);
+}
+
 #[test]
 fn normalizes_attachment_filename_and_mime_type_tags() {
     let raw = serde_json::json!({
