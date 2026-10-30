@@ -7,11 +7,11 @@
 //!
 //! Stability protocol: record `stability_started_at`, stat the opened file,
 //! hash the bytes in fixed-size chunks, re-stat (size, mtime, ctime, and
-//! file key), then record
-//! `stability_confirmed_at`. Any fact difference between the two stats is
-//! terminal drift reported with the stage marker `hash_drift` and **no**
-//! observed facts, so a file mutated mid-hash can never publish stale
-//! identity evidence (the pump discriminates drift by class + code).
+//! file key), then record `stability_confirmed_at`. Any fact difference
+//! between the two stats is terminal drift reported with the stage marker
+//! `hash_drift` and **no** observed facts, so a file mutated mid-hash can
+//! never publish stale identity evidence (the pump discriminates drift by
+//! class + code).
 
 use std::path::Path;
 use std::time::SystemTime;
