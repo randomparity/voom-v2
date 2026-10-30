@@ -113,3 +113,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0114](0114-lossless-audio-facts-contract.md) | Resolve bounded lossless integer audio facts per stream |
 | [0118](0118-automatic-lease-recovery-and-scan-terminality.md) | Automatic lease recovery and scan terminality |
 | [0119](0119-container-pcm-muxing.md) | Preserve PCM layout with an opt-in FFmpeg container |
+| [0120](0120-phase-specific-media-evidence.md) | Phase-specific media identity evidence |
