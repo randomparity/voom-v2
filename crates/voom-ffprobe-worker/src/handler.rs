@@ -260,6 +260,13 @@ impl From<WorkerError> for FfprobeError {
                 }),
                 message,
             },
+            WorkerError::MalformedMedia(message) => Self::MalformedMedia {
+                payload: serde_json::json!({
+                    "stage": "normalize_snapshot",
+                    "message": message,
+                }),
+                message,
+            },
             WorkerError::MalformedWorkerResult(message) => malformed_worker_result(
                 "normalize_ffprobe_json",
                 format!("ffprobe JSON normalization failed: {message}"),

@@ -18,8 +18,8 @@ use serde_json::{Value as JsonValue, json};
 use tokio::time::Instant;
 use voom_core::{
     ArtifactAccessDeclaration, ArtifactAccessRight, ArtifactAccessTarget, ErrorCode, FailureClass,
-    HashSource, LeaseId, NodeIncarnationId, OperationKind, ScanObservationEvidence, ScanSessionId,
-    ScanSidecarEvidence, StorageRootId,
+    HashSource, LeaseId, MAX_EVIDENCE_BYTES, MAX_EVIDENCE_SIDECARS, NodeIncarnationId,
+    OperationKind, ScanObservationEvidence, ScanSessionId, ScanSidecarEvidence, StorageRootId,
 };
 use voom_worker_protocol::{
     ClientHandle, HashFileRequest, HashFileResult, NdjsonOutcome, ObservedFileFacts,
@@ -40,11 +40,6 @@ const FLUSH_OBSERVATION_COUNT: usize = 1000;
 /// Estimated serialized-batch bytes that force a flush before the API's
 /// ~1 MiB request-body cap can reject the batch.
 const FLUSH_ESTIMATED_BYTES: usize = 512 * 1024;
-/// Sidecar digest entries tolerated per primary; overflow degrades the whole
-/// observation to evidence-less.
-const MAX_SIDECAR_ENTRIES: usize = 64;
-/// Serialized-evidence bytes tolerated per primary.
-const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
 /// How long the pump waits for a hash/probe child to (re)appear before
 /// failing the session. Child restarts take ~250 ms.
 const ENDPOINT_WAIT: Duration = Duration::from_secs(2);
@@ -914,7 +909,8 @@ async fn process_candidate(
         probe_snapshot: snapshot,
         hash_source,
     };
-    let over_bound = evidence.sidecars.len() > MAX_SIDECAR_ENTRIES
+    // ADR 0077 bounds; overflow degrades the whole observation to evidence-less.
+    let over_bound = evidence.sidecars.len() > MAX_EVIDENCE_SIDECARS
         || serde_json::to_vec(&evidence).is_ok_and(|bytes| bytes.len() > MAX_EVIDENCE_BYTES);
     let evidence = if over_bound {
         contribution.degraded_evidence = true;
