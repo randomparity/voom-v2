@@ -46,26 +46,51 @@ def record(walls, hash_seconds=None, cpu=10.0, rss=5 * MIB, evict=True, ids=("f0
     }
 
 
+def current(path):
+    return (candidates.REPO_ROOT / path).read_text(encoding="utf-8")
+
+
 class VariantEditTests(unittest.TestCase):
-    def test_every_variant_applies_exactly_once_to_the_current_source(self):
-        source = (candidates.REPO_ROOT / candidates.HASH_SOURCE).read_text(encoding="utf-8")
-        for name, edits in candidates.VARIANTS.items():
-            with self.subTest(variant=name):
-                edited = candidates.apply_edits(source, edits)
-                self.assertEqual(edited == source, name == "baseline")
+    def test_every_variant_applies_exactly_once_to_the_current_sources(self):
+        for name, files in candidates.VARIANTS.items():
+            for path, edits in files.items():
+                with self.subTest(variant=name, path=path):
+                    self.assertNotEqual(candidates.apply_edits(path, current(path), edits),
+                                        current(path))
+        self.assertEqual(candidates.VARIANTS["baseline"], {})
 
     def test_buffer_variants_change_only_the_hash_worker_chunk_size(self):
-        source = (candidates.REPO_ROOT / candidates.HASH_SOURCE).read_text(encoding="utf-8")
-        edited = candidates.apply_edits(source, candidates.VARIANTS["buf1m"])
+        files = candidates.VARIANTS["buf1m"]
+        self.assertEqual(list(files), [candidates.HASH_SOURCE])
+        edited = candidates.apply_edits(candidates.HASH_SOURCE, current(candidates.HASH_SOURCE),
+                                        files[candidates.HASH_SOURCE])
         self.assertIn("pub const HASH_CHUNK_BYTES: usize = 1024 * 1024;", edited)
         self.assertIn("vec![0_u8; HASH_CHUNK_BYTES]", edited)
 
+    def test_single_read_builds_on_buf1m_and_drops_both_probe_rereads(self):
+        files = candidates.VARIANTS["single-read"]
+        buf1m = candidates.VARIANTS["buf1m"][candidates.HASH_SOURCE]
+        self.assertEqual(files[candidates.HASH_SOURCE], buf1m)
+        source = current(candidates.PROBE_SOURCE)
+        self.assertEqual(source.count("observe_file_facts(&path)"), 2)
+        edited = candidates.apply_edits(candidates.PROBE_SOURCE, source,
+                                        files[candidates.PROBE_SOURCE])
+        self.assertNotIn("observe_file_facts", edited)
+        self.assertIn('stat_facts("pre_probe", &path, &request.expected)', edited)
+        self.assertIn('stat_facts("post_probe", &path, &request.expected)', edited)
+        self.assertIn("modified_at != expected.modified_at", edited)
+
     def test_drifted_source_fails_instead_of_building_the_wrong_variant(self):
+        hash_edits = candidates.VARIANTS["buf64k"][candidates.HASH_SOURCE]
         with self.assertRaises(candidates.CandidateError):
-            candidates.apply_edits("fn main() {}\n", candidates.VARIANTS["buf64k"])
-        old = candidates.VARIANTS["batch8k"][1][0]
+            candidates.apply_edits(candidates.HASH_SOURCE, "fn main() {}\n", hash_edits)
+        old = candidates.VARIANTS["batch8k"][candidates.HASH_SOURCE][1][0]
         with self.assertRaises(candidates.CandidateError):
-            candidates.apply_edits(old + old, candidates.VARIANTS["batch8k"])
+            candidates.apply_edits(candidates.HASH_SOURCE, old + old,
+                                   candidates.VARIANTS["batch8k"][candidates.HASH_SOURCE])
+        probe_edits = candidates.VARIANTS["single-read"][candidates.PROBE_SOURCE]
+        with self.assertRaises(candidates.CandidateError):
+            candidates.apply_edits(candidates.PROBE_SOURCE, "fn main() {}\n", probe_edits)
 
 
 class CompareTests(unittest.TestCase):
@@ -204,7 +229,10 @@ class PrepareTests(unittest.TestCase):
     def test_prepare_fails_on_drifted_source_before_creating_a_worktree(self):
         with tempfile.TemporaryDirectory() as parent:
             target = Path(parent) / "variant"
-            drifted = dict(candidates.VARIANTS, drifted=[("no such source text", "")])
+            drifted = dict(candidates.VARIANTS, drifted={
+                candidates.HASH_SOURCE: candidates.VARIANTS["buf1m"][candidates.HASH_SOURCE],
+                candidates.PROBE_SOURCE: [("no such source text", "")],
+            })
             original, candidates.VARIANTS = candidates.VARIANTS, drifted
             self.addCleanup(setattr, candidates, "VARIANTS", original)
             with self.assertRaises(candidates.CandidateError):
