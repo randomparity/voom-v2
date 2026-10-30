@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-"""Prove the #789 candidate tooling applies variants exactly and judges by the frozen protocol.
+"""Prove the #789/#801 candidate tooling applies variants exactly and judges by the frozen protocol.
 
 Comparison fixtures are synthetic records in the #788 schema; the thresholds they exercise
 are the ones docs/media-evidence-protocol.md froze before any candidate ran.
 """
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location(
-    "media_candidates", Path(__file__).with_name("media-evidence-candidates.py")
-)
-candidates = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(candidates)
+
+def load_script(name, filename):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+candidates = load_script("media_candidates", "media-evidence-candidates.py")
+harness = load_script("media_baseline", "media-evidence-baseline.py")
+SINGLE_READ_DIR = candidates.REPO_ROOT / "docs" / "media-evidence-baseline" / "single-read"
 
 MIB = 1024 * 1024
 
@@ -243,6 +250,20 @@ class PrepareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as parent:
             with self.assertRaises(candidates.CandidateError):
                 candidates.prepare("buf9g", Path(parent) / "variant")
+
+
+class SingleReadRecordTests(unittest.TestCase):
+    """The #788 self-test reads only the top-level baseline directory, so check these here."""
+
+    def test_committed_records_are_valid_runs_of_the_single_read_build(self):
+        paths = sorted(SINGLE_READ_DIR.glob("*.json"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(record=path.name):
+                record = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(harness.validate_run(record), [])
+                self.assertEqual(record["build"]["git_changed_paths"],
+                                 sorted(candidates.VARIANTS["single-read"]))
 
 
 if __name__ == "__main__":

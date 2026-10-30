@@ -173,7 +173,8 @@ Boundaries of the model:
   transformation, verified output, sidecar hashing, retries, ffprobe child memory and I/O.
 - Probe-worker buffer variants: the probe worker kept its 16 KiB buffer.
 - The flush byte bound, and real publication through the control plane.
-- Stages 3–4 belong to #790. Stage 5, a single combined read, is #801.
+- Stages 3–4 belong to #790. Stage 5, a single combined read, is #801:
+  [single-read](single-read/README.md).
 
 ## Disclosures
 
