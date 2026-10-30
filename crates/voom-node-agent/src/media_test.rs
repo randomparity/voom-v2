@@ -1018,3 +1018,91 @@ async fn compatibility_fields_reach_child_request() {
         "source and result identities must not be conflated"
     );
 }
+
+// ADR 0120 contract 3: only the scan pump may ask for hash reuse. The
+// media-child probe and every staged-output probe carry no guard, so the
+// worker always re-reads their bytes and never reports a hash source (G8).
+#[tokio::test]
+async fn media_probes_send_no_guard() {
+    let root = TempDir::new().unwrap();
+    write_source(&root);
+    let envelope = json!({
+        "operation": "probe", "schema": voom_core::PROTOCOL_VERSION,
+        "source": {"storage_root_id": 1, "provider_relative_locator": "media/source.mkv"},
+        "expected": {"size_bytes": SOURCE_BYTES.len(), "content_hash": hash_of(SOURCE_BYTES),
+                     "modified_at": null, "local_file_key": null}
+    });
+    let decoded = voom_worker_protocol::decode_media_dispatch(&envelope).unwrap();
+    let plan = super::resolve_plan(&storage_roots(&root), &decoded)
+        .await
+        .unwrap();
+    let (operation, payload) = super::child_request(&decoded, &plan).unwrap();
+    assert_eq!(operation, OperationKind::ProbeFile);
+    assert!(payload.get("guard").is_none(), "{payload}");
+
+    let output_root = TempDir::new().unwrap();
+    write_source(&output_root);
+    let staged_parent = ensure_output_parent(&output_root);
+    let output = std::fs::canonicalize(staged_parent.parent().unwrap())
+        .unwrap()
+        .join(staged_parent.file_name().unwrap());
+    let probe = ScriptedMediaWorker::new(probe_script());
+    let outcome = run(
+        &output_root,
+        ScriptedMediaWorker::new(transcode_script(output)),
+        registry_with(Some(probe.clone())),
+        media_payload(&transcode_audio_envelope(
+            SOURCE_BYTES.len() as u64,
+            &hash_of(SOURCE_BYTES),
+        )),
+    )
+    .await;
+    assert!(
+        matches!(outcome, super::LeaseOutcome::Complete(_)),
+        "{outcome:?}"
+    );
+    let probes = recorded_requests(&probe).await;
+    assert!(!probes.is_empty());
+    for (operation, payload) in probes {
+        assert_eq!(operation, OperationKind::ProbeFile);
+        assert!(payload.get("guard").is_none(), "{payload}");
+    }
+}
+
+// G6: bytes edited after a reused observation, with size and mtime kept,
+// still fail the transform's full input hash before any child dispatch.
+#[tokio::test]
+async fn restored_mtime_edit_before_transform_fails_checksum_mismatch() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let root = TempDir::new().unwrap();
+    let source = write_source(&root);
+    let envelope = transcode_audio_envelope(SOURCE_BYTES.len() as u64, &hash_of(SOURCE_BYTES));
+    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(3)).unwrap();
+    file.write_all(b"X").unwrap();
+    file.set_modified(original_mtime).unwrap();
+    drop(file);
+    let worker = ScriptedMediaWorker::new(Box::new(|_| unreachable!("no dispatch expected")));
+
+    let outcome = run(
+        &root,
+        worker.clone(),
+        registry_with(None),
+        media_payload(&envelope),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            outcome,
+            super::LeaseOutcome::Failure(FailureClass::ArtifactChecksumMismatch, _, _)
+        ),
+        "{outcome:?}"
+    );
+    assert!(recorded_requests(&worker).await.is_empty());
+}

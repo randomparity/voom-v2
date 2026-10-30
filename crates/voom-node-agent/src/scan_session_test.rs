@@ -553,6 +553,10 @@ enum SingleFileBehavior {
     Unreadable,
     /// Probe-only: observed facts disagree with the expected hash facts.
     ModifiedDrift,
+    /// Probe-only: agreeing facts marked as a reused owner hash.
+    Reused,
+    /// The stream ends before any terminal frame, as when the worker dies.
+    StreamEnd,
 }
 
 #[derive(Debug)]
@@ -608,6 +612,10 @@ impl ClientHandle for ScriptedSingleFileWorker {
         let operation = self.operation;
         let behavior = self.behavior;
         tokio::spawn(async move {
+            if behavior == SingleFileBehavior::StreamEnd {
+                drop(writer);
+                return;
+            }
             let frame = match (operation, behavior) {
                 (OperationKind::HashFile, SingleFileBehavior::Agree) => ProgressFrame::Result {
                     lease_id: request.lease_id,
@@ -621,6 +629,18 @@ impl ClientHandle for ScriptedSingleFileWorker {
                     emitted_at: time::OffsetDateTime::UNIX_EPOCH,
                     payload: json!(agreeing_probe_result(json!({"format": "publish-v1"}))),
                 },
+                (OperationKind::ProbeFile, SingleFileBehavior::Reused) => {
+                    let result = ProbeFileResult {
+                        hash_source: Some(voom_core::HashSource::Reused),
+                        ..agreeing_probe_result(json!({"format": "publish-v1"}))
+                    };
+                    ProgressFrame::Result {
+                        lease_id: request.lease_id,
+                        seq: 0,
+                        emitted_at: time::OffsetDateTime::UNIX_EPOCH,
+                        payload: json!(result),
+                    }
+                }
                 (OperationKind::ProbeFile, SingleFileBehavior::ModifiedDrift) => {
                     let mut drifted = observed_agreeing();
                     drifted.modified_at = Some("1971-01-01T00:00:00Z".to_owned());
@@ -1438,4 +1458,141 @@ async fn batch_idempotency_keys_are_deterministic_per_sequence() {
     let key =
         super::scan_idempotency_key_for_test(&context, voom_core::ScanSessionId(SESSION), "3");
     assert_eq!(key, format!("{incarnation}-scan-{SESSION}-3"));
+}
+
+/// Run one candidate through the pump with the given probe behaviour and
+/// reuse setting; returns the outcome and the probe requests it sent.
+async fn pump_one_candidate(
+    fixture: &PumpFixture,
+    hash: SingleFileBehavior,
+    probe: SingleFileBehavior,
+    probe_hash_reuse: bool,
+) -> (LeaseOutcome, Vec<OperationRequest>) {
+    let probe_worker = ScriptedSingleFileWorker::new(OperationKind::ProbeFile, probe);
+    let registry = registry_with(
+        ScriptedScanWorker::new(vec![
+            ScanFrame::Candidates(vec![candidate("film.mkv")]),
+            ScanFrame::Result(1, 0),
+        ]),
+        ScriptedSingleFileWorker::new(OperationKind::HashFile, hash),
+        probe_worker.clone(),
+    );
+    let scan_worker = registry.resolve(OperationKind::ScanLibrary).unwrap();
+    let outcome = pump_scan_session(
+        &fixture.dispatch,
+        scan_worker.client.clone(),
+        &scan_worker.credentials,
+        &registry,
+        &fixture.client,
+        &ScanPumpContext {
+            probe_hash_reuse,
+            ..fixture.context()
+        },
+    )
+    .await;
+    let requests = probe_worker
+        .dispatches
+        .lock()
+        .await
+        .iter()
+        .map(|(_, request)| request.clone())
+        .collect();
+    (outcome, requests)
+}
+
+// G7: with the setting off no guard is sent and no reused row is written.
+#[tokio::test]
+async fn setting_off_sends_no_guard_and_writes_no_reused_row() {
+    let fixture = pump_fixture().await;
+
+    let (outcome, probes) = pump_one_candidate(
+        &fixture,
+        SingleFileBehavior::Agree,
+        SingleFileBehavior::Agree,
+        false,
+    )
+    .await;
+
+    assert!(matches!(outcome, LeaseOutcome::Complete(_)));
+    assert_eq!(probes.len(), 1);
+    assert!(
+        probes[0].payload.get("guard").is_none(),
+        "{}",
+        probes[0].payload
+    );
+    let evidence = only_evidence(&fixture).await.unwrap();
+    assert!(!evidence.contains("hash_source"), "{evidence}");
+}
+
+// Contracts 3 and 7: the guard carries the hash leg's ctime and file key, and
+// an accepted reused hash is recorded in the durable evidence.
+#[tokio::test]
+async fn guarded_reuse_persists_hash_source() {
+    let fixture = pump_fixture().await;
+
+    let (outcome, probes) = pump_one_candidate(
+        &fixture,
+        SingleFileBehavior::Agree,
+        SingleFileBehavior::Reused,
+        true,
+    )
+    .await;
+
+    assert!(matches!(outcome, LeaseOutcome::Complete(_)));
+    let hash = agreeing_hash_result();
+    assert_eq!(
+        probes[0].payload["guard"],
+        json!({"changed_at_ns": CTIME_NS, "file_key": hash.file_key})
+    );
+    let evidence: JsonValue =
+        serde_json::from_str(&only_evidence(&fixture).await.unwrap()).unwrap();
+    assert_eq!(evidence["hash_source"], "reused");
+    assert_eq!(evidence["content_hash"], HASH);
+}
+
+// Contract 6 / G7: a reused hash answering a request that carried no guard
+// is not agreement; the file is recorded without identity.
+#[tokio::test]
+async fn reused_result_without_guard_is_refused() {
+    let fixture = pump_fixture().await;
+
+    let (outcome, probes) = pump_one_candidate(
+        &fixture,
+        SingleFileBehavior::Agree,
+        SingleFileBehavior::Reused,
+        false,
+    )
+    .await;
+
+    assert!(probes[0].payload.get("guard").is_none());
+    let LeaseOutcome::Complete(summary) = outcome else {
+        unreachable!("an unusable identity still completes the session")
+    };
+    assert_eq!(summary["failed_content_count"], 1);
+    assert!(only_evidence(&fixture).await.is_none());
+}
+
+/// A worker killed mid-dispatch fails the lease and publishes nothing.
+async fn assert_crash_publishes_nothing(hash: SingleFileBehavior, probe: SingleFileBehavior) {
+    let fixture = pump_fixture().await;
+
+    let (outcome, _) = pump_one_candidate(&fixture, hash, probe, true).await;
+
+    let LeaseOutcome::Failure(class, _, _) = outcome else {
+        unreachable!("a stream without a terminal frame fails the session");
+    };
+    assert_eq!(class, FailureClass::WorkerCrash);
+    assert_eq!(observation_count(&fixture).await, 0);
+}
+
+// G7 (O14): killed mid-probe under the guard.
+#[tokio::test]
+async fn guarded_probe_crash_publishes_nothing() {
+    assert_crash_publishes_nothing(SingleFileBehavior::Agree, SingleFileBehavior::StreamEnd).await;
+}
+
+// G7 (O14): killed mid-hash.
+#[tokio::test]
+async fn hash_crash_publishes_nothing() {
+    assert_crash_publishes_nothing(SingleFileBehavior::StreamEnd, SingleFileBehavior::Agree).await;
 }
