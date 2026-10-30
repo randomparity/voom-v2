@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import functools
 import hashlib
 import http.client
 import json
@@ -30,7 +31,6 @@ from typing import Any
 SCHEMA = "media-evidence-baseline-run/1"
 UNAVAILABLE = "unavailable"
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PROTOCOL_VERSION = "5"
 PROGRESS_IDLE_DEADLINE_MS = 600_000
 # The socket waits this long past the deadline the worker was told, so a worker
 # that honours its own idle deadline reports it before the client gives up.
@@ -77,6 +77,12 @@ SOURCE_CONSTANTS = {
         r"const FLUSH_ESTIMATED_BYTES: usize = ([0-9_ *]+);",
     ),
 }
+# Workers accept only their own protocol version (ADR 0016), so the harness offers the
+# checkout's; kept out of SOURCE_CONSTANTS so records keep their parameter set.
+PROTOCOL_VERSION_SOURCE = (
+    "crates/voom-core/src/lib.rs",
+    r"pub const PROTOCOL_VERSION: u32 = ([0-9_ *]+);",
+)
 NOT_MEASURED = {
     "discovery": "replay starts from a manifest; the scan worker is not run",
     "first_durable_observation": "replay does not publish batches to the control plane",
@@ -94,22 +100,31 @@ class HarnessError(Exception):
     """An operator-actionable refusal or capture failure."""
 
 
+def read_constant(repo_root: Path, name: str, relative: str, pattern: str) -> int:
+    path = repo_root / relative
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise HarnessError(f"cannot read {relative} for {name}: {error}") from error
+    match = re.search(pattern, text)
+    if match is None:
+        raise HarnessError(f"constant {name} not found in {relative}; update the harness")
+    product = 1
+    for factor in match.group(1).replace("_", "").split("*"):
+        product *= int(factor.strip())
+    return product
+
+
 def read_constants(repo_root: Path) -> dict[str, int]:
-    values = {}
-    for name, (relative, pattern) in SOURCE_CONSTANTS.items():
-        path = repo_root / relative
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as error:
-            raise HarnessError(f"cannot read {relative} for {name}: {error}") from error
-        match = re.search(pattern, text)
-        if match is None:
-            raise HarnessError(f"constant {name} not found in {relative}; update the harness")
-        product = 1
-        for factor in match.group(1).replace("_", "").split("*"):
-            product *= int(factor.strip())
-        values[name] = product
-    return values
+    return {
+        name: read_constant(repo_root, name, relative, pattern)
+        for name, (relative, pattern) in SOURCE_CONSTANTS.items()
+    }
+
+
+@functools.cache
+def protocol_version() -> str:
+    return str(read_constant(REPO_ROOT, "protocol_version", *PROTOCOL_VERSION_SOURCE))
 
 
 def refuse_private_path_in_checkout(output: Path) -> None:
@@ -346,7 +361,7 @@ class Worker:
         try:
             connection.request("POST", "/v1/operations", body, {
                 "Authorization": f"Bearer {self.secret}", "x-voom-worker-id": "1",
-                "x-voom-worker-epoch": "1", "x-voom-protocol-version": PROTOCOL_VERSION,
+                "x-voom-worker-epoch": "1", "x-voom-protocol-version": protocol_version(),
                 "x-voom-idempotency-key": secrets.token_hex(16),
                 "Content-Type": "application/json",
             })
