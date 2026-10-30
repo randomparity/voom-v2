@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Candidate tooling for the issue #789 read-efficiency and scheduling stages.
+"""Candidate tooling for the read-efficiency, scheduling (#789) and single-read (#801) stages.
 
 `prepare` builds a bench-only worker variant in a detached worktree of HEAD, so production
 source and defaults never change; the #788 harness in that worktree then records the
@@ -21,6 +21,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HASH_SOURCE = "crates/voom-hash-worker/src/hash.rs"
+PROBE_SOURCE = "crates/voom-ffprobe-worker/src/handler.rs"
 UNAVAILABLE = "unavailable"
 MIB = 1024 * 1024
 
@@ -70,6 +71,60 @@ BLOCKING_LOOP = """pub async fn read_hash(file: &mut tokio::fs::File) -> Result<
 }
 """
 
+PROBE_IMPORT = "use crate::{WorkerError, normalize_ffprobe_json, observe_file_facts};\n"
+PRE_PROBE_READ = """    let pre_probe = Box::pin(observe_file_facts(&path))
+        .await
+        .map_err(FfprobeError::from)?;
+"""
+POST_PROBE_READ = """    let post_probe = Box::pin(observe_file_facts(&path))
+        .await
+        .map_err(FfprobeError::from)?;
+"""
+EXPECTED_CHECK = "fn verify_expected_facts(\n"
+STAT_FACTS = """/// Bench-only (#801): stat instead of re-hashing. Size and mtime must equal the
+/// expected facts; the expected content hash is echoed, never recomputed from file bytes.
+async fn stat_facts(
+    stage: &str,
+    path: &std::path::Path,
+    expected: &voom_worker_protocol::ExpectedFileFacts,
+) -> Result<voom_worker_protocol::ObservedFileFacts, FfprobeError> {
+    let unavailable =
+        |message: String| FfprobeError::from(WorkerError::ArtifactUnavailable(message));
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|err| unavailable(format!("artifact path {}: {err}", path.display())))?;
+    if !metadata.is_file() {
+        return Err(unavailable(format!(
+            "artifact path {} is not a regular file",
+            path.display()
+        )));
+    }
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .map(|modified| format_iso8601(OffsetDateTime::from(modified)));
+    if metadata.len() != expected.size_bytes || modified_at != expected.modified_at {
+        return Err(checksum_mismatch(
+            stage,
+            "stat facts differ from expected size/mtime",
+            serde_json::json!({
+                "stage": stage,
+                "expected": expected,
+                "size_bytes": metadata.len(),
+                "modified_at": modified_at,
+            }),
+        ));
+    }
+    Ok(voom_worker_protocol::ObservedFileFacts {
+        size_bytes: metadata.len(),
+        content_hash: expected.content_hash.clone(),
+        modified_at,
+        local_file_key: None,
+    })
+}
+
+"""
+
 
 def buffer_variant(size: str) -> list[tuple[str, str]]:
     """A larger hash-worker chunk; heap-allocated so a multi-MiB buffer never sits on a stack."""
@@ -79,14 +134,27 @@ def buffer_variant(size: str) -> list[tuple[str, str]]:
     ]
 
 
-# Each variant is a list of (old, new) edits to the hash worker source; every old text must
-# occur exactly once, so a drifted source fails rather than building something unmeasured.
-VARIANTS: dict[str, list[tuple[str, str]]] = {
-    "baseline": [],
-    "buf64k": buffer_variant("64 * 1024"),
-    "buf1m": buffer_variant("1024 * 1024"),
-    "buf4m": buffer_variant("4 * 1024 * 1024"),
-    "batch8k": [("use tokio::io::AsyncReadExt;\n", ""), (ASYNC_LOOP, BLOCKING_LOOP)],
+# The probe worker checks size and mtime by stat before and after ffprobe instead of reading
+# the whole file twice, so the hash worker's pass is the only full read (#801, stage 5).
+STAT_ONLY_PROBE = [
+    (PROBE_IMPORT, "use crate::{WorkerError, normalize_ffprobe_json};\n"),
+    (PRE_PROBE_READ,
+     '    let pre_probe = stat_facts("pre_probe", &path, &request.expected).await?;\n'),
+    (POST_PROBE_READ,
+     '    let post_probe = stat_facts("post_probe", &path, &request.expected).await?;\n'),
+    (EXPECTED_CHECK, STAT_FACTS + EXPECTED_CHECK),
+]
+
+# Each variant maps a worker source to its (old, new) edits; every old text must occur
+# exactly once, so a drifted source fails rather than building something unmeasured.
+VARIANTS: dict[str, dict[str, list[tuple[str, str]]]] = {
+    "baseline": {},
+    "buf64k": {HASH_SOURCE: buffer_variant("64 * 1024")},
+    "buf1m": {HASH_SOURCE: buffer_variant("1024 * 1024")},
+    "buf4m": {HASH_SOURCE: buffer_variant("4 * 1024 * 1024")},
+    "batch8k": {HASH_SOURCE: [("use tokio::io::AsyncReadExt;\n", ""),
+                              (ASYNC_LOOP, BLOCKING_LOOP)]},
+    "single-read": {HASH_SOURCE: buffer_variant("1024 * 1024"), PROBE_SOURCE: STAT_ONLY_PROBE},
 }
 
 # Lower is better for every compared metric. Resource metrics are judged by the protocol's
@@ -100,12 +168,12 @@ class CandidateError(Exception):
     """An operator-actionable refusal."""
 
 
-def apply_edits(source: str, edits: list[tuple[str, str]]) -> str:
+def apply_edits(path: str, source: str, edits: list[tuple[str, str]]) -> str:
     for old, new in edits:
         count = source.count(old)
         if count != 1:
             raise CandidateError(
-                f"variant edit expects one match in {HASH_SOURCE}, found {count}; "
+                f"variant edit expects one match in {path}, found {count}; "
                 "update the variant for the current source"
             )
         source = source.replace(old, new)
@@ -120,13 +188,16 @@ def prepare(variant: str, directory: Path) -> Path:
     if directory.exists():
         raise CandidateError(f"{directory} already exists; choose a new directory")
     # Edit in memory first, so a drifted source fails before any worktree exists.
-    head = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"HEAD:{HASH_SOURCE}"],
-                          capture_output=True, text=True, check=True).stdout
-    edited = apply_edits(head, VARIANTS[variant])
+    edited = {}
+    for path, edits in VARIANTS[variant].items():
+        head = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"HEAD:{path}"],
+                              capture_output=True, text=True, check=True).stdout
+        edited[path] = apply_edits(path, head, edits)
     subprocess.run(["git", "-C", str(REPO_ROOT), "worktree", "add", "--detach", str(directory),
                     "HEAD"], check=True)
     try:
-        (directory / HASH_SOURCE).write_text(edited, encoding="utf-8")
+        for path, source in edited.items():
+            (directory / path).write_text(source, encoding="utf-8")
         subprocess.run(["cargo", "build", "--release", "--locked", "-p", "voom-hash-worker",
                         "-p", "voom-ffprobe-worker"], cwd=directory, check=True)
     except BaseException:

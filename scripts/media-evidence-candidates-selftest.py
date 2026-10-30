@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the #789 candidate tooling applies variants exactly and judges by the frozen protocol.
+"""Prove the #789/#801 candidate tooling applies variants exactly and judges by the frozen protocol.
 
 Comparison fixtures are synthetic records in the #788 schema; the thresholds they exercise
 are the ones docs/media-evidence-protocol.md froze before any candidate ran.
@@ -9,12 +9,20 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-spec = importlib.util.spec_from_file_location(
-    "media_candidates", Path(__file__).with_name("media-evidence-candidates.py")
-)
-candidates = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(candidates)
+
+def load_script(name, filename):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+candidates = load_script("media_candidates", "media-evidence-candidates.py")
+harness = load_script("media_baseline", "media-evidence-baseline.py")
+BASELINE_DIR = candidates.REPO_ROOT / "docs" / "media-evidence-baseline"
+SINGLE_READ_DIR = BASELINE_DIR / "single-read"
 
 MIB = 1024 * 1024
 
@@ -46,26 +54,51 @@ def record(walls, hash_seconds=None, cpu=10.0, rss=5 * MIB, evict=True, ids=("f0
     }
 
 
+def current(path):
+    return (candidates.REPO_ROOT / path).read_text(encoding="utf-8")
+
+
 class VariantEditTests(unittest.TestCase):
-    def test_every_variant_applies_exactly_once_to_the_current_source(self):
-        source = (candidates.REPO_ROOT / candidates.HASH_SOURCE).read_text(encoding="utf-8")
-        for name, edits in candidates.VARIANTS.items():
-            with self.subTest(variant=name):
-                edited = candidates.apply_edits(source, edits)
-                self.assertEqual(edited == source, name == "baseline")
+    def test_every_variant_applies_exactly_once_to_the_current_sources(self):
+        for name, files in candidates.VARIANTS.items():
+            for path, edits in files.items():
+                with self.subTest(variant=name, path=path):
+                    self.assertNotEqual(candidates.apply_edits(path, current(path), edits),
+                                        current(path))
+        self.assertEqual(candidates.VARIANTS["baseline"], {})
 
     def test_buffer_variants_change_only_the_hash_worker_chunk_size(self):
-        source = (candidates.REPO_ROOT / candidates.HASH_SOURCE).read_text(encoding="utf-8")
-        edited = candidates.apply_edits(source, candidates.VARIANTS["buf1m"])
+        files = candidates.VARIANTS["buf1m"]
+        self.assertEqual(list(files), [candidates.HASH_SOURCE])
+        edited = candidates.apply_edits(candidates.HASH_SOURCE, current(candidates.HASH_SOURCE),
+                                        files[candidates.HASH_SOURCE])
         self.assertIn("pub const HASH_CHUNK_BYTES: usize = 1024 * 1024;", edited)
         self.assertIn("vec![0_u8; HASH_CHUNK_BYTES]", edited)
 
+    def test_single_read_builds_on_buf1m_and_drops_both_probe_rereads(self):
+        files = candidates.VARIANTS["single-read"]
+        buf1m = candidates.VARIANTS["buf1m"][candidates.HASH_SOURCE]
+        self.assertEqual(files[candidates.HASH_SOURCE], buf1m)
+        source = current(candidates.PROBE_SOURCE)
+        self.assertEqual(source.count("observe_file_facts(&path)"), 2)
+        edited = candidates.apply_edits(candidates.PROBE_SOURCE, source,
+                                        files[candidates.PROBE_SOURCE])
+        self.assertNotIn("observe_file_facts", edited)
+        self.assertIn('stat_facts("pre_probe", &path, &request.expected)', edited)
+        self.assertIn('stat_facts("post_probe", &path, &request.expected)', edited)
+        self.assertIn("modified_at != expected.modified_at", edited)
+
     def test_drifted_source_fails_instead_of_building_the_wrong_variant(self):
+        hash_edits = candidates.VARIANTS["buf64k"][candidates.HASH_SOURCE]
         with self.assertRaises(candidates.CandidateError):
-            candidates.apply_edits("fn main() {}\n", candidates.VARIANTS["buf64k"])
-        old = candidates.VARIANTS["batch8k"][1][0]
+            candidates.apply_edits(candidates.HASH_SOURCE, "fn main() {}\n", hash_edits)
+        old = candidates.VARIANTS["batch8k"][candidates.HASH_SOURCE][1][0]
         with self.assertRaises(candidates.CandidateError):
-            candidates.apply_edits(old + old, candidates.VARIANTS["batch8k"])
+            candidates.apply_edits(candidates.HASH_SOURCE, old + old,
+                                   candidates.VARIANTS["batch8k"][candidates.HASH_SOURCE])
+        probe_edits = candidates.VARIANTS["single-read"][candidates.PROBE_SOURCE]
+        with self.assertRaises(candidates.CandidateError):
+            candidates.apply_edits(candidates.PROBE_SOURCE, "fn main() {}\n", probe_edits)
 
 
 class CompareTests(unittest.TestCase):
@@ -204,17 +237,57 @@ class PrepareTests(unittest.TestCase):
     def test_prepare_fails_on_drifted_source_before_creating_a_worktree(self):
         with tempfile.TemporaryDirectory() as parent:
             target = Path(parent) / "variant"
-            drifted = dict(candidates.VARIANTS, drifted=[("no such source text", "")])
+            drifted = dict(candidates.VARIANTS, drifted={
+                candidates.HASH_SOURCE: candidates.VARIANTS["buf1m"][candidates.HASH_SOURCE],
+                candidates.PROBE_SOURCE: [("no such source text", "")],
+            })
             original, candidates.VARIANTS = candidates.VARIANTS, drifted
             self.addCleanup(setattr, candidates, "VARIANTS", original)
-            with self.assertRaises(candidates.CandidateError):
-                candidates.prepare("drifted", target)
+            commands = []
+            real_run = candidates.subprocess.run
+
+            def recording_run(command, *args, **kwargs):
+                commands.append(command)
+                if "worktree" in command:
+                    self.fail("prepare created a worktree before every edit applied")
+                return real_run(command, *args, **kwargs)
+
+            with mock.patch.object(candidates.subprocess, "run", recording_run):
+                with self.assertRaises(candidates.CandidateError):
+                    candidates.prepare("drifted", target)
+            self.assertEqual(len(commands), 2)
             self.assertFalse(target.exists())
 
     def test_prepare_refuses_an_unknown_variant(self):
         with tempfile.TemporaryDirectory() as parent:
             with self.assertRaises(candidates.CandidateError):
                 candidates.prepare("buf9g", Path(parent) / "variant")
+
+
+class SingleReadRecordTests(unittest.TestCase):
+    """The #788 self-test reads only the top-level baseline directory, so check these here."""
+
+    def test_committed_records_are_valid_runs_of_the_single_read_build(self):
+        buf1m = candidates.load(BASELINE_DIR / "2026-10-29-stage1-buf1m-local-corpus.json")
+        current = candidates.load(BASELINE_DIR / "2026-10-29-local-corpus-evicted.json")
+        paths = sorted(SINGLE_READ_DIR.glob("*.json"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(record=path.name):
+                record = candidates.load(path)
+                self.assertEqual(harness.validate_run(record), [])
+                self.assertEqual(record["build"]["git_changed_paths"], [
+                    "crates/voom-ffprobe-worker/src/handler.rs",
+                    "crates/voom-hash-worker/src/hash.rs",
+                ])
+                # The buf1m hash binary with a rebuilt probe worker that reads no corpus bytes.
+                self.assertEqual(record["build"]["hash_worker_sha256"],
+                                 buf1m["build"]["hash_worker_sha256"])
+                self.assertNotEqual(record["build"]["probe_worker_sha256"],
+                                    current["build"]["probe_worker_sha256"])
+                for repetition in record["repetitions"]:
+                    corpus = sum(row["size_bytes"] for row in repetition["files"])
+                    self.assertLess(repetition["workers"]["probe"]["rchar"], corpus / 100)
 
 
 if __name__ == "__main__":
