@@ -86,10 +86,11 @@ Persisted `media_dispatch.schema` advances from 5 to 6 with the worker protocol:
 operator-disposition unfinished schema-5 media work exactly as for protocol 5 above. Upgrade
 the control plane, every node agent and every bundled worker together with
 `probe_hash_reuse` off, and turn it on only after the whole fleet runs protocol 6; a
-protocol-5 control plane rejects reused evidence at the scan-batch decode. Rows written with
-recomputed hashes stay byte-identical, so a fleet-wide binary downgrade is supported until
-reused rows exist. After that it needs the pre-upgrade database snapshot; the rollback is
-the setting.
+protocol-5 control plane rejects reused evidence at the scan-batch decode. The rollback is
+the setting. Rows written with recomputed hashes stay byte-identical, but a fleet-wide binary
+downgrade still needs the same drain or operator disposition of unfinished schema-6 media work,
+because a protocol-5 binary rejects every schema-6 envelope; once reused evidence rows exist it
+needs the pre-upgrade database snapshot instead.
 
 `tickets.payload` carries a breaking change under this contract (ADR 0069): a
 byte-touching workflow ticket now requires a `declared_artifact_access` declaration, and a
