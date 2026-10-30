@@ -26,51 +26,9 @@ UNAVAILABLE = "unavailable"
 MIB = 1024 * 1024
 
 # Since #810 the hash worker reads 1 MiB per call into a heap buffer, so `baseline` is the
-# former `buf1m` and `buf8k` restores the original 8 KiB read for old-versus-new comparison.
+# former `buf1m` and `buf8k` restores the original 8 KiB read for old-versus-new comparison;
+# #791 decided the other #789 buffer variants, whose runs stay pinned in stages-1-2.md.
 CHUNK_CONSTANT = "pub const HASH_CHUNK_BYTES: usize = 1024 * 1024;"
-ASYNC_LOOP = """pub async fn read_hash(file: &mut tokio::fs::File) -> Result<String, HashWorkerError> {
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0_u8; HASH_CHUNK_BYTES];
-    loop {
-        let count =
-            file.read(&mut buffer)
-                .await
-                .map_err(|err| HashWorkerError::ArtifactUnreadable {
-                    message: format!("cannot read candidate file while hashing: {err}"),
-                    payload: serde_json::json!({ "stage": "read" }),
-                })?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(hasher.finalize().to_hex().to_string())
-}
-"""
-BLOCKING_LOOP = """pub async fn read_hash(file: &mut tokio::fs::File) -> Result<String, HashWorkerError> {
-    let unreadable = |err: std::io::Error| HashWorkerError::ArtifactUnreadable {
-        message: format!("cannot read candidate file while hashing: {err}"),
-        payload: serde_json::json!({ "stage": "read" }),
-    };
-    let mut blocking = file.try_clone().await.map_err(unreadable)?.into_std().await;
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut hasher = blake3::Hasher::new();
-        let mut buffer = [0_u8; HASH_CHUNK_BYTES];
-        loop {
-            let count = blocking.read(&mut buffer).map_err(unreadable)?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
-        Ok(hasher.finalize().to_hex().to_string())
-    })
-    .await
-    .map_err(|err| unreadable(std::io::Error::other(err)))?
-}
-"""
-
 PROBE_IMPORT = "use crate::{WorkerError, normalize_ffprobe_json, observe_file_facts};\n"
 PRE_PROBE_READ = """    let pre_probe = Box::pin(observe_file_facts(&path))
         .await
@@ -126,11 +84,6 @@ async fn stat_facts(
 """
 
 
-def buffer_variant(size: str) -> list[tuple[str, str]]:
-    """A different hash-worker chunk size in the production heap buffer."""
-    return [(CHUNK_CONSTANT, f"pub const HASH_CHUNK_BYTES: usize = {size};")]
-
-
 # The probe worker checks size and mtime by stat before and after ffprobe instead of reading
 # the whole file twice, so the hash worker's pass is the only full read (#801, stage 5).
 STAT_ONLY_PROBE = [
@@ -146,13 +99,7 @@ STAT_ONLY_PROBE = [
 # exactly once, so a drifted source fails rather than building something unmeasured.
 VARIANTS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "baseline": {},
-    "buf8k": {HASH_SOURCE: buffer_variant("8 * 1024")},
-    "buf64k": {HASH_SOURCE: buffer_variant("64 * 1024")},
-    "buf4m": {HASH_SOURCE: buffer_variant("4 * 1024 * 1024")},
-    # The blocking loop keeps its 8 KiB stack buffer, as #789 measured it.
-    "batch8k": {HASH_SOURCE: [*buffer_variant("8 * 1024"),
-                              ("use tokio::io::AsyncReadExt;\n", ""),
-                              (ASYNC_LOOP, BLOCKING_LOOP)]},
+    "buf8k": {HASH_SOURCE: [(CHUNK_CONSTANT, "pub const HASH_CHUNK_BYTES: usize = 8 * 1024;")]},
     "single-read": {PROBE_SOURCE: STAT_ONLY_PROBE},
 }
 
