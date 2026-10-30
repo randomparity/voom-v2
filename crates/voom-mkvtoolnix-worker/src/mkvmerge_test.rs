@@ -629,3 +629,176 @@ fn build_args_uses_provider_index_order_for_group_remainder() {
         Some("0:7,0:12,0:14")
     );
 }
+
+const NON_ASCII_CHILD_ROOT: &str = "VOOM_TEST_NON_ASCII_CHILD_ROOT";
+const NON_ASCII_CHILD_MKVMERGE: &str = "VOOM_TEST_NON_ASCII_CHILD_MKVMERGE";
+const NON_ASCII_TRACK_NAME: &str = "Director’s cut";
+
+/// The node agent starts workers with a cleared environment. mkvmerge without a UTF-8 locale
+/// truncates identify JSON at the first non-ASCII character (still exiting 0) and cannot open
+/// non-ASCII paths, so this test re-runs itself with `env_clear()` against the real mkvmerge.
+#[test]
+fn non_ascii_track_name_and_paths_survive_cleared_environment() {
+    if let Some(root) = std::env::var_os(NON_ASCII_CHILD_ROOT) {
+        let mkvmerge = std::env::var_os(NON_ASCII_CHILD_MKVMERGE).unwrap();
+        identify_and_remux_non_ascii_fixture(Path::new(&root), Path::new(&mkvmerge));
+        return;
+    }
+    let mkvmerge = mkvmerge_on_path();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    write_non_ascii_fixture(&root, &mkvmerge);
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "mkvmerge::tests::non_ascii_track_name_and_paths_survive_cleared_environment",
+            "--nocapture",
+        ])
+        .env_clear()
+        // Coverage runs need the profile path; it carries no locale.
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+        .env(NON_ASCII_CHILD_ROOT, &root)
+        .env(NON_ASCII_CHILD_MKVMERGE, &mkvmerge)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("1 passed"), "child ran no test: {stdout}");
+}
+
+fn identify_and_remux_non_ascii_fixture(root: &Path, mkvmerge: &Path) {
+    let config = MkvmergeConfig::new(
+        mkvmerge.to_owned(),
+        "mkvmerge (real)".to_owned(),
+        Duration::from_mins(1),
+    );
+    let non_ascii_dir = root.join("dír é");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for input in [root.join("ascii.mkv"), non_ascii_dir.join("ïnput.mkv")] {
+            let identify = identify_json(&config, &input).await.unwrap();
+            assert_eq!(subtitle_track_name(&identify), NON_ASCII_TRACK_NAME);
+        }
+        let input = non_ascii_dir.join("ïnput.mkv");
+        let output = non_ascii_dir.join("öutput.mkv");
+        let identify = identify_json(&config, &input).await.unwrap();
+        let mapping = track_mapping_from_identify(&identify).unwrap();
+        let mut request = remux_request(base_selection(vec![stream(0)]));
+        request.input.path = input.to_string_lossy().into_owned();
+        request.output.path = output.to_string_lossy().into_owned();
+        run_mkvmerge_remux(&config, &request, &mapping)
+            .await
+            .unwrap();
+        let remuxed = identify_json(&config, &output).await.unwrap();
+        assert_eq!(subtitle_track_name(&remuxed), NON_ASCII_TRACK_NAME);
+    });
+}
+
+fn subtitle_track_name(identify: &Value) -> &str {
+    identify
+        .pointer("/tracks/0/properties/track_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// Builds the fixture through a JSON option file, which mkvmerge always reads as UTF-8, so the
+/// fixture does not depend on the test host's locale.
+fn write_non_ascii_fixture(root: &Path, mkvmerge: &Path) {
+    let subtitle = root.join("subtitle.srt");
+    std::fs::write(&subtitle, "1\n00:00:00,000 --> 00:00:00,400\nfixture\n").unwrap();
+    let fixture = root.join("ascii.mkv");
+    let options = serde_json::json!([
+        "--output",
+        fixture,
+        "--track-name",
+        format!("0:{NON_ASCII_TRACK_NAME}"),
+        subtitle,
+    ]);
+    let options_path = root.join("options.json");
+    std::fs::write(&options_path, options.to_string()).unwrap();
+    let status = std::process::Command::new(mkvmerge)
+        .arg(format!("@{}", options_path.display()))
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkvmerge could not build the fixture");
+    let non_ascii_dir = root.join("dír é");
+    std::fs::create_dir(&non_ascii_dir).unwrap();
+    std::fs::copy(&fixture, non_ascii_dir.join("ïnput.mkv")).unwrap();
+}
+
+fn mkvmerge_on_path() -> std::path::PathBuf {
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    let found = std::env::split_paths(&paths)
+        .map(|dir| dir.join("mkvmerge"))
+        .find(|path| path.is_file());
+    assert!(
+        found.is_some(),
+        "required test dependency mkvmerge is missing from PATH"
+    );
+    found.unwrap()
+}
+
+#[tokio::test]
+async fn identify_names_locale_cause_and_action_for_truncated_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let command = temp.path().join("mkvmerge");
+    voom_test_support::executable::write_executable(
+        &command,
+        "#!/bin/sh\nprintf '%s' '{\"tracks\": [{\"properties\": {\"track_name\": \"Director'\n",
+    )
+    .unwrap();
+    let config = MkvmergeConfig::new(
+        command.clone(),
+        "mkvmerge (stub)".to_owned(),
+        Duration::from_secs(5),
+    );
+
+    let err = identify_tracks(&config, Path::new("input.mkv"))
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("invalid identify JSON (51 bytes, exit 0)"),
+        "{err}"
+    );
+    assert!(err.contains("LC_ALL=C.UTF-8"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "make a UTF-8 locale usable by {}",
+            command.display()
+        )),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn remux_runs_mkvmerge_with_utf8_locale() {
+    let temp = tempfile::tempdir().unwrap();
+    let command = temp.path().join("mkvmerge");
+    voom_test_support::executable::write_executable(
+        &command,
+        "#!/bin/sh\n[ \"$LC_ALL\" = C.UTF-8 ] || { echo \"LC_ALL=$LC_ALL\" >&2; exit 3; }\n",
+    )
+    .unwrap();
+    let config = MkvmergeConfig::new(
+        command,
+        "mkvmerge (stub)".to_owned(),
+        Duration::from_secs(5),
+    );
+    let mapping = track_mapping_from_identify(&serde_json::json!({"tracks": [
+        {"id": 0, "type": "subtitles", "properties": {}}
+    ]}))
+    .unwrap();
+    let request = remux_request(base_selection(vec![stream(0)]));
+
+    run_mkvmerge_remux(&config, &request, &mapping)
+        .await
+        .unwrap();
+}
