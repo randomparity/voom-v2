@@ -96,8 +96,9 @@ activation, so it is gated like the first.
 - **Actors.** Network callers reaching the API listener (unauthenticated until the bearer check);
   the control plane as seen by the agent (trusted over TLS, but possibly another release).
 - **Controls.** Request: header read with `to_str` and `parse::<u32>`, compared, refusal before
-  any body read or database access; no refusal echoes the received value. Response: same parse; refusal is terminal and logged
-  through the existing error path.
+  any body read or database access; the malformed refusal does not echo the received value,
+  and the unsupported refusal echoes only the parsed `u32`. Response: same parse; refusal is
+  terminal and logged through the existing error path.
 - **Pre-auth disclosure.** Without a token, a caller can already read the version: the gate
   stamps it on the 401 that any authenticated node route returns to a tokenless request. The
   "missing" and "unsupported" refusals state that same number and nothing else. They read no
