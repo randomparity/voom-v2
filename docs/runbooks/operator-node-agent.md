@@ -183,16 +183,19 @@ ctime tick, or a forged ctime, can leave probe facts that describe other bytes;
 the transform input's full hash still refuses to act on such a file. Turning the
 setting off and restarting the agent is the rollback.
 
-**Keep it off for now.** The #794 rollout gates did not all pass. G1, G4, G5, G6 and G8
-passed. G2 and G3 are inconclusive because a whole-root scan of the local corpus fails
-on an oversized probe result
-([#816](https://github.com/randomparity/voom-v2/issues/816)). G7 failed: the control
-plane and node agent do not refuse each other across protocol versions
-([#817](https://github.com/randomparity/voom-v2/issues/817)). G9 failed on remux defects
-([#819](https://github.com/randomparity/voom-v2/issues/819),
-[#820](https://github.com/randomparity/voom-v2/issues/820)). See the
-[rollout report](../media-evidence-rollout-report.md). Enable the setting only after those
-issues close and the blocked gates pass on a rerun with `scripts/media-evidence-rollout.py`.
+**Keep it off for now.** On the #794 rollout, G2 and G3 passed: reuse cut a full local
+pass from 673 s to 224 s at 1.00× physical reads. The guard gates G4–G6 and G8 also
+passed. Two gates failed:
+
+- G7: the control plane and node agent do not refuse each other across protocol
+  versions ([#817](https://github.com/randomparity/voom-v2/issues/817)).
+- G9: repeat application does not converge because of two remux defects
+  ([#819](https://github.com/randomparity/voom-v2/issues/819),
+  [#820](https://github.com/randomparity/voom-v2/issues/820)).
+
+See the [rollout report](../media-evidence-rollout-report.md). Enable the setting only
+after those issues close and G7 and G9 pass on a rerun with
+`scripts/media-evidence-rollout.py`.
 Then roll it out in this order:
 
 1. Upgrade the control plane, every node agent and every bundled worker to the same

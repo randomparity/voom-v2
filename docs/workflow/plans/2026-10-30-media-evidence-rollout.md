@@ -1,6 +1,7 @@
 # Plan: media evidence rollout gates (#794)
 
-Spec: [2026-10-30-media-evidence-rollout-design.md](../specs/2026-10-30-media-evidence-rollout-design.md).
+Spec:
+[2026-10-30-media-evidence-rollout-design.md](../specs/2026-10-30-media-evidence-rollout-design.md).
 Measurements hold `flock -x` on the corpus lock. Builds and checks hold `flock -s`. Every
 private manifest, stack work directory and copy stays outside the checkout or under an ignored
 path.

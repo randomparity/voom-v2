@@ -5,7 +5,8 @@
 ADR 0120 selects a 1 MiB owner hash buffer (#810) and guarded probe reuse of the owner hash on
 btrfs and tmpfs behind the owner-node `probe_hash_reuse` setting, default off (#811). Its
 latency gains are modelled, not measured. No record measures first durable observation:
-the #788 replay harness does not publish. The [decision report](../../media-evidence-decision-report.md)
+the #788 replay harness does not publish. The
+[decision report](../../media-evidence-decision-report.md)
 froze rollout gates G1–G9. The setting may be recommended for enabling only if they pass on
 real storage. A failed gate keeps the setting off and publishes the no-go evidence.
 
@@ -72,7 +73,7 @@ the recommendation. The node-agent runbook gains the enable criteria and the rol
   fewer than 1,000 files that runs longer could end `stale` and publish nothing. That
   is a recorded result, not a reason to change the gate.
 - A host-wide counter on the shared host includes unrelated traffic. Worker counters are
-  per-process, and ffprobe's own reads are not attributed (protocol).
+  per-process. CPU and I/O include reaped ffprobe children; memory does not.
 - A stack whose worker restarts mid-scan reports `unavailable` usage, never a partial number.
 - Network cells are `as-found` and disclose rehearsal interference.
 
