@@ -28,7 +28,7 @@ while read -r expected filename; do
     while read -r name url; do
         [[ $name == "$filename" ]] || continue
         if curl --fail --silent --show-error --location --proto =https --proto-redir =https \
-            --connect-timeout 20 --max-time 300 --retry 2 \
+            --connect-timeout 20 --speed-limit 1024 --speed-time 30 --max-time 300 --retry 2 \
             --output "$download/$filename" "$url" </dev/null &&
             [[ $(digest_of "$download/$filename") == "$expected" ]]; then
             mv "$download/$filename" "$target"
