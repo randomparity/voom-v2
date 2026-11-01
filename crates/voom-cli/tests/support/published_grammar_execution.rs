@@ -282,8 +282,16 @@ impl ScenarioRun {
             let cover = array(&snapshot["streams"], "T1 source streams")?
                 .iter()
                 .find(|stream| stream["filename"] == "fixture-cover.jpg")
-                .and_then(|stream| stream["id"].as_str())
                 .ok_or_else(|| io::Error::other("T1 source snapshot lacks the cover art"))?;
+            // The probe must record the attached-picture flag itself: the legacy
+            // tag fallback would otherwise mask a normalizer regression here.
+            require(
+                cover["disposition"]["attached_pic"] == true,
+                format!("T1 cover art lacks attached_pic: {cover}"),
+            )?;
+            let cover = cover["id"]
+                .as_str()
+                .ok_or_else(|| io::Error::other("T1 cover art lacks a stream id"))?;
             let selection = &rendered["media_dispatch"]["selection"];
             for list in [
                 "default_streams",
