@@ -261,3 +261,68 @@ async fn unguarded_probe_sets_no_hash_source() {
             .is_none()
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn normalization_classification_survives_http_terminal_frames() {
+    for (raw, expected) in [
+        (
+            r#"{"format":{"duration":"NaN"}}"#,
+            voom_core::FailureClass::MalformedMedia,
+        ),
+        (
+            "invalid JSON",
+            voom_core::FailureClass::MalformedWorkerResult,
+        ),
+        (
+            r#"{"format":{"duration":"bad"},"streams":{}}"#,
+            voom_core::FailureClass::MalformedWorkerResult,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media.mkv");
+        std::fs::write(&media, b"source bytes").unwrap();
+        let config = fixture_ffprobe(dir.path());
+        std::fs::write(dir.path().join("ffprobe.json"), raw).unwrap();
+        let credentials = WorkerCredentials {
+            worker_id: voom_core::WorkerId(7),
+            worker_epoch: 3,
+            secret: secrecy::SecretString::from("test-secret"),
+        };
+        let server = HttpServer::new(credentials.clone(), operation_handler(config))
+            .serve(([127, 0, 0, 1], 0).into())
+            .await
+            .unwrap();
+        let client =
+            HttpClient::with_timeouts(server.bound, Duration::from_secs(5), Duration::from_secs(5));
+        let request = ProbeFileRequest {
+            guard: None,
+            ..guarded_request(&media)
+        };
+        let req = OperationRequest {
+            operation: OperationKind::ProbeFile,
+            lease_id: voom_core::LeaseId(42),
+            payload: serde_json::json!(request),
+            heartbeat_deadline_ms: 2_000,
+            progress_idle_deadline_ms: 2_000,
+        };
+        let mut dispatch = client
+            .dispatch(&credentials, "normalization", req)
+            .await
+            .unwrap();
+        loop {
+            match dispatch.frames.next_frame().await.unwrap() {
+                NdjsonOutcome::Frame(_) => {}
+                NdjsonOutcome::Terminated(ProgressFrame::Error { class, code, .. }) => {
+                    assert_eq!(class, expected, "{raw}");
+                    assert_eq!(code, expected.into_error_code(), "{raw}");
+                    break;
+                }
+                other => panic!("expected terminal error: {other:?}"),
+            }
+        }
+        server.shutdown.send(()).unwrap();
+        server.joined.await.unwrap();
+        assert_eq!(std::fs::read(media).unwrap(), b"source bytes");
+    }
+}

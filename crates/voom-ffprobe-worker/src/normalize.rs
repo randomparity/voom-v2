@@ -35,6 +35,8 @@ pub fn normalize_ffprobe_json(
     let root = raw
         .as_object()
         .ok_or_else(|| malformed("ffprobe output must be a JSON object"))?;
+    // Provider defects stay fatal even when an earlier field has invalid media content.
+    validate_provider_structure(root)?;
 
     let mut snapshot = Map::new();
     snapshot.insert("format".to_owned(), Value::String("sprint10-v1".to_owned()));
@@ -125,6 +127,80 @@ fn optional_array<'a>(
         .ok_or_else(|| malformed(format!("{key} must be a JSON array")))
 }
 
+fn validate_numeric_types(input: &Map<String, Value>, keys: &[&str]) -> Result<(), WorkerError> {
+    for key in keys {
+        if input
+            .get(*key)
+            .is_some_and(|v| !v.is_string() && !v.is_number())
+        {
+            let expected = if *key == "duration" {
+                "numeric"
+            } else {
+                "an unsigned integer"
+            };
+            return Err(malformed(format!("{key} must be {expected}")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_structure(root: &Map<String, Value>) -> Result<(), WorkerError> {
+    if let Some(format) = optional_object(root, "format")? {
+        validate_numeric_types(format, &["duration", "bit_rate"])?;
+    }
+    let Some(streams) = optional_array(root, "streams")? else {
+        return Ok(());
+    };
+    for stream in streams {
+        let input = stream
+            .as_object()
+            .ok_or_else(|| malformed("ffprobe stream must be a JSON object"))?;
+        validate_numeric_types(
+            input,
+            &[
+                "index",
+                "width",
+                "height",
+                "duration",
+                "sample_rate",
+                "channels",
+            ],
+        )?;
+        if input.get("codec_type").and_then(Value::as_str) == Some("audio") {
+            validate_numeric_types(input, &["bits_per_raw_sample", "bits_per_sample"])?;
+            for key in ["sample_fmt", "channel_layout"] {
+                if input.get(key).is_some_and(|v| !v.is_string()) {
+                    return Err(malformed(format!("{key} must be a string")));
+                }
+            }
+        }
+        if let Some(tags) = input.get("tags").and_then(Value::as_object) {
+            for (key, value) in tags {
+                if (key.eq_ignore_ascii_case("voom_compatibility_stream_id")
+                    || key.eq_ignore_ascii_case("voom_compatibility_source_stream_id"))
+                    && !value.is_string()
+                {
+                    return Err(malformed(format!("{key} must be a non-empty string")));
+                }
+            }
+        }
+        if let Some(value) = input.get("disposition") {
+            let flags = value
+                .as_object()
+                .ok_or_else(|| malformed("disposition must be a JSON object"))?;
+            for key in ["default", "forced", "comment", "attached_pic"] {
+                if flags
+                    .get(key)
+                    .is_some_and(|v| !v.is_boolean() && !v.is_number() && !v.is_string())
+                {
+                    return Err(malformed(format!("{key} disposition must be 0 or 1")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn container_object(format: &Map<String, Value>) -> Result<Map<String, Value>, WorkerError> {
     let mut container = Map::new();
 
@@ -155,7 +231,7 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
             insert_u64_string(input, &mut output, "sample_rate", "sample_rate")?;
             if input.get("codec_type").and_then(Value::as_str) == Some("audio") {
                 let facts = voom_worker_protocol::AudioSampleFacts::from_ffprobe(stream)
-                    .map_err(|error| malformed(error.to_string()))?;
+                    .map_err(|error| invalid_media(error.to_string()))?;
                 if let Some(format) = facts.sample_format {
                     output.insert("sample_format".to_owned(), Value::String(format));
                 }
@@ -245,13 +321,15 @@ fn observed_identity_tag(
     {
         let value = value
             .as_str()
-            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| malformed(format!("{key} must be a non-empty string")))?;
+        if value.trim().is_empty() {
+            return Err(invalid_media(format!("{key} must be a non-empty string")));
+        }
         if observed
             .as_deref()
             .is_some_and(|previous| previous != value)
         {
-            return Err(malformed(format!("conflicting {name} tags")));
+            return Err(invalid_media(format!("conflicting {name} tags")));
         }
         observed = Some(value.to_owned());
     }
@@ -327,15 +405,18 @@ fn disposition_bool(value: &Value, key: &str) -> Result<bool, WorkerError> {
         return match value {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(malformed(format!("{key} disposition must be 0 or 1"))),
+            _ => Err(invalid_media(format!("{key} disposition must be 0 or 1"))),
         };
     }
     if let Some(value) = value.as_str() {
         return match value {
             "0" => Ok(false),
             "1" => Ok(true),
-            _ => Err(malformed(format!("{key} disposition must be 0 or 1"))),
+            _ => Err(invalid_media(format!("{key} disposition must be 0 or 1"))),
         };
+    }
+    if value.is_number() {
+        return Err(invalid_media(format!("{key} disposition must be 0 or 1")));
     }
     Err(malformed(format!("{key} disposition must be 0 or 1")))
 }
@@ -391,7 +472,7 @@ fn insert_f64_string(
         return Ok(());
     };
     if !parsed.is_finite() {
-        return Err(malformed(format!("{input_key} must be finite")));
+        return Err(invalid_media(format!("{input_key} must be finite")));
     }
     let number = serde_json::Number::from_f64(parsed)
         .ok_or_else(|| malformed(format!("{input_key} must be representable as JSON")))?;
@@ -439,7 +520,7 @@ fn optional_f64(value: &Value, key: &str) -> Result<Option<f64>, WorkerError> {
         return raw
             .parse::<f64>()
             .map(Some)
-            .map_err(|_| malformed(format!("{key} must be numeric")));
+            .map_err(|_| invalid_media(format!("{key} must be numeric")));
     }
     if let Some(parsed) = value.as_f64() {
         return Ok(Some(parsed));
@@ -455,16 +536,23 @@ fn optional_u64(value: &Value, key: &str) -> Result<Option<u64>, WorkerError> {
         return raw
             .parse::<u64>()
             .map(Some)
-            .map_err(|_| malformed(format!("{key} must be an unsigned integer")));
+            .map_err(|_| invalid_media(format!("{key} must be an unsigned integer")));
     }
     if let Some(parsed) = value.as_u64() {
         return Ok(Some(parsed));
+    }
+    if value.is_number() {
+        return Err(invalid_media(format!("{key} must be an unsigned integer")));
     }
     Err(malformed(format!("{key} must be an unsigned integer")))
 }
 
 fn is_unknown_value(value: &str) -> bool {
     matches!(value.trim(), "" | "N/A" | "n/a" | "unknown")
+}
+
+fn invalid_media(message: impl Into<String>) -> WorkerError {
+    WorkerError::MalformedMedia(message.into())
 }
 
 fn malformed(message: impl Into<String>) -> WorkerError {
