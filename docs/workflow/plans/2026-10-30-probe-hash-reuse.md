@@ -29,7 +29,7 @@ lines across 12 files, 350–500 test lines, 40 doc lines.
   `use crate::{WorkerError, normalize_ffprobe_json, observe_file_facts};`, both
   `let pre_probe/post_probe = Box::pin(observe_file_facts(&path))` blocks, and
   `fn verify_expected_facts(` (`just media-evidence-candidates-selftest`).
-- Builds and tests run under `flock -s /home/dave/src/voom-v2/.agent/corpus.lock`.
+- Builds and tests run under `flock -s .agent/corpus.lock` (repository-relative shared lock).
 - Filesystem-dependent tests: tmpfs arms are `#[cfg(target_os = "linux")]` on
   `tempfile::tempdir_in("/dev/shm")`. The temp-root arm (`tempfile::tempdir()`, pinned to
   `.test-tmp/`) branches on `crate::guard::reuse_listed` of its `fstatfs` type on Linux: listed →
