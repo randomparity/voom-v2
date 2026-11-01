@@ -306,6 +306,13 @@ fn insert_disposition(
             );
         }
     }
+    // ADR 0125: cover art is a `video` stream whose attachment identity is this flag.
+    // Written only when true so snapshots of files without cover art keep their shape.
+    if let Some(value) = object.get("attached_pic")
+        && disposition_bool(value, "attached_pic")?
+    {
+        normalized.insert("attached_pic".to_owned(), Value::Bool(true));
+    }
     if !normalized.is_empty() {
         output.insert("disposition".to_owned(), Value::Object(normalized));
     }

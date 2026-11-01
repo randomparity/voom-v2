@@ -940,6 +940,170 @@ fn keep_subtitle_matching_zero_tracks_is_allowed() {
     );
 }
 
+/// #820: the #794 normalize policy on a file with cover art. ffprobe reports the
+/// cover as a `video` stream; the worker refuses an attachment in any flag list, so
+/// the selection must keep the cover without placing it in one.
+#[test]
+fn issue_820_policy_keeps_cover_art_out_of_flag_lists() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [
+            {"type": "keep_tracks", "target": "audio",
+             "filter": {"type": "language_in", "values": ["eng", "und"]}},
+            {"type": "keep_tracks", "target": "subtitle",
+             "filter": {"type": "language_in", "values": ["eng"]}}
+        ],
+        "track_order": ["video", "audio", "subtitle"],
+        "defaults": []
+    });
+    for snapshot in [
+        cover_art_snapshot(&mkv_cover()),
+        cover_art_snapshot(&mp4_cover()),
+    ] {
+        let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+        assert!(ids(&selection.keep_streams).contains(&"cover"));
+        assert_no_cover_placement(&selection);
+        assert_eq!(ids(&selection.default_streams), ["video", "audio-eng"]);
+        assert_eq!(
+            ids(&selection.clear_default_streams),
+            ["audio-und", "sub-eng"]
+        );
+    }
+}
+
+/// An MP4 cover has no MIME fact; an attachment font filter must still decide it.
+#[test]
+fn remove_non_font_attachments_drops_cover_art() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [
+            {"type": "remove_tracks", "target": "attachment",
+             "filter": {"type": "not", "inner": {"type": "font"}}}
+        ],
+        "track_order": ["video", "audio", "subtitle"],
+        "defaults": []
+    });
+    for snapshot in [
+        cover_art_snapshot(&mkv_cover()),
+        cover_art_snapshot(&mp4_cover()),
+    ] {
+        let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+        assert!(!ids(&selection.keep_streams).contains(&"cover"));
+        assert!(ids(&selection.keep_streams).contains(&"video"));
+        assert_no_cover_placement(&selection);
+    }
+}
+
+#[test]
+fn attachment_placement_guard_names_each_list() {
+    let snapshot = cover_art_snapshot(&mp4_cover());
+    let input = crate::media_snapshot::planning_input(1, &snapshot);
+    let facts = stream_facts(&input).unwrap();
+    let cover = RemuxStreamRef {
+        snapshot_stream_id: "cover".to_owned(),
+        provider_stream_index: 1,
+    };
+    let empty = RemuxSelection {
+        audio_head_stream: None,
+        keep_streams: vec![cover.clone()],
+        default_streams: Vec::new(),
+        clear_default_streams: Vec::new(),
+        track_order: Vec::new(),
+        head_streams: Vec::new(),
+        forced_streams: Vec::new(),
+        clear_forced_streams: Vec::new(),
+    };
+    assert!(reject_attachment_placements(&empty, &facts).is_ok());
+    for field in [
+        "default_streams",
+        "clear_default_streams",
+        "head_streams",
+        "audio_head_stream",
+        "forced_streams",
+        "clear_forced_streams",
+    ] {
+        let mut selection = empty.clone();
+        match field {
+            "default_streams" => selection.default_streams.push(cover.clone()),
+            "clear_default_streams" => selection.clear_default_streams.push(cover.clone()),
+            "head_streams" => selection.head_streams.push(cover.clone()),
+            "audio_head_stream" => selection.audio_head_stream = Some(cover.clone()),
+            "forced_streams" => selection.forced_streams.push(cover.clone()),
+            _ => selection.clear_forced_streams.push(cover.clone()),
+        }
+
+        let error = reject_attachment_placements(&selection, &facts).unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::ConfigInvalid, "{field}");
+        assert!(error.to_string().contains(field), "{error}");
+    }
+}
+
+fn ids(streams: &[RemuxStreamRef]) -> Vec<&str> {
+    streams
+        .iter()
+        .map(|stream| stream.snapshot_stream_id.as_str())
+        .collect()
+}
+
+fn assert_no_cover_placement(selection: &RemuxSelection) {
+    for (field, streams) in [
+        ("default_streams", &selection.default_streams),
+        ("clear_default_streams", &selection.clear_default_streams),
+        ("head_streams", &selection.head_streams),
+        ("forced_streams", &selection.forced_streams),
+        ("clear_forced_streams", &selection.clear_forced_streams),
+    ] {
+        assert!(!ids(streams).contains(&"cover"), "cover in {field}");
+    }
+}
+
+/// Matroska cover art as normalized from ffprobe 8.1.3: a `video` stream with the
+/// attachment's filename and MIME tags (snapshots before ADR 0125 lack `attached_pic`).
+fn mkv_cover() -> serde_json::Value {
+    json!({"id": "cover", "index": 1, "kind": "video", "codec_name": "mjpeg",
+           "filename": "cover.jpg", "mime_type": "image/jpeg",
+           "disposition": {"default": false, "forced": false, "commentary": false}})
+}
+
+/// MP4 `covr` as normalized from ffprobe 8.1.3: no tags, only `attached_pic`.
+fn mp4_cover() -> serde_json::Value {
+    json!({"id": "cover", "index": 1, "kind": "video", "codec_name": "mjpeg",
+           "disposition": {"default": false, "forced": false, "commentary": false,
+                           "attached_pic": true}})
+}
+
+fn cover_art_snapshot(cover: &serde_json::Value) -> MediaSnapshot {
+    let stream = |id: &str, index: u32, kind: &str, language: &str, default: bool| {
+        json!({"id": id, "index": index, "kind": kind, "codec_name": "aac",
+               "language": language, "channels": 2,
+               "disposition": {"default": default, "forced": false, "commentary": false}})
+    };
+    let streams = json!([
+        {"id": "video", "index": 0, "kind": "video", "codec_name": "hevc",
+         "disposition": {"default": true, "forced": false, "commentary": false}},
+        cover,
+        stream("audio-eng", 2, "audio", "eng", true),
+        stream("audio-und", 3, "audio", "und", false),
+        stream("audio-spa", 4, "audio", "spa", false),
+        stream("sub-eng", 5, "subtitle", "eng", false),
+        stream("sub-fre", 6, "subtitle", "fre", false),
+    ]);
+    MediaSnapshot {
+        id: MediaSnapshotId(1),
+        file_version_id: FileVersionId(1),
+        probed_by: None,
+        probed_at: OffsetDateTime::UNIX_EPOCH,
+        payload: json!({ "streams": streams }),
+    }
+}
+
 fn keep_audio_language_payload(values: &[&str]) -> serde_json::Value {
     json!({
         "type": "remux",
