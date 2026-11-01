@@ -1,0 +1,57 @@
+{
+  "build": {
+    "binaries_sha256": {
+      "voom-ffprobe-worker": "92c784cc8b56f598bb3aec09c69c262fae3626ab163b5c2c0960b9794d885dbc",
+      "voom-hash-worker": "a203ea44466c067a5e2a0969e09c7552f1bca51d7aefbc17a11162504bf36b1f"
+    },
+    "ffprobe_version": "8.1.3",
+    "git_commit": "2ca5dc668cd1bf431386d9216ba51685fb0319a7",
+    "instrument_sha256": "08797f6368abf1954560534ce77f9bd0ce04c9172498316ab2a2ce772c0d30be"
+  },
+  "cases": [
+    {
+      "case": "unchanged",
+      "detected": null,
+      "guard_sent": true,
+      "hash_source": "reused",
+      "result": "result",
+      "stage": "probe"
+    },
+    {
+      "case": "a_restored_mtime_edit_before_probe",
+      "class": "artifact_checksum_mismatch",
+      "code": "ARTIFACT_CHECKSUM_MISMATCH",
+      "detected": true,
+      "guard_sent": true,
+      "marker": "pre_probe_guard",
+      "result": "failure",
+      "stage": "probe"
+    },
+    {
+      "case": "b_restored_mtime_edit_during_hash",
+      "class": "artifact_checksum_mismatch",
+      "code": "ARTIFACT_CHECKSUM_MISMATCH",
+      "detected": true,
+      "marker": "hash_drift",
+      "result": "failure",
+      "stage": "hash"
+    },
+    {
+      "case": "c_mtime_moving_write_before_probe",
+      "class": "artifact_checksum_mismatch",
+      "code": "ARTIFACT_CHECKSUM_MISMATCH",
+      "detected": true,
+      "guard_sent": true,
+      "marker": "pre_probe_guard",
+      "result": "failure",
+      "stage": "probe"
+    }
+  ],
+  "schema": "media-evidence-rollout-construct/1",
+  "scratch": {
+    "filesystem_type": "btrfs",
+    "source_bytes": 6080870033,
+    "source_label": "local-corpus-f0004",
+    "storage_class": "local"
+  }
+}

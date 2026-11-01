@@ -1,0 +1,308 @@
+{
+  "build": {
+    "binaries_sha256": {
+      "voom": "0c8960e06f714010b85915927a63997d6a592128d659b6a3fdffafb244e1409f",
+      "voom-api": "2a40945a1378ada716b7ccb8d6b23df81b39c6cb24e6d892ff8d466b2b772a1d",
+      "voom-ffprobe-worker": "5e6d4788e2bd1529a030ca5b506600758017aff40aec1efc0a45266cbebf898b",
+      "voom-hash-worker": "6369c014ab936f7c88005de58d916dc5d9199eef0a63271bcab016c1f9c190ca",
+      "voom-node-agent": "b3eea4b3b924e7ac00189b12267a2a57b812088f4271463fee33a5e8b68241e7",
+      "voom-scan-worker": "40c8f72158771be649a460552aed75bb2550579f923959b26d789479d5276c06"
+    },
+    "bootstrap_sha256": "4ee1b3a344ef51afac7b1cf96e5183acd7a4794dd21b089fcb59bcbda43b19de",
+    "ffprobe_version": "8.1.3",
+    "git_changed_paths": [],
+    "git_commit": "32046ec268dc34e97315c9ce07d0f5c8df6165b5",
+    "instrument_sha256": "cf4f3c393eb86b050f21bec6bc1f534ba2b06eaab227fb47b83198d046d2d0bb"
+  },
+  "cell": {
+    "evict": true,
+    "kill": null,
+    "probe_hash_reuse": false,
+    "repetitions": 3
+  },
+  "corpus": {
+    "filesystem_type": "btrfs",
+    "label": "local-corpus",
+    "manifest_files": 34,
+    "roots": 1,
+    "selected_bytes": 935300661466,
+    "selected_ids": [
+      "f0001",
+      "f0002",
+      "f0003",
+      "f0004",
+      "f0005",
+      "f0006",
+      "f0007",
+      "f0008",
+      "f0009",
+      "f0010",
+      "f0011",
+      "f0012",
+      "f0013",
+      "f0014",
+      "f0015",
+      "f0016",
+      "f0017",
+      "f0018",
+      "f0019",
+      "f0020",
+      "f0021",
+      "f0022",
+      "f0023",
+      "f0024",
+      "f0025",
+      "f0026",
+      "f0027",
+      "f0028",
+      "f0029",
+      "f0030",
+      "f0031",
+      "f0032",
+      "f0033",
+      "f0034"
+    ],
+    "storage_class": "local"
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133616844800,
+    "os": "Linux",
+    "python": "3.14.8"
+  },
+  "not_measured": {
+    "discovery": "the scan worker's enumeration is not separated from the session",
+    "ffprobe_child": "ffprobe child memory and I/O are not attributed to the probe worker",
+    "first_actionable_plan": "no policy is applied by a scan cell",
+    "first_transformation_start": "no policy is applied by a scan cell",
+    "first_verified_output": "no policy is applied by a scan cell",
+    "per_file_stage_seconds": "the stack does not expose per-file hash and probe timings",
+    "retries": "the stack does not expose per-operation retries"
+  },
+  "repetitions": [
+    {
+      "complete_seconds": 184.368,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observations": 0,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 0,
+        "unmatched": 0,
+        "with_evidence": 0
+      },
+      "first_durable_observation_seconds": "unavailable",
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 2400341
+      },
+      "index": 1,
+      "resident_bytes_before": {
+        "f0001": 0,
+        "f0002": 0,
+        "f0003": 0,
+        "f0004": 0,
+        "f0005": 0,
+        "f0006": 0,
+        "f0007": 0,
+        "f0008": 0,
+        "f0009": 0,
+        "f0010": 0,
+        "f0011": 0,
+        "f0012": 0,
+        "f0013": 0,
+        "f0014": 0,
+        "f0015": 0,
+        "f0016": 0,
+        "f0017": 0,
+        "f0018": 0,
+        "f0019": 0,
+        "f0020": 0,
+        "f0021": 0,
+        "f0022": 0,
+        "f0023": 0,
+        "f0024": 0,
+        "f0025": 0,
+        "f0026": 0,
+        "f0027": 0,
+        "f0028": 0,
+        "f0029": 0,
+        "f0030": 0,
+        "f0031": 0,
+        "f0032": 0,
+        "f0033": 0,
+        "f0034": 0
+      },
+      "session_status": [
+        "failed"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 52.53,
+          "peak_rss_bytes": 14434304,
+          "rchar": 305801543626,
+          "read_bytes": 305741807616
+        },
+        "probe": {
+          "cpu_seconds": 209.31,
+          "peak_rss_bytes": 8232960,
+          "rchar": 479955624751,
+          "read_bytes": 448700096512
+        }
+      }
+    },
+    {
+      "complete_seconds": 179.431,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observations": 0,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 0,
+        "unmatched": 0,
+        "with_evidence": 0
+      },
+      "first_durable_observation_seconds": "unavailable",
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 2774307
+      },
+      "index": 2,
+      "resident_bytes_before": {
+        "f0001": 0,
+        "f0002": 0,
+        "f0003": 0,
+        "f0004": 0,
+        "f0005": 0,
+        "f0006": 0,
+        "f0007": 0,
+        "f0008": 0,
+        "f0009": 0,
+        "f0010": 0,
+        "f0011": 0,
+        "f0012": 0,
+        "f0013": 0,
+        "f0014": 0,
+        "f0015": 0,
+        "f0016": 0,
+        "f0017": 0,
+        "f0018": 0,
+        "f0019": 0,
+        "f0020": 0,
+        "f0021": 0,
+        "f0022": 0,
+        "f0023": 0,
+        "f0024": 0,
+        "f0025": 0,
+        "f0026": 0,
+        "f0027": 0,
+        "f0028": 0,
+        "f0029": 0,
+        "f0030": 0,
+        "f0031": 0,
+        "f0032": 0,
+        "f0033": 0,
+        "f0034": 0
+      },
+      "session_status": [
+        "failed"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 52.04,
+          "peak_rss_bytes": 12541952,
+          "rchar": 305178689477,
+          "read_bytes": 305116856320
+        },
+        "probe": {
+          "cpu_seconds": 185.14,
+          "peak_rss_bytes": 8044544,
+          "rchar": 468433871666,
+          "read_bytes": 430531108864
+        }
+      }
+    },
+    {
+      "complete_seconds": 179.395,
+      "corpus_unchanged": true,
+      "evicted": true,
+      "evidence": {
+        "hash_set_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "observations": 0,
+        "other_source": 0,
+        "recomputed_without_source": 0,
+        "reused": 0,
+        "unmatched": 0,
+        "with_evidence": 0
+      },
+      "first_durable_observation_seconds": "unavailable",
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 2836770
+      },
+      "index": 3,
+      "resident_bytes_before": {
+        "f0001": 0,
+        "f0002": 0,
+        "f0003": 0,
+        "f0004": 0,
+        "f0005": 0,
+        "f0006": 0,
+        "f0007": 0,
+        "f0008": 0,
+        "f0009": 0,
+        "f0010": 0,
+        "f0011": 0,
+        "f0012": 0,
+        "f0013": 0,
+        "f0014": 0,
+        "f0015": 0,
+        "f0016": 0,
+        "f0017": 0,
+        "f0018": 0,
+        "f0019": 0,
+        "f0020": 0,
+        "f0021": 0,
+        "f0022": 0,
+        "f0023": 0,
+        "f0024": 0,
+        "f0025": 0,
+        "f0026": 0,
+        "f0027": 0,
+        "f0028": 0,
+        "f0029": 0,
+        "f0030": 0,
+        "f0031": 0,
+        "f0032": 0,
+        "f0033": 0,
+        "f0034": 0
+      },
+      "session_status": [
+        "failed"
+      ],
+      "worker_restarted": false,
+      "workers": {
+        "hash": {
+          "cpu_seconds": 50.64,
+          "peak_rss_bytes": 14458880,
+          "rchar": 305453416390,
+          "read_bytes": 305393680384
+        },
+        "probe": {
+          "cpu_seconds": 186.32,
+          "peak_rss_bytes": 7847936,
+          "rchar": 468334256953,
+          "read_bytes": 430432817152
+        }
+      }
+    }
+  ],
+  "schema": "media-evidence-rollout-scan/1"
+}
