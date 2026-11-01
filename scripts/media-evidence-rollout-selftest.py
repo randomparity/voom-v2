@@ -462,7 +462,7 @@ class RecordTests(unittest.TestCase):
 
     def test_a_host_path_is_refused(self):
         record = self.scan_record()
-        record["corpus"]["label"] = "/home/someone/media"
+        record["corpus"]["label"] = "share/Users/someone/media"
         self.assertIn("host path", rollout.validate_scan(record))
 
     def test_any_absolute_path_is_refused(self):

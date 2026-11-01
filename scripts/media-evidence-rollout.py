@@ -452,7 +452,7 @@ def validate_scan(record: dict[str, Any]) -> list[str]:
 
 def host_path_problems(record: dict[str, Any]) -> list[str]:
     text = json.dumps(record)
-    return ["host path"] if re.search(r'"/|\\\\|/home/|/Users/|/mnt/', text) else []
+    return ["host path"] if re.search(r'"/|\\\\|/(home|Users|mnt)/', text) else []
 
 
 def scan_metrics(record: dict[str, Any], repetition: dict[str, Any]) -> dict[str, Any]:
