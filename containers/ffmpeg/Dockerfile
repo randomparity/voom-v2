@@ -12,21 +12,15 @@ RUN rm /etc/apt/sources.list.d/debian.sources && \
 FROM packages AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential=12.12 nasm=2.16.03-1 pkgconf=1.8.1-4 patch=2.8-2 \
-    gnupg=2.4.7-21+deb13u1 curl=8.14.1-2+deb13u7 xz-utils=5.8.1-1+deb13u2 \
+    gnupg=2.4.7-21+deb13u1 xz-utils=5.8.1-1+deb13u2 \
     libx264-dev=2:0.164.3108+git31e19f9-2+b1 libx265-dev=4.1-2 \
     libsvtav1enc-dev=2.3.0+dfsg-1 libopus-dev=1.5.2-2 \
     libaom-dev=3.12.1-1+deb13u1 zlib1g-dev=1:1.3.dfsg+really1.3.1-1+b1
 WORKDIR /build
 COPY pcm-wavex.patch Dockerfile source-sha256 ./
 COPY sources/ ./source-inputs/
-RUN if [ -f source-inputs/ffmpeg-9.0.2.tar.xz ]; then \
-        cp source-inputs/ffmpeg-9.0.2.tar.xz source-inputs/ffmpeg-9.0.2.tar.xz.asc \
-           source-inputs/ffmpeg-devel.asc .; \
-    else \
-        curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz && \
-        curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc && \
-        curl --fail --location --retry 3 --max-time 120 -O https://ffmpeg.org/ffmpeg-devel.asc; \
-    fi && \
+RUN cp source-inputs/ffmpeg-9.0.2.tar.xz source-inputs/ffmpeg-9.0.2.tar.xz.asc \
+        source-inputs/ffmpeg-devel.asc . && \
     sha256sum --check source-sha256 && \
     mkdir -m 700 /build/gnupg && \
     gpg --homedir /build/gnupg --batch --import ffmpeg-devel.asc 2> key-import.log && \
