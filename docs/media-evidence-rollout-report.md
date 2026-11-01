@@ -32,7 +32,7 @@ turn it on is the operator's decision.**
 
 **Ordering rule.** The stage-0 cell precedes its paired setting-on cell per scan
 configuration, and worker-level constructions are not scan cells (operator-approved
-2026-10-30). Each off/on pair below ran on one build, with a fresh control-plane store and
+2026-10-30). Each stage-0/setting-on pair below ran on one build, with a fresh control-plane store and
 an evicted cache for every repetition.
 
 **Builds.** Every cell keeps the build it ran on. Stage-0/setting-on pairs never mix builds.

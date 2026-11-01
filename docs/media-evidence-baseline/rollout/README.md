@@ -17,7 +17,7 @@ SLOs.
   with earlier records.
 
 **Builds.** Each record carries its commit and binary SHA-256s.
-- The full-local, canary, setting-on kill and G4/G5 cells, and G1, ran on release binaries
+- The full-local, 6-file scan canary, setting-on kill and G4/G5 cells, and G1, ran on binaries
   built after merging `main` at `3092e7c3`. That merge includes #821, the fix for
   [#816](https://github.com/randomparity/voom-v2/issues/816).
 - Cells marked *pre-#816* ran at `f8be728c`. #821 changes only how large a probe snapshot may
@@ -119,11 +119,11 @@ filesystem drops below 200 GB. Neither came close.
     completed files that is convergence. The three failed files are terminal, so a resume
     does not retry them.
   - A second scan published identical hashes for all six files.
+  - None of the 14 output verification reports carries a hash source.
+  - Minimum free space during the run was 1,215 GB.
 - **Order.** The library ran before the canary, as the orchestrator's go-ahead specified;
   the frozen G9 text lists the canary first. The remux-only canary below ran first, on the
   earlier build.
-  - None of the 14 output verification reports carries a hash source.
-  - Minimum free space during the run was 1,215 GB.
 
 ## CLI-driven gates
 
