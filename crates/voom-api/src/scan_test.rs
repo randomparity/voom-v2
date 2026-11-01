@@ -90,6 +90,10 @@ impl ScanApiFixture {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(AUTHORIZATION, format!("Bearer {token}"))
                     .header("content-type", "application/json")
                     .header("x-voom-idempotency-key", key)
@@ -106,6 +110,10 @@ impl ScanApiFixture {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(AUTHORIZATION, format!("Bearer {}", self.token))
                     .header("content-type", "application/json")
                     .header("x-voom-idempotency-key", key)
@@ -126,6 +134,10 @@ impl ScanApiFixture {
             .clone()
             .oneshot(
                 Request::get(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -160,6 +172,10 @@ async fn scan_session_routes_are_registered_at_the_approved_paths() {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .method(method)
                     .uri(path)
                     .body(Body::empty())
@@ -192,6 +208,10 @@ async fn scan_routes_reject_credentials_before_revealing_unknown_session_ids() {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .method(method)
                     .uri(path)
                     .body(Body::empty())
@@ -228,6 +248,10 @@ async fn scan_mutations_require_idempotency_but_inspection_does_not() {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(AUTHORIZATION, "Bearer syntactically-valid")
                     .body(Body::empty())
                     .unwrap(),
@@ -250,6 +274,10 @@ async fn scan_mutations_require_idempotency_but_inspection_does_not() {
             .clone()
             .oneshot(
                 Request::get(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(AUTHORIZATION, "Bearer syntactically-valid")
                     .body(Body::empty())
                     .unwrap(),
@@ -898,6 +926,10 @@ async fn scan_mutations_share_the_one_mib_server_body_boundary() {
                     "/v1/scan/node/{}/session/{}/{suffix}",
                     fixture.node_id.0, session.id.0
                 ))
+                .header(
+                    "x-voom-protocol-version",
+                    voom_core::PROTOCOL_VERSION.to_string(),
+                )
                 .header(AUTHORIZATION, format!("Bearer {}", fixture.token))
                 .header("content-type", "application/json")
                 .header("x-voom-idempotency-key", format!("oversized-scan-{index}"))
@@ -930,6 +962,10 @@ async fn scan_route_body_processing_uses_the_shared_request_deadline_envelope() 
                 "/v1/scan/node/{}/session/{}/start",
                 fixture.node_id.0, session.id.0
             ))
+            .header(
+                "x-voom-protocol-version",
+                voom_core::PROTOCOL_VERSION.to_string(),
+            )
             .header(AUTHORIZATION, format!("Bearer {}", fixture.token))
             .header("content-type", "application/json")
             .header("x-voom-idempotency-key", "pending-scan")
@@ -1256,6 +1292,10 @@ async fn request_route_case(
 ) -> Response<Body> {
     let path = case.path.replace("{node_id}", &node_id.0.to_string());
     let mut request = Request::builder()
+        .header(
+            "x-voom-protocol-version",
+            voom_core::PROTOCOL_VERSION.to_string(),
+        )
         .method(&case.method)
         .uri(path)
         .header(AUTHORIZATION, format!("Bearer {token}"));

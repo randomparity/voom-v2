@@ -13,7 +13,7 @@ use voom_core::{ArtifactAccessMode, ErrorCode, NodeId, OperationKind, VoomError}
 
 use super::{
     ControlPlaneClient, DEFAULT_MAXIMUM_ATTEMPTS, INITIAL_RETRY_DELAY, MAX_RETRY_DELAY,
-    RetryBackoff, RetryRequest, RetrySettings,
+    PROTOCOL_VERSION_HEADER, RetryBackoff, RetryRequest, RetrySettings,
 };
 use crate::config::{AgentConfig, LoadedAgentConfig, TokenSource, WorkerConfig};
 
@@ -26,6 +26,8 @@ struct TestBody {
 struct TestResponse {
     accepted: bool,
 }
+
+const SUCCESS_BODY: &str = r#"{"schema_version":"0","command":"test","status":"ok","data":{"accepted":true},"warnings":[],"error":null}"#;
 
 /// How long `RawResponse::Timeout` withholds a response so the client's request timeout fires.
 const SERVER_STALL: Duration = Duration::from_millis(400);
@@ -234,6 +236,100 @@ async fn other_client_errors_are_terminal() {
     server.join().unwrap();
 }
 
+fn protocol_test_request() -> RetryRequest<TestBody> {
+    RetryRequest::new(
+        "protocol-key".to_owned(),
+        &TestBody {
+            incarnation_id: "0123456789abcdef0123456789abcdef",
+        },
+    )
+    .unwrap()
+}
+
+/// ADR 0123: the control plane refuses a request that does not name this build's version.
+#[tokio::test]
+async fn requests_offer_the_agent_protocol_version() {
+    let (address, received, server) = raw_server([RawResponse::Success]);
+    let client = test_client(address, Some(1), Duration::ZERO, REQUEST_TIMEOUT);
+
+    let response: TestResponse = client
+        .send("/test", &protocol_test_request())
+        .await
+        .unwrap();
+
+    assert_eq!(response, TestResponse { accepted: true });
+    let attempt = received.recv().unwrap();
+    assert_eq!(
+        attempt.protocol_version,
+        Some(voom_core::PROTOCOL_VERSION.to_string())
+    );
+    server.join().unwrap();
+}
+
+/// ADR 0123: an answer from a control plane on another protocol version (or one that predates
+/// the header) is refused before its body is used, and never retried: a lease must not follow.
+#[tokio::test]
+async fn skewed_success_is_refused_without_retry() {
+    for response in [
+        RawResponse::SuccessWithVersion(Some(voom_core::PROTOCOL_VERSION + 1)),
+        RawResponse::SuccessWithVersion(Some(voom_core::PROTOCOL_VERSION - 1)),
+        RawResponse::SuccessWithVersion(None),
+        RawResponse::SuccessMalformedVersion,
+    ] {
+        let (address, received, server) = raw_server([response]);
+        let client = test_client(address, None, Duration::ZERO, REQUEST_TIMEOUT);
+
+        let error = client
+            .send::<TestResponse, _>("/test", &protocol_test_request())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+        assert!(error.to_string().contains("(ADR 0123)"), "{error}");
+        assert_eq!(received.iter().count(), 1);
+        server.join().unwrap();
+    }
+}
+
+/// The control plane's protocol refusal is terminal even when retries are unbounded: a
+/// skewed agent must stop, not retry activation forever.
+#[tokio::test]
+async fn protocol_refusal_is_terminal() {
+    let (address, received, server) = raw_server([RawResponse::ProtocolRefusal]);
+    let client = test_client(address, None, Duration::ZERO, REQUEST_TIMEOUT);
+
+    let error = client
+        .send::<TestResponse, _>("/test", &protocol_test_request())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        error.to_string().contains(&format!(
+            "offered={}, expected {}",
+            voom_core::PROTOCOL_VERSION + 1,
+            voom_core::PROTOCOL_VERSION
+        )),
+        "{error}"
+    );
+    assert_eq!(received.iter().count(), 1);
+    server.join().unwrap();
+}
+
+/// Error answers are not version-checked: outer layers and proxies may produce them
+/// without the header, and they never lead to execution.
+#[tokio::test]
+async fn error_answers_are_not_version_checked() {
+    let (address, _received, server) = raw_server([RawResponse::BadRequest]);
+    let client = test_client(address, Some(1), Duration::ZERO, REQUEST_TIMEOUT);
+    let error = client
+        .send::<TestResponse, _>("/test", &protocol_test_request())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Config(ref message) if message == "bad input"));
+    server.join().unwrap();
+}
+
 #[tokio::test]
 async fn success_envelopes_are_strict_and_bounded() {
     for response in [RawResponse::UnknownEnvelope, RawResponse::Oversized] {
@@ -324,6 +420,11 @@ enum RawResponse {
     BadRequest,
     UnknownEnvelope,
     Oversized,
+    /// A success whose protocol header is this version, or absent for `None`.
+    SuccessWithVersion(Option<u32>),
+    SuccessMalformedVersion,
+    /// The control plane's 400 refusal of a request from another protocol version.
+    ProtocolRefusal,
 }
 
 #[derive(Debug)]
@@ -331,6 +432,7 @@ struct CapturedRequest {
     path: String,
     idempotency_key: String,
     authorization: String,
+    protocol_version: Option<String>,
     body: Vec<u8>,
 }
 
@@ -363,15 +465,13 @@ fn raw_server<const N: usize>(
                     RawResponse::Status(status) => write_response(&mut stream, status, "{}"),
                     RawResponse::Timeout => thread::sleep(SERVER_STALL),
                     RawResponse::Disconnect => {}
-                    RawResponse::Success => write_response(
-                        &mut stream,
-                        200,
-                        r#"{"schema_version":"0","command":"test","status":"ok","data":{"accepted":true},"warnings":[],"error":null}"#,
-                    ),
-                    RawResponse::BadRequest => write_response(
+                    RawResponse::Success => write_response(&mut stream, 200, SUCCESS_BODY),
+                    // Unstamped, as an outer layer or proxy may answer.
+                    RawResponse::BadRequest => write_response_with_version(
                         &mut stream,
                         400,
                         r#"{"schema_version":"0","command":"test","status":"error","data":null,"warnings":[],"error":{"code":"BAD_ARGS","message":"bad input"}}"#,
+                        None,
                     ),
                     RawResponse::UnknownEnvelope => write_response(
                         &mut stream,
@@ -380,8 +480,29 @@ fn raw_server<const N: usize>(
                     ),
                     RawResponse::Oversized => {
                         let _ = stream.write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n",
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{PROTOCOL_VERSION_HEADER}: {}\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n",
+                                voom_core::PROTOCOL_VERSION
+                            )
+                            .as_bytes(),
                         );
+                    }
+                    RawResponse::SuccessWithVersion(version) => write_response_with_version(
+                        &mut stream,
+                        200,
+                        SUCCESS_BODY,
+                        version.map(|version| version.to_string()).as_deref(),
+                    ),
+                    RawResponse::SuccessMalformedVersion => {
+                        write_response_with_version(&mut stream, 200, SUCCESS_BODY, Some("x"));
+                    }
+                    RawResponse::ProtocolRefusal => {
+                        let expected = voom_core::PROTOCOL_VERSION;
+                        let offered = expected + 1;
+                        let body = format!(
+                            r#"{{"schema_version":"0","command":"api.request","status":"error","data":null,"warnings":[],"error":{{"code":"BAD_ARGS","message":"unsupported protocol version: offered={offered}, expected {expected}","hint":"mixed protocol versions are refused (ADR 0123)"}}}}"#
+                        );
+                        write_response(&mut stream, 400, &body);
                     }
                 }
             }));
@@ -424,23 +545,42 @@ fn read_request(stream: &mut TcpStream) -> CapturedRequest {
             .to_owned(),
         idempotency_key: header_value(&headers, "x-voom-idempotency-key").to_owned(),
         authorization: header_value(&headers, "authorization").to_owned(),
+        protocol_version: optional_header_value(&headers, PROTOCOL_VERSION_HEADER)
+            .map(str::to_owned),
         body: bytes[header_end..header_end + content_length].to_vec(),
     }
 }
 
 fn header_value<'a>(headers: &'a str, name: &str) -> &'a str {
+    optional_header_value(headers, name).unwrap()
+}
+
+fn optional_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
     headers
         .lines()
         .filter_map(|line| line.split_once(':'))
         .find(|(header, _)| header.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.trim())
-        .unwrap()
 }
 
+/// Answer as a control plane on this build's protocol version.
 fn write_response(stream: &mut TcpStream, status: u16, body: &str) {
+    let version = voom_core::PROTOCOL_VERSION.to_string();
+    write_response_with_version(stream, status, body, Some(&version));
+}
+
+fn write_response_with_version(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &str,
+    version: Option<&str>,
+) {
     let reason = if status == 200 { "OK" } else { "Error" };
+    let version_header = version
+        .map(|version| format!("{PROTOCOL_VERSION_HEADER}: {version}\r\n"))
+        .unwrap_or_default();
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{version_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());

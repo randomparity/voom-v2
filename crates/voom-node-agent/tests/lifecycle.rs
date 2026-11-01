@@ -122,7 +122,7 @@ fn init_tracing() {
 async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
     init_tracing();
     assert_current_agent_version();
-    let fixture = LiveFixture::start(None).await;
+    let fixture = LiveFixture::start(None, None).await;
     let echo_worker = echo_worker_binary();
     let config = fixture.agent_config(echo_worker.clone());
 
@@ -204,7 +204,7 @@ async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
 #[tokio::test]
 async fn delayed_acquire_replay_never_dispatches() {
     let delay = Arc::new(DelayedAcquire::default());
-    let fixture = LiveFixture::start(Some(delay.clone())).await;
+    let fixture = LiveFixture::start(Some(delay.clone()), None).await;
     let config = fixture.agent_config(echo_worker_binary());
     let ticket_id = fixture.ready_probe_ticket().await;
     let (stop, shutdown) = oneshot::channel();
@@ -243,6 +243,38 @@ async fn delayed_acquire_replay_never_dispatches() {
     assert_eq!(ticket.state, TicketState::Ready);
     assert_eq!(delay.complete_count.load(Ordering::SeqCst), 0);
     assert_eq!(delay.fail_count.load(Ordering::SeqCst), 0);
+    fixture.shutdown().await;
+}
+
+/// ADR 0120 gate G7 / ADR 0123: an agent facing a control plane on an older protocol version
+/// stops at activation and never takes a lease. The asserted text is the agent's own refusal,
+/// so the test fails if only the agent-side response check is removed.
+#[tokio::test]
+async fn agent_refuses_an_older_control_plane_before_any_lease() {
+    let fixture = LiveFixture::start(None, Some(voom_core::PROTOCOL_VERSION - 1)).await;
+    let ticket_id = fixture.ready_probe_ticket().await;
+    let config = fixture.agent_config(echo_worker_binary());
+
+    let result = tokio::time::timeout(
+        HANG_GUARD,
+        AgentRuntime::new(config)
+            .unwrap()
+            .run_until(std::future::pending()),
+    )
+    .await
+    .expect("agent did not stop after refusing the control plane");
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("this node agent speaks protocol"), "{error}");
+    let paths = fixture.requests.lock().await.clone();
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path == "/v1/execution/lease/acquire"),
+        "{paths:?}"
+    );
+    let ticket = fixture.cp.tickets().get(ticket_id).await.unwrap().unwrap();
+    assert_eq!(ticket.state, TicketState::Ready);
     fixture.shutdown().await;
 }
 
@@ -300,7 +332,9 @@ struct LiveFixture {
 }
 
 impl LiveFixture {
-    async fn start(delay: Option<Arc<DelayedAcquire>>) -> Self {
+    /// `response_version` replaces the protocol version the control plane stamps on its
+    /// answers, standing in for a control plane from another release (ADR 0123).
+    async fn start(delay: Option<Arc<DelayedAcquire>>, response_version: Option<u32>) -> Self {
         // Every test that starts a live fixture drives the BEGIN IMMEDIATE openers
         // and can therefore orphan one, so the subscriber is installed here rather
         // than in a single test. Installed from one test only, it would miss any
@@ -324,6 +358,12 @@ impl LiveFixture {
         let mut app = router_with_control_plane(health, cp.clone());
         if let Some(delay) = delay {
             app = app.layer(middleware::from_fn_with_state(delay, delay_acquire));
+        }
+        if let Some(version) = response_version {
+            app = app.layer(middleware::from_fn_with_state(
+                version,
+                rewrite_protocol_version,
+            ));
         }
         let requests = Arc::new(Mutex::new(Vec::new()));
         app = app.layer(middleware::from_fn_with_state(
@@ -470,6 +510,10 @@ async fn delay_acquire(
         delay.replay_acquire_started.notify_one();
         return (
             StatusCode::OK,
+            [(
+                "x-voom-protocol-version",
+                voom_core::PROTOCOL_VERSION.to_string(),
+            )],
             axum::Json(json!({
                 "schema_version": "0",
                 "command": "execution.acquire",
@@ -488,6 +532,18 @@ async fn delay_acquire(
     let response = next.run(request).await;
     delay.first_response_committed.notify_one();
     delay.release_response.notified().await;
+    response
+}
+
+async fn rewrite_protocol_version(
+    State(version): State<u32>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert("x-voom-protocol-version", version.into());
     response
 }
 

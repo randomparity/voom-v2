@@ -103,7 +103,12 @@ impl CommitApiFixture {
         key: Option<&str>,
         body: &str,
     ) -> Response<Body> {
-        let mut builder = Request::post(path).header(CONTENT_TYPE, "application/json");
+        let mut builder = Request::post(path)
+            .header(
+                "x-voom-protocol-version",
+                voom_core::PROTOCOL_VERSION.to_string(),
+            )
+            .header(CONTENT_TYPE, "application/json");
         if let Some(token) = token {
             builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
         }
@@ -299,6 +304,10 @@ async fn commit_intent_routes_are_registered_at_the_approved_paths() {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from("{}"))
                     .unwrap(),
@@ -352,6 +361,10 @@ async fn commit_intent_routes_report_not_configured_without_a_control_plane() {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(CONTENT_TYPE, "application/json")
                     .header(AUTHORIZATION, "Bearer syntactically-valid")
                     .header("x-voom-idempotency-key", "not-configured-key")

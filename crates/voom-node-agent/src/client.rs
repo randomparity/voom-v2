@@ -23,6 +23,7 @@ const RESPONSE_LIMIT_BYTES: usize = 1024 * 1024;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const DEFAULT_MAXIMUM_ATTEMPTS: usize = 5;
+const PROTOCOL_VERSION_HEADER: &str = "x-voom-protocol-version";
 
 /// How long one HTTP attempt against the control plane may take before the
 /// client abandons it.
@@ -264,6 +265,10 @@ impl ControlPlaneClient {
             .http
             .post(url)
             .bearer_auth(self.node_token.expose_secret())
+            .header(
+                PROTOCOL_VERSION_HEADER,
+                voom_core::PROTOCOL_VERSION.to_string(),
+            )
             .header("X-Voom-Idempotency-Key", request.idempotency_key())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(request.body().to_vec())
@@ -292,6 +297,11 @@ impl ControlPlaneClient {
             || status.is_server_error()
         {
             return AttemptResult::Retry(retry_status_error(status));
+        }
+        if status.is_success()
+            && let Err(error) = check_protocol_version(response.headers())
+        {
+            return AttemptResult::Complete(Err(error));
         }
         let body = match read_bounded_body(&mut response).await {
             Ok(body) => body,
@@ -583,6 +593,31 @@ async fn read_bounded_body(response: &mut reqwest::Response) -> Result<Vec<u8>, 
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// Refuse a control-plane answer from another protocol version (ADR 0123).
+fn check_protocol_version(headers: &reqwest::header::HeaderMap) -> Result<(), VoomError> {
+    let expected = voom_core::PROTOCOL_VERSION;
+    let Some(raw) = headers.get(PROTOCOL_VERSION_HEADER) else {
+        return Err(VoomError::Config(format!(
+            "control-plane response omitted {PROTOCOL_VERSION_HEADER}; this node agent speaks \
+             protocol {expected} and refuses a control plane from another release (ADR 0123)"
+        )));
+    };
+    match raw
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        Some(offered) if offered == expected => Ok(()),
+        Some(offered) => Err(VoomError::Config(format!(
+            "control plane speaks protocol {offered}; this node agent speaks protocol \
+             {expected} (ADR 0123)"
+        ))),
+        None => Err(VoomError::Config(format!(
+            "control-plane response carried a malformed {PROTOCOL_VERSION_HEADER} (ADR 0123)"
+        ))),
+    }
 }
 
 fn validate_completion_window(body: &[u8]) -> Result<(), VoomError> {
