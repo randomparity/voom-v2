@@ -122,7 +122,24 @@ fixes merge; see the [report](../../media-evidence-rollout-report.md).
   | protocol-5 control plane, protocol-6 agent, setting off | leased, scanned, published |
   | protocol-5 control plane, protocol-6 agent, setting on | leased; first batch rejected (`unknown field hash_source`); session failed, nothing published |
 
-  Tracked as [#817](https://github.com/randomparity/voom-v2/issues/817).
+  These results led to [#817](https://github.com/randomparity/voom-v2/issues/817), fixed by
+  #822 (ADR 0123).
+
+- **G7 mixed versions, rerun on `0d685231` (#817 fixed).** Release binaries from three builds
+  were paired in `acceptance-bootstrap.py smoke`. The builds were `0d685231`, `3092e7c3`
+  (protocol 6 without ADR 0123) and `4a1b37fa` (protocol 5):
+
+  | Pairing | Outcome |
+  |---|---|
+  | all `0d685231` (control) | activated, scanned, published; 1 lease |
+  | `0d685231` control plane, protocol-5 agent and workers | refused at activation (control plane speaks protocol 6); 0 leases, 0 tickets |
+  | protocol-5 control plane, `0d685231` agent | agent refuses the control plane's answer at activation; 0 leases, 0 tickets |
+  | `0d685231` control plane, `3092e7c3` agent | refused at activation; 0 leases, 0 tickets |
+  | `3092e7c3` control plane, `0d685231` agent | agent refuses at activation; 0 leases, 0 tickets |
+  | `0d685231` agent with a protocol-5 hash worker, or probe worker | refused at agent startup (worker handshake); 0 leases, 0 tickets |
+
+  A `3092e7c3` build is refused although it speaks protocol 6. That is ADR 0123's intended
+  flag day.
 
 ## Timings and interference
 
