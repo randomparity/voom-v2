@@ -189,7 +189,8 @@ on, a full local pass took 224 s instead of 673 s, at 1.00× physical reads. See
 [rollout report](../media-evidence-rollout-report.md) for the per-gate evidence and the
 transcode defects found on the canary
 ([#832](https://github.com/randomparity/voom-v2/issues/832),
-[#833](https://github.com/randomparity/voom-v2/issues/833)), which do not involve reuse.
+[#833](https://github.com/randomparity/voom-v2/issues/833)). Those defects are not in the
+reuse path, but they were not reproduced with the setting off.
 Then roll it out in this order:
 
 1. Upgrade the control plane, every node agent and every bundled worker to the same

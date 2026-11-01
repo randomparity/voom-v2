@@ -1,6 +1,7 @@
 # Media evidence rollout records (#794)
 
-Captured on 2026-10-30 under the frozen [protocol](../../media-evidence-protocol.md), for the
+Captured from 2026-10-30 to 2026-11-01 under the frozen
+[protocol](../../media-evidence-protocol.md), for the
 [rollout gates](../../media-evidence-decision-report.md#rollout-gates) of ADR 0120. The
 verdicts and the recommendation are in the
 [rollout report](../../media-evidence-rollout-report.md). These are measurements of one host,
@@ -21,6 +22,8 @@ SLOs.
   [#816](https://github.com/randomparity/voom-v2/issues/816).
 - Cells marked *pre-#816* ran at `f8be728c`. #821 changes only how large a probe snapshot may
   grow, so those cells' scan, guard and transform behavior is the same.
+- G7's mixed-version rerun ran on `0d685231` (#822, the fix for #817). G9 ran on `437ee1f6`
+  (#826 and #828, the fixes for #819 and #820).
 
 ## Instruments
 
@@ -112,12 +115,17 @@ filesystem drops below 200 GB. Neither came close.
   - `f0022` and `f0025` failed at `audio_transcode`, on `selected audio channel count
     mismatch` and `selected audio title mismatch`. Both carry 7.1 TrueHD tracks
     ([#832](https://github.com/randomparity/voom-v2/issues/832)).
-  - The re-apply dispatched 0 tickets.
+  - The re-apply (`compliance execute --resume-job-id`) dispatched 0 tickets. For the three
+    completed files that is convergence. The three failed files are terminal, so a resume
+    does not retry them.
   - A second scan published identical hashes for all six files.
+- **Order.** The library ran before the canary, as the orchestrator's go-ahead specified;
+  the frozen G9 text lists the canary first. The remux-only canary below ran first, on the
+  earlier build.
   - None of the 14 output verification reports carries a hash source.
   - Minimum free space during the run was 1,215 GB.
 
-## CLI-driven gates *(pre-#816 build)*
+## CLI-driven gates
 
 The G9 canary below is superseded by the run above. It used a remux-only policy before the
 #819 and #820 fixes.
@@ -186,7 +194,7 @@ later, on a generated fixture without touching either corpus.
 | Pre-#816 stage-0 | 09:04–09:08 and 10:28–10:37 |
 | Pre-#816 canary and kill cells | 10:14–10:25 and 10:38–12:04 |
 | Pre-#816 G4/G5 | 10:41–10:56 |
-| G6 and G9 | 10:57–11:50 |
+| G6 and the superseded G9 canary | 10:57–11:50 |
 | #816-fixed full-local, canary, kill, G4 and G5 cells | 12:19–13:34 |
 | G1 rerun | 13:34–14:42 |
 | G9 complete library (2026-11-01, UTC−5) | 11:58–12:26 |
