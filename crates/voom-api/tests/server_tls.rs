@@ -235,10 +235,12 @@ async fn invalid_bearer_keeps_existing_generic_401_without_token_leak() -> TestR
     .to_string();
     let request = format!(
         "POST /v1/execution/node/{}/heartbeat HTTP/1.1\r\nHost: localhost\r\n\
+         X-Voom-Protocol-Version: {protocol}\r\n\
          Authorization: Bearer {sentinel}\r\nContent-Type: application/json\r\n\
          X-Voom-Idempotency-Key: tls-invalid-token\r\nContent-Length: {}\r\n\r\n{request_body}",
         registered.node.id.0,
-        request_body.len()
+        request_body.len(),
+        protocol = voom_core::PROTOCOL_VERSION,
     );
     let (response, _) = tls_request(server.local_addr(), client, request.as_bytes()).await?;
     let response = String::from_utf8(response)?;
@@ -295,11 +297,13 @@ async fn valid_bearer_commits_heartbeat_through_real_tls() -> TestResult {
     let request_body = json!({"incarnation_id": incarnation_id}).to_string();
     let request = format!(
         "POST /v1/execution/node/{}/heartbeat HTTP/1.1\r\nHost: localhost\r\n\
+         X-Voom-Protocol-Version: {protocol}\r\n\
          Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
          X-Voom-Idempotency-Key: tls-valid-heartbeat\r\nContent-Length: {}\r\n\r\n{request_body}",
         registered.node.id.0,
         registered.token.expose_secret(),
-        request_body.len()
+        request_body.len(),
+        protocol = voom_core::PROTOCOL_VERSION,
     );
     let (response, _) = tls_request(server.local_addr(), client, request.as_bytes()).await?;
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
@@ -338,12 +342,14 @@ async fn chunked_oversized_execution_json_uses_exact_413_envelope() -> TestResul
     let oversized = vec![b'x'; 1024 * 1024 + 1];
     let mut request = format!(
         "POST /v1/execution/node/{}/heartbeat HTTP/1.1\r\nHost: localhost\r\n\
+         X-Voom-Protocol-Version: {protocol}\r\n\
          Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
          X-Voom-Idempotency-Key: tls-chunked-oversized\r\n\
          Transfer-Encoding: chunked\r\n\r\n{:x}\r\n",
         registered.node.id.0,
         registered.token.expose_secret(),
-        oversized.len()
+        oversized.len(),
+        protocol = voom_core::PROTOCOL_VERSION,
     )
     .into_bytes();
     request.extend_from_slice(&oversized);
