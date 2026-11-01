@@ -172,7 +172,7 @@ with the exact FFmpeg build. No host codec/compiler installation is necessary.
 
 Pinned inputs:
 
-- FFmpeg 9.0.2 archive: `https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz`, SHA256
+- FFmpeg 9.0.2 archive: `ffmpeg-9.0.2.tar.xz` (URLs in `containers/ffmpeg/source-urls`), SHA256
   `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e`.
 - Detached signature SHA256:
   `d617fd94ea354dadd2a8bb16243d37c44e1e9729b06b6ad58fe30bfb0fa943f2`.
@@ -491,7 +491,9 @@ The same decision record authorizes an optional directory containing exactly the
 three pinned FFmpeg source/signature/key files when a build host cannot reach the
 official endpoint. The build script rejects missing, extra, symlinked or
 wrong-digest inputs before engine access; the unchanged digest, signature and
-fingerprint checks run again inside the builder before extraction. The single
-Dockerfile supports both online and prefetched transport. No arbitrary URL,
+fingerprint checks run again inside the builder before extraction. Without that
+directory, the host fetches the files from the reviewed `source-urls` list and
+keeps only digest-matching bytes (#814); the Dockerfile itself never downloads
+them, and CI caches the verified directory. No arbitrary URL,
 version, signing-key or patch override is introduced, and downloads stay outside
 Git. Native architecture and final image provenance requirements are unchanged.
