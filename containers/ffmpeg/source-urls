@@ -1,0 +1,6 @@
+ffmpeg-9.0.2.tar.xz https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/f/ffmpeg/ffmpeg_9.0.2.orig.tar.xz
+ffmpeg-9.0.2.tar.xz https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+ffmpeg-9.0.2.tar.xz.asc https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/f/ffmpeg/ffmpeg_9.0.2.orig.tar.xz.asc
+ffmpeg-9.0.2.tar.xz.asc https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc
+ffmpeg-devel.asc https://ffmpeg.org/ffmpeg-devel.asc
+ffmpeg-devel.asc https://web.archive.org/web/20260902212154id_/https://ffmpeg.org/ffmpeg-devel.asc
