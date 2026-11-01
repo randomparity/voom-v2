@@ -145,9 +145,27 @@ jobs:
           no-project: true
       - name: Verify acceptance Python
         run: python3 -c 'import sys; assert sys.version_info >= (3, 13), sys.version'
+      # The cache and every mirror are untrusted transport: container-sources keeps only
+      # files matching source-sha256, and the builder re-verifies digests and signature.
+      - name: Restore pinned FFmpeg sources
+        id: ffmpeg-sources
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ffmpeg-sources
+          key: ffmpeg-sources-${{ hashFiles('containers/ffmpeg/source-sha256') }}
+      - name: Fetch or verify pinned FFmpeg sources
+        run: |
+          mkdir -p "$RUNNER_TEMP/ffmpeg-sources"
+          just container-sources "$RUNNER_TEMP/ffmpeg-sources"
+      - name: Save pinned FFmpeg sources
+        if: steps.ffmpeg-sources.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ffmpeg-sources
+          key: ffmpeg-sources-${{ hashFiles('containers/ffmpeg/source-sha256') }}
       - name: Build pinned native image
         run: |
-          image=$(just container-build docker)
+          image=$(just container-build docker "$RUNNER_TEMP/ffmpeg-sources")
           printf 'PCM_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Verify PCM headers, samples, remux and software profile
         run: just container-check docker "$PCM_IMAGE"

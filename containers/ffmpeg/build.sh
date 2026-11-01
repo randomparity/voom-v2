@@ -38,6 +38,8 @@ cp "$recipe/Dockerfile" "$recipe/pcm-wavex.patch" "$recipe/source-sha256" \
 mkdir "$context/sources"
 if [[ -n $source_dir ]]; then
     cp "${inputs[@]}" "$context/sources/"
+else
+    "$recipe/fetch-sources.sh" "$context/sources"
 fi
 "$engine" build --platform "$platform" --iidfile "$context/image-id" \
     --tag voom-ffmpeg:9.0.2-pcm-wavex "$context" >&2
