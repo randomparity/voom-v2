@@ -58,6 +58,7 @@ Dockerfile, ~25 workflow, ~5 justfile, ~45 tests, ~20 docs.
    `just container-sources`, save on `cache-hit != 'true'`, build with the directory.
 3. Fetch the real inputs locally with `just container-sources` while ffmpeg.org is down and run
    `just container-build docker` once without SOURCES (proves the context path end to end).
-4. Update README and the PCM spec's pinned-input bullet. Run actionlint, zizmor, `just ci`.
-   Commit, push. Record the first `pcm-container` run (cache miss): its URL, and the URL that
-   served each file. That run, not a later cache-hit run, is the criterion 1 evidence.
+4. Update README (host needs `curl` and `sha256sum`/`shasum`) and every PCM-spec passage on
+   input transport (the pinned-archive bullet and the online/prefetched transport paragraph).
+   Run actionlint, zizmor, `just ci`. Commit, push. Record the first `pcm-container` run
+   (cache miss): its URL, whether ffmpeg.org was reachable, and the URL that served each file. That run, not a later cache-hit run, is the criterion 1 evidence.
