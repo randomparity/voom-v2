@@ -47,6 +47,10 @@ impl Fixture {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(AUTHORIZATION, format!("Bearer {}", self.token))
                     .header("content-type", "application/json")
                     .header("x-voom-idempotency-key", key)
@@ -62,6 +66,10 @@ impl Fixture {
             .clone()
             .oneshot(
                 Request::get(path)
+                    .header(
+                        "x-voom-protocol-version",
+                        voom_core::PROTOCOL_VERSION.to_string(),
+                    )
                     .header(AUTHORIZATION, format!("Bearer {}", self.token))
                     .body(Body::empty())
                     .unwrap(),
@@ -84,6 +92,10 @@ async fn router_authentication_precedes_scan_session_disclosure() {
         .clone()
         .oneshot(
             Request::post(path)
+                .header(
+                    "x-voom-protocol-version",
+                    voom_core::PROTOCOL_VERSION.to_string(),
+                )
                 .header("content-type", "application/json")
                 .header("x-voom-idempotency-key", "unauthorized-charter")
                 .body(Body::from(

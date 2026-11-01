@@ -356,6 +356,19 @@ Do not run old binaries against the migrated database. Rollback is paired: stop 
 processes, restore both the prior binaries and the pre-upgrade database backup, then start
 the prior deployment. Restoring only one side is unsupported.
 
+The control plane and node agents also refuse each other across a protocol version
+([ADR 0123](../adr/0123-control-plane-node-agent-protocol-match.md)). An agent newer or older
+than its control plane exits at activation, before it takes any lease, with one of these errors:
+
+- `unsupported protocol version: offered=<agent>, expected <control plane>` or
+  `missing x-voom-protocol-version` — the control plane refused the agent;
+- `control plane speaks protocol <n>; this node agent speaks protocol <m>` or
+  `control-plane response omitted x-voom-protocol-version` — the agent refused the control
+  plane.
+
+Either way, install the control plane and agent binaries from the same release. Do not retry
+the agent against the mismatched control plane.
+
 ## Current boundary
 
 This agent supplies authenticated pull execution, fencing, heartbeats, child supervision,
