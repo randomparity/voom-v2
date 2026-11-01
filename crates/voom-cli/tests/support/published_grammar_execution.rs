@@ -108,6 +108,7 @@ pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
     let execute = run.execute(version_id, input_id, &staging)?;
     assert_no_failures(&execute, "T1")?;
     assert_committed_rows(&execute, "T1")?;
+    run.assert_cover_art_has_no_flag_placement()?;
     let job_id = number(&execute["data"]["summary"]["job_id"], "T1 job id")?;
     let stored = run.ok(
         &["compliance", "report", "--job-id", &job_id.to_string()],
@@ -241,6 +242,73 @@ impl ScenarioRun {
             library: library.to_path_buf(),
             _emulator: emulator,
         })
+    }
+
+    /// #820: the owner-node emulator settles remux tickets without mkvmerge, so the
+    /// worker's refusal of attachments in flag lists cannot fire here. Assert the
+    /// dispatched selections instead: the T1 cover art (an attached-picture `video`
+    /// stream) must never be placed in a default, forced or head list.
+    fn assert_cover_art_has_no_flag_placement(&self) -> io::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let (tickets, snapshots) = runtime.block_on(async {
+            let pool = voom_store::connect(&self.url)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let tickets: Vec<String> = sqlx::query_scalar(
+                "SELECT payload FROM tickets WHERE payload ->> '$.operation' = 'remux'",
+            )
+            .fetch_all(&pool)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+            let snapshots: Vec<(i64, String)> =
+                sqlx::query_as("SELECT id, payload FROM media_snapshots")
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok::<_, io::Error>((tickets, snapshots))
+        })?;
+        require(!tickets.is_empty(), "T1 dispatched remux tickets")?;
+        for ticket in &tickets {
+            let ticket: Value = serde_json::from_str(ticket)?;
+            let rendered = &ticket["rendered_payload"];
+            let snapshot_id = rendered["remux"]["source_media_snapshot_id"].as_i64();
+            let snapshot = snapshots
+                .iter()
+                .find(|(id, _)| Some(*id) == snapshot_id)
+                .ok_or_else(|| io::Error::other(format!("remux source snapshot: {ticket}")))?;
+            let snapshot: Value = serde_json::from_str(&snapshot.1)?;
+            let cover = array(&snapshot["streams"], "T1 source streams")?
+                .iter()
+                .find(|stream| stream["filename"] == "fixture-cover.jpg")
+                .ok_or_else(|| io::Error::other("T1 source snapshot lacks the cover art"))?;
+            // The probe must record the attached-picture flag itself: the legacy
+            // tag fallback would otherwise mask a normalizer regression here.
+            require(
+                cover["disposition"]["attached_pic"] == true,
+                format!("T1 cover art lacks attached_pic: {cover}"),
+            )?;
+            let cover = cover["id"]
+                .as_str()
+                .ok_or_else(|| io::Error::other("T1 cover art lacks a stream id"))?;
+            let selection = &rendered["media_dispatch"]["selection"];
+            for list in [
+                "default_streams",
+                "clear_default_streams",
+                "head_streams",
+                "forced_streams",
+                "clear_forced_streams",
+            ] {
+                require(
+                    array(&selection[list], list)?
+                        .iter()
+                        .all(|stream| stream["snapshot_stream_id"] != cover),
+                    format!("T1 remux placed cover art in {list}: {selection}"),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Seed every media file under `library`, probing each file with the same

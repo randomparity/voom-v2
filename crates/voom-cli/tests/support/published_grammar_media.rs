@@ -230,6 +230,22 @@ fn assemble_track_policy_mkv(
     let other = scratch.join("fixture-data.bin");
     std::fs::write(&font, b"deterministic font fixture payload\n")?;
     std::fs::write(&other, b"deterministic non-font fixture payload\n")?;
+    // #820: an image attachment probes as an attached-picture `video` stream; the
+    // select phase's `remove attachment where not font` must drop it, not fail.
+    let cover = scratch.join("fixture-cover.jpg");
+    run_success(
+        ffmpeg()
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:size=32x32",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&cover),
+        "generate cover art",
+    )?;
     let tracks = [
         audio_track(&shared.english, "eng", "Main", false, false),
         video_track(video),
@@ -243,7 +259,11 @@ fn assemble_track_policy_mkv(
     assemble_mkv(
         target,
         &tracks,
-        &[(&font, "font/ttf"), (&other, "application/octet-stream")],
+        &[
+            (&font, "font/ttf"),
+            (&other, "application/octet-stream"),
+            (&cover, "image/jpeg"),
+        ],
     )
 }
 
@@ -478,7 +498,7 @@ fn validate_tracks(scenario: &ScenarioMedia) -> io::Result<()> {
             .filter_map(|item| item["content_type"].as_str())
             .collect::<Vec<_>>();
         require(
-            mime_types == ["font/ttf", "application/octet-stream"],
+            mime_types == ["font/ttf", "application/octet-stream", "image/jpeg"],
             format!("{key} attachment MIME types: {mime_types:?}"),
         )?;
     }
