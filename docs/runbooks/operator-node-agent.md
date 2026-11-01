@@ -183,18 +183,13 @@ ctime tick, or a forged ctime, can leave probe facts that describe other bytes;
 the transform input's full hash still refuses to act on such a file. Turning the
 setting off and restarting the agent is the rollback.
 
-**Keep it off for now.** On the #794 rollout, G2 and G3 passed: reuse cut a full local
-pass from 673 s to 224 s at 1.00× physical reads. The guard gates G4, G6 and G8 also
-passed, and so did G5 (ext4 through a FUSE stand-in). G7 passed once
-[#817](https://github.com/randomparity/voom-v2/issues/817) was fixed. One gate is still open:
-
-- G9 is waiting on two remux fixes
-  ([#819](https://github.com/randomparity/voom-v2/issues/819),
-  [#820](https://github.com/randomparity/voom-v2/issues/820)) before it reruns.
-
-See the [rollout report](../media-evidence-rollout-report.md). Enable the setting only
-after those issues close and G9 passes on a rerun with
-`scripts/media-evidence-rollout.py`.
+**Rollout status.** The #794 rollout gates G1–G9 pass on their stated criteria (G5's ext4
+arm used a FUSE stand-in), so enabling the setting is now the operator's decision. With reuse
+on, a full local pass took 224 s instead of 673 s, at 1.00× physical reads. See the
+[rollout report](../media-evidence-rollout-report.md) for the per-gate evidence and the
+transcode defects found on the canary
+([#832](https://github.com/randomparity/voom-v2/issues/832),
+[#833](https://github.com/randomparity/voom-v2/issues/833)), which do not involve reuse.
 Then roll it out in this order:
 
 1. Upgrade the control plane, every node agent and every bundled worker to the same

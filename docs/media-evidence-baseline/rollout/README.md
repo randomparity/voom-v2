@@ -83,10 +83,44 @@ cells do not exercise turning the setting off on a database that already holds r
 The kill timer fires on time after the scan request. The records do not show whether the
 killed worker was mid-operation at that moment.
 
+## G9 on `437ee1f6` (#819 and #820 fixed)
+
+Both runs used the stack held by `media-evidence-rollout.py serve` with the setting on. Each ran
+under the corpus lock with a watchdog that stops execution if free space on the output
+filesystem drops below 200 GB. Neither came close.
+
+- **Complete library, remux-only.**
+  - Input: the corpus root, scanned read-only.
+  - Policy: one normalize phase (`container mkv`, `keep audio where language in
+    ["eng","und"]`, `order tracks [video, audio, subtitle]`), writing into a separate output
+    root outside the corpus.
+  - The first scan reused all 34 hashes. 7 files were remuxed and 27 were already compliant,
+    with 0 failures. Execution took 20.4 min and wrote 160.4 GB of outputs.
+  - The re-apply (`compliance execute --resume-job-id`) dispatched 0 tickets.
+  - A second scan published an identical content-hash set for all 34 files.
+  - None of the 7 output verification reports carries a hash source.
+  - Minimum free space during the run was 1,367 GB.
+- **Canary, full flagship.**
+  - Input: reflink copies of the six subset files.
+  - Policy: `reference-user.voom` with its two `defaults` lines removed, an operator-accepted
+    deviation ([#827](https://github.com/randomparity/voom-v2/issues/827)). Encoding was
+    software (ffmpeg 8.1.3: libx265, eac3, aac), and execution took 80.2 min.
+  - `f0004`, `f0009` and `f0015` completed every phase through `verify`. `f0009` and `f0015`
+    were HEVC-transcoded; `f0004` was already HEVC.
+  - `f0005` was blocked at `video`, because its cover art counts as a second video stream
+    ([#833](https://github.com/randomparity/voom-v2/issues/833)).
+  - `f0022` and `f0025` failed at `audio_transcode`, on `selected audio channel count
+    mismatch` and `selected audio title mismatch`. Both carry 7.1 TrueHD tracks
+    ([#832](https://github.com/randomparity/voom-v2/issues/832)).
+  - The re-apply dispatched 0 tickets.
+  - A second scan published identical hashes for all six files.
+  - None of the 14 output verification reports carries a hash source.
+  - Minimum free space during the run was 1,215 GB.
+
 ## CLI-driven gates *(pre-#816 build)*
 
-The G9 canary below predates the operator's approved G9 scope. G9 reruns after the #819 and #820
-fixes merge; see the [report](../../media-evidence-rollout-report.md).
+The G9 canary below is superseded by the run above. It used a remux-only policy before the
+#819 and #820 fixes.
 
 - **G6 transform backstop.**
   - Setup: a stack with the setting on and one root holding a reflink copy of `f0004`. The
@@ -143,7 +177,8 @@ fixes merge; see the [report](../../media-evidence-rollout-report.md).
 
 ## Timings and interference
 
-Corpus time under the lock (local clock):
+Corpus time under the lock (2026-10-30, UTC−4, unless noted). G7's version pairings ran
+later, on a generated fixture without touching either corpus.
 
 | Work | Time |
 |---|---|
@@ -154,6 +189,8 @@ Corpus time under the lock (local clock):
 | G6 and G9 | 10:57–11:50 |
 | #816-fixed full-local, canary, kill, G4 and G5 cells | 12:19–13:34 |
 | G1 rerun | 13:34–14:42 |
+| G9 complete library (2026-11-01, UTC−5) | 11:58–12:26 |
+| G9 canary (2026-11-01, UTC−5) | 12:26–13:52 |
 
 The network corpus was touched at three times:
 - 10:26: a manifest walk and three ffprobe header reads.
@@ -191,4 +228,6 @@ counters include rehearsal traffic.
   kernel reports that filesystem as `fuse`, which is also outside the reuse list. #813's CI
   ran the guard tests' recompute arm on a native ext4 test root.
 - G9 outputs and all copies lived under an ignored scratch path and have been moved to the
-  operator's trash. Nothing was written to either corpus.
+  operator's trash. The G9 work directories totaled 530.7 GB: the library run's 320.9 GB,
+  including its staging root, and the canary run's 209.8 GB. Nothing was written to either
+  corpus, and a final listing of the local corpus matched its manifest.
