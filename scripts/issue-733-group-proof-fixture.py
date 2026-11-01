@@ -11,6 +11,7 @@ import datetime
 import http.server
 import hashlib
 import json
+import re
 import socket
 import signal
 import sqlite3
@@ -21,6 +22,16 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+
+PROTOCOL_VERSION_HEADER = "x-voom-protocol-version"
+
+
+def protocol_version():
+    """The checkout's voom_core::PROTOCOL_VERSION, which the binaries under test speak (ADR 0123)."""
+    source = (Path(__file__).resolve().parents[1] / "crates/voom-core/src/lib.rs").read_text()
+    match = re.search(r"^pub const PROTOCOL_VERSION: u32 = (\d+);$", source, re.MULTILINE)
+    assert match, "PROTOCOL_VERSION not found in crates/voom-core/src/lib.rs"
+    return match.group(1)
 
 
 class GroupProofProxy:
@@ -146,12 +157,14 @@ class GroupProofProxy:
                     # Retain only the assertion/error class, never an exception
                     # containing a capability-bearing request or HTTP headers.
                     proxy.failures.append(proxy.current_case + ":" + type(error).__name__)
-                    response = (500, b'{"error":"synthetic group fixture failed"}')
+                    response = (500, b'{"error":"synthetic group fixture failed"}', None)
                 if proxy.apply_delay_seconds and "/execution/lease/" in self.path and self.path.endswith("/complete") and response[0] == 408:
                     assert json.loads(response[1])["error"]["code"] == "REQUEST_TIMEOUT"
                     proxy.checks.append({"case": "healthy-completion-response-window", "status": 408})
                 self.send_response(response[0])
                 self.send_header("Content-Type", "application/json")
+                if response[2] is not None:
+                    self.send_header(PROTOCOL_VERSION_HEADER, response[2])
                 self.send_header("Content-Length", str(len(response[1])))
                 self.end_headers()
                 try:
@@ -177,9 +190,9 @@ class GroupProofProxy:
         request = urllib.request.Request((base_url or self.base_url) + path, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return response.status, response.read()
+                return response.status, response.read(), response.headers.get(PROTOCOL_VERSION_HEADER)
         except urllib.error.HTTPError as error:
-            return error.code, error.read()
+            return error.code, error.read(), error.headers.get(PROTOCOL_VERSION_HEADER)
 
     def publication_state(self, path=None):
         with sqlite3.connect(f"file:{path or self.database}?mode=ro", uri=True) as database:
@@ -202,7 +215,7 @@ class GroupProofProxy:
         self.current_case = label
         headers = dict(headers)
         headers["X-Voom-Idempotency-Key"] = "fixture-" + uuid.uuid4().hex
-        status, body = self.forward(path, json.dumps(encoded).encode(), headers)
+        status, body, _ = self.forward(path, json.dumps(encoded).encode(), headers)
         self.checks.append({"case": label, "status": status, "expected": expected})
         assert status == expected, f"{label}: unexpected status"
         if code:
@@ -561,7 +574,7 @@ class GroupProofProxy:
                 assert base is not None
                 request_headers = dict(headers)
                 request_headers["X-Voom-Idempotency-Key"] = "fixture-expired-group-" + uuid.uuid4().hex
-                status, body = self.forward(path, json.dumps(encoded).encode(), request_headers, base)
+                status, body, _ = self.forward(path, json.dumps(encoded).encode(), request_headers, base)
                 assert status == 409 and json.loads(body)["error"]["code"] == "CONFLICT"
                 assert self.publication_state(clone) == before
                 self.checks.append({"case": "ordinary-group-complete-rejects-expired-source", "status": status})
@@ -595,7 +608,7 @@ class GroupProofProxy:
                 remaining = ticket_row("extract_audio", 50)
                 reports_before = database.execute("SELECT id, report FROM artifact_verifications ORDER BY id").fetchall()
                 attempt, ordinal, original_path = database.execute("SELECT attempt_id, ordinal, path FROM audio_extract_dispatch_attempt_paths ORDER BY attempt_id,ordinal DESC LIMIT 1").fetchone()
-            headers = {"Content-Type": "application/json", "Authorization": "Bearer " + Path(credential).read_text().strip(), "X-Voom-Idempotency-Key": "fixture-reuse-" + uuid.uuid4().hex}
+            headers = {"Content-Type": "application/json", "Authorization": "Bearer " + Path(credential).read_text().strip(), "X-Voom-Idempotency-Key": "fixture-reuse-" + uuid.uuid4().hex, PROTOCOL_VERSION_HEADER: protocol_version()}
             body = {"node_id": context["node_id"], "worker_id": context["worker_id"], "incarnation_id": context["incarnation_id"], "lease_ttl_seconds": 30}
             before = self.publication_state()
             with sqlite3.connect(self.database) as database:
@@ -711,7 +724,7 @@ class GroupProofProxy:
             assert other_hash != context["request_hash"]
             injected = database.execute("INSERT INTO remote_idempotency_keys (node_id,route_key,worker_scope_id,worker_id,idempotency_key,request_hash,response_json,status,created_at) VALUES (?,?,?,?,?,?,?,'completed',?)", (context["node_id"], original_route, context["worker_id"], context["worker_id"], original_key, other_hash, json.dumps({"status":"error","code":"CONFLICT","message":"synthetic original completion"}), now)).lastrowid
         encoded = {"node_id": context["node_id"], "incarnation_id": context["incarnation_id"], "proof": {"group": {"operation_id": operation, "generation": generation, "claim_lease_id": lease, "claim_token": claim, "output_count": len(members)}, "members": members}}
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + Path(credential).read_text().strip(), "X-Voom-Idempotency-Key": "fixture-late-rollback-" + uuid.uuid4().hex}
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + Path(credential).read_text().strip(), "X-Voom-Idempotency-Key": "fixture-late-rollback-" + uuid.uuid4().hex, PROTOCOL_VERSION_HEADER: protocol_version()}
         path = f"/v1/artifact/commit/group/{operation}/complete"
         body = json.dumps(encoded).encode()
         before = self.complete_database_state()
