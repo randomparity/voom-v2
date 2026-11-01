@@ -54,6 +54,12 @@ pub enum MkvtoolnixError {
 }
 
 pub const MKVMERGE_BIN_ENV: &str = "VOOM_MKVMERGE_BIN";
+/// mkvmerge converts its arguments and output through the locale's charset. The node agent
+/// starts workers with a cleared environment; without a UTF-8 locale mkvmerge truncates identify
+/// JSON at the first non-ASCII character (still exiting 0) and cannot open non-ASCII paths, so
+/// every mkvmerge child runs with this locale whatever the worker inherited.
+pub(crate) const MKVMERGE_LOCALE_ENV: &str = "LC_ALL";
+pub(crate) const MKVMERGE_LOCALE: &str = "C.UTF-8";
 const DEFAULT_MKVMERGE_BIN: &str = "mkvmerge";
 const MINIMUM_MKVMERGE_MAJOR: u32 = 80;
 
@@ -68,7 +74,11 @@ pub fn preflight_mkvmerge(command: &Path) -> Result<MkvmergeConfig, MkvtoolnixEr
     require_executable_file(command)?;
     let provider_version = first_output_line(
         "mkvmerge --version",
-        command_output(Command::new(command).arg("--version")),
+        command_output(
+            Command::new(command)
+                .env(MKVMERGE_LOCALE_ENV, MKVMERGE_LOCALE)
+                .arg("--version"),
+        ),
     )?;
     let _version = parse_mkvmerge_version(&provider_version)?;
     Ok(MkvmergeConfig::new(

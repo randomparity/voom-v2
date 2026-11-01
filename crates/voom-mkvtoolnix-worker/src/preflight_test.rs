@@ -68,3 +68,16 @@ fn stub_bin(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf
     voom_test_support::executable::write_executable(&path, body).unwrap();
     path
 }
+
+#[test]
+fn preflight_runs_mkvmerge_with_utf8_locale() {
+    let temp = tempfile::tempdir().unwrap();
+    let command = stub_bin(
+        temp.path(),
+        "mkvmerge",
+        "#!/bin/sh\n[ \"$LC_ALL\" = C.UTF-8 ] || { echo \"LC_ALL=$LC_ALL\" >&2; exit 3; }\n\
+         printf '%s\\n' \"mkvmerge v80.0 ('Roundabout') 64-bit\"\n",
+    );
+
+    preflight_mkvmerge(&command).unwrap();
+}

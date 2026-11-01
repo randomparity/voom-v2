@@ -8,7 +8,7 @@ use tokio::time::{Duration, timeout};
 use voom_core::is_font_attachment_mime_type;
 use voom_worker_protocol::{RemuxRequest, RemuxSelection, RemuxStreamRef, RemuxTrackGroup};
 
-use crate::preflight::{MkvmergeConfig, MkvtoolnixError};
+use crate::preflight::{MKVMERGE_LOCALE, MKVMERGE_LOCALE_ENV, MkvmergeConfig, MkvtoolnixError};
 
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
 
@@ -375,7 +375,10 @@ pub async fn run_mkvmerge_remux(
 ) -> Result<(), MkvtoolnixError> {
     let args = build_mkvmerge_args(request, mapping)?;
     let mut command = Command::new(&config.command);
-    command.args(args).kill_on_drop(true);
+    command
+        .env(MKVMERGE_LOCALE_ENV, MKVMERGE_LOCALE)
+        .args(args)
+        .kill_on_drop(true);
     let output = timeout(config.timeout, command_output(&mut command))
         .await
         .map_err(|_| MkvtoolnixError::MkvmergeFailed("mkvmerge timed out".to_owned()))?
@@ -678,6 +681,7 @@ fn track_order(
 async fn identify_json(config: &MkvmergeConfig, path: &Path) -> Result<Value, MkvtoolnixError> {
     let mut command = Command::new(&config.command);
     command
+        .env(MKVMERGE_LOCALE_ENV, MKVMERGE_LOCALE)
         .arg("--identify")
         .arg("--identification-format")
         .arg("json")
@@ -690,8 +694,15 @@ async fn identify_json(config: &MkvmergeConfig, path: &Path) -> Result<Value, Mk
     if !output.status.success() {
         return Err(MkvtoolnixError::IdentifyFailed(command_error(&output)));
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|err| MkvtoolnixError::IdentifyFailed(format!("invalid identify JSON: {err}")))
+    serde_json::from_slice(&output.stdout).map_err(|err| {
+        MkvtoolnixError::IdentifyFailed(format!(
+            "invalid identify JSON ({} bytes, exit 0): {err}; likely cause: mkvmerge did not \
+             emit UTF-8 under {MKVMERGE_LOCALE_ENV}={MKVMERGE_LOCALE} and truncated its output at \
+             non-ASCII metadata; action: make a UTF-8 locale usable by {}",
+            output.stdout.len(),
+            config.command.display()
+        ))
+    })
 }
 
 fn command_error(output: &std::process::Output) -> String {
