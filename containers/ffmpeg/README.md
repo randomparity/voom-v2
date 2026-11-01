@@ -32,10 +32,15 @@ just container-build docker
 # Or: just container-build podman
 ```
 
-If the build engine cannot reach ffmpeg.org, prefetch exactly
-`ffmpeg-9.0.2.tar.xz`, `ffmpeg-9.0.2.tar.xz.asc` and `ffmpeg-devel.asc` from the
-pinned official URLs into a private directory, or transfer those same verified
-files from a connected build host. Run `just container-build docker /absolute/source-directory`.
+The build host fetches `ffmpeg-9.0.2.tar.xz`, `ffmpeg-9.0.2.tar.xz.asc` and
+`ffmpeg-devel.asc` with `curl`, trying the HTTPS URLs in `source-urls` in order
+(Debian snapshot, ffmpeg.org, an Internet Archive capture of the key). Every URL
+is untrusted transport: a download is kept only when its digest matches
+`source-sha256` (checked with `sha256sum` or `shasum`), so an ffmpeg.org outage
+costs only time. To build offline, create an empty directory, run
+`just container-sources /absolute/source-directory` on a connected host (a rerun
+re-verifies files already there without downloading), transfer that directory,
+then run `just container-build docker /absolute/source-directory`.
 No downloads belong in Git. The script rejects missing/extra/symlinked files and
 wrong digests before accessing the engine. The builder repeats all digest and
 signature/fingerprint checks before extraction. This input transport does not

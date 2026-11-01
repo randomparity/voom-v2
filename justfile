@@ -369,6 +369,10 @@ stress:
 container-build ENGINE='docker' SOURCES='':
     ./containers/ffmpeg/build.sh {{quote(ENGINE)}} {{quote(SOURCES)}}
 
+# Fetch or re-verify the pinned FFmpeg inputs in an existing directory.
+container-sources DIR:
+    ./containers/ffmpeg/fetch-sources.sh {{quote(DIR)}}
+
 # Prove actual mux representation, decoded samples and software codecs.
 container-check ENGINE IMAGE:
     python3 containers/ffmpeg/verify_pcm.py --engine {{quote(ENGINE)}} --image {{quote(IMAGE)}}
@@ -376,7 +380,8 @@ container-check ENGINE IMAGE:
 # Portable configuration and caller-identity checks; no container engine required.
 container-unit-check:
     bash -n containers/ffmpeg/build.sh
-    ./target/workflow-tools/shellcheck containers/ffmpeg/build.sh
+    bash -n containers/ffmpeg/fetch-sources.sh
+    ./target/workflow-tools/shellcheck containers/ffmpeg/build.sh containers/ffmpeg/fetch-sources.sh
     python3 -m unittest discover -s containers/ffmpeg -p '*_test.py'
 
 # Real launcher streams, mounts, ownership and cancellation on the selected engine.

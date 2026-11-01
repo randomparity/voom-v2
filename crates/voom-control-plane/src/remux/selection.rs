@@ -79,7 +79,7 @@ pub fn selection_from_payload_and_snapshot(
         })
         .transpose()?;
 
-    Ok(RemuxSelection {
+    let selection = RemuxSelection {
         audio_head_stream,
         keep_streams,
         default_streams,
@@ -88,7 +88,51 @@ pub fn selection_from_payload_and_snapshot(
         head_streams,
         forced_streams,
         clear_forced_streams,
-    })
+    };
+    reject_attachment_placements(&selection, &facts)?;
+    Ok(selection)
+}
+
+/// ADR 0125: the worker refuses attachments in flag and head lists, so a selection
+/// that places one is a planning defect, refused before dispatch. The exhaustive
+/// destructure makes a new selection field fail to compile until it is classified.
+fn reject_attachment_placements(
+    selection: &RemuxSelection,
+    facts: &[SnapshotStreamFact],
+) -> Result<(), VoomError> {
+    let RemuxSelection {
+        keep_streams: _,
+        track_order: _,
+        default_streams,
+        clear_default_streams,
+        head_streams,
+        audio_head_stream,
+        forced_streams,
+        clear_forced_streams,
+    } = selection;
+    let placements = [
+        ("default_streams", default_streams.as_slice()),
+        ("clear_default_streams", clear_default_streams.as_slice()),
+        ("head_streams", head_streams.as_slice()),
+        ("audio_head_stream", audio_head_stream.as_slice()),
+        ("forced_streams", forced_streams.as_slice()),
+        ("clear_forced_streams", clear_forced_streams.as_slice()),
+    ];
+    for (field, streams) in placements {
+        let attachment = streams.iter().find(|placed| {
+            facts.iter().any(|stream| {
+                stream.kind == TrackTarget::Attachment
+                    && stream.snapshot_stream_id == placed.snapshot_stream_id
+            })
+        });
+        if let Some(attachment) = attachment {
+            return Err(VoomError::Config(format!(
+                "remux selection places attachment `{}` in {field}",
+                attachment.snapshot_stream_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn forced_refs(
