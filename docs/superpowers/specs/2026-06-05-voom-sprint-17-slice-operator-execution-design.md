@@ -69,7 +69,7 @@ transcode-to-HEVC against a real directory, entirely through JSON envelopes.
    executed in a single run (see Component B).
 4. A committed sample policy (remux to MKV + transcode video to HEVC).
 5. An end-to-end integration test over a small real media fixture, plus a
-   documented manual runbook for running against `/mnt/pool0/test-video`.
+   documented manual runbook for running against `<media-root>`.
 6. A pre-dispatch endpoint liveness check in `compliance execute` plus an
    actionable error when a required worker kind has no live (registered and
    reachable) worker.
@@ -147,7 +147,7 @@ These extend the existing `PolicyCommand` enum, which currently has only the
 set from a *single* `file_version_id` + `media_snapshot_id` and requires the
 operator to hand-type `--container`/`--video-codec`
 (`crates/voom-control-plane/src/cases/policy/policy_inputs.rs:13-19`). That makes
-the stated "run against a real directory / `/mnt/pool0/test-video`" goal
+the stated "run against a real directory / `<media-root>`" goal
 unreachable: a library scan yields many file-versions. This slice therefore adds
 a whole-library mode `voom policy input create-from-scan --all`. There is **no
 durable scan id** (scans return an ephemeral report; nothing persists a
@@ -238,7 +238,7 @@ Using a directory (not a single file) is deliberate: it also covers the
 whole-scan input-set builder, and the fixture directory includes one non-video
 file (e.g. a `.txt`/`.srt`) to assert the builder skips it and reports the skip.
 
-#### Runbook (`/mnt/pool0/test-video`)
+#### Runbook (`<media-root>`)
 
 For a human operator running against a real library:
 
@@ -468,6 +468,6 @@ pre-dispatch liveness check.
 ## Closeout documentation
 
 A short closeout note recording the commands shipped, the manual runbook for
-`/mnt/pool0/test-video`, and the items still owed by the broader Sprint 17
+`<media-root>`, and the items still owed by the broader Sprint 17
 (backup, sidecar, library-root CRUD, use-lease/issue commands, daemon-readiness
 matrix).

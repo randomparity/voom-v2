@@ -98,6 +98,8 @@ This sprint produces ~60 files. Here is the responsibility map; refer back when 
 
 ---
 
+Set `REPO_ROOT` to your checkout path before running the shell examples below.
+
 ## Task 1: Create implementation branch
 
 **Files:**
@@ -105,12 +107,12 @@ This sprint produces ~60 files. Here is the responsibility map; refer back when 
 
 - [ ] **Step 1: Confirm we're on `main` with a clean tree**
 
-Run: `git -C /Users/dave/src/voom-v2 status --short --branch`
+Run: `git -C "$REPO_ROOT" status --short --branch`
 Expected: `## main` and no working tree changes (or only the not-yet-committed plan file).
 
 - [ ] **Step 2: Create the implementation branch**
 
-Run: `git -C /Users/dave/src/voom-v2 switch -c sprint-0-skeleton`
+Run: `git -C "$REPO_ROOT" switch -c sprint-0-skeleton`
 Expected: `Switched to a new branch 'sprint-0-skeleton'`
 
 All subsequent tasks happen on this branch.
@@ -118,7 +120,7 @@ All subsequent tasks happen on this branch.
 - [ ] **Step 3: Commit any uncommitted plan file (if needed)**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 if ! git diff --quiet HEAD -- docs/superpowers/plans/; then
   git add docs/superpowers/plans/2026-05-15-voom-sprint-0.md
   git commit -m "Add Sprint 0 implementation plan"
@@ -136,7 +138,7 @@ fi
 
 - [ ] **Step 1: Write the workspace manifest**
 
-Create `/Users/dave/src/voom-v2/Cargo.toml`:
+Create `Cargo.toml`:
 
 ```toml
 [workspace]
@@ -222,7 +224,7 @@ This is a `#[cfg(test)]`-only relaxation; production builds remain strict. `unsa
 
 - [ ] **Step 2: Write `rustfmt.toml`**
 
-Create `/Users/dave/src/voom-v2/rustfmt.toml`:
+Create `rustfmt.toml`:
 
 ```toml
 edition = "2024"
@@ -235,7 +237,7 @@ use_field_init_shorthand = true
 
 - [ ] **Step 3: Extend `.gitignore`**
 
-Edit `/Users/dave/src/voom-v2/.gitignore`. Final contents:
+Edit `.gitignore`. Final contents:
 
 ```
 # Superpowers Plugin
@@ -283,7 +285,7 @@ This task creates the directory and minimal `Cargo.toml` + `src/lib.rs` for ever
 - [ ] **Step 1: Create directory structure**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 mkdir -p crates/{voom-core,voom-store,voom-events,voom-policy,voom-plan,voom-scheduler,voom-artifact,voom-worker-protocol,voom-control-plane,voom-api,voom-cli}/src
 mkdir -p crates/voom-cli/tests crates/voom-api/tests crates/voom-store/tests
 mkdir -p crates/voom-store/src/repo crates/voom-cli/src/commands
@@ -391,7 +393,7 @@ git commit -m "Scaffold all 11 workspace crates with empty placeholders"
 - [ ] **Step 1: Add dependencies**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-core thiserror
 cargo add --package voom-core serde --features derive
 ```
@@ -626,7 +628,7 @@ git commit -m "Add VersionInfo with release/dirty derivation"
 - [ ] **Step 1: Add `directories` dependency**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-core directories
 ```
 
@@ -872,7 +874,7 @@ git commit -m "Add Config + LogFormat with XDG-based defaults"
 - [ ] **Step 1: Add `time` dep**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-core time --features serde,formatting
 ```
 
@@ -1015,7 +1017,7 @@ git commit -m "Add Clock trait, SystemClock, and ID newtypes"
 
 - [ ] **Step 1: Write the migration**
 
-Create `/Users/dave/src/voom-v2/migrations/0001_init.sql`:
+Create `migrations/0001_init.sql`:
 
 ```sql
 CREATE TABLE schema_meta (
@@ -1048,7 +1050,7 @@ git commit -m "Add 0001_init.sql creating schema_meta with init timestamp"
 - [ ] **Step 1: Add dependencies**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-store --path crates/voom-core
 cargo add --package voom-store sqlx --features runtime-tokio,sqlite,migrate,time
 cargo add --package voom-store tokio --features rt-multi-thread,macros,sync
@@ -2013,7 +2015,7 @@ async fn connect_then_probe_leaves_db_uninitialized() {
 Add the `sqlx` dev-dep for this test:
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-store --dev sqlx --features runtime-tokio,sqlite
 ```
 
@@ -2162,7 +2164,7 @@ The helper takes a `NamedTempFile` ownership and returns it alongside the pool s
 Also add `sqlx` as a dev-dep so the helper's `sqlx::SqlitePool` return type resolves:
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-store --dev sqlx --features runtime-tokio,sqlite
 ```
 
@@ -2216,7 +2218,7 @@ git commit -m "voom-store: add SchemaMetaRepo trait, SqliteSchemaMetaRepo, and r
 - [ ] **Step 1: Add dependencies**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-control-plane --path crates/voom-core
 cargo add --package voom-control-plane --path crates/voom-store
 cargo add --package voom-control-plane sqlx --features runtime-tokio,sqlite
@@ -2531,7 +2533,7 @@ git commit -m "voom-cli: build.rs emits VOOM_GIT_SHA and VOOM_GIT_DIRTY"
 - [ ] **Step 1: Add dependencies**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-cli --path crates/voom-core
 cargo add --package voom-cli --path crates/voom-store
 cargo add --package voom-cli --path crates/voom-control-plane
@@ -3556,7 +3558,7 @@ git commit -m "voom-cli: snapshot tests for health and init envelope shapes"
 - [ ] **Step 1: Add dependencies**
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-api --path crates/voom-core
 cargo add --package voom-api --path crates/voom-control-plane
 cargo add --package voom-api axum
@@ -3840,7 +3842,7 @@ async fn health_on_too_new_db_returns_503_db_schema_too_new() {
 Add the dev-dependencies needed for this test:
 
 ```bash
-cd /Users/dave/src/voom-v2
+cd "$REPO_ROOT"
 cargo add --package voom-api --dev voom-store --path crates/voom-store
 cargo add --package voom-api --dev sqlx --features runtime-tokio,sqlite
 cargo add --package voom-api --dev tempfile
@@ -3893,7 +3895,7 @@ If `cargo fmt --all -- --check` reports diffs, run `cargo fmt --all` and commit 
 
 - [ ] **Step 1: Write `deny.toml`**
 
-Create `/Users/dave/src/voom-v2/deny.toml`:
+Create `deny.toml`:
 
 ```toml
 [graph]
@@ -3936,7 +3938,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
 - [ ] **Step 2: Write `audit.toml`**
 
-Create `/Users/dave/src/voom-v2/audit.toml`:
+Create `audit.toml`:
 
 ```toml
 [advisories]
@@ -3971,7 +3973,7 @@ git commit -m "Add deny.toml (licenses+bans) and audit.toml (vuln policy)"
 
 - [ ] **Step 1: Write the justfile**
 
-Create `/Users/dave/src/voom-v2/justfile` exactly as spec §9 defines it:
+Create `justfile` exactly as spec §9 defines it:
 
 ```just
 # Default action: list available recipes
@@ -4118,7 +4120,7 @@ Record the tag for use below (e.g. `v5.0.0`).
 
 - [ ] **Step 2: Write the config**
 
-Create `/Users/dave/src/voom-v2/.pre-commit-config.yaml`:
+Create `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
@@ -4205,7 +4207,7 @@ gh api repos/<owner>/<repo>/git/tags/<sha-from-above> --jq .object.sha
 
 - [ ] **Step 2: Write the workflow**
 
-Create `/Users/dave/src/voom-v2/.github/workflows/ci.yml`:
+Create `.github/workflows/ci.yml`:
 
 ```yaml
 name: ci
@@ -4287,7 +4289,7 @@ gh api repos/rustsec/audit-check/git/refs/tags/v2 --jq .object.sha
 
 - [ ] **Step 2: Write the workflow**
 
-Create `/Users/dave/src/voom-v2/.github/workflows/audit.yml`:
+Create `.github/workflows/audit.yml`:
 
 ```yaml
 name: audit
@@ -4348,7 +4350,7 @@ If `actions-rust-cross` isn't preferred, use `cross` directly with `cargo instal
 
 - [ ] **Step 2: Write the workflow**
 
-Create `/Users/dave/src/voom-v2/.github/workflows/release.yml`:
+Create `.github/workflows/release.yml`:
 
 ```yaml
 name: release
@@ -4430,7 +4432,7 @@ git commit -m "Add release.yml: tag-triggered binaries for linux-x64/arm64 and m
 
 - [ ] **Step 1: Write the config**
 
-Create `/Users/dave/src/voom-v2/.github/dependabot.yml`:
+Create `.github/dependabot.yml`:
 
 ```yaml
 version: 2
@@ -4478,7 +4480,7 @@ git commit -m "Add Dependabot config for cargo + github-actions with 7-day coold
 
 - [ ] **Step 1: Write the runbook**
 
-Create `/Users/dave/src/voom-v2/docs/release-process.md`:
+Create `docs/release-process.md`:
 
 ```markdown
 # Release Process
@@ -4545,10 +4547,10 @@ git commit -m "Add docs/release-process.md: bump-tag-bump runbook"
 - [ ] **Step 1: Write the ADR**
 
 ```bash
-mkdir -p /Users/dave/src/voom-v2/docs/adr
+mkdir -p "$REPO_ROOT/docs/adr"
 ```
 
-Create `/Users/dave/src/voom-v2/docs/adr/0001-durable-jobs-over-events.md`:
+Create `docs/adr/0001-durable-jobs-over-events.md`:
 
 ```markdown
 ---
@@ -4618,7 +4620,7 @@ git commit -m "ADR 0001: durable jobs route work; events record facts"
 
 - [ ] **Step 1: Write the ADR**
 
-Create `/Users/dave/src/voom-v2/docs/adr/0002-out-of-process-workers-only.md`:
+Create `docs/adr/0002-out-of-process-workers-only.md`:
 
 ```markdown
 ---
@@ -4679,7 +4681,7 @@ git commit -m "ADR 0002: all providers are out-of-process workers from day one"
 
 - [ ] **Step 1: Write the ADR**
 
-Create `/Users/dave/src/voom-v2/docs/adr/0003-sqlx-and-tokio-foundation.md`:
+Create `docs/adr/0003-sqlx-and-tokio-foundation.md`:
 
 ```markdown
 ---
@@ -4743,7 +4745,7 @@ git commit -m "ADR 0003: sqlx + tokio as the async storage foundation"
 
 - [ ] **Step 1: Rewrite README**
 
-Replace `/Users/dave/src/voom-v2/README.md`:
+Replace `README.md`:
 
 ```markdown
 # VOOM — Video Orchestration Operations Manager
@@ -4844,7 +4846,7 @@ No commit. If steps 1-3 all succeed, Sprint 0 implementation is done.
 - [ ] **Step 1: Push the branch**
 
 ```bash
-git -C /Users/dave/src/voom-v2 push -u origin sprint-0-skeleton
+git -C "$REPO_ROOT" push -u origin sprint-0-skeleton
 ```
 
 If `origin` is not configured, ask the user before adding a remote.

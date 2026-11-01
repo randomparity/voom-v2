@@ -4,7 +4,7 @@
 
 - Branch: `feat/sliding-file-window-401`
 - Base: `main`
-- Worktree: `/home/dave/src/voom-v2-worktrees/issue-401`
+- Worktree: `<worktree-root>/issue-401`
 - Assigned ADR: `0048`
 - Assigned migration: `0028`
 - Full guardrail: `just ci`

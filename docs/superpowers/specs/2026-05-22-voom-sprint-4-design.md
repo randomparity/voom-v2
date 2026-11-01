@@ -8,7 +8,7 @@ references:
   - docs/specs/voom-control-plane-design.md
   - docs/superpowers/specs/2026-05-22-voom-mvp-roadmap-rescope-design.md
   - docs/superpowers/specs/2026-05-22-voom-sprint-3-design.md
-  - /home/dave/src/voom-v1/docs/dsl-reference.md
+  - <voom-v1-repo>/docs/dsl-reference.md
 ---
 
 # VOOM Sprint 4 - Policy Parser, Validator, And Compiled Model
