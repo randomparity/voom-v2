@@ -4437,3 +4437,71 @@ fn verify_lossless_policy(codec: &str) {
         );
     }
 }
+
+#[test]
+fn transcode_video_plans_with_cover_art() {
+    for (container, codec) in [
+        ("mkv", "mjpeg"),
+        ("mkv", "png"),
+        ("mkv", "gif"),
+        ("mkv", "tiff"),
+        ("mp4", "mjpeg"),
+        ("mp4", "png"),
+    ] {
+        let mut snapshot = video_snapshot(
+            "mkv",
+            64,
+            64,
+            &video_extra(&[
+                ("codec_name", serde_json::json!("h264")),
+                ("pixel_format", serde_json::json!("yuv420p")),
+            ]),
+            &[],
+        );
+        snapshot.video_codec = Some("h264".to_owned());
+        snapshot.stream_summary["streams"]
+            .as_array_mut()
+            .unwrap()
+            .insert(
+                0,
+                serde_json::json!({"id":"cover", "index":1, "kind":"video",
+                "codec_name":codec, "pixel_format":"rgb24", "disposition":{"attached_pic":true}}),
+            );
+        let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+        profile.pixel_format = Some("yuv420p".to_owned());
+        let plan = plan_transcode_with_container(profile, snapshot, container);
+        assert_eq!(
+            node_status(&plan),
+            NodeStatus::Planned,
+            "{container}/{codec}"
+        );
+        assert_eq!(
+            plan.nodes[0].operation_payload["source_video_pixel_format"],
+            "yuv420p"
+        );
+    }
+}
+
+#[test]
+fn transcode_video_blocks_unsupported_cover_art() {
+    for (container, codec) in [("mkv", "bmp"), ("mp4", "gif"), ("mp4", "tiff")] {
+        let mut snapshot = source_hevc_720_mkv();
+        snapshot.video_codec = Some("h264".to_owned());
+        snapshot.stream_summary["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id":"cover", "index":1, "kind":"video",
+                "codec_name":codec, "disposition":{"attached_pic":true}}));
+        let plan = plan_transcode_with_container(
+            voom_core::TranscodeVideoProfile::default_hevc(),
+            snapshot,
+            container,
+        );
+        assert_eq!(
+            node_status(&plan),
+            NodeStatus::Blocked,
+            "{container}/{codec}"
+        );
+        assert!(blocked_reason(&plan).contains("cover art"));
+    }
+}

@@ -182,6 +182,8 @@ async fn one_shot_nvenc_request_requires_configured_run_local_worker() {
         codec_profile: None,
         codec_level: None,
         video_stream_count: 1,
+        cover_art: Vec::new(),
+        attachment_count: 0,
         forced_subtitle_ordinals: Vec::new(),
     };
     let err = validate_video_hardware_binding(&request, &config(dir.path()), &source).unwrap_err();
@@ -1622,6 +1624,8 @@ fn input_probe_with_codec(codec: &str) -> InputProbe {
         codec_profile: None,
         codec_level: None,
         video_stream_count: 1,
+        cover_art: Vec::new(),
+        attachment_count: 0,
         forced_subtitle_ordinals: Vec::new(),
     }
 }
