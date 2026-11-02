@@ -188,3 +188,23 @@ fn planning_input_rejects_unknown_or_malformed_container_names() {
         assert_eq!(input.container, None, "durable container {container}");
     }
 }
+
+#[test]
+fn planning_input_excludes_cover_art_from_primary_video_facts() {
+    for cover in [
+        json!({"id":"cover", "index":0, "kind":"video", "codec_name":"mjpeg",
+            "width":16, "height":16, "disposition":{"attached_pic":true}}),
+        json!({"id":"cover", "index":0, "kind":"video", "codec_name":"png",
+            "width":16, "height":16, "filename":"cover.png", "mime_type":"image/png"}),
+    ] {
+        let snapshot = snapshot_with_payload(json!({"container":"matroska", "streams":[
+            cover, {"id":"primary", "index":1, "kind":"video", "codec_name":"h264",
+                "width":1920, "height":1080}
+        ]}));
+        let input = planning_input(1, &snapshot);
+        assert_eq!(input.stream_summary["video_stream_count"], 1);
+        assert_eq!(input.video_codec.as_deref(), Some("h264"));
+        assert_eq!((input.width, input.height), (Some(1920), Some(1080)));
+        assert_eq!(input.stream_summary["streams"], snapshot.payload["streams"]);
+    }
+}

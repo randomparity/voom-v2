@@ -2503,3 +2503,302 @@ async fn pcm_container_copied_audio_timing() {
         }
     }
 }
+
+async fn cover_art_fixture(
+    preflight: &voom_ffmpeg_worker::FfmpegPreflight,
+    dir: &Path,
+    codecs: &[&str],
+    generic_attachment: bool,
+    container: &str,
+) -> (PathBuf, Vec<Vec<u8>>) {
+    let base = dir.join("base.mkv");
+    generate_h264_fixture(&preflight.ffmpeg_path, &base);
+    let mut images = Vec::new();
+    let mut originals = Vec::new();
+    for (ordinal, codec) in codecs.iter().enumerate() {
+        let (extension, mime) = match *codec {
+            "mjpeg" => ("jpg", "image/jpeg"),
+            "png" => ("png", "image/png"),
+            "gif" => ("gif", "image/gif"),
+            "tiff" => ("tiff", "image/tiff"),
+            _ => unreachable!(),
+        };
+        let image = dir.join(format!("cover-{ordinal}.{extension}"));
+        let mut command = tokio::process::Command::new(&preflight.ffmpeg_path);
+        command.args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=16x16:rate=2",
+        ]);
+        command.args(if *codec == "gif" {
+            ["-t", "1"]
+        } else {
+            ["-frames:v", "1"]
+        });
+        flac_command(command.args(["-c:v", codec, "-threads", "1"]).arg(&image)).await;
+        originals.push(std::fs::read(&image).unwrap());
+        images.push((image, mime));
+    }
+    let source = dir.join("source.mkv");
+    let mut command = tokio::process::Command::new(&preflight.ffmpeg_path);
+    command
+        .args(["-v", "error", "-i"])
+        .arg(base)
+        .args(["-map", "0", "-c", "copy"]);
+    if generic_attachment {
+        let font = dir.join("font.ttf");
+        std::fs::write(&font, b"opaque attachment fixture").unwrap();
+        command.arg("-attach").arg(font).args([
+            "-metadata:s:t:0",
+            "filename=font.ttf",
+            "-metadata:s:t:0",
+            "mimetype=application/x-truetype-font",
+        ]);
+    }
+    for (ordinal, (image, mime)) in images.iter().enumerate() {
+        let attachment = ordinal + usize::from(generic_attachment);
+        command
+            .arg("-attach")
+            .arg(image)
+            .arg(format!("-metadata:s:t:{attachment}"))
+            .arg(format!(
+                "filename={}",
+                image.file_name().unwrap().to_str().unwrap()
+            ))
+            .arg(format!("-metadata:s:t:{attachment}"))
+            .arg(format!("mimetype={mime}"))
+            .arg(format!("-metadata:s:t:{attachment}"))
+            .arg(format!("title=Cover {ordinal}"));
+    }
+    flac_command(command.arg(&source)).await;
+    if container == "mkv" {
+        return (source, originals);
+    }
+    let mp4 = dir.join("source.mp4");
+    let mut command = tokio::process::Command::new(&preflight.ffmpeg_path);
+    command
+        .args(["-v", "error", "-i"])
+        .arg(source)
+        .args(["-map", "0:V:0", "-c", "copy"]);
+    for ordinal in 0..codecs.len() {
+        command
+            .args(["-map", &format!("0:{}", ordinal + 1)])
+            .arg(format!("-disposition:v:{}", ordinal + 1))
+            .arg("attached_pic");
+    }
+    flac_command(command.arg(&mp4)).await;
+    (mp4, originals)
+}
+
+#[tokio::test]
+async fn cover_art_transcode_preserves_generated_images() {
+    let preflight = preflight_from_process_env().unwrap();
+    let config = ffmpeg_config(&preflight);
+    for (source_container, target, codecs, generic) in [
+        ("mkv", "mkv", vec!["mjpeg", "png", "gif", "tiff"], true),
+        ("mkv", "mp4", vec!["mjpeg", "png"], false),
+        ("mp4", "mkv", vec!["mjpeg", "png"], false),
+        ("mp4", "mp4", vec!["mjpeg", "png"], false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, originals) =
+            cover_art_fixture(&preflight, dir.path(), &codecs, generic, source_container).await;
+        let output = dir.path().join(format!("output.{target}"));
+        let mut profile = TranscodeVideoProfile::default_hevc();
+        profile.preset = Some("ultrafast".to_owned());
+        profile.pixel_format = Some("yuv420p".to_owned());
+        profile.max_width = Some(32);
+        let request = with_real_expected(
+            basic_request(&input, &output, dir.path(), target, "hevc", profile),
+            &input,
+        )
+        .await;
+        let result = handle_transcode_video(&request, &config).await.unwrap();
+        assert_eq!(result.output_video_codec, "hevc");
+        assert_eq!((result.output_width, result.output_height), (32, 32));
+        assert_eq!(
+            result.input_pre.content_hash,
+            result.input_post.content_hash
+        );
+        let probe =
+            assert_cover_art_output(&preflight, &output, &originals, &codecs, generic).await;
+        if target == "mkv" {
+            let covers: Vec<_> = probe["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|stream| stream["disposition"]["attached_pic"] == 1)
+                .collect();
+            for (ordinal, (cover, (extension, mime))) in covers
+                .iter()
+                .zip([
+                    ("jpg", "image/jpeg"),
+                    ("png", "image/png"),
+                    ("gif", "image/gif"),
+                    ("tiff", "image/tiff"),
+                ])
+                .enumerate()
+            {
+                let index = ordinal + usize::from(source_container == "mp4");
+                assert_eq!(
+                    cover["tags"]["filename"],
+                    format!("cover-{index}.{extension}")
+                );
+                assert_eq!(cover["tags"]["mimetype"], mime);
+                if source_container == "mkv" {
+                    assert_eq!(cover["tags"]["title"], format!("Cover {ordinal}"));
+                }
+            }
+        }
+        let copied = dir.path().join(format!("copied.{target}"));
+        let mut request = with_real_expected(
+            basic_request(
+                &output,
+                &copied,
+                dir.path(),
+                target,
+                "hevc",
+                TranscodeVideoProfile::default_hevc(),
+            ),
+            &output,
+        )
+        .await;
+        request.copy_video = true;
+        assert!(
+            handle_transcode_video(&request, &config)
+                .await
+                .unwrap()
+                .copied_video
+        );
+        assert_cover_art_output(&preflight, &copied, &originals, &codecs, generic).await;
+    }
+}
+
+#[tokio::test]
+async fn cover_art_rejects_unsupported_before_output() {
+    let preflight = preflight_from_process_env().unwrap();
+    for (codecs, generic) in [(vec!["gif"], false), (vec!["mjpeg"], true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, _) = cover_art_fixture(&preflight, dir.path(), &codecs, generic, "mkv").await;
+        let output = dir.path().join("output.mp4");
+        let request = with_real_expected(
+            basic_request(
+                &input,
+                &output,
+                dir.path(),
+                "mp4",
+                "hevc",
+                TranscodeVideoProfile::default_hevc(),
+            ),
+            &input,
+        )
+        .await;
+        let error = handle_transcode_video(&request, &ffmpeg_config(&preflight))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("cover art") || error.to_string().contains("attachments"),
+            "{error}"
+        );
+        assert!(!output.exists());
+    }
+}
+
+#[tokio::test]
+async fn cover_art_rejects_genuine_multi_video() {
+    let preflight = preflight_from_process_env().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (input, _) = cover_art_fixture(&preflight, dir.path(), &["mjpeg"], false, "mkv").await;
+    let multiple = dir.path().join("multiple.mkv");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-v", "error", "-i"])
+            .arg(input)
+            .args(["-map", "0:V", "-map", "0:V", "-c", "copy", "-attach"])
+            .arg(dir.path().join("cover-0.jpg"))
+            .args([
+                "-metadata:s:t",
+                "filename=cover.jpg",
+                "-metadata:s:t",
+                "mimetype=image/jpeg",
+            ])
+            .arg(&multiple),
+    )
+    .await;
+    let output = dir.path().join("output.mkv");
+    let request = with_real_expected(
+        basic_request(
+            &multiple,
+            &output,
+            dir.path(),
+            "mkv",
+            "hevc",
+            TranscodeVideoProfile::default_hevc(),
+        ),
+        &multiple,
+    )
+    .await;
+    let error = handle_transcode_video(&request, &ffmpeg_config(&preflight))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("exactly one"), "{error}");
+    assert!(!output.exists());
+}
+
+async fn assert_cover_art_output(
+    preflight: &voom_ffmpeg_worker::FfmpegPreflight,
+    output: &Path,
+    originals: &[Vec<u8>],
+    codecs: &[&str],
+    generic: bool,
+) -> serde_json::Value {
+    let probe = flac_physical_probe(&preflight.ffprobe_path, output).await;
+    let streams = probe["streams"].as_array().unwrap();
+    let covers: Vec<_> = streams
+        .iter()
+        .filter(|stream| stream["disposition"]["attached_pic"] == 1)
+        .collect();
+    assert_eq!(covers.len(), originals.len());
+    assert_eq!(
+        streams
+            .iter()
+            .filter(|stream| stream["codec_type"] == "attachment")
+            .count(),
+        usize::from(generic)
+    );
+    for (ordinal, (cover, original)) in covers.iter().zip(originals).enumerate() {
+        assert_eq!(cover["codec_name"], codecs[ordinal]);
+        assert_eq!(cover["width"], 16);
+        let extracted = output.with_file_name(format!(
+            "{}.cover-{ordinal}.bin",
+            output.file_name().unwrap().to_str().unwrap()
+        ));
+        flac_command(
+            tokio::process::Command::new(&preflight.ffmpeg_path)
+                .args(["-v", "error", "-i"])
+                .arg(output)
+                .args([
+                    "-map",
+                    &format!("0:{}", cover["index"]),
+                    "-c",
+                    "copy",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "data",
+                ])
+                .arg(&extracted),
+        )
+        .await;
+        assert_eq!(
+            &std::fs::read(extracted).unwrap(),
+            original,
+            "cover codec {}",
+            codecs[ordinal]
+        );
+    }
+    probe
+}

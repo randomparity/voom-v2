@@ -1,4 +1,6 @@
 mod copied_audio;
+pub(crate) mod cover_art;
+pub use cover_art::CoverArt;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -302,6 +304,8 @@ pub struct InputProbe {
     pub codec_profile: Option<String>,
     pub codec_level: Option<String>,
     pub video_stream_count: u32,
+    pub cover_art: Vec<CoverArt>,
+    pub attachment_count: usize,
     pub forced_subtitle_ordinals: Vec<usize>,
 }
 
@@ -312,6 +316,8 @@ pub struct VideoTranscodeInput<'a> {
     pub height: u32,
     pub codec: &'a str,
     pub forced_subtitle_ordinals: &'a [usize],
+    pub cover_art: &'a [CoverArt],
+    pub attachment_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -666,6 +672,21 @@ pub async fn run_ffmpeg_transcode(
     let container = &request.output.container;
     let codec = &request.output.video_codec;
 
+    cover_art::validate(source.cover_art, container, source.attachment_count)?;
+    let prepared = if source.cover_art.is_empty() {
+        None
+    } else {
+        Some(
+            cover_art::PreparedCovers::prepare(
+                config,
+                input,
+                Path::new(&request.output.staging_root),
+                source.cover_art,
+            )
+            .await?,
+        )
+    };
+    let scope_primary = container == "mp4" && !source.cover_art.is_empty();
     let mut command = Command::new(&config.ffmpeg_path);
     command.arg("-hide_banner").arg("-nostdin").arg("-n");
     append_hardware_input_args(
@@ -679,7 +700,7 @@ pub async fn run_ffmpeg_transcode(
         .arg("-i")
         .arg(input)
         .arg("-map")
-        .arg("0:v:0")
+        .arg("0:V:0")
         .arg("-map")
         .arg("0:a?")
         .arg("-map")
@@ -687,12 +708,16 @@ pub async fn run_ffmpeg_transcode(
         .arg("-map")
         .arg("0:t?");
 
-    for arg in video_codec_args(profile, request.copy_video)? {
-        command.arg(arg);
-    }
-    for arg in video_filter_args(profile, source.width, source.height, request.copy_video)? {
-        command.arg(arg);
-    }
+    append_primary_options(
+        &mut command,
+        video_codec_args(profile, request.copy_video)?,
+        scope_primary,
+    );
+    append_primary_options(
+        &mut command,
+        video_filter_args(profile, source.width, source.height, request.copy_video)?,
+        scope_primary,
+    );
     command
         .arg("-c:a")
         .arg("copy")
@@ -707,26 +732,47 @@ pub async fn run_ffmpeg_transcode(
             .arg(format!("-disposition:s:{ordinal}"))
             .arg("+forced");
     }
-    for arg in container_args(container, codec)? {
-        command.arg(arg);
+    append_primary_options(
+        &mut command,
+        container_args(container, codec)?,
+        scope_primary,
+    );
+    if let Some(prepared) = &prepared {
+        prepared.append(
+            &mut command,
+            source.cover_art,
+            container,
+            source.attachment_count,
+        );
     }
     command.arg(output).kill_on_drop(true);
 
-    let process_output = timeout(
-        config.process_timeout,
-        output_retrying_etxtbsy(&mut command),
-    )
-    .await
-    .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
-    .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
-    if !process_output.status.success() {
-        return Err(classify_process_failure(
-            &process_output,
-            FfmpegError::FfmpegFailed,
-        ));
-    }
+    run_ffmpeg_command(config, command).await?;
 
-    probe_output(config, output, container, codec, profile).await
+    let result = probe_output(config, output, container, codec, profile).await?;
+    if let Some(prepared) = prepared {
+        prepared
+            .verify(config, output, source.cover_art, container)
+            .await?;
+        prepared.close()?;
+    }
+    Ok(result)
+}
+
+fn append_primary_options(command: &mut Command, args: Vec<OsString>, scoped: bool) {
+    for (index, arg) in args.into_iter().enumerate() {
+        if scoped && index % 2 == 0 && arg != "-f" {
+            let option = arg.to_string_lossy();
+            let option = match option.as_ref() {
+                "-vf" => "-filter:v:0".to_owned(),
+                "-c:v" | "-b:v" | "-profile:v" | "-tag:v" => format!("{option}:0"),
+                _ => format!("{option}:v:0"),
+            };
+            command.arg(option);
+        } else {
+            command.arg(arg);
+        }
+    }
 }
 
 /// Pre-input arguments that bind the command to a device. A `copy_video` request
@@ -1591,6 +1637,11 @@ pub async fn run_ffmpeg_extract_audio(
     Ok(probe)
 }
 
+fn is_primary_video(stream: &Value) -> bool {
+    stream.get("codec_type").and_then(Value::as_str) == Some("video")
+        && disposition_bool(stream, "attached_pic") != Some(true)
+}
+
 /// Probes the input file and returns key video stream facts needed for
 /// downscale and copy-video revalidation.
 pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProbe, FfmpegError> {
@@ -1598,11 +1649,7 @@ pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProb
     let video_stream = json
         .get("streams")
         .and_then(Value::as_array)
-        .and_then(|streams| {
-            streams
-                .iter()
-                .find(|s| s.get("codec_type").and_then(Value::as_str) == Some("video"))
-        })
+        .and_then(|streams| streams.iter().find(|stream| is_primary_video(stream)))
         .ok_or_else(|| FfmpegError::FfprobeFailed("no video stream in input".to_owned()))?;
 
     let width = video_stream
@@ -1643,7 +1690,7 @@ pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProb
         .map(|streams| {
             streams
                 .iter()
-                .filter(|s| s.get("codec_type").and_then(Value::as_str) == Some("video"))
+                .filter(|stream| is_primary_video(stream))
                 .count()
         })
         .and_then(|n| u32::try_from(n).ok())
@@ -1673,6 +1720,13 @@ pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProb
         codec_profile,
         codec_level,
         video_stream_count,
+        cover_art: cover_art::from_probe(&json)?,
+        attachment_count: json["streams"].as_array().map_or(0, |streams| {
+            streams
+                .iter()
+                .filter(|stream| stream["codec_type"] == "attachment")
+                .count()
+        }),
         forced_subtitle_ordinals,
     })
 }
@@ -1704,11 +1758,7 @@ async fn probe_output(
     let video_stream = json
         .get("streams")
         .and_then(Value::as_array)
-        .and_then(|streams| {
-            streams
-                .iter()
-                .find(|s| s.get("codec_type").and_then(Value::as_str) == Some("video"))
-        });
+        .and_then(|streams| streams.iter().find(|stream| is_primary_video(stream)));
 
     let actual_codec = video_stream
         .and_then(|s| s.get("codec_name"))

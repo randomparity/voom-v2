@@ -14,7 +14,7 @@ pub use payload::{
 };
 pub use selection::{
     RemuxFilterOperation, RemuxPlanningBlock, SnapshotFact, SnapshotStreamFact, evaluate_filter,
-    resolve_track_keep_ids, stream_facts,
+    is_cover_art, resolve_track_keep_ids, stream_facts,
 };
 
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};

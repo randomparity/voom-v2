@@ -229,6 +229,8 @@ fn video_source(
         height,
         codec: "hevc",
         forced_subtitle_ordinals,
+        cover_art: &[],
+        attachment_count: 0,
     }
 }
 
@@ -521,6 +523,8 @@ async fn nvenc_cuda_decode_command_pins_decoder_and_zero_copy_filter() {
         height: 1080,
         codec: "h264",
         forced_subtitle_ordinals: &[],
+        cover_art: &[],
+        attachment_count: 0,
     };
 
     run_ffmpeg_transcode(&config, &request, source)
@@ -1800,7 +1804,7 @@ async fn vaapi_software_decode_uploads_nv12_to_the_bound_render_node() {
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -1863,7 +1867,7 @@ async fn vaapi_software_decode_uploads_p010_and_names_main10_profile() {
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -1928,7 +1932,7 @@ async fn vaapi_hardware_decode_stays_in_hardware_frames_with_no_filter() {
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -1992,7 +1996,7 @@ async fn vaapi_hardware_decode_main10_names_profile_without_a_filter() {
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -2158,6 +2162,8 @@ async fn vaapi_hardware_decode_rejects_an_unsupported_source_codec() {
         height: 1080,
         codec: "vp9",
         forced_subtitle_ordinals: &[],
+        cover_art: &[],
+        attachment_count: 0,
     };
 
     let err = run_ffmpeg_transcode(&config, &request, source)
@@ -2774,5 +2780,37 @@ async fn media_spawn_stamps_actual_caller_identity() {
             .unwrap()
             .status
             .success()
+    );
+}
+
+#[tokio::test]
+async fn cover_art_input_probe_selects_primary_after_cover() {
+    let dir = tempfile::tempdir().unwrap();
+    let ffprobe = stub_bin(
+        dir.path(),
+        "ffprobe",
+        r#"#!/bin/sh
+cat <<'JSON'
+{"streams":[{"index":0,"codec_type":"video","codec_name":"mjpeg","width":16,"height":16,"pix_fmt":"rgb24","disposition":{"attached_pic":1}},{"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"pix_fmt":"yuv420p"}]}
+JSON
+"#,
+    );
+    let config = FfmpegConfig::new(
+        dir.path().join("ffmpeg"),
+        ffprobe,
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let probe = probe_input(&config, &dir.path().join("input.mkv"))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            probe.codec.as_str(),
+            probe.width,
+            probe.height,
+            probe.video_stream_count
+        ),
+        ("h264", 1920, 1080, 1)
     );
 }

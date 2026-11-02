@@ -120,3 +120,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0126](0126-abandoned-media-evidence-workers.md) | Abandon timed-out media evidence workers |
 | [0127](0127-content-normalization-failures.md) | Content normalization failures affect one file |
 | [0128](0128-bounded-worker-error-diagnostics.md) | Bound external worker error diagnostics |
+| [0129](0129-cover-art-transcoding.md) | Preserve cover art during video transcoding |
