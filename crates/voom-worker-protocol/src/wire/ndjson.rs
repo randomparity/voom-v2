@@ -26,6 +26,21 @@ use crate::{ProgressFrame, ProtocolError};
 /// Largest NDJSON frame payload a reader accepts; every worker result must fit one frame.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
+/// Retain a UTF-8 diagnostic tail, reporting the exact decoded-byte loss.
+/// Two copies, even with six-byte JSON escapes, leave room for fixed error-frame context.
+#[must_use]
+pub fn bounded_error_diagnostic(diagnostic: &str) -> String {
+    const MAX_DIAGNOSTIC_BYTES: usize = 4096;
+    if diagnostic.len() <= MAX_DIAGNOSTIC_BYTES {
+        return diagnostic.to_owned();
+    }
+    let mut start = diagnostic.len() - MAX_DIAGNOSTIC_BYTES;
+    while !diagnostic.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[truncated {start} UTF-8 bytes] {}", &diagnostic[start..])
+}
+
 /// One outcome from `NdjsonReader::next_frame`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NdjsonOutcome {

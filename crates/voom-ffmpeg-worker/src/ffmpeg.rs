@@ -13,6 +13,7 @@ use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioRequest,
     NvidiaVideoAcceleratorDescriptor, TranscodeAudioRequest, TranscodeVideoProfile,
     TranscodeVideoRequest, VaapiVideoAcceleratorDescriptor, VideoToolboxVideoAcceleratorDescriptor,
+    bounded_error_diagnostic,
 };
 
 /// The video encoders advertised by every ffmpeg build voom supports.
@@ -272,10 +273,10 @@ fn classify_process_failure(
     output: &std::process::Output,
     transient: impl Fn(String) -> FfmpegError,
 ) -> FfmpegError {
+    let malformed = output.status.code().is_some()
+        && is_malformed_media_stderr(&String::from_utf8_lossy(&output.stderr));
     let message = command_error(output);
-    if output.status.code().is_some()
-        && is_malformed_media_stderr(&String::from_utf8_lossy(&output.stderr))
-    {
+    if malformed {
         return FfmpegError::MalformedMedia(message);
     }
     transient(message)
@@ -2543,13 +2544,16 @@ fn verify_preserved_audio_metadata(
 
 fn command_error(output: &std::process::Output) -> String {
     format!(
-        "status {}: {}{}",
+        "status {}: {}",
         output
             .status
             .code()
             .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        bounded_error_diagnostic(&format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
     )
 }
 

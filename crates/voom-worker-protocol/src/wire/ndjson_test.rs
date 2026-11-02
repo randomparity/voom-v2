@@ -10,6 +10,50 @@ use voom_core::LeaseId;
 
 use crate::{PercentBps, ProgressFrame, ProtocolError};
 
+#[test]
+fn diagnostic_preserves_short_and_exact_bound_text() {
+    for input in [String::new(), "é\n\"\\".to_owned(), "x".repeat(4096)] {
+        assert_eq!(bounded_error_diagnostic(&input), input);
+    }
+}
+
+#[test]
+fn diagnostic_truncates_on_utf8_boundary_with_exact_accounting() {
+    let input = "\u{1}é🙂".repeat(1000);
+    assert_eq!(
+        bounded_error_diagnostic(&input),
+        format!("[truncated 2905 UTF-8 bytes] {}", &input[2905..])
+    );
+    assert_eq!(
+        bounded_error_diagnostic(&"x".repeat(4097)),
+        format!("[truncated 1 UTF-8 bytes] {}", "x".repeat(4096))
+    );
+}
+
+#[tokio::test]
+async fn diagnostic_duplicate_worst_case_json_fits_default_reader() {
+    let diagnostic = bounded_error_diagnostic(&"\u{1}".repeat(70_000));
+    let message = format!("ffprobe exited with status {}: {diagnostic}", i32::MIN);
+    let lease = LeaseId(u64::MAX);
+    let mut frame = ProgressFrame::Error {
+        lease_id: lease,
+        seq: u64::MAX,
+        emitted_at: fixed_time(),
+        class: voom_core::FailureClass::ExternalSystemUnavailable,
+        code: voom_core::ErrorCode::ExternalSystemUnavailable,
+        message: format!("external system unavailable: {message}"),
+        payload: Some(serde_json::json!({"stage": "exit", "message": message})),
+    };
+    assert!(line_for(&frame).len() - 1 <= MAX_FRAME_BYTES);
+    set_frame_seq(&mut frame, 0);
+    let bytes = line_for(&frame);
+    let outcome = NdjsonReader::new(bytes.as_slice(), lease)
+        .next_frame()
+        .await
+        .unwrap();
+    assert_eq!(outcome, NdjsonOutcome::Terminated(frame));
+}
+
 /// An `AsyncRead` that serves `remaining` non-newline bytes in bounded chunks
 /// and records the total number of bytes actually read from it. Used to prove
 /// the reader stops consuming input once a frame exceeds `max_frame_bytes`,
