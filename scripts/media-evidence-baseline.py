@@ -91,7 +91,10 @@ NOT_MEASURED = {
     "first_verified_output": "replay does not verify outputs",
     "complete_library": "replay covers a recorded subset, not a whole library",
     "sidecar_hashing": "replay hashes primaries only",
-    "ffprobe_child_peak_memory_and_io": "per-process counters exclude the ffprobe child",
+    # Keep the legacy key: historical records are validated against this exact key set.
+    "ffprobe_child_peak_memory_and_io": (
+        "worker peak memory excludes the ffprobe child; CPU and I/O include reaped children"
+    ),
     "retries": "replay performs no retries; failures are recorded as rows",
 }
 
@@ -383,7 +386,7 @@ class Worker:
         return terminal_frame(text.splitlines()[1:])
 
     def usage(self) -> dict[str, int | float | str]:
-        """CPU includes reaped children; memory and I/O are this process only."""
+        """CPU and I/O include reaped children; peak memory is this process only."""
         proc = Path("/proc", str(self.process.pid))
         usage: dict[str, int | float | str] = {
             "cpu_seconds": UNAVAILABLE, "peak_rss_bytes": UNAVAILABLE,

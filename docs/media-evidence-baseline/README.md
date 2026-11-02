@@ -22,10 +22,18 @@ btrfs. The network corpus is on a CIFS mount.
 
 Not measured, recorded in each file as `not_measured`: discovery, first durable observation
 (publication), first actionable plan, first transformation start, first verified output,
-complete library, sidecar hashing, retries, and ffprobe child memory and I/O. The "first
+complete library, sidecar hashing, retries, and ffprobe child memory. The "first
 file done" column below is the replay's first completed hash-and-probe. It is not the
 first durable observation: the control plane publishes evidence only at session
 completion.
+
+Measurement correction (#823): historical records' `not_measured` entry
+`ffprobe_child_peak_memory_and_io` incorrectly says that I/O excludes the ffprobe child.
+Only worker peak memory excludes children. Worker CPU and I/O counters include reaped
+ffprobe children, as described in the [protocol](../media-evidence-protocol.md).
+Committed records are unchanged; the harness retains the legacy key for record-validation
+compatibility and corrects its description for future captures. No recorded values or
+comparison verdicts change.
 
 ## Results
 

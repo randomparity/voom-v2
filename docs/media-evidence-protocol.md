@@ -52,16 +52,22 @@ Per-stage metrics (a stage is one worker operation kind or one harness phase):
 |---|---|---|
 | Wall time | Monotonic seconds per file per stage, and per repetition | harness |
 | Queue delay | Seconds from repetition start until a file's first operation starts | harness |
-| CPU | `utime+stime+cutime+cstime` of each worker process; includes reaped children such as ffprobe | `/proc/<pid>/stat` |
+| CPU | `utime+stime+cutime+cstime` of each worker process: its own user/system time plus waited-for (reaped) children's user/system time, including ffprobe | `/proc/<pid>/stat` |
 | Peak memory | `VmHWM` of each worker process; children excluded | `/proc/<pid>/status` |
 | Retries | Count of retried operations per file | harness |
 | Logical bytes | Size × whole-file reads completed: 3 for `observed` or `disagree`, 1 for `probe_failed`, 0 for `hash_failed`. Partial reads of a failed operation are excluded; `rchar` cross-checks the total. | harness, `/proc/<pid>/io` |
-| Physical bytes | Bytes fetched from the storage layer by the worker (`read_bytes`). On network storage, host-wide interface and CIFS counters. | `/proc/<pid>/io`, `/proc/net/dev`, `/proc/fs/cifs/Stats` |
+| Physical bytes | Bytes fetched from the storage layer by the worker and its reaped children, including ffprobe (`read_bytes`). On network storage, host-wide interface and CIFS counters. | `/proc/<pid>/io`, `/proc/net/dev`, `/proc/fs/cifs/Stats` |
 | Outcome | `observed`, `disagree`, `hash_failed`, or `probe_failed`, with failure class and code only | harness |
 
 A metric a host cannot provide is recorded as `unavailable`, never zero or omitted. Worker
 messages are never recorded because they can contain host paths. Host-wide counters on a
 shared host include unrelated traffic. Each result states that.
+
+Linux documents the worker counter boundaries in
+[`proc_pid_stat(5)`](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html),
+[`proc_pid_io(5)`](https://man7.org/linux/man-pages/man5/proc_pid_io.5.html), and
+[`proc_pid_status(5)`](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html).
+Both `rchar` and `read_bytes` include waited-for children; `VmHWM` covers only the worker.
 
 ## Corpus
 
