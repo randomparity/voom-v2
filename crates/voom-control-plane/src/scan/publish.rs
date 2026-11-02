@@ -140,7 +140,6 @@ async fn publish_one(
                                 storage_root_id,
                                 provider_relative_locator,
                                 candidate: &candidate,
-                                snapshot_payload: evidence.probe_snapshot.clone(),
                                 now,
                             },
                         )
@@ -149,6 +148,19 @@ async fn publish_one(
                 }
             }
         };
+
+    // Per-file probe provenance remains with the owner session's batches.
+    crate::media_snapshot::record_with_event_in_tx(
+        control_plane,
+        tx,
+        NewMediaSnapshot {
+            file_version_id: resolved.file_version_id,
+            probed_by: None,
+            probed_at: now,
+            payload: normalize_snapshot_stream_ids(evidence.probe_snapshot.clone())?,
+        },
+    )
+    .await?;
 
     persist_bundle_sidecars(
         control_plane,
@@ -316,7 +328,6 @@ async fn ingest_new_scanned_file(
         storage_root_id,
         provider_relative_locator,
         candidate,
-        snapshot_payload,
         now,
     } = input;
     let outcome = control_plane
@@ -336,19 +347,6 @@ async fn ingest_new_scanned_file(
         .await?;
     let ingested = emit_ingest_events(control_plane, tx, &outcome, now).await?;
     record_inode_fact(tx, ingested.location, candidate, now).await?;
-    // The probe ran on the owner node under a worker identity the control plane
-    // does not attribute per-file; provenance stays with the session's batches.
-    crate::media_snapshot::record_with_event_in_tx(
-        control_plane,
-        tx,
-        NewMediaSnapshot {
-            file_version_id: ingested.version,
-            probed_by: None,
-            probed_at: now,
-            payload: normalize_snapshot_stream_ids(snapshot_payload)?,
-        },
-    )
-    .await?;
     Ok(ResolvedIdentity {
         file_version_id: ingested.version,
         hardlink: false,
@@ -364,7 +362,6 @@ struct NewScanIdentity<'a> {
     storage_root_id: StorageRootId,
     provider_relative_locator: ProviderRelativeLocator,
     candidate: &'a PublishedFacts,
-    snapshot_payload: Value,
     now: OffsetDateTime,
 }
 

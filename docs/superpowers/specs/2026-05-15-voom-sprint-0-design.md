@@ -250,8 +250,8 @@ because version data has no host context):
     "runtime": { "tokio_workers": 8 }
   },
   "local": {
-    "db_url": "sqlite:///Users/dave/Library/Application Support/voom/voom.db",
-    "config_path": "/Users/dave/Library/Preferences/voom/config.toml"
+    "db_url": "sqlite://$HOME/Library/Application Support/voom/voom.db",
+    "config_path": "$HOME/Library/Preferences/voom/config.toml"
   },
   "warnings": [],
   "error": null
@@ -275,8 +275,8 @@ identical except the `local` block is absent.
     "already_initialized": false
   },
   "local": {
-    "db_url": "sqlite:///Users/dave/Library/Application Support/voom/voom.db",
-    "config_path": "/Users/dave/Library/Preferences/voom/config.toml"
+    "db_url": "sqlite://$HOME/Library/Application Support/voom/voom.db",
+    "config_path": "$HOME/Library/Preferences/voom/config.toml"
   },
   "warnings": [],
   "error": null

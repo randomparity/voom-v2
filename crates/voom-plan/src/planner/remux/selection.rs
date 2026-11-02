@@ -74,6 +74,7 @@ pub fn stream_facts(
     let mut facts = Vec::with_capacity(streams.len());
 
     for stream in streams {
+        let cover_art = is_cover_art(stream);
         let stream = stream
             .as_object()
             .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
@@ -101,16 +102,7 @@ pub fn stream_facts(
             // ADR 0125: ffprobe reports cover art as video; mkvmerge carries it as an
             // attachment. A Matroska image attachment's filename and image MIME tags
             // recover covers from snapshots probed before `attached_pic` was recorded.
-            "video"
-                if attached_picture
-                    || legacy_matroska_image(
-                        codec_name.as_deref(),
-                        mime_type.as_deref(),
-                        filename.as_deref(),
-                    ) =>
-            {
-                TrackTarget::Attachment
-            }
+            "video" if cover_art => TrackTarget::Attachment,
             "video" => TrackTarget::Video,
             "audio" => TrackTarget::Audio,
             "subtitle" => TrackTarget::Subtitle,
@@ -139,6 +131,21 @@ pub fn stream_facts(
     }
 
     Ok(facts)
+}
+
+/// Normalized cover classification shared by remux and primary-video projection (ADR 0125).
+#[must_use]
+pub fn is_cover_art(stream: &Value) -> bool {
+    stream.get("kind").and_then(Value::as_str) == Some("video")
+        && (stream
+            .pointer("/disposition/attached_pic")
+            .and_then(Value::as_bool)
+            == Some(true)
+            || legacy_matroska_image(
+                stream.get("codec_name").and_then(Value::as_str),
+                stream.get("mime_type").and_then(Value::as_str),
+                stream.get("filename").and_then(Value::as_str),
+            ))
 }
 
 /// Track tags are author-controlled, so the fallback also requires an image codec as

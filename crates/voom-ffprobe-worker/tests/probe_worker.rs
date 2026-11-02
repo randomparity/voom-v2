@@ -20,6 +20,82 @@ use voom_worker_protocol::{
 const BASIC_FFPROBE_JSON: &str = include_str!("../fixtures/ffprobe/basic-mp4.json");
 
 #[tokio::test]
+async fn oversized_ffprobe_stderr_preserves_classification_through_default_reader() {
+    for (prefix, tail, class, code, termination, status) in [
+        (
+            "Invalid data found when processing input",
+            "\u{1}é🙂".repeat(20_000),
+            FailureClass::MalformedMedia,
+            ErrorCode::MalformedMedia,
+            "exit 42",
+            "42",
+        ),
+        (
+            "transient dependency failure",
+            "\u{1}".repeat(70_000),
+            FailureClass::ExternalSystemUnavailable,
+            ErrorCode::ExternalSystemUnavailable,
+            "exit 42",
+            "42",
+        ),
+        (
+            "Invalid data found when processing input",
+            "\u{1}".repeat(70_000),
+            FailureClass::ExternalSystemUnavailable,
+            ErrorCode::ExternalSystemUnavailable,
+            "kill -TERM $$",
+            "signal",
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("temporary probe fixture");
+        let media_path = write_wav(dir.path());
+        let diagnostic_path = dir.path().join("diagnostic");
+        let mut diagnostic = format!("{prefix}: {tail}").into_bytes();
+        diagnostic.push(0xff);
+        std::fs::write(&diagnostic_path, &diagnostic).expect("write oversized diagnostic");
+        let fake_ffprobe = write_fake_ffprobe(
+            dir.path(),
+            &format!("cat '{}' >&2\n{termination}\n", diagnostic_path.display()),
+        );
+        let frame = Box::pin(dispatch_terminal_frame(
+            &media_path,
+            configured_ffprobe(&fake_ffprobe),
+            "oversized-stderr",
+        ))
+        .await;
+        let encoded = serde_json::to_vec(&frame).expect("serialize complete terminal frame");
+        assert!(encoded.len() <= voom_worker_protocol::MAX_FRAME_BYTES);
+        let ProgressFrame::Error {
+            message, payload, ..
+        } = &frame
+        else {
+            assert!(matches!(frame, ProgressFrame::Error { .. }));
+            return;
+        };
+        let decoded = String::from_utf8_lossy(&diagnostic);
+        let start = decoded
+            .char_indices()
+            .find(|(index, _)| decoded.len() - index <= 4096)
+            .expect("retained UTF-8 suffix")
+            .0;
+        let expected = format!(
+            "ffprobe exited with status {status}: [truncated {start} UTF-8 bytes] {}",
+            &decoded[start..]
+        );
+        assert_eq!(
+            payload.as_ref().expect("error payload")["message"],
+            expected
+        );
+        assert!(message.ends_with(&expected));
+        assert!(
+            !message.contains(prefix),
+            "classifying must precede truncation"
+        );
+        assert_terminal_error(frame, class, code);
+    }
+}
+
+#[tokio::test]
 async fn missing_ffprobe_returns_terminal_domain_error_over_http_success() {
     let dir_result = tempfile::tempdir();
     assert!(dir_result.is_ok());
@@ -500,7 +576,7 @@ async fn dispatch_terminal_frame(
             terminal => break terminal,
         }
     };
-    assert!(terminal_result.is_ok());
+    assert!(terminal_result.is_ok(), "{terminal_result:?}");
     stop_server(running).await;
     let Ok(terminal) = terminal_result else {
         return fallback_error_frame();

@@ -10,6 +10,7 @@ use crate::{
     NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode, ResourceEstimates,
 };
 
+use super::remux::is_cover_art;
 use super::{OperationPlan, PlanGenerationError, serialization_error, video_stream_count};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +140,9 @@ fn transcode_video_shape(
         Ok(needs_change) => needs_change,
         Err(shape) => return shape,
     };
+    if needs_change && let Some(shape) = cover_art_shape(snapshot, target_container) {
+        return shape;
+    }
     if needs_change && let Some(shape) = unsupported_hardware_decode_shape(resolved, video_codec) {
         return shape;
     }
@@ -391,6 +395,28 @@ fn codec_level_needs_change(
     Ok(voom_core::normalize_codec_token(observed) != voom_core::normalize_codec_token(target))
 }
 
+fn cover_art_shape(snapshot: &MediaSnapshotInput, container: &str) -> Option<TranscodeVideoShape> {
+    let streams = snapshot.stream_summary.get("streams")?.as_array()?;
+    for stream in streams.iter().filter(|stream| is_cover_art(stream)) {
+        let Some(codec) = stream.get("codec_name").and_then(serde_json::Value::as_str) else {
+            return Some(TranscodeVideoShape::InsufficientFacts(
+                "cover art codec is unknown".to_owned(),
+            ));
+        };
+        let supported = match container {
+            "mkv" => matches!(codec, "mjpeg" | "png" | "gif" | "tiff"),
+            "mp4" => matches!(codec, "mjpeg" | "png"),
+            _ => false,
+        };
+        if !supported {
+            return Some(TranscodeVideoShape::UnsupportedShape(format!(
+                "{container} target cannot preserve cover art codec `{codec}`"
+            )));
+        }
+    }
+    None
+}
+
 fn mp4_gate_shape(snapshot: &MediaSnapshotInput) -> Option<TranscodeVideoShape> {
     let Some(streams) = snapshot
         .stream_summary
@@ -439,7 +465,7 @@ fn mp4_muxable(kind: &str, codec_name: &str) -> bool {
     }
 }
 
-/// Returns the value of a field from the first video stream in the snapshot's
+/// Returns a field from the first primary video stream (excluding cover art) in the snapshot's
 /// `stream_summary.streams` array.
 #[must_use]
 pub fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Option<&'a str> {
@@ -448,7 +474,10 @@ pub fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Op
         .get("streams")
         .and_then(serde_json::Value::as_array)?
         .iter()
-        .find(|stream| stream.get("kind").and_then(serde_json::Value::as_str) == Some("video"))
+        .find(|stream| {
+            stream.get("kind").and_then(serde_json::Value::as_str) == Some("video")
+                && !is_cover_art(stream)
+        })
         .and_then(|stream| stream.get(key))
         .and_then(serde_json::Value::as_str)
 }

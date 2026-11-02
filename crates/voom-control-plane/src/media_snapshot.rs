@@ -4,6 +4,7 @@ use std::time::Duration;
 use voom_core::VoomError;
 use voom_events::payload::MediaSnapshotRecordedPayload;
 use voom_events::{Event, SubjectType};
+use voom_plan::planner::remux::is_cover_art;
 use voom_policy::{MediaSnapshotInput, TargetRef};
 use voom_store::repo::media::identity::{MediaSnapshot, MediaSnapshotRepo, NewMediaSnapshot};
 
@@ -48,9 +49,9 @@ pub(crate) fn planning_input(ordinal: u32, snapshot: &MediaSnapshot) -> MediaSna
         .get("streams")
         .and_then(Value::as_array)
         .and_then(|streams| {
-            streams
-                .iter()
-                .find(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
+            streams.iter().find(|stream| {
+                stream.get("kind").and_then(Value::as_str) == Some("video") && !is_cover_art(stream)
+            })
         });
     let container = canonical_container(payload);
     let container_facts = payload.get("container").and_then(Value::as_object);
@@ -123,7 +124,9 @@ pub(crate) fn stream_summary_from_snapshot_payload(payload: &Value) -> Value {
     let video_stream_count = streams.and_then(Value::as_array).map_or(0, |streams| {
         streams
             .iter()
-            .filter(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
+            .filter(|stream| {
+                stream.get("kind").and_then(Value::as_str) == Some("video") && !is_cover_art(stream)
+            })
             .count()
     });
     let mut summary = json!({"video_stream_count": video_stream_count});

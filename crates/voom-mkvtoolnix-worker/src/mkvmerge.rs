@@ -6,7 +6,9 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use voom_core::is_font_attachment_mime_type;
-use voom_worker_protocol::{RemuxRequest, RemuxSelection, RemuxStreamRef, RemuxTrackGroup};
+use voom_worker_protocol::{
+    RemuxRequest, RemuxSelection, RemuxStreamRef, RemuxTrackGroup, bounded_error_diagnostic,
+};
 
 use crate::preflight::{MKVMERGE_LOCALE, MKVMERGE_LOCALE_ENV, MkvmergeConfig, MkvtoolnixError};
 
@@ -707,13 +709,16 @@ async fn identify_json(config: &MkvmergeConfig, path: &Path) -> Result<Value, Mk
 
 fn command_error(output: &std::process::Output) -> String {
     format!(
-        "status {}: {}{}",
+        "status {}: {}",
         output
             .status
             .code()
             .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        bounded_error_diagnostic(&format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
     )
 }
 

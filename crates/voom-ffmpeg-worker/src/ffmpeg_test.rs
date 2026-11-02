@@ -229,6 +229,8 @@ fn video_source(
         height,
         codec: "hevc",
         forced_subtitle_ordinals,
+        cover_art: &[],
+        attachment_count: 0,
     }
 }
 
@@ -521,6 +523,8 @@ async fn nvenc_cuda_decode_command_pins_decoder_and_zero_copy_filter() {
         height: 1080,
         codec: "h264",
         forced_subtitle_ordinals: &[],
+        cover_art: &[],
+        attachment_count: 0,
     };
 
     run_ffmpeg_transcode(&config, &request, source)
@@ -530,8 +534,8 @@ async fn nvenc_cuda_decode_command_pins_decoder_and_zero_copy_filter() {
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(
         args.contains(
-            "-hwaccel\ncuda\n-hwaccel_device\n0\n-hwaccel_output_format\ncuda\n\
-             -c:v\nh264_cuvid\n-i\n"
+            "-hwaccel:V:0\ncuda\n-hwaccel_device:V:0\n0\n-hwaccel_output_format:V:0\ncuda\n\
+             -c:V:0\nh264_cuvid\n-i\n"
         ),
         "{args}"
     );
@@ -570,7 +574,10 @@ async fn videotoolbox_software_decode_uses_explicit_format_and_hardware_only_enc
         args.contains("-c:v\nhevc_videotoolbox\n-allow_sw\n0\n-b:v\n8000k\n"),
         "{args}"
     );
-    assert!(!args.contains("-hwaccel\n"), "{args}");
+    assert!(
+        !args.lines().any(|arg| arg.starts_with("-hwaccel")),
+        "{args}"
+    );
     assert!(!args.contains("allow_sw\n1"), "{args}");
 }
 
@@ -600,7 +607,9 @@ async fn videotoolbox_decode_without_scaling_keeps_hardware_frames() {
 
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(
-        args.contains("-hwaccel\nvideotoolbox\n-hwaccel_output_format\nvideotoolbox_vld\n-i\n"),
+        args.contains(
+            "-hwaccel:V:0\nvideotoolbox\n-hwaccel_output_format:V:0\nvideotoolbox_vld\n-i\n"
+        ),
         "{args}"
     );
     assert!(!args.contains("-vf\n"), "{args}");
@@ -1664,7 +1673,7 @@ fn ffprobe_audio_stub(
     third_codec: &str,
 ) -> PathBuf {
     let streams = serde_json::json!({"format":{"format_name":container},"streams":[
-        {"index":1,"codec_type":"audio","codec_name":first_codec,"channels":6,
+        {"index":1,"codec_type":"audio","codec_name":first_codec,"channels":6,"channel_layout":"5.1",
          "tags":{"language":"eng","title":"Main"},"disposition":{"default":1,"forced":0,"comment":0}},
         {"index":2,"codec_type":"audio","codec_name":"aac","channels":2},
         {"index":3,"codec_type":"audio","codec_name":third_codec,
@@ -1800,7 +1809,7 @@ async fn vaapi_software_decode_uploads_nv12_to_the_bound_render_node() {
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -1863,7 +1872,7 @@ async fn vaapi_software_decode_uploads_p010_and_names_main10_profile() {
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -1919,16 +1928,16 @@ async fn vaapi_hardware_decode_stays_in_hardware_frames_with_no_filter() {
     -hide_banner
     -nostdin
     -n
-    -hwaccel
+    -hwaccel:V:0
     vaapi
-    -hwaccel_device
+    -hwaccel_device:V:0
     <DIR>/renderD129
-    -hwaccel_output_format
+    -hwaccel_output_format:V:0
     vaapi
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -1983,16 +1992,16 @@ async fn vaapi_hardware_decode_main10_names_profile_without_a_filter() {
     -hide_banner
     -nostdin
     -n
-    -hwaccel
+    -hwaccel:V:0
     vaapi
-    -hwaccel_device
+    -hwaccel_device:V:0
     <DIR>/renderD129
-    -hwaccel_output_format
+    -hwaccel_output_format:V:0
     vaapi
     -i
     <DIR>/input.mkv
     -map
-    0:v:0
+    0:V:0
     -map
     0:a?
     -map
@@ -2158,6 +2167,8 @@ async fn vaapi_hardware_decode_rejects_an_unsupported_source_codec() {
         height: 1080,
         codec: "vp9",
         forced_subtitle_ordinals: &[],
+        cover_art: &[],
+        attachment_count: 0,
     };
 
     let err = run_ffmpeg_transcode(&config, &request, source)
@@ -2774,5 +2785,329 @@ async fn media_spawn_stamps_actual_caller_identity() {
             .unwrap()
             .status
             .success()
+    );
+}
+
+#[tokio::test]
+async fn cover_art_input_probe_selects_primary_after_cover() {
+    let dir = tempfile::tempdir().unwrap();
+    let ffprobe = stub_bin(
+        dir.path(),
+        "ffprobe",
+        r#"#!/bin/sh
+cat <<'JSON'
+{"streams":[{"index":0,"codec_type":"video","codec_name":"mjpeg","width":16,"height":16,"pix_fmt":"rgb24","disposition":{"attached_pic":1}},{"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"pix_fmt":"yuv420p"}]}
+JSON
+"#,
+    );
+    let config = FfmpegConfig::new(
+        dir.path().join("ffmpeg"),
+        ffprobe,
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let probe = probe_input(&config, &dir.path().join("input.mkv"))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            probe.codec.as_str(),
+            probe.width,
+            probe.height,
+            probe.video_stream_count
+        ),
+        ("h264", 1920, 1080, 1)
+    );
+}
+
+#[test]
+fn cover_art_hardware_input_options_select_primary() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = FfmpegConfig::new(
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("ffprobe"),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    for (config, profile) in [
+        (
+            base.clone().with_accelerator(nvidia_descriptor()),
+            profile_nvenc(voom_core::VideoDecodeMode::nvidia()),
+        ),
+        (
+            base.clone().with_vaapi_device(vaapi_binding(dir.path())),
+            profile_vaapi(voom_core::VideoDecodeMode::vaapi(), Some("nv12"), None),
+        ),
+        (
+            base.with_videotoolbox_device(videotoolbox_descriptor()),
+            profile_videotoolbox(
+                "hevc_videotoolbox",
+                "hevc",
+                "main",
+                None,
+                "yuv420p",
+                voom_core::VideoDecodeMode::video_toolbox(),
+            ),
+        ),
+    ] {
+        let mut command = Command::new("ffmpeg");
+        append_hardware_input_args(&mut command, &config, &profile, "h264", false).unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|arg| arg == "-hwaccel:V:0"), "{args:?}");
+        assert!(
+            args.iter().any(|arg| arg == "-hwaccel_output_format:V:0"),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| matches!(
+                arg.as_str(),
+                "-hwaccel" | "-hwaccel_device" | "-hwaccel_output_format" | "-c:v"
+            )),
+            "{args:?}"
+        );
+        if profile.decode.is_nvidia() {
+            assert!(args.windows(2).any(|args| args == ["-c:V:0", "h264_cuvid"]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn cover_art_forced_decoder_preserves_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = FfmpegConfig::new(
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("ffprobe"),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let image = dir.path().join("cover.jpg");
+    let source = dir.path().join("source.mkv");
+    let output = dir.path().join("output.mp4");
+    let mut command = Command::new(&config.ffmpeg_path);
+    command
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:size=16x16",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&image);
+    run_ffmpeg_command(&config, command).await.unwrap();
+    let mut command = Command::new(&config.ffmpeg_path);
+    command
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:size=64x64:rate=1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-attach",
+        ])
+        .arg(&image)
+        .args([
+            "-metadata:s:t",
+            "filename=cover.jpg",
+            "-metadata:s:t",
+            "mimetype=image/jpeg",
+        ])
+        .arg(&source);
+    run_ffmpeg_command(&config, command).await.unwrap();
+    let mut planned = Command::new(&config.ffmpeg_path);
+    append_hardware_input_args(
+        &mut planned,
+        &config.clone().with_accelerator(nvidia_descriptor()),
+        &profile_nvenc(voom_core::VideoDecodeMode::nvidia()),
+        "h264",
+        false,
+    )
+    .unwrap();
+    let args: Vec<_> = planned
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut command = Command::new(&config.ffmpeg_path);
+    command.args(["-v", "error"]);
+    // Retain production stream selectors while substituting CPU-only option values.
+    for pair in args.chunks_exact(2) {
+        let value = match pair[0].as_str() {
+            "-c:v" | "-c:V:0" => "h264",
+            "-hwaccel" | "-hwaccel:V:0" => "none",
+            "-hwaccel_device" | "-hwaccel_device:V:0" => "unused",
+            "-hwaccel_output_format" | "-hwaccel_output_format:V:0" => "yuv420p",
+            other => panic!("unexpected hardware input option {other}"),
+        };
+        command.arg(&pair[0]).arg(value);
+    }
+    command
+        .arg("-i")
+        .arg(&source)
+        .args([
+            "-map",
+            "0:V:0",
+            "-map",
+            "0:1",
+            "-c",
+            "copy",
+            "-disposition:v:1",
+            "attached_pic",
+        ])
+        .arg(&output);
+    run_ffmpeg_command(&config, command).await.unwrap();
+    let probe = probe_json(&config, &output).await.unwrap();
+    let streams = probe["streams"].as_array().unwrap();
+    assert_eq!(streams[0]["codec_name"], "h264");
+    assert_eq!(streams[1]["codec_name"], "mjpeg");
+    assert_eq!(streams[1]["width"], 16);
+    assert_eq!(streams[1]["disposition"]["attached_pic"], 1);
+}
+
+#[tokio::test]
+async fn eac3_rejects_unsupported_source_facts_before_encoding() {
+    for (channels, layout) in [
+        (Some(8), Some("7.1")),
+        (Some(6), Some("6.0")),
+        (Some(7), Some("6.1")),
+        (Some(2), Some("mono")),
+        (Some(0), Some("stereo")),
+        (None, Some("stereo")),
+        (Some(2), None),
+        (Some(2), Some("")),
+        (Some(6), Some("unknown")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("encoded");
+        let ffmpeg = stub_bin(
+            dir.path(),
+            "ffmpeg",
+            &format!(
+                "#!/bin/sh\ntouch '{}'\nfor last; do :; done\nprintf output > \"$last\"\n",
+                marker.display()
+            ),
+        );
+        let mut source = serde_json::json!({"format":{"format_name":"matroska"},"streams":[
+            {"index":1,"codec_type":"audio","codec_name":"flac","channels":channels,"channel_layout":layout}
+        ]});
+        if channels.is_none() {
+            source["streams"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("channels");
+        }
+        if layout.is_none() {
+            source["streams"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("channel_layout");
+        }
+        let ffprobe = audio_probe_stub(dir.path(), source.clone(), source);
+        let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+        let output = dir.path().join("out.mkv");
+        let error = run_ffmpeg_transcode_audio(
+            &config,
+            &dir.path().join("input.mkv"),
+            &output,
+            &transcode_audio_request(dir.path(), &[1], "eac3"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !marker.exists(),
+            "unsupported {channels:?}/{layout:?} must not invoke the encoder"
+        );
+        assert!(
+            !output.exists(),
+            "unsupported layout must fail before output creation"
+        );
+        assert!(error.to_string().contains("E-AC-3"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn eac3_source_admission_accepts_supported_pairs_and_ignores_unselected_streams() {
+    for (channels, layouts) in [
+        (1, vec!["mono"]),
+        (2, vec!["stereo", "2 channels (FC+LFE)"]),
+        (3, vec!["2.1", "3.0", "3.0(back)"]),
+        (
+            4,
+            vec![
+                "3.1",
+                "4.0",
+                "quad",
+                "quad(side)",
+                "4 channels (FL+FR+LFE+BC)",
+            ],
+        ),
+        (5, vec!["4.1", "5.0", "5.0(side)"]),
+        (6, vec!["5.1", "5.1(side)"]),
+    ] {
+        for layout in layouts {
+            let dir = tempfile::tempdir().unwrap();
+            let source = serde_json::json!({"format":{"format_name":"matroska"},"streams":[
+                {"index":1,"codec_type":"audio","codec_name":"eac3","channels":channels,"channel_layout":layout},
+                {"index":2,"codec_type":"audio","codec_name":"flac","channels":8,"channel_layout":"7.1"}
+            ]});
+            let ffprobe = audio_probe_stub(dir.path(), source.clone(), source);
+            let ffmpeg = stub_bin(
+                dir.path(),
+                "ffmpeg",
+                "#!/bin/sh\nfor last; do :; done\nprintf output > \"$last\"\n",
+            );
+            let config =
+                FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+            let result = run_ffmpeg_transcode_audio(
+                &config,
+                &dir.path().join("input.mkv"),
+                &dir.path().join("out.mkv"),
+                &transcode_audio_request(dir.path(), &[1], "eac3"),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "native supported {channels}/{layout}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn eac3_postcheck_preserves_title_and_channel_contract() {
+    let source = serde_json::json!({"index":1,"codec_type":"audio","codec_name":"flac", "channels":6,
+        "channel_layout":"5.1", "tags":{"language":"eng","title":"Main"},
+        "disposition":{"default":1,"forced":0,"comment":0}});
+    let sources = audio_facts_from_probe(&serde_json::json!({"streams":[source.clone()]})).unwrap();
+    let mut encoded = source;
+    encoded["codec_name"] = serde_json::json!("eac3");
+    let output = audio_output_stream_fact(&encoded, "selected".to_owned(), Some("eac3"))
+        .unwrap()
+        .unwrap();
+    verify_preserved_audio_metadata(&sources[0], &output).unwrap();
+    let mut wrong_title = output.clone();
+    wrong_title.title = Some("Changed".to_owned());
+    assert!(
+        matches!(verify_preserved_audio_metadata(&sources[0], &wrong_title),
+        Err(FfmpegError::OutputFactsMismatch(message)) if message == "selected audio title mismatch")
+    );
+    let mut wrong_channels = output;
+    wrong_channels.channels = Some(2);
+    assert!(
+        matches!(verify_preserved_audio_metadata(&sources[0], &wrong_channels),
+        Err(FfmpegError::OutputFactsMismatch(message)) if message == "selected audio channel count mismatch")
     );
 }

@@ -226,29 +226,37 @@ async fn evidence_less_observation_publishes_nothing() {
 }
 
 #[tokio::test]
-async fn republishing_same_content_hits_same_address_replay() {
+async fn republishing_same_content_refreshes_snapshot_without_new_identity() {
     let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let mut legacy = evidence(&blake3(&"b".repeat(64)));
+    legacy.probe_snapshot = json!({
+        "streams": [
+            {"index": 0, "kind": "video", "codec_name": "h264"},
+            {"index": 1, "kind": "video", "codec_name": "mjpeg"}
+        ]
+    });
     let first = publish(
         &cp,
-        vec![observation(
-            "library/replay.mkv",
-            Some(evidence(&blake3(&"b".repeat(64)))),
-        )],
+        vec![observation("library/replay.mp4", Some(legacy.clone()))],
         SESSION,
     )
     .await
     .unwrap();
     assert_eq!(first.published, 1);
+    let original: (i64, i64, String) =
+        sqlx::query_as("SELECT id, file_version_id, payload FROM media_snapshots")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let events_before = table_count(&cp, "events").await;
 
-    // A later session observing identical bytes at the same address must not
-    // mint duplicate identity rows.
+    // Provider facts evolve independently of bytes. Equal timestamps also
+    // prove the existing greatest-ID reader can distinguish these observations.
+    legacy.probe_snapshot["streams"][1]["disposition"] = json!({"attached_pic": true});
     let second_session = ScanSessionId(4243);
     let second = publish(
         &cp,
-        vec![observation(
-            "library/replay.mkv",
-            Some(evidence(&blake3(&"b".repeat(64)))),
-        )],
+        vec![observation("library/replay.mp4", Some(legacy))],
         second_session,
     )
     .await
@@ -259,7 +267,86 @@ async fn republishing_same_content_hits_same_address_replay() {
     assert_eq!(table_count(&cp, "file_assets").await, 1);
     assert_eq!(table_count(&cp, "file_versions").await, 1);
     assert_eq!(table_count(&cp, "file_locations").await, 1);
+    let history: Vec<(i64, i64, String)> =
+        sqlx::query_as("SELECT id, file_version_id, payload FROM media_snapshots ORDER BY id ASC")
+            .fetch_all(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(history.len(), 2, "rescan must retain its new probe facts");
+    assert_eq!(history[0], original, "historical snapshots are immutable");
+    assert!(history[1].0 > original.0);
+    assert_eq!(
+        history[1].1, original.1,
+        "unchanged bytes keep their version"
+    );
+    let refreshed: serde_json::Value = serde_json::from_str(&history[1].2).unwrap();
+    assert_eq!(refreshed["streams"][1]["id"], "stream-1");
+    assert_eq!(refreshed["streams"][1]["disposition"]["attached_pic"], true);
+    assert_eq!(table_count(&cp, "events").await, events_before + 1);
+}
+
+#[tokio::test]
+async fn refresh_event_abort_preserves_previous_snapshot() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let agreed = evidence(&blake3(&"b".repeat(64)));
+    publish(
+        &cp,
+        vec![observation("a.mp4", Some(agreed.clone()))],
+        SESSION,
+    )
+    .await
+    .unwrap();
+    let events_before = table_count(&cp, "events").await;
+    sqlx::query(
+        "CREATE TRIGGER reject_refresh_event BEFORE INSERT ON events \
+         WHEN NEW.kind = 'media_snapshot.recorded' \
+         BEGIN SELECT RAISE(ABORT, 'forced refresh event rollback'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = publish(
+        &cp,
+        vec![observation("a.mp4", Some(agreed))],
+        ScanSessionId(4243),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(error.to_string().contains("forced refresh event rollback"));
     assert_eq!(table_count(&cp, "media_snapshots").await, 1);
+    assert_eq!(table_count(&cp, "file_versions").await, 1);
+    assert_eq!(table_count(&cp, "events").await, events_before);
+}
+
+#[tokio::test]
+async fn malformed_refresh_preserves_previous_snapshot() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let mut agreed = evidence(&blake3(&"b".repeat(64)));
+    publish(
+        &cp,
+        vec![observation("a.mp4", Some(agreed.clone()))],
+        SESSION,
+    )
+    .await
+    .unwrap();
+    let events_before = table_count(&cp, "events").await;
+    agreed.probe_snapshot = json!({"streams": [{"kind": "video"}]});
+
+    let error = publish(
+        &cp,
+        vec![observation("a.mp4", Some(agreed))],
+        ScanSessionId(4243),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), "CONFIG_INVALID");
+    assert!(error.to_string().contains("numeric index"));
+    assert_eq!(table_count(&cp, "media_snapshots").await, 1);
+    assert_eq!(table_count(&cp, "events").await, events_before);
 }
 
 #[tokio::test]
@@ -329,8 +416,8 @@ async fn hardlink_pair_attaches_two_locations_to_one_asset() {
     assert_eq!(table_count(&cp, "file_assets").await, 1);
     assert_eq!(table_count(&cp, "file_versions").await, 1);
     assert_eq!(table_count(&cp, "file_locations").await, 2);
-    // Only the fresh ingest records a snapshot; the hardlink reuses it.
-    assert_eq!(table_count(&cp, "media_snapshots").await, 1);
+    // Each agreed probe is an observation of the shared content version.
+    assert_eq!(table_count(&cp, "media_snapshots").await, 2);
 }
 
 #[tokio::test]

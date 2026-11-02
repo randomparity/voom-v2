@@ -16,6 +16,7 @@ pub struct SnapshotAudioStreamFact {
     pub language: Option<String>,
     pub title: Option<String>,
     pub channels: Option<u32>,
+    pub channel_layout: Option<String>,
     pub default: bool,
     pub disposition: AudioDispositionFact,
     pub commentary: Option<bool>,
@@ -95,6 +96,7 @@ pub fn stream_facts(
             codec: optional_string(stream.get("codec_name")),
             language: optional_string(stream.get("language")),
             title: optional_string(stream.get("title")),
+            channel_layout: optional_string(stream.get("channel_layout")),
             channels: stream
                 .get("channels")
                 .and_then(Value::as_u64)
@@ -247,10 +249,32 @@ pub fn transcode_audio_shape(
             .iter()
             .all(|stream| stream.codec.as_deref() == Some(target_codec))
     {
-        AudioPlanShape::NoOp
-    } else {
-        AudioPlanShape::Planned
+        return AudioPlanShape::NoOp;
     }
+    if target_codec == "eac3" {
+        for stream in &selected {
+            let (Some(channels), Some(layout)) =
+                (stream.channels, stream.channel_layout.as_deref())
+            else {
+                return AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts);
+            };
+            if !matches!(
+                (channels, layout),
+                (1, "mono")
+                    | (2, "stereo" | "2 channels (FC+LFE)")
+                    | (3, "2.1" | "3.0" | "3.0(back)")
+                    | (
+                        4,
+                        "3.1" | "4.0" | "quad" | "quad(side)" | "4 channels (FL+FR+LFE+BC)"
+                    )
+                    | (5, "4.1" | "5.0" | "5.0(side)")
+                    | (6, "5.1" | "5.1(side)")
+            ) {
+                return AudioPlanShape::Blocked(AudioPlanningBlock::UnsupportedMediaShape);
+            }
+        }
+    }
+    AudioPlanShape::Planned
 }
 
 /// Plan shape for `synthesize audio` (ADR 0026, #276). Synthesis *adds* a

@@ -114,4 +114,6 @@ pub use wire::identity::{
     WorkerIdentityRequest, WorkerIdentityResponse, generate_identity_challenge, identity_response,
     verify_identity_response,
 };
-pub use wire::ndjson::{MAX_FRAME_BYTES, NdjsonOutcome, NdjsonReader, NdjsonWriter};
+pub use wire::ndjson::{
+    MAX_FRAME_BYTES, NdjsonOutcome, NdjsonReader, NdjsonWriter, bounded_error_diagnostic,
+};

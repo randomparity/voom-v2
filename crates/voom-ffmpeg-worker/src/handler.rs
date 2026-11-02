@@ -286,8 +286,8 @@ pub async fn handle_transcode_video(
             ),
         ));
     }
-    if input_probe.video_stream_count > 1 {
-        // The transcode maps only 0:v:0; a source with multiple video streams
+    if input_probe.video_stream_count != 1 {
+        // The transcode maps one primary video; multiple primary streams
         // would silently drop the rest. Fail loud rather than lose data.
         return Err(TranscodeVideoError::from(FfmpegError::UnsupportedInput(
             format!(
@@ -297,6 +297,12 @@ pub async fn handle_transcode_video(
         )));
     }
 
+    crate::ffmpeg::cover_art::validate(
+        &input_probe.cover_art,
+        &request.output.container,
+        input_probe.attachment_count,
+    )
+    .map_err(TranscodeVideoError::from)?;
     if request.copy_video {
         validate_copy_video_preconditions(request, &input_probe)?;
     }
@@ -310,6 +316,8 @@ pub async fn handle_transcode_video(
             height: input_probe.height,
             codec: &input_probe.codec,
             forced_subtitle_ordinals: &input_probe.forced_subtitle_ordinals,
+            cover_art: &input_probe.cover_art,
+            attachment_count: input_probe.attachment_count,
         },
     )
     .await

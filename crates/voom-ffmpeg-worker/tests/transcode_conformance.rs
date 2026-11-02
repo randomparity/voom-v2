@@ -942,10 +942,10 @@ async fn tiny_process_timeout_yields_external_system_unavailable() {
 // Audio conformance
 // ---------------------------------------------------------------------------
 
-/// Generates a 1-second, 5.1 (6-channel) FLAC-in-mkv audio source at `path`,
-/// using the same ffmpeg binary the worker uses. FLAC is lossless and supports
-/// six channels, giving a clean 5.1 input to re-encode to E-AC-3.
-fn generate_5_1_audio_fixture(ffmpeg: &Path, path: &Path) {
+/// Generates a 1-second, 5.1 FLAC or `TrueHD` source with language/title metadata,
+/// using the same ffmpeg binary the worker uses. Both preserve the six-channel
+/// source shape for the E-AC-3 transport and metadata checks.
+fn generate_5_1_audio_fixture(ffmpeg: &Path, path: &Path, codec: &str) {
     let status = Command::new(ffmpeg)
         .args([
             "-y",
@@ -959,7 +959,13 @@ fn generate_5_1_audio_fixture(ffmpeg: &Path, path: &Path) {
             "-t",
             "1",
             "-c:a",
-            "flac",
+            codec,
+            "-strict",
+            "-2",
+            "-metadata:s:a:0",
+            "language=eng",
+            "-metadata:s:a:0",
+            "title=English TrueHD 5.1 / α Main",
             path.to_str().unwrap(),
         ])
         .status()
@@ -984,82 +990,92 @@ async fn audio_expected(path: &Path) -> AudioExpectedFacts {
 async fn eac3_transcode_preserves_5_1_channels() {
     let preflight = preflight_from_process_env()
         .expect("preflight failed — ensure libx265 and libsvtav1 are available");
-    let config = ffmpeg_config(&preflight);
-    let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("source.mkv");
-    let output = dir.path().join("out.eac3.mkv");
-    generate_5_1_audio_fixture(&preflight.ffmpeg_path, &input);
+    for codec in ["flac", "truehd"] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("out.eac3.mkv");
+        generate_5_1_audio_fixture(&preflight.ffmpeg_path, &input, codec);
+        let source_identity = audio_expected(&input).await;
 
-    let request = TranscodeAudioRequest {
-        input: TranscodeAudioInput {
-            path: input.to_string_lossy().into_owned(),
-            expected: audio_expected(&input).await,
-        },
-        output: TranscodeAudioOutput {
-            staging_root: dir.path().to_string_lossy().into_owned(),
-            path: output.to_string_lossy().into_owned(),
-            container: "mkv".to_owned(),
-            overwrite: false,
-        },
-        selection: TranscodeAudioSelection {
-            selected_streams: vec![AudioStreamRef {
-                snapshot_stream_id: "audio-0".to_owned(),
-                provider_stream_index: 0,
-            }],
-        },
-        audio: TranscodeAudioSettings {
-            lossless: None,
-            compatibility: None,
-            target_codec: "eac3".to_owned(),
-            profile: AUDIO_PROFILE_DEFAULT.to_owned(),
-            add_track: false,
-            target_channels: None,
-        },
-    };
+        let request = TranscodeAudioRequest {
+            input: TranscodeAudioInput {
+                path: input.to_string_lossy().into_owned(),
+                expected: audio_expected(&input).await,
+            },
+            output: TranscodeAudioOutput {
+                staging_root: dir.path().to_string_lossy().into_owned(),
+                path: output.to_string_lossy().into_owned(),
+                container: "mkv".to_owned(),
+                overwrite: false,
+            },
+            selection: TranscodeAudioSelection {
+                selected_streams: vec![AudioStreamRef {
+                    snapshot_stream_id: "audio-0".to_owned(),
+                    provider_stream_index: 0,
+                }],
+            },
+            audio: TranscodeAudioSettings {
+                lossless: None,
+                compatibility: None,
+                target_codec: "eac3".to_owned(),
+                profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+                add_track: false,
+                target_channels: None,
+            },
+        };
 
-    let result = handle_transcode_audio(&request, &config)
-        .await
-        .expect("eac3 5.1 transcode failed");
+        let result = synthesize_through_worker(&request).await;
+        assert_eq!(
+            audio_expected(&input).await,
+            source_identity,
+            "source must remain immutable"
+        );
 
-    assert_eq!(result.output_audio_codecs, vec!["eac3".to_owned()]);
-    let stream = result
-        .selected_output_streams
-        .first()
-        .expect("one selected output stream");
-    assert_eq!(stream.codec, "eac3");
-    assert_eq!(
-        stream.channels,
-        Some(6),
-        "eac3 output must preserve the 5.1 (6-channel) layout"
-    );
-    let independent = Command::new(&preflight.ffprobe_path)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_streams",
-            "-of",
-            "json",
-        ])
-        .arg(&output)
-        .output()
-        .expect("independent output probe must start");
-    assert!(independent.status.success());
-    let raw: serde_json::Value = serde_json::from_slice(&independent.stdout).unwrap();
-    let actual = &raw["streams"][0];
-    assert_eq!(
-        stream.sample_rate,
-        Some(actual["sample_rate"].as_str().unwrap().parse().unwrap())
-    );
-    assert_eq!(
-        stream.sample_format.as_deref(),
-        actual["sample_fmt"].as_str()
-    );
-    assert_eq!(
-        stream.bits_per_sample, None,
-        "lossy float output carries no integer precision claim"
-    );
+        assert_eq!(result.output_audio_codecs, vec!["eac3".to_owned()]);
+        let stream = result
+            .selected_output_streams
+            .first()
+            .expect("one selected output stream");
+        assert_eq!(stream.codec, "eac3");
+        assert_eq!(stream.title.as_deref(), Some("English TrueHD 5.1 / α Main"));
+        assert_eq!(stream.language.as_deref(), Some("eng"));
+        assert_eq!(
+            stream.channels,
+            Some(6),
+            "eac3 output must preserve the 5.1 (6-channel) layout"
+        );
+        let independent = Command::new(&preflight.ffprobe_path)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_streams",
+                "-of",
+                "json",
+            ])
+            .arg(&output)
+            .output()
+            .expect("independent output probe must start");
+        assert!(independent.status.success());
+        let raw: serde_json::Value = serde_json::from_slice(&independent.stdout).unwrap();
+        let actual = &raw["streams"][0];
+        assert_eq!(actual["channels"], 6);
+        assert_eq!(actual["tags"]["title"], "English TrueHD 5.1 / α Main");
+        assert_eq!(actual["tags"]["language"], "eng");
+        assert_eq!(
+            stream.sample_rate,
+            Some(actual["sample_rate"].as_str().unwrap().parse().unwrap())
+        );
+        assert_eq!(
+            stream.sample_format.as_deref(),
+            actual["sample_fmt"].as_str()
+        );
+        assert_eq!(
+            stream.bits_per_sample, None,
+            "lossy float output carries no integer precision claim"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1271,13 +1287,20 @@ fn assert_synthesized_audio_file(
     clippy::too_many_lines,
     reason = "one generated-media matrix keeps source and output preservation assertions together"
 )]
-async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
+async fn dolby_real_worker_preserves_channels_and_synthesizes_surround() {
     let preflight = preflight_from_process_env().unwrap();
-    for (layout, channels, synthesis, expected_channels, bitrate) in [
-        ("mono", 1, false, 1, "96000"),
-        ("stereo", 2, false, 2, "192000"),
-        ("5.1", 6, false, 6, "576000"),
-        ("7.1", 8, true, 6, "576000"),
+    for (codec, layout, channels, synthesis, expected_channels, bitrate) in [
+        ("ac3", "mono", 1, false, 1, "96000"),
+        ("ac3", "stereo", 2, false, 2, "192000"),
+        ("ac3", "5.1", 6, false, 6, "576000"),
+        ("ac3", "7.1", 8, true, 6, "576000"),
+        ("eac3", "mono", 1, false, 1, "96000"),
+        ("eac3", "stereo", 2, false, 2, "192000"),
+        ("eac3", "3.0", 3, false, 3, "288000"),
+        ("eac3", "4.0", 4, false, 4, "384000"),
+        ("eac3", "5.0", 5, false, 5, "480000"),
+        ("eac3", "5.1", 6, false, 6, "576000"),
+        ("eac3", "7.1", 8, true, 6, "576000"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("source.mkv");
@@ -1352,7 +1375,7 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
             audio: TranscodeAudioSettings {
                 lossless: None,
                 compatibility: None,
-                target_codec: "ac3".to_owned(),
+                target_codec: codec.to_owned(),
                 profile: AUDIO_PROFILE_DEFAULT.to_owned(),
                 add_track: synthesis,
                 target_channels: synthesis.then_some(expected_channels),
@@ -1400,7 +1423,7 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
             u32::try_from(selected_index).unwrap()
         );
         assert_eq!(physical[1]["format"]["tags"]["title"], "AC-3 source");
-        assert_eq!(selected["codec_name"], "ac3");
+        assert_eq!(selected["codec_name"], codec);
         assert_eq!(selected["channels"], expected_channels);
         assert_eq!(selected["bit_rate"], bitrate);
         assert_eq!(
@@ -1408,6 +1431,9 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
             match expected_channels {
                 1 => "mono",
                 2 => "stereo",
+                3 => "3.0",
+                4 => "4.0",
+                5 => "5.0(side)",
                 _ => "5.1(side)",
             }
         );
@@ -2501,5 +2527,364 @@ async fn pcm_container_copied_audio_timing() {
             }
             assert_eq!(source_facts, audio_expected(&input).await);
         }
+    }
+}
+
+async fn cover_art_fixture(
+    preflight: &voom_ffmpeg_worker::FfmpegPreflight,
+    dir: &Path,
+    codecs: &[&str],
+    generic_attachment: bool,
+    container: &str,
+) -> (PathBuf, Vec<Vec<u8>>) {
+    let base = dir.join("base.mkv");
+    generate_h264_fixture(&preflight.ffmpeg_path, &base);
+    let mut images = Vec::new();
+    let mut originals = Vec::new();
+    for (ordinal, codec) in codecs.iter().enumerate() {
+        let (extension, mime) = match *codec {
+            "mjpeg" => ("jpg", "image/jpeg"),
+            "png" => ("png", "image/png"),
+            "gif" => ("gif", "image/gif"),
+            "tiff" => ("tiff", "image/tiff"),
+            _ => unreachable!(),
+        };
+        let image = dir.join(format!("cover-{ordinal}.{extension}"));
+        let mut command = tokio::process::Command::new(&preflight.ffmpeg_path);
+        command.args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=16x16:rate=2",
+        ]);
+        command.args(if *codec == "gif" {
+            ["-t", "1"]
+        } else {
+            ["-frames:v", "1"]
+        });
+        flac_command(command.args(["-c:v", codec, "-threads", "1"]).arg(&image)).await;
+        originals.push(std::fs::read(&image).unwrap());
+        images.push((image, mime));
+    }
+    let source = dir.join("source.mkv");
+    let mut command = tokio::process::Command::new(&preflight.ffmpeg_path);
+    command
+        .args(["-v", "error", "-i"])
+        .arg(base)
+        .args(["-map", "0", "-c", "copy"]);
+    if generic_attachment {
+        let font = dir.join("font.ttf");
+        std::fs::write(&font, b"opaque attachment fixture").unwrap();
+        command.arg("-attach").arg(font).args([
+            "-metadata:s:t:0",
+            "filename=font.ttf",
+            "-metadata:s:t:0",
+            "mimetype=application/x-truetype-font",
+        ]);
+    }
+    for (ordinal, (image, mime)) in images.iter().enumerate() {
+        let attachment = ordinal + usize::from(generic_attachment);
+        command
+            .arg("-attach")
+            .arg(image)
+            .arg(format!("-metadata:s:t:{attachment}"))
+            .arg(format!(
+                "filename={}",
+                image.file_name().unwrap().to_str().unwrap()
+            ))
+            .arg(format!("-metadata:s:t:{attachment}"))
+            .arg(format!("mimetype={mime}"))
+            .arg(format!("-metadata:s:t:{attachment}"))
+            .arg(format!("title=Cover {ordinal}"));
+    }
+    flac_command(command.arg(&source)).await;
+    if container == "mkv" {
+        return (source, originals);
+    }
+    let mp4 = dir.join("source.mp4");
+    let mut command = tokio::process::Command::new(&preflight.ffmpeg_path);
+    command
+        .args(["-v", "error", "-i"])
+        .arg(source)
+        .args(["-map", "0:V:0", "-c", "copy"]);
+    for ordinal in 0..codecs.len() {
+        command
+            .args(["-map", &format!("0:{}", ordinal + 1)])
+            .arg(format!("-disposition:v:{}", ordinal + 1))
+            .arg("attached_pic");
+    }
+    flac_command(command.arg(&mp4)).await;
+    (mp4, originals)
+}
+
+#[tokio::test]
+async fn cover_art_transcode_preserves_generated_images() {
+    let preflight = preflight_from_process_env().unwrap();
+    let config = ffmpeg_config(&preflight);
+    for (source_container, target, codecs, generic) in [
+        ("mkv", "mkv", vec!["mjpeg", "png", "gif", "tiff"], true),
+        ("mkv", "mp4", vec!["mjpeg", "png"], false),
+        ("mp4", "mkv", vec!["mjpeg", "png"], false),
+        ("mp4", "mp4", vec!["mjpeg", "png"], false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, originals) =
+            cover_art_fixture(&preflight, dir.path(), &codecs, generic, source_container).await;
+        let output = dir.path().join(format!("output.{target}"));
+        let mut profile = TranscodeVideoProfile::default_hevc();
+        profile.preset = Some("ultrafast".to_owned());
+        profile.pixel_format = Some("yuv420p".to_owned());
+        profile.max_width = Some(32);
+        let request = with_real_expected(
+            basic_request(&input, &output, dir.path(), target, "hevc", profile),
+            &input,
+        )
+        .await;
+        let result = handle_transcode_video(&request, &config).await.unwrap();
+        assert_eq!(result.output_video_codec, "hevc");
+        assert_eq!((result.output_width, result.output_height), (32, 32));
+        assert_eq!(
+            result.input_pre.content_hash,
+            result.input_post.content_hash
+        );
+        let probe =
+            assert_cover_art_output(&preflight, &output, &originals, &codecs, generic).await;
+        if target == "mkv" {
+            let covers: Vec<_> = probe["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|stream| stream["disposition"]["attached_pic"] == 1)
+                .collect();
+            for (ordinal, (cover, (extension, mime))) in covers
+                .iter()
+                .zip([
+                    ("jpg", "image/jpeg"),
+                    ("png", "image/png"),
+                    ("gif", "image/gif"),
+                    ("tiff", "image/tiff"),
+                ])
+                .enumerate()
+            {
+                let index = ordinal + usize::from(source_container == "mp4");
+                assert_eq!(
+                    cover["tags"]["filename"],
+                    format!("cover-{index}.{extension}")
+                );
+                assert_eq!(cover["tags"]["mimetype"], mime);
+                if source_container == "mkv" {
+                    assert_eq!(cover["tags"]["title"], format!("Cover {ordinal}"));
+                }
+            }
+        }
+        let copied = dir.path().join(format!("copied.{target}"));
+        let mut request = with_real_expected(
+            basic_request(
+                &output,
+                &copied,
+                dir.path(),
+                target,
+                "hevc",
+                TranscodeVideoProfile::default_hevc(),
+            ),
+            &output,
+        )
+        .await;
+        request.copy_video = true;
+        assert!(
+            handle_transcode_video(&request, &config)
+                .await
+                .unwrap()
+                .copied_video
+        );
+        assert_cover_art_output(&preflight, &copied, &originals, &codecs, generic).await;
+    }
+}
+
+#[tokio::test]
+async fn cover_art_rejects_unsupported_before_output() {
+    let preflight = preflight_from_process_env().unwrap();
+    for (codecs, generic) in [(vec!["gif"], false), (vec!["mjpeg"], true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, _) = cover_art_fixture(&preflight, dir.path(), &codecs, generic, "mkv").await;
+        let output = dir.path().join("output.mp4");
+        let request = with_real_expected(
+            basic_request(
+                &input,
+                &output,
+                dir.path(),
+                "mp4",
+                "hevc",
+                TranscodeVideoProfile::default_hevc(),
+            ),
+            &input,
+        )
+        .await;
+        let error = handle_transcode_video(&request, &ffmpeg_config(&preflight))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("cover art") || error.to_string().contains("attachments"),
+            "{error}"
+        );
+        assert!(!output.exists());
+    }
+}
+
+#[tokio::test]
+async fn cover_art_rejects_genuine_multi_video() {
+    let preflight = preflight_from_process_env().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (input, _) = cover_art_fixture(&preflight, dir.path(), &["mjpeg"], false, "mkv").await;
+    let multiple = dir.path().join("multiple.mkv");
+    flac_command(
+        tokio::process::Command::new(&preflight.ffmpeg_path)
+            .args(["-v", "error", "-i"])
+            .arg(input)
+            .args(["-map", "0:V", "-map", "0:V", "-c", "copy", "-attach"])
+            .arg(dir.path().join("cover-0.jpg"))
+            .args([
+                "-metadata:s:t",
+                "filename=cover.jpg",
+                "-metadata:s:t",
+                "mimetype=image/jpeg",
+            ])
+            .arg(&multiple),
+    )
+    .await;
+    let output = dir.path().join("output.mkv");
+    let request = with_real_expected(
+        basic_request(
+            &multiple,
+            &output,
+            dir.path(),
+            "mkv",
+            "hevc",
+            TranscodeVideoProfile::default_hevc(),
+        ),
+        &multiple,
+    )
+    .await;
+    let error = handle_transcode_video(&request, &ffmpeg_config(&preflight))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("exactly one"), "{error}");
+    assert!(!output.exists());
+}
+
+async fn assert_cover_art_output(
+    preflight: &voom_ffmpeg_worker::FfmpegPreflight,
+    output: &Path,
+    originals: &[Vec<u8>],
+    codecs: &[&str],
+    generic: bool,
+) -> serde_json::Value {
+    let probe = flac_physical_probe(&preflight.ffprobe_path, output).await;
+    let streams = probe["streams"].as_array().unwrap();
+    let covers: Vec<_> = streams
+        .iter()
+        .filter(|stream| stream["disposition"]["attached_pic"] == 1)
+        .collect();
+    assert_eq!(covers.len(), originals.len());
+    assert_eq!(
+        streams
+            .iter()
+            .filter(|stream| stream["codec_type"] == "attachment")
+            .count(),
+        usize::from(generic)
+    );
+    for (ordinal, (cover, original)) in covers.iter().zip(originals).enumerate() {
+        assert_eq!(cover["codec_name"], codecs[ordinal]);
+        assert_eq!(cover["width"], 16);
+        let extracted = output.with_file_name(format!(
+            "{}.cover-{ordinal}.bin",
+            output.file_name().unwrap().to_str().unwrap()
+        ));
+        flac_command(
+            tokio::process::Command::new(&preflight.ffmpeg_path)
+                .args(["-v", "error", "-i"])
+                .arg(output)
+                .args([
+                    "-map",
+                    &format!("0:{}", cover["index"]),
+                    "-c",
+                    "copy",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "data",
+                ])
+                .arg(&extracted),
+        )
+        .await;
+        assert_eq!(
+            &std::fs::read(extracted).unwrap(),
+            original,
+            "cover codec {}",
+            codecs[ordinal]
+        );
+    }
+    probe
+}
+
+#[tokio::test]
+async fn eac3_real_worker_blocks_unsupported_layouts() {
+    let preflight = preflight_from_process_env().unwrap();
+    for (layout, channels) in [("7.1", 8), ("6.0", 6)] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("rejected.mkv");
+        let generated = Command::new(&preflight.ffmpeg_path)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=16x16:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("anullsrc=r=48000:cl={layout}"),
+                "-t",
+                "0.2",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "ffv1",
+                "-c:a",
+                "flac",
+            ])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let physical = Command::new(&preflight.ffprobe_path)
+            .args(["-v", "error", "-show_streams", "-of", "json"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(physical.status.success());
+        let raw: serde_json::Value = serde_json::from_slice(&physical.stdout).unwrap();
+        assert_eq!(raw["streams"][1]["channels"], channels);
+        assert_eq!(raw["streams"][1]["channel_layout"], layout);
+        let request = lossless_request("eac3", &input, &output, None).await;
+        let error = handle_transcode_audio(&request, &ffmpeg_config(&preflight))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("E-AC-3"), "{layout}: {error}");
+        assert!(
+            !output.exists(),
+            "unsupported {layout} must fail before encoding"
+        );
+        assert_eq!(audio_expected(&input).await, request.input.expected);
     }
 }

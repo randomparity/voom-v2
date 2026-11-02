@@ -17,6 +17,39 @@ use crate::preflight::MkvmergeConfig;
 use super::*;
 
 #[tokio::test]
+async fn bounded_command_error_preserves_terminal_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let diagnostic = dir.path().join("diagnostic");
+    std::fs::write(&diagnostic, "\u{1}".repeat(70_000)).unwrap();
+    let binary = stub_bin(
+        dir.path(),
+        "mkvmerge",
+        &format!(
+            "#!/bin/sh\ncat '{}'\ncat '{}' >&2\nexit 42\n",
+            diagnostic.display(),
+            diagnostic.display()
+        ),
+    );
+    let config = MkvmergeConfig::new(binary, "test".into(), Duration::from_secs(5));
+    let err: MkvtoolnixWorkerError = identify_tracks(&config, &dir.path().join("input"))
+        .await
+        .unwrap_err()
+        .into();
+    assert_eq!(err.failure_class(), FailureClass::ExternalSystemUnavailable);
+    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+    let lease = LeaseId(u64::MAX);
+    let frame = error_frame(lease, &err, 0);
+    let bytes = body_from_frames(std::slice::from_ref(&frame)).unwrap();
+    assert!(bytes.len() - 1 <= voom_worker_protocol::MAX_FRAME_BYTES);
+    let outcome = voom_worker_protocol::NdjsonReader::new(bytes.as_slice(), lease)
+        .next_frame()
+        .await
+        .unwrap();
+    assert_eq!(outcome, NdjsonOutcome::Terminated(frame));
+    assert!(err.to_string().contains("status 42: [truncated "));
+}
+
+#[tokio::test]
 async fn handler_rejects_existing_output() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

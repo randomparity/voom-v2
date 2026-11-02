@@ -375,6 +375,25 @@ agent, so that node's config must declare `scan_library`, `hash_file`, and
 the session completes. Non-media files (unsupported extensions) are excluded
 at discovery.
 
+Run the same command again to refresh provider facts, such as cover-art metadata,
+for files ingested by an older probe worker. A rescan covers the selected root;
+there is no file-selection flag. Successful completion appends a snapshot for each
+primary with agreed probe evidence, including unchanged files. Unchanged content
+keeps its file-version identity. Files without usable probe evidence retain their
+previous snapshots, and failed completion publishes no refresh.
+
+Historical snapshots and stored input-set references remain intact. Newly
+generated plans use the current active snapshot, including when generated from an
+existing input set; already planned operations retain their explicit snapshot
+pins. To capture a new root-scoped input set after rescanning, use a fresh slug:
+
+```sh
+voom policy input create-from-scan --root <storage-root-id> --slug library-refreshed
+```
+
+Capture its `input_set_id` for planning. Repeated scans retain observation history,
+even when normalized facts are unchanged. See [ADR 0131](../adr/0131-explicit-media-snapshot-refresh.md).
+
 ### 4. Author and accept the policy
 
 ```
@@ -449,6 +468,26 @@ library (ADR 0021):
   audio track is rejected at execution (`no audio track survived the track
   filters`) — surfaced as a `terminal_failure` issue for that file while the rest
   of the library proceeds. voom never emits an audio-less artifact.
+
+Ordinary `transcode audio to eac3` preserves source channels and metadata. Planning blocks
+selected unsupported layouts, including 7.1/8 and 6.0/6, because FFmpeg would otherwise reduce
+their channel counts. Missing channel/layout facts also block an encode; refresh the media
+facts or choose a codec that can preserve the source. A true no-op does not need encoding.
+
+For an intentional downmixed companion, the existing syntax is:
+
+```voom
+policy "EAC3 companion" {
+  phase downmix {
+    synthesize audio from channels > 6 { codec eac3 channels 6 }
+  }
+}
+```
+
+This adds a non-default six-channel EAC3 companion and retains the original multichannel
+track. It does not make a later unconditional EAC3 transcode of that original valid; keep
+selection and final-policy requirements explicit. ADR [0130](../adr/0130-eac3-preserved-audio-contract.md)
+records the preservation rule.
 
 ### 5. Build an input set for the activated root
 

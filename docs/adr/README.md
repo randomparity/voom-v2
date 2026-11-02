@@ -119,3 +119,7 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0125](0125-attached-pictures-are-remux-attachments.md) | Classify attached pictures as remux attachments |
 | [0126](0126-abandoned-media-evidence-workers.md) | Abandon timed-out media evidence workers |
 | [0127](0127-content-normalization-failures.md) | Content normalization failures affect one file |
+| [0128](0128-bounded-worker-error-diagnostics.md) | Bound external worker error diagnostics |
+| [0129](0129-cover-art-transcoding.md) | Preserve cover art during video transcoding |
+| [0130](0130-eac3-preserved-audio-contract.md) | Preserve channels during E-AC-3 transcoding | accepted |
+| [0131](0131-explicit-media-snapshot-refresh.md) | Explicit scans refresh media snapshots while retaining historical pins |
