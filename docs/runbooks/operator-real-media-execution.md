@@ -375,6 +375,25 @@ agent, so that node's config must declare `scan_library`, `hash_file`, and
 the session completes. Non-media files (unsupported extensions) are excluded
 at discovery.
 
+Run the same command again to refresh provider facts, such as cover-art metadata,
+for files ingested by an older probe worker. A rescan covers the selected root;
+there is no file-selection flag. Successful completion appends a snapshot for each
+primary with agreed probe evidence, including unchanged files. Unchanged content
+keeps its file-version identity. Files without usable probe evidence retain their
+previous snapshots, and failed completion publishes no refresh.
+
+Historical snapshots and stored input-set references remain intact. Newly
+generated plans use the current active snapshot, including when generated from an
+existing input set; already planned operations retain their explicit snapshot
+pins. To capture a new root-scoped input set after rescanning, use a fresh slug:
+
+```sh
+voom policy input create-from-scan --root <storage-root-id> --slug library-refreshed
+```
+
+Capture its `input_set_id` for planning. Repeated scans retain observation history,
+even when normalized facts are unchanged. See [ADR 0131](../adr/0131-explicit-media-snapshot-refresh.md).
+
 ### 4. Author and accept the policy
 
 ```
