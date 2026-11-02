@@ -174,8 +174,7 @@ pub use transcode_video_profile::{
 };
 pub use version::VersionInfo;
 
-/// Worker-protocol wire version consumed by `voom-worker-protocol`'s handshake
-/// and middleware.
+/// Protocol version shared by the worker wire and control-plane/node-agent requests.
 ///
 /// Workers are bundled, co-deployed, and version-locked with the
 /// control-plane build (ADR-0002), so the contract is an **exact match**:
@@ -184,7 +183,12 @@ pub use version::VersionInfo;
 /// operations-path middleware — with
 /// `ProtocolError::UnsupportedProtocolVersion`. There is no supported
 /// version range; skew is rejected by design. Bumping this constant is a
-/// flag day: every worker and the control plane move together because they
-/// are the same release. See ADR-0016
+/// flag day: every worker, node agent, and the control plane move together
+/// because they are the same release. See ADR-0016
 /// (`docs/adr/0016-worker-protocol-exact-version-match.md`).
+///
+/// The control plane also requires this exact version in the
+/// `x-voom-protocol-version` header on node-agent requests, and node agents
+/// check the header on successful control-plane responses. See ADR-0123
+/// (`docs/adr/0123-control-plane-node-agent-protocol-match.md`).
 pub const PROTOCOL_VERSION: u32 = 6;

@@ -290,9 +290,9 @@ pub fn require_probe_evidence(probed: &Value) -> Result<(), Box<dyn std::error::
 
 // Exports the probe-fact subset the current chaos fixtures exercise. Known
 // missing facts the oracle compares strictly (chaos-librarian issue #222):
-// attached_pic (cover art) and asset-level chapters — the worker snapshot
-// captures neither, so cover-art and chaptered fixtures cannot pass compare
-// until both layers learn those facts.
+// attached_pic (cover art) is captured by the worker snapshot but not exported
+// here; asset-level chapters are captured by neither layer. Cover-art and
+// chaptered fixtures cannot pass compare until those exporter and capture gaps close.
 fn probed_stream(stream: &Value) -> Option<Value> {
     let kind = stream.get("kind").and_then(Value::as_str)?;
     let codec = stream.get("codec_name").and_then(Value::as_str)?;

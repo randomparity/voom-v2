@@ -345,10 +345,13 @@ class Worker:
         self.host, self.port = match.group(1), int(match.group(2))
         self.lease = 0
         self.lock = threading.Lock()
+        self.abandoned = False
 
     def call(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return the terminal frame, or a failure dict for any protocol surprise."""
         with self.lock:
+            if self.abandoned:
+                return {"kind": "failure", "code": "worker_abandoned"}
             self.lease += 1
             lease = self.lease
         body = json.dumps({
@@ -368,6 +371,8 @@ class Worker:
             response = connection.getresponse()
             text = response.read().decode("utf-8", "replace")
         except TimeoutError:
+            with self.lock:
+                self.abandoned = True
             return {"kind": "failure", "code": "transport_timeout"}
         except (OSError, http.client.HTTPException) as error:
             return {"kind": "failure", "code": f"transport_{type(error).__name__}"}
@@ -384,6 +389,9 @@ class Worker:
             "cpu_seconds": UNAVAILABLE, "peak_rss_bytes": UNAVAILABLE,
             "rchar": UNAVAILABLE, "read_bytes": UNAVAILABLE,
         }
+        with self.lock:
+            if self.abandoned:
+                return usage
         try:
             fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
             ticks = sum(int(value) for value in fields[11:15])

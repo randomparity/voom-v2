@@ -7,8 +7,10 @@ baseline runs, which are validated here too.
 """
 
 import argparse
+import concurrent.futures
 import importlib.util
 import json
+import os
 import re
 import socket
 import stat
@@ -208,34 +210,154 @@ class ReplayTests(HarnessFixture):
                 harness.evict(self.root / "a" / "Alpha Title (2001).mkv", fs_type)
 
 
-class StalledWorkerTests(unittest.TestCase):
-    def test_a_worker_that_accepts_and_never_replies_ends_in_a_named_timeout_failure(self):
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            listener.listen()
-            held = []
-            threading.Thread(target=lambda: held.append(listener.accept()), daemon=True).start()
-            worker = object.__new__(harness.Worker)
-            worker.host, worker.port = listener.getsockname()
-            worker.secret, worker.lease, worker.lock = "secret", 0, threading.Lock()
-            with mock.patch.object(harness, "PROGRESS_IDLE_DEADLINE_MS", 100), \
-                    mock.patch.object(harness, "CALL_TIMEOUT_MARGIN_SECONDS", 0.1):
-                started = time.monotonic()
-                frame = worker.call("hash", {})
-                elapsed = time.monotonic() - started
-        self.assertEqual(frame, {"kind": "failure", "code": "transport_timeout"})
-        self.assertLess(elapsed, 5)
+class StalledWorkerTests(HarnessFixture):
+    def setUp(self):
+        super().setUp()
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(0.05)
+        finished = threading.Event()
+        self.accepted = []
+
+        def accept_requests():
+            while not finished.is_set():
+                try:
+                    connection, _address = listener.accept()
+                except TimeoutError:
+                    continue
+                self.accepted.append(connection)
+
+        thread = threading.Thread(target=accept_requests)
+        thread.start()
+
+        def cleanup():
+            finished.set()
+            thread.join(timeout=5)
+            listener.close()
+            for connection in self.accepted:
+                connection.close()
+            self.assertFalse(thread.is_alive(), "stalled listener did not stop")
+
+        self.addCleanup(cleanup)
+        self.worker = object.__new__(harness.Worker)
+        self.worker.host, self.worker.port = listener.getsockname()
+        self.worker.secret, self.worker.lease = "secret", 0
+        self.worker.lock, self.worker.abandoned = threading.Lock(), False
+        self.worker.process = mock.Mock(pid=os.getpid())
+        for name, value in (("PROGRESS_IDLE_DEADLINE_MS", 100),
+                            ("CALL_TIMEOUT_MARGIN_SECONDS", 0.1)):
+            patch = mock.patch.object(harness, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_timeout_abandons_later_calls_without_another_request(self):
+        started = time.monotonic()
+        self.assertEqual(self.worker.call("hash", {}),
+                         {"kind": "failure", "code": "transport_timeout"})
+        self.assertEqual(self.worker.call("hash", {}),
+                         {"kind": "failure", "code": "worker_abandoned"})
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(len(self.accepted), 1)
+        self.assertEqual(self.worker.lease, 1)
+
+    def test_timeout_withholds_affected_worker_usage(self):
+        self.assertEqual(self.worker.call("hash", {})["code"], "transport_timeout")
+        self.assertEqual(self.worker.usage(), dict.fromkeys(harness.WORKER_KEYS,
+                                                          harness.UNAVAILABLE))
+
+    def test_repetition_marks_dependent_rows_and_only_the_affected_worker_usage(self):
+        original_worker = harness.Worker
+        for role in ("hash", "probe"):
+            with self.subTest(role=role):
+                self.worker.abandoned = False
+                self.worker.lease = 0
+                healthy = original_worker(self.workers / (
+                    "voom-ffprobe-worker" if role == "hash" else "voom-hash-worker"))
+                self.addCleanup(healthy.stop)
+                workers = [self.worker, healthy] if role == "hash" else [healthy, self.worker]
+                manifest = json.loads(self.manifest_path.read_text())
+                files = [dict(manifest["files"][0], id=f"f{index:04d}")
+                         for index in (1, 2)]
+                args = self.run_args()
+                args.concurrency = 1
+                with mock.patch.object(harness, "Worker", side_effect=workers), \
+                        mock.patch.object(self.worker, "stop") as stop:
+                    repetition = harness.run_repetition(1, manifest, files, args, "ext4")
+                self.assertEqual([row["outcome"] for row in repetition["files"]],
+                                 [f"{role}_failed"] * 2)
+                self.assertEqual([row["failure"] for row in repetition["files"]], [
+                    {"stage": role, "class": "harness", "code": "transport_timeout"},
+                    {"stage": role, "class": "harness", "code": "worker_abandoned"},
+                ])
+                self.assertEqual(repetition["workers"][role],
+                                 dict.fromkeys(harness.WORKER_KEYS, harness.UNAVAILABLE))
+                self.assertEqual(self.worker.lease, 1)
+                self.assertEqual(harness.repetition_problems(repetition), [])
+                stop.assert_called_once_with()
+        self.assertEqual(len(self.accepted), 2)
+
+    def test_in_flight_success_does_not_revive_an_abandoned_worker(self):
+        entered, first_entered, release = (threading.Event() for _ in range(3))
+        first, second, later = (mock.MagicMock() for _ in range(3))
+        later.getresponse.side_effect = TimeoutError
+        response = second.getresponse.return_value
+        response.status = 200
+        response.read.return_value = b'{"lease_id":2}\n{"kind":"result","payload":{}}\n'
+
+        def timeout():
+            first_entered.set()
+            if not entered.wait(timeout=5):
+                raise AssertionError("second request never entered transport")
+            raise TimeoutError
+
+        def complete():
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("in-flight request was not released")
+            return response
+
+        first.getresponse.side_effect, second.getresponse.side_effect = timeout, complete
+        with mock.patch.object(harness.http.client, "HTTPConnection",
+                               side_effect=[first, second, later]) as connection:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                try:
+                    timed_out = pool.submit(self.worker.call, "hash", {})
+                    self.assertTrue(first_entered.wait(timeout=5))
+                    successful = pool.submit(self.worker.call, "hash", {})
+                    self.assertEqual(timed_out.result(timeout=5)["code"], "transport_timeout")
+                    self.assertEqual(self.worker.call("hash", {})["code"], "worker_abandoned")
+                finally:
+                    release.set()
+                self.assertEqual(successful.result(timeout=5)["kind"], "result")
+            self.assertEqual(connection.call_count, 2)
+        self.assertEqual(self.worker.usage(), dict.fromkeys(harness.WORKER_KEYS,
+                                                          harness.UNAVAILABLE))
+
+    def test_a_call_queued_on_the_lock_observes_abandonment(self):
+        entered = threading.Event()
+
+        def call():
+            entered.set()
+            return self.worker.call("hash", {})
+
+        with mock.patch.object(harness.http.client, "HTTPConnection") as connection:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                with self.worker.lock:
+                    queued = pool.submit(call)
+                    self.assertTrue(entered.wait(timeout=5))
+                    self.worker.abandoned = True
+                self.assertEqual(queued.result(timeout=5)["code"], "worker_abandoned")
+            connection.assert_not_called()
 
     def test_other_transport_errors_keep_their_error_class_name(self):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             host, port = listener.getsockname()
-        worker = object.__new__(harness.Worker)
-        worker.host, worker.port = host, port
-        worker.secret, worker.lease, worker.lock = "secret", 0, threading.Lock()
-        self.assertEqual(
-            worker.call("hash", {}), {"kind": "failure", "code": "transport_ConnectionRefusedError"}
-        )
+        self.worker.host, self.worker.port = host, port
+        self.assertEqual(self.worker.call("hash", {}),
+                         {"kind": "failure", "code": "transport_ConnectionRefusedError"})
+        self.assertFalse(self.worker.abandoned)
 
 
 class ContractTests(unittest.TestCase):
