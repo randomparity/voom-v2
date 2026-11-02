@@ -19,6 +19,72 @@ use crate::DEFAULT_PROCESS_TIMEOUT;
 
 use super::*;
 
+#[tokio::test]
+async fn bounded_command_error_preserves_classification_and_terminal_frame() {
+    for (prefix, class, termination, status) in [
+        (
+            "Invalid data found when processing input",
+            FailureClass::MalformedMedia,
+            "exit 42",
+            "42",
+        ),
+        (
+            "transient dependency failure",
+            FailureClass::ExternalSystemUnavailable,
+            "exit 42",
+            "42",
+        ),
+        (
+            "Invalid data found when processing input",
+            FailureClass::ExternalSystemUnavailable,
+            "kill -TERM $$",
+            "signal",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let diagnostic = dir.path().join("diagnostic");
+        std::fs::write(&diagnostic, format!("{prefix}: {}", "\u{1}".repeat(70_000))).unwrap();
+        let binary = stub_bin(
+            dir.path(),
+            "ffprobe",
+            &format!(
+                "#!/bin/sh\ncat '{}'\ncat '{}' >&2\n{termination}\n",
+                diagnostic.display(),
+                diagnostic.display()
+            ),
+        );
+        let config = FfmpegConfig::new(
+            binary.clone(),
+            binary,
+            "test".into(),
+            DEFAULT_PROCESS_TIMEOUT,
+        );
+        let err: TranscodeVideoError = probe_input(&config, &dir.path().join("input"))
+            .await
+            .unwrap_err()
+            .into();
+        assert_eq!(err.failure_class(), class);
+        assert_eq!(err.error_code(), class.into_error_code());
+        let lease = LeaseId(u64::MAX);
+        let frame = error_frame(lease, &err, 0);
+        let bytes = body_from_frames(std::slice::from_ref(&frame)).unwrap();
+        assert!(bytes.len() - 1 <= voom_worker_protocol::MAX_FRAME_BYTES);
+        let outcome = voom_worker_protocol::NdjsonReader::new(bytes.as_slice(), lease)
+            .next_frame()
+            .await
+            .unwrap();
+        assert_eq!(outcome, NdjsonOutcome::Terminated(frame));
+        assert!(
+            err.to_string()
+                .contains(&format!("status {status}: [truncated "))
+        );
+        assert!(
+            !err.to_string().contains(prefix),
+            "classify before bounding"
+        );
+    }
+}
+
 #[test]
 fn compatibility_request_mode_is_bounded() {
     let dir = tempfile::tempdir().unwrap();

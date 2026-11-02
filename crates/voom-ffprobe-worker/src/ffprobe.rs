@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use voom_core::{ErrorCode, FailureClass};
-use voom_worker_protocol::FFPROBE_VERSION_TIMEOUT;
+use voom_worker_protocol::{FFPROBE_VERSION_TIMEOUT, bounded_error_diagnostic};
 
 pub const FFPROBE_BIN_ENV: &str = "VOOM_FFPROBE_BIN";
 const DEFAULT_FFPROBE_BIN: &str = "ffprobe";
@@ -200,20 +200,21 @@ pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Val
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let malformed = output.status.code().is_some() && is_malformed_media_stderr(&stderr);
         let message = format!(
             "ffprobe exited with status {}: {}",
             output
                 .status
                 .code()
                 .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-            stderr.trim()
+            bounded_error_diagnostic(stderr.trim())
         );
         // A non-zero exit whose diagnostics name a structural input fault is a
         // permanent MalformedMedia (the file cannot be probed on any retry); a
         // signal kill or any other non-zero exit stays the transient
-        // ExternalSystemUnavailable. Signal kills carry no code and no matching
-        // stderr, so they take the transient branch.
-        if output.status.code().is_some() && is_malformed_media_stderr(&stderr) {
+        // ExternalSystemUnavailable. Signal kills carry no code, so they take
+        // the transient branch even when earlier stderr matches a signature.
+        if malformed {
             return Err(malformed_media("exit", message));
         }
         return Err(external_system_unavailable("exit", message));
