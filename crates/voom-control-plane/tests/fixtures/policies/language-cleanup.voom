@@ -4,7 +4,7 @@ policy "language cleanup" {
     keep audio where language in ["eng", "und"]
     keep subtitle where language in ["eng"]
     order tracks [video, audio, subtitle]
-    defaults audio where language in ["eng"]
-    defaults subtitle where forced
+    defaults audio best
+    defaults subtitle preserve
   }
 }

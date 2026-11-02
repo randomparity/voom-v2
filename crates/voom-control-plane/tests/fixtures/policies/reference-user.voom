@@ -1,6 +1,6 @@
 // The reference user's whole-library policy (issue #288 / #269 Workstream D).
-// It exercises the full V1(+V1.1) vocabulary the DSL work landed:
-//   MKV container + language-filtered keep + filter-addressed defaults/order
+// It combines the shipped DSL operations:
+//   MKV container + language-filtered keep + best audio/preserved subtitle defaults + order
 //   (normalize), HEVC video profile (video), E-AC-3 5.1 plus a synthesized
 //   stereo downmix (audio_companion), and an artifact verification (verify).
 //   Each phase depends on the prior so every mutation sees the committed output
@@ -20,8 +20,8 @@ policy "reference user library normalize" {
     container mkv
     keep audio where language in ["eng", "und"]
     order tracks [video, audio, subtitle]
-    defaults audio where language in ["eng"]
-    defaults subtitle where forced
+    defaults audio best
+    defaults subtitle preserve
   }
 
   phase video {

@@ -419,12 +419,22 @@ vocabulary; each has a planner-oracle test in
 | Sample | What it does |
 |--------|--------------|
 | `container-normalize.voom` | Remux every file to mkv; already-mkv files are a no-op. |
-| `language-cleanup.voom` | Keep only the preferred-language audio/subtitles, then order tracks and set filter-addressed defaults. |
-| `reference-user.voom` | The whole-library flagship: mkv + HEVC video + E-AC-3 5.1 audio + a synthesized stereo downmix + language-filtered keep + filter-addressed defaults + `verify artifact`, run as a five-phase barrier chain. |
+| `language-cleanup.voom` | Keep only the preferred-language audio/subtitles, then order tracks, select the first retained audio as default, and preserve subtitle defaults. |
+| `reference-user.voom` | The whole-library flagship: mkv + HEVC video + E-AC-3 5.1 audio + a synthesized stereo downmix + language-filtered keep + best audio/preserved subtitle defaults + `verify artifact`, run as a five-phase barrier chain. |
 | `verify-heavy.voom` | An artifact verification between each mutating phase. |
 
 For a real whole-library run, `reference-user.voom` is the closest to a
-production policy. Its language filters
+production policy. Both samples use `defaults audio best` and
+`defaults subtitle preserve`, so several retained English audio tracks or no
+forced subtitles do not cause an exact-one defaults-filter block. The flagship
+ranks retained audio by its configured language preference (`eng`, then `und`),
+then provider stream index; language-cleanup has no configured preference and
+uses provider stream index. This does not classify commentary. Retained subtitle
+default flags stay as supplied, including zero or multiple defaults. Explicit
+`defaults ... where ...` filters still require exactly one retained match.
+Final flagship real-media acceptance remains tracked by #339.
+
+Its language filters
 (`keep audio where language in ["eng", "und"]`,
 `transcode audio to eac3 where language in ["eng", "und"]`) behave predictably on a messy
 library (ADR 0021):
