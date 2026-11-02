@@ -27,10 +27,12 @@ file done" column below is the replay's first completed hash-and-probe. It is no
 first durable observation: the control plane publishes evidence only at session
 completion.
 
-Measurement correction (#823): historical records' `not_measured` entry
+Measurement correction (#823), covering the earlier #788–#801 descriptions: historical
+records' `not_measured` entry
 `ffprobe_child_peak_memory_and_io` incorrectly says that I/O excludes the ffprobe child.
 Only worker peak memory excludes children. Worker CPU and I/O counters include reaped
 ffprobe children, as described in the [protocol](../media-evidence-protocol.md).
+Child I/O is included in aggregate worker counters, not attributed separately.
 Committed records are unchanged; the harness retains the legacy key for record-validation
 compatibility and corrects its description for future captures. No recorded values or
 comparison verdicts change.
