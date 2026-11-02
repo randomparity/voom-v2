@@ -1639,6 +1639,194 @@ async fn complete_rejects_wrong_final_sequence_or_count_without_reconciliation()
 }
 
 #[tokio::test]
+async fn completion_refresh_obeys_replay_fences_and_rollback() {
+    let fixture = fixture().await;
+    let first = refresh_completion(&fixture, 0).await;
+    fixture.cp.complete_scan_session(first).await.unwrap();
+    let original = refresh_history(&fixture.cp).await;
+    let second = refresh_completion(&fixture, 1).await;
+    let outcome = fixture
+        .cp
+        .complete_scan_session(second.clone())
+        .await
+        .unwrap();
+    let history = refresh_history(&fixture.cp).await;
+    assert_eq!(
+        history.len(),
+        2,
+        "a successful rescan publishes its new facts"
+    );
+    assert_eq!(history[0], original[0]);
+    assert_eq!(
+        history[0].1, history[1].1,
+        "content version must not change"
+    );
+    assert_ne!(history[0].2, history[1].2);
+
+    fixture.clock.advance(Duration::seconds(10));
+    assert_eq!(
+        fixture.cp.complete_scan_session(second).await.unwrap(),
+        outcome
+    );
+    assert_eq!(refresh_history(&fixture.cp).await, history);
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::MediaSnapshotRecorded).await,
+        2
+    );
+
+    let stale = refresh_completion(&fixture, 2).await;
+    fixture.clock.advance(Duration::seconds(10));
+    let error = fixture.cp.complete_scan_session(stale).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    assert!(error.to_string().contains("marked stale"));
+    assert_eq!(refresh_history(&fixture.cp).await, history);
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::MediaSnapshotRecorded).await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn rejected_completion_watermark_rolls_back_refresh_but_records_error_replay() {
+    let fixture = fixture().await;
+    let first = refresh_completion(&fixture, 0).await;
+    fixture.cp.complete_scan_session(first).await.unwrap();
+    let original = refresh_history(&fixture.cp).await;
+    let mut rejected = refresh_completion(&fixture, 1).await;
+    rejected.observation_count = 0;
+
+    for _ in 0..2 {
+        let error = fixture
+            .cp
+            .complete_scan_session(rejected.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::Conflict);
+        assert_eq!(refresh_history(&fixture.cp).await, original);
+        assert_eq!(
+            event_count(&fixture.cp, EventKind::MediaSnapshotRecorded).await,
+            1
+        );
+        assert_eq!(
+            replay_rows_for_key(&fixture.cp, &rejected.idempotency_key).await,
+            1
+        );
+        assert_eq!(
+            fixture
+                .cp
+                .scan_session(rejected.scan_session_id)
+                .await
+                .unwrap()
+                .status,
+            ScanSessionStatus::Running
+        );
+    }
+}
+
+#[tokio::test]
+async fn completion_failure_after_refresh_preserves_previous_history() {
+    for trigger in [
+        CompleteRollbackTrigger::SessionUpdate,
+        CompleteRollbackTrigger::EventInsert,
+        CompleteRollbackTrigger::ReplayCompletion,
+    ] {
+        let fixture = fixture().await;
+        let first = refresh_completion(&fixture, 0).await;
+        fixture.cp.complete_scan_session(first).await.unwrap();
+        let original = refresh_history(&fixture.cp).await;
+        let rejected = refresh_completion(&fixture, 1).await;
+        install_completion_rollback_trigger(&fixture.cp, trigger).await;
+
+        let error = fixture
+            .cp
+            .complete_scan_session(rejected.clone())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::DbUnreachable, "{trigger:?}");
+        assert_eq!(refresh_history(&fixture.cp).await, original, "{trigger:?}");
+        assert_eq!(
+            event_count(&fixture.cp, EventKind::MediaSnapshotRecorded).await,
+            1
+        );
+        assert_eq!(
+            replay_rows_for_key(&fixture.cp, &rejected.idempotency_key).await,
+            0
+        );
+        assert_eq!(
+            fixture
+                .cp
+                .scan_session(rejected.scan_session_id)
+                .await
+                .unwrap()
+                .status,
+            ScanSessionStatus::Running,
+            "{trigger:?}"
+        );
+    }
+}
+
+async fn refresh_completion(fixture: &Fixture, attempt: u32) -> RemoteScanCompleteInput {
+    let session = fixture
+        .cp
+        .request_scan_session(fixture.root_id, 10)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .start_scan_session(start_input(
+            fixture,
+            session.id,
+            &format!("refresh-start-{attempt}"),
+        ))
+        .await
+        .unwrap();
+    let mut batch = batch_input(
+        fixture,
+        session.id,
+        0,
+        &format!("refresh-batch-{attempt}"),
+        'b',
+    );
+    batch.observations[0].provider_relative_locator =
+        ProviderRelativeLocator::new("legacy.mp4".to_owned()).unwrap();
+    batch.observations[0].evidence = Some(voom_core::ScanObservationEvidence {
+        content_hash: format!("blake3:{}", "b".repeat(64)),
+        size_bytes: 1,
+        modified_at: "1970-01-01T00:00:00Z".to_owned(),
+        file_key: None,
+        sidecars: Vec::new(),
+        probe_snapshot: json!({
+            "streams": [
+                {"index": 0, "kind": "video", "codec_name": "h264"},
+                {"index": 1, "kind": "video", "codec_name": "mjpeg",
+                 "disposition": {"attached_pic": attempt > 0}}
+            ]
+        }),
+        hash_source: None,
+    });
+    fixture
+        .cp
+        .accept_scan_observation_batch(batch)
+        .await
+        .unwrap();
+    complete_input(
+        fixture,
+        session.id,
+        &format!("refresh-complete-{attempt}"),
+        Some(0),
+        1,
+    )
+}
+
+async fn refresh_history(cp: &crate::ControlPlane) -> Vec<(i64, i64, String)> {
+    sqlx::query_as("SELECT id, file_version_id, payload FROM media_snapshots ORDER BY id ASC")
+        .fetch_all(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
 async fn complete_validates_corrupt_session_counters_before_request_watermark() {
     let fixture = fixture().await;
     let observed = seed_rooted_location(&fixture.cp, fixture.root_id, "batch/0-a.mkv").await;

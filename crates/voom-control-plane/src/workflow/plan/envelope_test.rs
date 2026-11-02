@@ -3,6 +3,68 @@
 use super::*;
 use serde_json::json;
 
+#[tokio::test]
+async fn snapshot_for_keeps_pin_after_refresh() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let outcome = cp
+        .record_discovered_file(
+            voom_store::repo::media::identity::DiscoveredFile {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_core::ProviderRelativeLocator::new(
+                    "pin.mp4".to_owned(),
+                )
+                .unwrap(),
+                content_hash: "hash-pinned-file".to_owned(),
+                size_bytes: 1024,
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let voom_store::repo::media::identity::IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
+    else {
+        panic!("expected a new file asset");
+    };
+    let original = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            json!({"provider_generation": 1}),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    let refreshed = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            json!({"provider_generation": 2}),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    assert_ne!(original.id, refreshed.id);
+
+    let loaded = snapshot_for(
+        &cp,
+        file_version_id,
+        &json!({"source_media_snapshot_id": original.id.0}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        loaded.id, original.id,
+        "an existing operation retains its snapshot pin"
+    );
+    assert_eq!(loaded.file_version_id, original.file_version_id);
+    assert_eq!(loaded.payload, original.payload);
+}
+
 #[test]
 fn source_facts_read_scan_recorded_blocks_and_reject_gaps() {
     let facts = SourceFacts::from_source_file(&json!({

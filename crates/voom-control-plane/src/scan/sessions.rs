@@ -502,12 +502,14 @@ impl ControlPlane {
         session: ScanSession,
         now: OffsetDateTime,
     ) -> Result<RemoteScanCompleteOutcome, VoomError> {
-        // Publish identity from agreed evidence first (ADR 0077): inside this
-        // transaction, before retirement, so a failed completion rolls back
-        // every published row with it.
+        // A replayable completion error commits its outer replay reservation.
+        // Isolate publication so that error cannot commit partial domain facts.
+        let mut mutation =
+            voom_store::tx::begin_savepoint(&mut tx, "scan completion publication savepoint")
+                .await?;
         super::publish::publish_session_evidence_in_tx(
             self,
-            &mut tx,
+            &mut mutation,
             session.id,
             session.storage_root_id,
             now,
@@ -516,7 +518,7 @@ impl ControlPlane {
         let completion = self
             .scan_sessions
             .complete_in_tx(
-                &mut tx,
+                &mut mutation,
                 CompleteScanSessionInput {
                     scan_session_id: session.id,
                     expected_storage_root_id: session.storage_root_id,
@@ -530,11 +532,19 @@ impl ControlPlane {
             )
             .await;
         let completion = match completion {
-            Ok(completion) => completion,
-            Err(error) if is_completion_commit_lock_conflict(&error) => {
-                return rollback_scan_error(tx, error).await;
+            Ok(completion) => {
+                commit_tx(mutation).await?;
+                completion
             }
-            Err(error) => return self.finish_scan_error(tx, &replay, error).await,
+            Err(error) => {
+                mutation.rollback().await.map_err(|rollback| {
+                    VoomError::database_context("scan completion publication rollback", rollback)
+                })?;
+                if is_completion_commit_lock_conflict(&error) {
+                    return rollback_scan_error(tx, error).await;
+                }
+                return self.finish_scan_error(tx, &replay, error).await;
+            }
         };
         let outcome = completion_outcome(&completion)?;
         append_completion_event(self, &mut tx, &outcome, session.storage_root_id, now).await?;

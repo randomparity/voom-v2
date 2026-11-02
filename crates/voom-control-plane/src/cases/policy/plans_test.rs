@@ -225,9 +225,23 @@ async fn stored_stream_input_replaces_cached_facts() {
         .await
         .unwrap()
         .unwrap();
-    input.media_snapshots[0].existing_media_snapshot_id = None;
+    let original = input.clone();
     let policy = compiled_policy("when exists subtitle { container mkv }");
+    let linked = cp
+        .resolve_stored_planning_input(&policy, input.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        original.media_snapshots[0].existing_media_snapshot_id,
+        Some(media_snapshot_id)
+    );
+    assert_eq!(linked.files[0].active_snapshot.id, latest.id);
+    assert_eq!(
+        linked.draft.media_snapshots[0].existing_media_snapshot_id,
+        Some(latest.id)
+    );
 
+    input.media_snapshots[0].existing_media_snapshot_id = None;
     let resolved = cp
         .resolve_stored_planning_input(&policy, input)
         .await
@@ -249,6 +263,14 @@ async fn stored_stream_input_replaces_cached_facts() {
     assert_eq!(
         resolved.draft.media_snapshots[0].existing_media_snapshot_id,
         Some(latest.id)
+    );
+    assert_eq!(
+        cp.get_policy_input_set(created.input_set_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        original,
+        "new planning may project latest facts without rewriting stored input history"
     );
 }
 
