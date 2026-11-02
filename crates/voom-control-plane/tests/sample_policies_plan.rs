@@ -100,6 +100,76 @@ async fn language_cleanup_sample_plans_expected_operations_per_input() {
 }
 
 #[tokio::test]
+async fn sample_defaults_select_one_audio_and_preserve_non_forced_subtitles() {
+    let (cp, _db) = open_control_plane().await;
+    for (slug, fixture) in [
+        ("reference-user-library-normalize", "reference-user.voom"),
+        ("language-cleanup", "language-cleanup.voom"),
+    ] {
+        let policy = create_policy(&cp, slug, fixture).await;
+        for correct_audio_default in [false, true] {
+            for (case, subtitle_defaults) in [
+                vec![],
+                vec![false, false],
+                vec![true, false],
+                vec![true, true],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // Real releases retain several English mixes. JSON order is not
+                // provider order, and subtitle defaults need not identify one track.
+                let mut media = snapshot(
+                    "mkv",
+                    "hevc",
+                    vec![
+                        audio_stream("a-later", 2, "eac3", Some("eng"), 2, !correct_audio_default),
+                        audio_stream("a-first", 1, "eac3", Some("eng"), 6, correct_audio_default),
+                    ],
+                );
+                let streams = media.stream_summary["streams"].as_array_mut().unwrap();
+                streams.retain(|stream| stream["kind"] != "subtitle");
+                for (offset, default) in subtitle_defaults.iter().enumerate() {
+                    streams.push(json!({
+                        "id": format!("s-{offset}"),
+                        "index": 100 + offset,
+                        "kind": "subtitle",
+                        "codec_name": "subrip",
+                        "language": "eng",
+                        "disposition": {"default": default, "forced": false, "commentary": false},
+                    }));
+                }
+                let input = single_input(&format!("{slug}-{correct_audio_default}-{case}"), media);
+                let plan = report(&cp, policy, input).await;
+                let normalize = only_node(&plan, "normalize", |_| true);
+                assert_eq!(
+                    normalize.status,
+                    if correct_audio_default {
+                        NodeStatus::NoOp
+                    } else {
+                        NodeStatus::Planned
+                    },
+                    "{fixture}, subtitle defaults {subtitle_defaults:?}: {}",
+                    normalize.status_reason,
+                );
+                assert_eq!(
+                    normalize.operation_payload["defaults"],
+                    json!([
+                        {
+                            "target": "audio",
+                            "strategy": "best",
+                            "selected_snapshot_stream_id": "a-first",
+                        },
+                        {"target": "subtitle", "strategy": "preserve"},
+                    ]),
+                    "{fixture}, subtitle defaults {subtitle_defaults:?}",
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn reference_user_sample_plans_the_full_pipeline() {
     let (cp, _db) = open_control_plane().await;
     let policy = create_policy(
