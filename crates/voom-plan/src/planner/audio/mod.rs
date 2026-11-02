@@ -156,7 +156,20 @@ pub(super) fn plan_transcode(
                 None,
             ),
             AudioPlanShape::Blocked(block) => {
-                let (code, message) = audio_block_diagnostic(block, operation_kind);
+                let (code, message) = if target_codec == "eac3"
+                    && block == AudioPlanningBlock::UnsupportedMediaShape
+                {
+                    (
+                        PlanningDiagnosticCode::UnsupportedMediaShape,
+                        concat!(
+                            "E-AC-3 transcode cannot preserve this source channel layout; ",
+                            "choose a preserving codec or explicit synthesize audio ",
+                            "for an intentional downmixed companion",
+                        ),
+                    )
+                } else {
+                    audio_block_diagnostic(block, operation_kind)
+                };
                 (NodeStatus::Blocked, message.to_owned(), None, Some(code))
             }
         };

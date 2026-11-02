@@ -440,6 +440,26 @@ library (ADR 0021):
   filters`) — surfaced as a `terminal_failure` issue for that file while the rest
   of the library proceeds. voom never emits an audio-less artifact.
 
+Ordinary `transcode audio to eac3` preserves source channels and metadata. Planning blocks
+selected unsupported layouts, including 7.1/8 and 6.0/6, because FFmpeg would otherwise reduce
+their channel counts. Missing channel/layout facts also block an encode; refresh the media
+facts or choose a codec that can preserve the source. A true no-op does not need encoding.
+
+For an intentional downmixed companion, the existing syntax is:
+
+```voom
+policy "EAC3 companion" {
+  phase downmix {
+    synthesize audio from channels > 6 { codec eac3 channels 6 }
+  }
+}
+```
+
+This adds a non-default six-channel EAC3 companion and retains the original multichannel
+track. It does not make a later unconditional EAC3 transcode of that original valid; keep
+selection and final-policy requirements explicit. ADR [0130](../adr/0130-eac3-preserved-audio-contract.md)
+records the preservation rule.
+
 ### 5. Build an input set for the activated root
 
 ```

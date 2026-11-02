@@ -1097,6 +1097,7 @@ pub async fn run_ffmpeg_transcode_audio(
     let source_streams = probe_audio_streams(config, input).await?;
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
     validate_ac3_source_facts(request, &selected)?;
+    validate_eac3_source_facts(request, &selected)?;
     let mut command = Command::new(&config.ffmpeg_path);
     command.args(["-copyts"]);
     if pcm_precision(&request.audio.target_codec).is_some() {
@@ -2330,6 +2331,38 @@ fn verify_lossless_output(
         resolve_lossless_audio(source, request)?
             .verify(&actual)
             .map_err(|error| FfmpegError::OutputFactsMismatch(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_eac3_source_facts(
+    request: &TranscodeAudioRequest,
+    sources: &[SourceAudioFact],
+) -> Result<(), FfmpegError> {
+    if request.audio.target_codec == "eac3"
+        && sources.iter().any(|source| {
+            !matches!(
+                (source.channels, source.channel_layout.as_deref()),
+                (Some(1), Some("mono"))
+                    | (Some(2), Some("stereo" | "2 channels (FC+LFE)"))
+                    | (Some(3), Some("2.1" | "3.0" | "3.0(back)"))
+                    | (
+                        Some(4),
+                        Some("3.1" | "4.0" | "quad" | "quad(side)" | "4 channels (FL+FR+LFE+BC)")
+                    )
+                    | (Some(5), Some("4.1" | "5.0" | "5.0(side)"))
+                    | (Some(6), Some("5.1" | "5.1(side)"))
+            )
+        })
+    {
+        return Err(FfmpegError::OutputFactsMismatch(
+            concat!(
+                "E-AC-3 transcode cannot preserve this source channel layout; ",
+                "choose a preserving codec or explicit synthesize audio ",
+                "for an intentional downmixed companion",
+            )
+            .to_owned(),
+        ));
     }
     Ok(())
 }

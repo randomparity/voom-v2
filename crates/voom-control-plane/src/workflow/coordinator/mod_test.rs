@@ -482,6 +482,7 @@ async fn phase_dispatch_rejects_multiple_same_file_mutations() {
                 "kind": "audio",
                 "codec_name": "ac3",
                 "channels": 6,
+                "channel_layout": "5.1",
                 "language": "eng"
             }
         ]
