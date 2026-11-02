@@ -219,8 +219,13 @@ class GroupProofProxy:
         self.checks.append({"case": label, "status": status, "expected": expected})
         assert status == expected, f"{label}: unexpected status"
         if code:
-            assert json.loads(body)["error"]["code"] == code, f"{label}: unexpected error category"
-        assert self.publication_state() == before, f"{label}: published partial state"
+            actual_code = json.loads(body)["error"]["code"]
+            self.checks[-1].update(expected_code=code, actual_code=actual_code)
+            assert actual_code == code, f"{label}: expected {code}, got {actual_code}"
+        after = self.publication_state()
+        changed = [name for name in before if before[name] != after[name]]
+        self.checks[-1]["changed_tables"] = changed
+        assert not changed, f"{label}: changed publication tables {changed}"
 
     @contextlib.contextmanager
     def changed_row(self, table, column, row_id, change):
@@ -572,11 +577,27 @@ class GroupProofProxy:
                     if base is None:
                         time.sleep(0.01)
                 assert base is not None
+                # The API recovery loop expires the deliberately stale source.
+                # Settle that exact liveness transition before testing whether
+                # the rejected group proof changes any publication state.
+                lease = encoded["proof"]["group"]["claim_lease_id"]
+                with sqlite3.connect(clone) as database:
+                    ticket = database.execute("SELECT ticket_id FROM leases WHERE id=?", (lease,)).fetchone()[0]
+                before["leases"] = [(key, "expired" if key == lease else state) for key, state in before["leases"]]
+                before["tickets"] = [(key, "failed" if key == ticket else state) for key, state in before["tickets"]]
+                deadline = time.monotonic() + 10
+                while (lease, "expired") not in self.publication_state(clone)["leases"]:
+                    assert process.poll() is None, "isolated expiry API stopped before recovery"
+                    assert time.monotonic() < deadline, "isolated API did not expire the source lease"
+                    time.sleep(0.01)
+                assert self.publication_state(clone) == before, "expiry changed more than the source lease and ticket"
                 request_headers = dict(headers)
                 request_headers["X-Voom-Idempotency-Key"] = "fixture-expired-group-" + uuid.uuid4().hex
                 status, body, _ = self.forward(path, json.dumps(encoded).encode(), request_headers, base)
                 assert status == 409 and json.loads(body)["error"]["code"] == "CONFLICT"
-                assert self.publication_state(clone) == before
+                after = self.publication_state(clone)
+                changed = [name for name in before if before[name] != after[name]]
+                assert not changed, f"expired group proof changed publication tables {changed}"
                 self.checks.append({"case": "ordinary-group-complete-rejects-expired-source", "status": status})
             finally:
                 if process.poll() is None:
