@@ -466,6 +466,11 @@ fn audio_stream(
         "kind": "audio",
         "codec_name": codec,
         "channels": channels,
+        "channel_layout": match channels {
+            2 => "stereo",
+            6 => "5.1",
+            _ => panic!("sample audio fixture supports stereo/2 or 5.1/6, got {channels}"),
+        },
         "disposition": {"default": default, "forced": false, "commentary": false},
     });
     if let Some(language) = language {

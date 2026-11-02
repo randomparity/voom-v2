@@ -1376,7 +1376,7 @@ fn audio_config(
         root,
         "ffprobe",
         &format!(
-            "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *audio-stage*) cat <<'JSON'\n{{\"format\":{{\"format_name\":\"{container}\"}},\"streams\":[{{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"{codec}\",\"channels\":6,\"tags\":{{\"snapshot_stream_id\":\"{snapshot_id}\",\"language\":\"{language}\",\"title\":\"{title}\"}},\"disposition\":{{\"default\":{default},\"forced\":0,\"comment\":0}}}}]}}\nJSON\n    ;;\n  *) cat <<'JSON'\n{{\"format\":{{\"format_name\":\"matroska\"}},\"streams\":[{{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":6,\"tags\":{{\"language\":\"eng\",\"title\":\"Main\"}},\"disposition\":{{\"default\":1,\"forced\":0,\"comment\":0}}}}]}}\nJSON\n    ;;\nesac\n"
+            "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *audio-stage*) cat <<'JSON'\n{{\"format\":{{\"format_name\":\"{container}\"}},\"streams\":[{{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"{codec}\",\"channels\":6,\"channel_layout\":\"5.1\",\"tags\":{{\"snapshot_stream_id\":\"{snapshot_id}\",\"language\":\"{language}\",\"title\":\"{title}\"}},\"disposition\":{{\"default\":{default},\"forced\":0,\"comment\":0}}}}]}}\nJSON\n    ;;\n  *) cat <<'JSON'\n{{\"format\":{{\"format_name\":\"matroska\"}},\"streams\":[{{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":6,\"channel_layout\":\"5.1\",\"tags\":{{\"language\":\"eng\",\"title\":\"Main\"}},\"disposition\":{{\"default\":1,\"forced\":0,\"comment\":0}}}}]}}\nJSON\n    ;;\nesac\n"
         ),
     );
     FfmpegConfig::new(

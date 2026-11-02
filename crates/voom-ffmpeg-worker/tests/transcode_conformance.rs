@@ -942,10 +942,10 @@ async fn tiny_process_timeout_yields_external_system_unavailable() {
 // Audio conformance
 // ---------------------------------------------------------------------------
 
-/// Generates a 1-second, 5.1 (6-channel) FLAC-in-mkv audio source at `path`,
-/// using the same ffmpeg binary the worker uses. FLAC is lossless and supports
-/// six channels, giving a clean 5.1 input to re-encode to E-AC-3.
-fn generate_5_1_audio_fixture(ffmpeg: &Path, path: &Path) {
+/// Generates a 1-second, 5.1 FLAC or `TrueHD` source with language/title metadata,
+/// using the same ffmpeg binary the worker uses. Both preserve the six-channel
+/// source shape for the E-AC-3 transport and metadata checks.
+fn generate_5_1_audio_fixture(ffmpeg: &Path, path: &Path, codec: &str) {
     let status = Command::new(ffmpeg)
         .args([
             "-y",
@@ -959,7 +959,13 @@ fn generate_5_1_audio_fixture(ffmpeg: &Path, path: &Path) {
             "-t",
             "1",
             "-c:a",
-            "flac",
+            codec,
+            "-strict",
+            "-2",
+            "-metadata:s:a:0",
+            "language=eng",
+            "-metadata:s:a:0",
+            "title=English TrueHD 5.1 / α Main",
             path.to_str().unwrap(),
         ])
         .status()
@@ -984,82 +990,92 @@ async fn audio_expected(path: &Path) -> AudioExpectedFacts {
 async fn eac3_transcode_preserves_5_1_channels() {
     let preflight = preflight_from_process_env()
         .expect("preflight failed — ensure libx265 and libsvtav1 are available");
-    let config = ffmpeg_config(&preflight);
-    let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("source.mkv");
-    let output = dir.path().join("out.eac3.mkv");
-    generate_5_1_audio_fixture(&preflight.ffmpeg_path, &input);
+    for codec in ["flac", "truehd"] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("out.eac3.mkv");
+        generate_5_1_audio_fixture(&preflight.ffmpeg_path, &input, codec);
+        let source_identity = audio_expected(&input).await;
 
-    let request = TranscodeAudioRequest {
-        input: TranscodeAudioInput {
-            path: input.to_string_lossy().into_owned(),
-            expected: audio_expected(&input).await,
-        },
-        output: TranscodeAudioOutput {
-            staging_root: dir.path().to_string_lossy().into_owned(),
-            path: output.to_string_lossy().into_owned(),
-            container: "mkv".to_owned(),
-            overwrite: false,
-        },
-        selection: TranscodeAudioSelection {
-            selected_streams: vec![AudioStreamRef {
-                snapshot_stream_id: "audio-0".to_owned(),
-                provider_stream_index: 0,
-            }],
-        },
-        audio: TranscodeAudioSettings {
-            lossless: None,
-            compatibility: None,
-            target_codec: "eac3".to_owned(),
-            profile: AUDIO_PROFILE_DEFAULT.to_owned(),
-            add_track: false,
-            target_channels: None,
-        },
-    };
+        let request = TranscodeAudioRequest {
+            input: TranscodeAudioInput {
+                path: input.to_string_lossy().into_owned(),
+                expected: audio_expected(&input).await,
+            },
+            output: TranscodeAudioOutput {
+                staging_root: dir.path().to_string_lossy().into_owned(),
+                path: output.to_string_lossy().into_owned(),
+                container: "mkv".to_owned(),
+                overwrite: false,
+            },
+            selection: TranscodeAudioSelection {
+                selected_streams: vec![AudioStreamRef {
+                    snapshot_stream_id: "audio-0".to_owned(),
+                    provider_stream_index: 0,
+                }],
+            },
+            audio: TranscodeAudioSettings {
+                lossless: None,
+                compatibility: None,
+                target_codec: "eac3".to_owned(),
+                profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+                add_track: false,
+                target_channels: None,
+            },
+        };
 
-    let result = handle_transcode_audio(&request, &config)
-        .await
-        .expect("eac3 5.1 transcode failed");
+        let result = synthesize_through_worker(&request).await;
+        assert_eq!(
+            audio_expected(&input).await,
+            source_identity,
+            "source must remain immutable"
+        );
 
-    assert_eq!(result.output_audio_codecs, vec!["eac3".to_owned()]);
-    let stream = result
-        .selected_output_streams
-        .first()
-        .expect("one selected output stream");
-    assert_eq!(stream.codec, "eac3");
-    assert_eq!(
-        stream.channels,
-        Some(6),
-        "eac3 output must preserve the 5.1 (6-channel) layout"
-    );
-    let independent = Command::new(&preflight.ffprobe_path)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_streams",
-            "-of",
-            "json",
-        ])
-        .arg(&output)
-        .output()
-        .expect("independent output probe must start");
-    assert!(independent.status.success());
-    let raw: serde_json::Value = serde_json::from_slice(&independent.stdout).unwrap();
-    let actual = &raw["streams"][0];
-    assert_eq!(
-        stream.sample_rate,
-        Some(actual["sample_rate"].as_str().unwrap().parse().unwrap())
-    );
-    assert_eq!(
-        stream.sample_format.as_deref(),
-        actual["sample_fmt"].as_str()
-    );
-    assert_eq!(
-        stream.bits_per_sample, None,
-        "lossy float output carries no integer precision claim"
-    );
+        assert_eq!(result.output_audio_codecs, vec!["eac3".to_owned()]);
+        let stream = result
+            .selected_output_streams
+            .first()
+            .expect("one selected output stream");
+        assert_eq!(stream.codec, "eac3");
+        assert_eq!(stream.title.as_deref(), Some("English TrueHD 5.1 / α Main"));
+        assert_eq!(stream.language.as_deref(), Some("eng"));
+        assert_eq!(
+            stream.channels,
+            Some(6),
+            "eac3 output must preserve the 5.1 (6-channel) layout"
+        );
+        let independent = Command::new(&preflight.ffprobe_path)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_streams",
+                "-of",
+                "json",
+            ])
+            .arg(&output)
+            .output()
+            .expect("independent output probe must start");
+        assert!(independent.status.success());
+        let raw: serde_json::Value = serde_json::from_slice(&independent.stdout).unwrap();
+        let actual = &raw["streams"][0];
+        assert_eq!(actual["channels"], 6);
+        assert_eq!(actual["tags"]["title"], "English TrueHD 5.1 / α Main");
+        assert_eq!(actual["tags"]["language"], "eng");
+        assert_eq!(
+            stream.sample_rate,
+            Some(actual["sample_rate"].as_str().unwrap().parse().unwrap())
+        );
+        assert_eq!(
+            stream.sample_format.as_deref(),
+            actual["sample_fmt"].as_str()
+        );
+        assert_eq!(
+            stream.bits_per_sample, None,
+            "lossy float output carries no integer precision claim"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1271,13 +1287,20 @@ fn assert_synthesized_audio_file(
     clippy::too_many_lines,
     reason = "one generated-media matrix keeps source and output preservation assertions together"
 )]
-async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
+async fn dolby_real_worker_preserves_channels_and_synthesizes_surround() {
     let preflight = preflight_from_process_env().unwrap();
-    for (layout, channels, synthesis, expected_channels, bitrate) in [
-        ("mono", 1, false, 1, "96000"),
-        ("stereo", 2, false, 2, "192000"),
-        ("5.1", 6, false, 6, "576000"),
-        ("7.1", 8, true, 6, "576000"),
+    for (codec, layout, channels, synthesis, expected_channels, bitrate) in [
+        ("ac3", "mono", 1, false, 1, "96000"),
+        ("ac3", "stereo", 2, false, 2, "192000"),
+        ("ac3", "5.1", 6, false, 6, "576000"),
+        ("ac3", "7.1", 8, true, 6, "576000"),
+        ("eac3", "mono", 1, false, 1, "96000"),
+        ("eac3", "stereo", 2, false, 2, "192000"),
+        ("eac3", "3.0", 3, false, 3, "288000"),
+        ("eac3", "4.0", 4, false, 4, "384000"),
+        ("eac3", "5.0", 5, false, 5, "480000"),
+        ("eac3", "5.1", 6, false, 6, "576000"),
+        ("eac3", "7.1", 8, true, 6, "576000"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("source.mkv");
@@ -1352,7 +1375,7 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
             audio: TranscodeAudioSettings {
                 lossless: None,
                 compatibility: None,
-                target_codec: "ac3".to_owned(),
+                target_codec: codec.to_owned(),
                 profile: AUDIO_PROFILE_DEFAULT.to_owned(),
                 add_track: synthesis,
                 target_channels: synthesis.then_some(expected_channels),
@@ -1400,7 +1423,7 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
             u32::try_from(selected_index).unwrap()
         );
         assert_eq!(physical[1]["format"]["tags"]["title"], "AC-3 source");
-        assert_eq!(selected["codec_name"], "ac3");
+        assert_eq!(selected["codec_name"], codec);
         assert_eq!(selected["channels"], expected_channels);
         assert_eq!(selected["bit_rate"], bitrate);
         assert_eq!(
@@ -1408,6 +1431,9 @@ async fn ac3_real_worker_preserves_channels_and_synthesizes_surround() {
             match expected_channels {
                 1 => "mono",
                 2 => "stereo",
+                3 => "3.0",
+                4 => "4.0",
+                5 => "5.0(side)",
                 _ => "5.1(side)",
             }
         );
@@ -2801,4 +2827,64 @@ async fn assert_cover_art_output(
         );
     }
     probe
+}
+
+#[tokio::test]
+async fn eac3_real_worker_blocks_unsupported_layouts() {
+    let preflight = preflight_from_process_env().unwrap();
+    for (layout, channels) in [("7.1", 8), ("6.0", 6)] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.mkv");
+        let output = dir.path().join("rejected.mkv");
+        let generated = Command::new(&preflight.ffmpeg_path)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=16x16:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("anullsrc=r=48000:cl={layout}"),
+                "-t",
+                "0.2",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "ffv1",
+                "-c:a",
+                "flac",
+            ])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let physical = Command::new(&preflight.ffprobe_path)
+            .args(["-v", "error", "-show_streams", "-of", "json"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(physical.status.success());
+        let raw: serde_json::Value = serde_json::from_slice(&physical.stdout).unwrap();
+        assert_eq!(raw["streams"][1]["channels"], channels);
+        assert_eq!(raw["streams"][1]["channel_layout"], layout);
+        let request = lossless_request("eac3", &input, &output, None).await;
+        let error = handle_transcode_audio(&request, &ffmpeg_config(&preflight))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("E-AC-3"), "{layout}: {error}");
+        assert!(
+            !output.exists(),
+            "unsupported {layout} must fail before encoding"
+        );
+        assert_eq!(audio_expected(&input).await, request.input.expected);
+    }
 }

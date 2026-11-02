@@ -13,6 +13,7 @@ fn surround_fact() -> SnapshotAudioStreamFact {
     SnapshotAudioStreamFact {
         codec: Some("eac3".to_owned()),
         channels: Some(6),
+        channel_layout: Some("5.1".to_owned()),
         ..audio_fact(Some(false))
     }
 }
@@ -97,6 +98,7 @@ fn stream_facts_parse_audio_streams_with_disposition_commentary() {
             language: Some("eng".to_owned()),
             title: Some("Commentary".to_owned()),
             channels: Some(2),
+            channel_layout: None,
             default: true,
             disposition: AudioDispositionFact {
                 default: true,
@@ -311,6 +313,158 @@ fn audio_language_filter_explicit_und_matches_like_untagged() {
     );
 }
 
+#[test]
+fn eac3_transcode_blocks_unsupported_layouts() {
+    for (channels, layout) in [
+        (8, "7.1"),
+        (7, "6.1"),
+        (6, "6.0"),
+        (2, "mono"),
+        (0, "stereo"),
+        (6, "unknown"),
+    ] {
+        let mut snapshot = snapshot_with_audio_facts(vec![audio_fact(Some(false))]);
+        snapshot.stream_summary["streams"][1]["channels"] = serde_json::json!(channels);
+        snapshot.stream_summary["streams"][1]["channel_layout"] = serde_json::json!(layout);
+        assert_eq!(
+            transcode_audio_shape(&snapshot, "eac3", AUDIO_TRANSCODE_CONTAINER, None),
+            AudioPlanShape::Blocked(AudioPlanningBlock::UnsupportedMediaShape),
+            "an EAC3 encode cannot preserve {channels}/{layout}"
+        );
+    }
+}
+
+#[test]
+fn eac3_transcode_accepts_supported_layouts() {
+    for (channels, layouts) in [
+        (1, vec!["mono"]),
+        (2, vec!["stereo", "2 channels (FC+LFE)"]),
+        (3, vec!["2.1", "3.0", "3.0(back)"]),
+        (
+            4,
+            vec![
+                "3.1",
+                "4.0",
+                "quad",
+                "quad(side)",
+                "4 channels (FL+FR+LFE+BC)",
+            ],
+        ),
+        (5, vec!["4.1", "5.0", "5.0(side)"]),
+        (6, vec!["5.1", "5.1(side)"]),
+    ] {
+        for layout in layouts {
+            let mut snapshot = snapshot_with_audio_facts(vec![audio_fact(Some(false))]);
+            snapshot.stream_summary["streams"][1]["channels"] = serde_json::json!(channels);
+            snapshot.stream_summary["streams"][1]["channel_layout"] = serde_json::json!(layout);
+            assert_eq!(
+                transcode_audio_shape(&snapshot, "eac3", AUDIO_TRANSCODE_CONTAINER, None),
+                AudioPlanShape::Planned,
+                "the native EAC3 encoder accepts {channels}/{layout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn eac3_transcode_requires_layout_facts_only_when_encoding() {
+    for (channels, layout) in [
+        (serde_json::Value::Null, serde_json::json!("stereo")),
+        (serde_json::json!(u64::MAX), serde_json::json!("stereo")),
+        (serde_json::json!(2), serde_json::Value::Null),
+    ] {
+        let mut snapshot = snapshot_with_audio_facts(vec![audio_fact(Some(false))]);
+        snapshot.stream_summary["streams"][1]["channels"] = channels;
+        snapshot.stream_summary["streams"][1]["channel_layout"] = layout;
+        assert_eq!(
+            transcode_audio_shape(&snapshot, "eac3", AUDIO_TRANSCODE_CONTAINER, None),
+            AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts)
+        );
+        assert_eq!(
+            transcode_audio_shape(&snapshot, "opus", AUDIO_TRANSCODE_CONTAINER, None),
+            AudioPlanShape::Planned,
+            "other codecs retain their existing planning floor"
+        );
+        snapshot.stream_summary["streams"][1]["codec_name"] = serde_json::json!("eac3");
+        assert_eq!(
+            transcode_audio_shape(&snapshot, "eac3", AUDIO_TRANSCODE_CONTAINER, None),
+            AudioPlanShape::NoOp,
+            "a true no-op does not invoke the encoder"
+        );
+    }
+}
+
+#[test]
+fn eac3_admission_preserves_selection_and_noops() {
+    let mut snapshot = snapshot_with_audio_facts(vec![
+        audio_fact(Some(false)),
+        SnapshotAudioStreamFact {
+            snapshot_stream_id: "foreign-surround".to_owned(),
+            provider_stream_index: 2,
+            language: Some("jpn".to_owned()),
+            channels: Some(8),
+            ..audio_fact(Some(false))
+        },
+    ]);
+    snapshot.stream_summary["streams"][1]["channel_layout"] = serde_json::json!("stereo");
+    snapshot.stream_summary["streams"][2]["channel_layout"] = serde_json::json!("7.1");
+    let filter = TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
+        values: vec!["eng".to_owned()],
+    });
+    assert_eq!(
+        transcode_audio_shape(&snapshot, "eac3", "mkv", Some(&filter)),
+        AudioPlanShape::Planned
+    );
+    assert_eq!(
+        transcode_audio_shape(&snapshot, "eac3", "mkv", None),
+        AudioPlanShape::Blocked(AudioPlanningBlock::UnsupportedMediaShape)
+    );
+    snapshot.stream_summary["streams"][1]["codec_name"] = serde_json::json!("eac3");
+    assert_eq!(
+        transcode_audio_shape(&snapshot, "eac3", "mkv", Some(&filter)),
+        AudioPlanShape::NoOp
+    );
+    snapshot.stream_summary["streams"][1]["channels"] = serde_json::json!(8);
+    snapshot.stream_summary["streams"][1]["channel_layout"] = serde_json::json!("7.1");
+    snapshot.container = Some("mp4".to_owned());
+    assert_eq!(
+        transcode_audio_shape(&snapshot, "eac3", "mkv", Some(&filter)),
+        AudioPlanShape::Blocked(AudioPlanningBlock::UnsupportedMediaShape)
+    );
+    snapshot.stream_summary["video_stream_count"] = serde_json::json!(0);
+    assert_eq!(
+        transcode_audio_shape(&snapshot, "eac3", "mkv", None),
+        AudioPlanShape::Blocked(AudioPlanningBlock::NoVideo)
+    );
+}
+
+#[test]
+fn eac3_plan_diagnostic_explains_preservation() {
+    let filter = TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
+        values: vec!["eng".to_owned(), "und".to_owned()],
+    });
+    for language in ["eng", "und"] {
+        let snapshot = snapshot_with_audio_facts(vec![SnapshotAudioStreamFact {
+            codec: Some("truehd".to_owned()),
+            language: Some(language.to_owned()),
+            channels: Some(8),
+            channel_layout: Some("7.1".to_owned()),
+            ..audio_fact(Some(false))
+        }]);
+        let plan =
+            crate::planner::audio::plan_transcode("audio", &snapshot, "eac3", "mkv", Some(&filter));
+        assert_eq!(plan.status, crate::NodeStatus::Blocked);
+        assert!(plan.capability.is_none());
+        assert!(plan.status_reason.contains("preserve"));
+        assert!(plan.status_reason.contains("synthesize audio"));
+        assert_eq!(
+            plan.diagnostics[0].code,
+            crate::PlanningDiagnosticCode::UnsupportedMediaShape
+        );
+        assert!(plan.operation_payload.get("target_channels").is_none());
+    }
+}
+
 fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
     SnapshotAudioStreamFact {
         snapshot_stream_id: "stream-1".to_owned(),
@@ -319,6 +473,7 @@ fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
         language: Some("eng".to_owned()),
         title: Some("Main".to_owned()),
         channels: Some(2),
+        channel_layout: Some("stereo".to_owned()),
         default: false,
         disposition: AudioDispositionFact {
             default: false,
@@ -354,6 +509,7 @@ fn snapshot_with_audio_facts(streams: Vec<SnapshotAudioStreamFact>) -> MediaSnap
                 "language": stream.language,
                 "title": stream.title,
                 "channels": stream.channels,
+                "channel_layout": stream.channel_layout,
                 "disposition": {
                     "default": stream.disposition.default,
                     "forced": stream.disposition.forced,

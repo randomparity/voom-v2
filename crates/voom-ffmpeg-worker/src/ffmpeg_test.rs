@@ -1673,7 +1673,7 @@ fn ffprobe_audio_stub(
     third_codec: &str,
 ) -> PathBuf {
     let streams = serde_json::json!({"format":{"format_name":container},"streams":[
-        {"index":1,"codec_type":"audio","codec_name":first_codec,"channels":6,
+        {"index":1,"codec_type":"audio","codec_name":first_codec,"channels":6,"channel_layout":"5.1",
          "tags":{"language":"eng","title":"Main"},"disposition":{"default":1,"forced":0,"comment":0}},
         {"index":2,"codec_type":"audio","codec_name":"aac","channels":2},
         {"index":3,"codec_type":"audio","codec_name":third_codec,
@@ -2975,4 +2975,139 @@ async fn cover_art_forced_decoder_preserves_discovery() {
     assert_eq!(streams[1]["codec_name"], "mjpeg");
     assert_eq!(streams[1]["width"], 16);
     assert_eq!(streams[1]["disposition"]["attached_pic"], 1);
+}
+
+#[tokio::test]
+async fn eac3_rejects_unsupported_source_facts_before_encoding() {
+    for (channels, layout) in [
+        (Some(8), Some("7.1")),
+        (Some(6), Some("6.0")),
+        (Some(7), Some("6.1")),
+        (Some(2), Some("mono")),
+        (Some(0), Some("stereo")),
+        (None, Some("stereo")),
+        (Some(2), None),
+        (Some(2), Some("")),
+        (Some(6), Some("unknown")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("encoded");
+        let ffmpeg = stub_bin(
+            dir.path(),
+            "ffmpeg",
+            &format!(
+                "#!/bin/sh\ntouch '{}'\nfor last; do :; done\nprintf output > \"$last\"\n",
+                marker.display()
+            ),
+        );
+        let mut source = serde_json::json!({"format":{"format_name":"matroska"},"streams":[
+            {"index":1,"codec_type":"audio","codec_name":"flac","channels":channels,"channel_layout":layout}
+        ]});
+        if channels.is_none() {
+            source["streams"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("channels");
+        }
+        if layout.is_none() {
+            source["streams"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("channel_layout");
+        }
+        let ffprobe = audio_probe_stub(dir.path(), source.clone(), source);
+        let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+        let output = dir.path().join("out.mkv");
+        let error = run_ffmpeg_transcode_audio(
+            &config,
+            &dir.path().join("input.mkv"),
+            &output,
+            &transcode_audio_request(dir.path(), &[1], "eac3"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !marker.exists(),
+            "unsupported {channels:?}/{layout:?} must not invoke the encoder"
+        );
+        assert!(
+            !output.exists(),
+            "unsupported layout must fail before output creation"
+        );
+        assert!(error.to_string().contains("E-AC-3"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn eac3_source_admission_accepts_supported_pairs_and_ignores_unselected_streams() {
+    for (channels, layouts) in [
+        (1, vec!["mono"]),
+        (2, vec!["stereo", "2 channels (FC+LFE)"]),
+        (3, vec!["2.1", "3.0", "3.0(back)"]),
+        (
+            4,
+            vec![
+                "3.1",
+                "4.0",
+                "quad",
+                "quad(side)",
+                "4 channels (FL+FR+LFE+BC)",
+            ],
+        ),
+        (5, vec!["4.1", "5.0", "5.0(side)"]),
+        (6, vec!["5.1", "5.1(side)"]),
+    ] {
+        for layout in layouts {
+            let dir = tempfile::tempdir().unwrap();
+            let source = serde_json::json!({"format":{"format_name":"matroska"},"streams":[
+                {"index":1,"codec_type":"audio","codec_name":"eac3","channels":channels,"channel_layout":layout},
+                {"index":2,"codec_type":"audio","codec_name":"flac","channels":8,"channel_layout":"7.1"}
+            ]});
+            let ffprobe = audio_probe_stub(dir.path(), source.clone(), source);
+            let ffmpeg = stub_bin(
+                dir.path(),
+                "ffmpeg",
+                "#!/bin/sh\nfor last; do :; done\nprintf output > \"$last\"\n",
+            );
+            let config =
+                FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+            let result = run_ffmpeg_transcode_audio(
+                &config,
+                &dir.path().join("input.mkv"),
+                &dir.path().join("out.mkv"),
+                &transcode_audio_request(dir.path(), &[1], "eac3"),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "native supported {channels}/{layout}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn eac3_postcheck_preserves_title_and_channel_contract() {
+    let source = serde_json::json!({"index":1,"codec_type":"audio","codec_name":"flac", "channels":6,
+        "channel_layout":"5.1", "tags":{"language":"eng","title":"Main"},
+        "disposition":{"default":1,"forced":0,"comment":0}});
+    let sources = audio_facts_from_probe(&serde_json::json!({"streams":[source.clone()]})).unwrap();
+    let mut encoded = source;
+    encoded["codec_name"] = serde_json::json!("eac3");
+    let output = audio_output_stream_fact(&encoded, "selected".to_owned(), Some("eac3"))
+        .unwrap()
+        .unwrap();
+    verify_preserved_audio_metadata(&sources[0], &output).unwrap();
+    let mut wrong_title = output.clone();
+    wrong_title.title = Some("Changed".to_owned());
+    assert!(
+        matches!(verify_preserved_audio_metadata(&sources[0], &wrong_title),
+        Err(FfmpegError::OutputFactsMismatch(message)) if message == "selected audio title mismatch")
+    );
+    let mut wrong_channels = output;
+    wrong_channels.channels = Some(2);
+    assert!(
+        matches!(verify_preserved_audio_metadata(&sources[0], &wrong_channels),
+        Err(FfmpegError::OutputFactsMismatch(message)) if message == "selected audio channel count mismatch")
+    );
 }
