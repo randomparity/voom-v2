@@ -28,7 +28,7 @@ ci: source-checks platform-checks
     @echo "==> All CI checks passed"
 
 # Source guards retain both GNU and BSD coverage in CI
-source-checks: check-workflows check-workflows-selftest check-test-layout \
+source-checks: check-host-paths check-host-paths-selftest check-workflows check-workflows-selftest check-test-layout \
     check-paused-time-db check-paused-time-db-selftest \
     check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
     check-check-constraint-bypass check-check-constraint-bypass-selftest \
@@ -40,6 +40,13 @@ source-checks: check-workflows check-workflows-selftest check-test-layout \
     check-media-evidence-fingerprint-guard-selftest container-unit-check \
     media-evidence-lazy-selftest media-evidence-candidates-selftest \
     media-evidence-reuse-selftest media-evidence-rollout-selftest
+
+# Tracked root/docs Markdown must contain portable paths, without host identifiers.
+check-host-paths:
+    ./scripts/check-host-paths.sh
+
+check-host-paths-selftest:
+    ./scripts/check-host-paths-selftest.sh
 
 # Filename/path diversity must affect real canary recommendation membership.
 media-inventory-selftest:
