@@ -1,5 +1,11 @@
 use super::*;
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use tokio::sync::Notify;
+
 #[test]
 fn stored_compatibility_corruption_is_database_error() {
     let payload = json!({"media_dispatch": {"operation": "transcode_audio", "settings": {
@@ -181,4 +187,212 @@ fn owner_result_projection_keeps_unknown_worker_fields_and_original_facts() {
         .is_err(),
         "owner projection must not erase an unaccepted worker field"
     );
+}
+
+struct WaitGate {
+    acquisitions: AtomicUsize,
+    at_boundary: Notify,
+    published: Notify,
+}
+
+struct WaitFixture {
+    cp: ControlPlane,
+    publisher: sqlx::SqlitePool,
+    pending: PendingMedia,
+    gate: Arc<WaitGate>,
+    _database: voom_test_support::TempDatabase,
+}
+
+async fn waiter_fixture() -> WaitFixture {
+    let database = voom_test_support::TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", database.path().display());
+    voom_store::init(&url).await.unwrap();
+    let gate = Arc::new(WaitGate {
+        acquisitions: AtomicUsize::new(usize::MAX),
+        at_boundary: Notify::new(),
+        published: Notify::new(),
+    });
+    let callback_gate = gate.clone();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .max_lifetime(None)
+        .idle_timeout(None)
+        .before_acquire(move |_, _| {
+            let gate = callback_gate.clone();
+            Box::pin(async move {
+                if gate.acquisitions.load(Ordering::SeqCst) != usize::MAX
+                    && gate.acquisitions.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    gate.at_boundary.notify_one();
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        gate.published.notified(),
+                    )
+                    .await
+                    .map_err(|_| sqlx::Error::PoolTimedOut)?;
+                }
+                Ok(true)
+            })
+        })
+        .connect(&url)
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(
+        pool.clone(),
+        Arc::new(voom_core::clock_test_support::FrozenClock::new(
+            OffsetDateTime::UNIX_EPOCH,
+        )),
+    )
+    .await
+    .unwrap();
+    voom_store::test_support::seed_test_rooted_location(&pool)
+        .await
+        .unwrap();
+    let owner = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
+    owner.install(&pool).await.unwrap();
+    sqlx::query("INSERT INTO workers (id,name,kind,status,registered_at,last_seen_at,node_id,node_incarnation_id) VALUES (1,'waiter','remote','active','1970-01-01T00:00:00Z','1970-01-01T00:00:00Z',9000001,?)")
+        .bind(owner.incarnation_id.to_string()).execute(&pool).await.unwrap();
+    sqlx::raw_sql(r#"
+        INSERT INTO jobs (id,kind,state,created_at,updated_at)
+        VALUES (1,'workflow','open','1970-01-01T00:00:00Z','1970-01-01T00:00:00Z');
+        INSERT INTO tickets (id,job_id,kind,state,payload,next_eligible_at,created_at,state_changed_at)
+        VALUES (1,1,'remux','leased',
+        '{"rendered_payload":{"source_file_version_id":9000001,"source_location_id":9000001}}',
+        '1970-01-01T00:00:00Z','1970-01-01T00:00:00Z','1970-01-01T00:00:00Z');
+        INSERT INTO leases (id,ticket_id,worker_id,state,acquired_at,expires_at,last_heartbeat_at,ttl_seconds)
+        VALUES (1,1,1,'held','1970-01-01T00:00:00Z','1970-01-01T00:01:00Z',
+        '1970-01-01T00:00:00Z',60);
+        INSERT INTO artifact_access_plans (id,lease_id,ticket_id,worker_id,node_id,owner_node_id,
+        access_evidence,status,created_at,updated_at)
+        VALUES (1,1,1,1,9000001,9000001,
+        '{"declaration":[{"target":{"kind":"storage_root","storage_root_id":9000001},"rights":["read"]}],"root_epochs":[{"storage_root_id":9000001,"root_epoch":1}]}',
+        'selected','1970-01-01T00:00:00Z','1970-01-01T00:00:00Z');
+    "#).execute(&pool).await.unwrap();
+    let context = RemoteMediaCompletionContext {
+        node_id: owner.node_id,
+        incarnation_id: owner.incarnation_id,
+        worker_id: WorkerId(1),
+        lease_id: LeaseId(1),
+        ticket_id: TicketId(1),
+        job_id: JobId(1),
+        source_file_version_id: FileVersionId(9_000_001),
+        source_location_id: FileLocationId(9_000_001),
+        source_location_fence: Some(SourceLocationFence {
+            epoch: 0,
+            storage_root_id: voom_core::StorageRootId(9_000_001),
+            provider_relative_locator: ProviderRelativeLocator::new(
+                "workflow-fixture.mkv".to_owned(),
+            )
+            .unwrap(),
+        }),
+        idempotency_key: "waiter-completion".to_owned(),
+        request_hash: "waiter-hash".to_owned(),
+        result: json!({}),
+    };
+    WaitFixture {
+        cp,
+        publisher: voom_store::connect(&url).await.unwrap(),
+        pending: PendingMedia {
+            context,
+            commits: Vec::new(),
+        },
+        gate,
+        _database: database,
+    }
+}
+
+#[tokio::test]
+async fn waiter_replays_publication_committed_between_snapshots() {
+    let WaitFixture {
+        cp,
+        publisher,
+        pending,
+        gate,
+        _database,
+    } = waiter_fixture().await;
+    let context = pending.context.clone();
+    let plan = cp
+        .artifact_access_plans
+        .get_by_lease(context.lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = RemoteCompleteOutcome {
+        lease_id: context.lease_id,
+        ticket_id: context.ticket_id,
+        worker_id: context.worker_id,
+        artifact_access_plan: crate::cases::execution::remote_execution::remote_plan(&plan),
+    };
+    let publish = async {
+        gate.at_boundary.notified().await;
+        let mut tx = voom_store::tx::begin_write_first(&publisher, "waiter test publish")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE leases SET state='released',release_reason='released',released_at='1970-01-01T00:00:00Z' WHERE id=1")
+            .execute(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE tickets SET state='succeeded' WHERE id=1")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let replay = context.replay_input(OffsetDateTime::UNIX_EPOCH);
+        assert!(matches!(
+            cp.remote_idempotency
+                .reserve_or_replay_in_tx(&mut tx, replay.clone())
+                .await
+                .unwrap(),
+            IdempotencyOutcome::Reserved
+        ));
+        cp.complete_remote_ok_in_tx(
+            &mut tx,
+            context.node_id,
+            &replay.route_key,
+            Some(context.worker_id),
+            &replay.idempotency_key,
+            &expected,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        gate.published.notify_one();
+    };
+    gate.acquisitions.store(0, Ordering::SeqCst);
+    let (observed, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(pending.wait(&cp), publish)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(observed.unwrap()).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
+        "publication must return its persisted replay, not a lost-lease conflict"
+    );
+    assert_eq!(
+        gate.acquisitions.load(Ordering::SeqCst),
+        2,
+        "the isolated pool must reach exactly the forced snapshot boundary"
+    );
+}
+
+#[tokio::test]
+async fn waiter_without_replay_rejects_expired_or_released_source() {
+    for (state, expiry) in [
+        ("held", "1970-01-01T00:00:00Z"),
+        ("released", "1970-01-01T00:01:00Z"),
+    ] {
+        let fixture = waiter_fixture().await;
+        sqlx::query("UPDATE leases SET state=?,expires_at=?,release_reason=CASE WHEN ?='held' THEN NULL ELSE 'released' END,released_at=CASE WHEN ?='held' THEN NULL ELSE '1970-01-01T00:00:00Z' END WHERE id=1")
+            .bind(state).bind(expiry).bind(state).bind(state).execute(&fixture.publisher).await.unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.pending.wait(&fixture.cp),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            matches!(error, VoomError::Conflict(_)),
+            "without terminal replay, expired/non-held authority must fail"
+        );
+    }
 }

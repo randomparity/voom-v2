@@ -655,18 +655,9 @@ impl PendingMedia {
                     return Err(VoomError::Conflict("owner media publication stopped; prepared artifacts retained".to_owned()));
                 }
             }
+            // Keep replay and held-lease checks in one snapshot: a later lease
+            // read could mistake successful publication for lost authority.
             commit_tx(tx).await?;
-            let lease =
-                cp.leases.get(self.context.lease_id).await?.ok_or_else(|| {
-                    VoomError::database("waiting media lease disappeared".to_owned())
-                })?;
-            if lease.state != voom_store::repo::execution::leases::LeaseState::Held
-                || lease.expires_at <= cp.clock().now()
-            {
-                return Err(VoomError::Conflict(
-                    "owner media publication lost its source lease".to_owned(),
-                ));
-            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
