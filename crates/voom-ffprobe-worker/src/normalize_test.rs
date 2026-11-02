@@ -326,7 +326,7 @@ fn rejects_malformed_attached_pic_disposition() {
 
     let error = normalize_ffprobe_json(raw, "8.1.3", "2026-10-30T00:00:00Z").unwrap_err();
 
-    assert_eq!(error.failure_class(), FailureClass::MalformedWorkerResult);
+    assert_eq!(error.failure_class(), FailureClass::MalformedMedia);
 }
 
 #[test]
@@ -410,7 +410,7 @@ fn rejects_non_numeric_duration() {
 
     assert!(matches!(
         result.as_ref().map_err(WorkerError::failure_class),
-        Err(voom_core::FailureClass::MalformedWorkerResult)
+        Err(voom_core::FailureClass::MalformedMedia)
     ));
 }
 
@@ -431,7 +431,7 @@ fn rejects_malformed_disposition_values() {
 
     assert!(matches!(
         result.as_ref().map_err(WorkerError::failure_class),
-        Err(voom_core::FailureClass::MalformedWorkerResult)
+        Err(voom_core::FailureClass::MalformedMedia)
     ));
 }
 
@@ -511,7 +511,7 @@ fn rejects_malformed_present_numeric_values() {
 
     assert!(matches!(
         result.as_ref().map_err(WorkerError::failure_class),
-        Err(voom_core::FailureClass::MalformedWorkerResult)
+        Err(voom_core::FailureClass::MalformedMedia)
     ));
 }
 
@@ -663,4 +663,180 @@ fn oversized_normalized_snapshot_is_malformed_media() {
         "tags": {"title": title}}]});
     let error = normalize_ffprobe_json(raw, "8.1.3", "2026-10-30T00:00:00Z").unwrap_err();
     assert_eq!(error.failure_class(), FailureClass::MalformedMedia);
+}
+
+#[test]
+fn normalization_rejects_content_tags_per_file() {
+    for name in [
+        "voom_compatibility_stream_id",
+        "voom_compatibility_source_stream_id",
+    ] {
+        for tags in [
+            serde_json::json!({name: " "}),
+            serde_json::json!({name: "a", name.to_uppercase(): "b"}),
+        ] {
+            let error = compatibility_tag_probe(&tags).unwrap_err();
+            assert_eq!(
+                error.failure_class(),
+                FailureClass::MalformedMedia,
+                "{tags}"
+            );
+        }
+    }
+}
+
+#[test]
+fn normalization_rejects_content_dispositions_per_file() {
+    for key in ["default", "forced", "comment", "attached_pic"] {
+        for value in [
+            serde_json::json!(2),
+            serde_json::json!(-1),
+            serde_json::json!(0.5),
+            serde_json::json!("maybe"),
+        ] {
+            let raw = serde_json::json!({"streams": [{"disposition": {key: value}}]});
+            let error = normalize_ffprobe_json(raw, "test", "now").unwrap_err();
+            assert_eq!(
+                error.failure_class(),
+                FailureClass::MalformedMedia,
+                "{key}={value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn normalization_rejects_content_numbers_per_file() {
+    for field in [
+        "duration",
+        "bit_rate",
+        "index",
+        "width",
+        "height",
+        "sample_rate",
+        "channels",
+    ] {
+        let values = if field == "duration" {
+            vec![
+                serde_json::json!("bad"),
+                serde_json::json!("NaN"),
+                serde_json::json!("inf"),
+                serde_json::json!("-inf"),
+                serde_json::json!("1e999"),
+            ]
+        } else {
+            vec![
+                serde_json::json!("bad"),
+                serde_json::json!("18446744073709551616"),
+                serde_json::json!(-1),
+                serde_json::json!(0.5),
+                serde_json::json!(1e30),
+            ]
+        };
+        for value in values {
+            let mut raw = serde_json::json!({"streams": [{field: value}]});
+            if field == "bit_rate" {
+                raw = serde_json::json!({"format": {field: value}});
+            }
+            let error = normalize_ffprobe_json(raw, "test", "now").unwrap_err();
+            assert_eq!(
+                error.failure_class(),
+                FailureClass::MalformedMedia,
+                "{field}={value}"
+            );
+            if field == "duration" {
+                let raw = serde_json::json!({"format": {field: value}});
+                assert_eq!(
+                    normalize_ffprobe_json(raw, "test", "now")
+                        .unwrap_err()
+                        .failure_class(),
+                    FailureClass::MalformedMedia,
+                    "container {value}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn normalization_rejects_content_audio_facts_per_file() {
+    for facts in [
+        serde_json::json!({"sample_rate": "4294967296"}),
+        serde_json::json!({"bits_per_raw_sample": 256}),
+        serde_json::json!({"bits_per_sample": 256}),
+        serde_json::json!({"bits_per_raw_sample": "bad"}),
+        serde_json::json!({"bits_per_sample": "bad"}),
+        serde_json::json!({"bits_per_raw_sample": -1}),
+        serde_json::json!({"bits_per_sample": 0.5}),
+        serde_json::json!({"bits_per_raw_sample": 24, "bits_per_sample": 16}),
+        serde_json::json!({"sample_fmt": "s16", "bits_per_raw_sample": 24}),
+        serde_json::json!({"sample_fmt": "s16p", "bits_per_sample": 24}),
+        serde_json::json!({"sample_fmt": "s32", "bits_per_raw_sample": 40}),
+        serde_json::json!({"sample_fmt": "s32p", "bits_per_sample": 40}),
+    ] {
+        let mut stream = facts.clone();
+        stream["codec_type"] = serde_json::json!("audio");
+        let error = normalize_ffprobe_json(serde_json::json!({"streams": [stream]}), "test", "now")
+            .unwrap_err();
+        assert_eq!(
+            error.failure_class(),
+            FailureClass::MalformedMedia,
+            "{facts}"
+        );
+    }
+}
+
+#[test]
+fn normalization_keeps_provider_contract_errors_fatal() {
+    let mut cases = vec![
+        serde_json::json!([]),
+        serde_json::json!({"format": []}),
+        serde_json::json!({"streams": {}}),
+        serde_json::json!({"streams": [42]}),
+        serde_json::json!({"streams": [{"disposition": []}]}),
+        serde_json::json!({"format": {"duration": "bad"}, "streams": {}}),
+        serde_json::json!({"streams": [{"codec_type":"audio", "sample_rate":"bad", "sample_fmt":[]}]}),
+        serde_json::json!({"streams": [{"duration":"bad"}, {"disposition":[]}]}),
+        serde_json::json!({"streams": [{"disposition":[]}, {"duration":"bad"}]}),
+    ];
+    for value in [
+        serde_json::json!(null),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        for field in [
+            "index",
+            "width",
+            "height",
+            "duration",
+            "sample_rate",
+            "channels",
+            "bits_per_raw_sample",
+            "bits_per_sample",
+            "sample_fmt",
+            "channel_layout",
+        ] {
+            cases.push(serde_json::json!({"streams": [{"codec_type":"audio", field: value}]}));
+        }
+        for field in ["duration", "bit_rate"] {
+            cases.push(serde_json::json!({"format": {field: value}}));
+        }
+        for field in ["default", "forced", "comment", "attached_pic"] {
+            cases.push(serde_json::json!({"streams": [{"disposition": {field: value}}]}));
+        }
+        for field in [
+            "voom_compatibility_stream_id",
+            "voom_compatibility_source_stream_id",
+        ] {
+            cases.push(serde_json::json!({"streams": [{"tags": {field: value}}]}));
+        }
+    }
+    for raw in cases {
+        let error = normalize_ffprobe_json(raw.clone(), "test", "now").unwrap_err();
+        assert_eq!(
+            error.failure_class(),
+            FailureClass::MalformedWorkerResult,
+            "{raw}"
+        );
+    }
 }

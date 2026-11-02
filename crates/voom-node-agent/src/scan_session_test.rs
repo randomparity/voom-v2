@@ -559,6 +559,10 @@ enum SingleFileBehavior {
     StreamEnd,
     /// Probe-only: refuses `dense.mkv` as oversized media and agrees on every other path.
     RefuseDense,
+    /// Dense file: normalize actual content or mixed provider defects through production translation.
+    RefuseNormalization {
+        provider_defect: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -622,43 +626,52 @@ impl ClientHandle for ScriptedSingleFileWorker {
                 return;
             }
             let frame = match (operation, behavior) {
-                (OperationKind::HashFile, SingleFileBehavior::Agree) => ProgressFrame::Result {
-                    lease_id: request.lease_id,
-                    seq: 0,
-                    emitted_at: time::OffsetDateTime::UNIX_EPOCH,
-                    payload: json!(agreeing_hash_result()),
-                },
-                (OperationKind::ProbeFile, SingleFileBehavior::RefuseDense) if dense => {
-                    ProgressFrame::Error {
-                        lease_id: request.lease_id,
-                        seq: 0,
-                        emitted_at: time::OffsetDateTime::UNIX_EPOCH,
-                        class: FailureClass::MalformedMedia,
-                        code: ErrorCode::MalformedMedia,
-                        message: "scripted oversized snapshot".to_owned(),
-                        payload: None,
-                    }
+                (OperationKind::HashFile, SingleFileBehavior::Agree) => {
+                    single_file_result(request.lease_id, json!(agreeing_hash_result()))
                 }
                 (
                     OperationKind::ProbeFile,
-                    SingleFileBehavior::Agree | SingleFileBehavior::RefuseDense,
-                ) => ProgressFrame::Result {
-                    lease_id: request.lease_id,
-                    seq: 0,
-                    emitted_at: time::OffsetDateTime::UNIX_EPOCH,
-                    payload: json!(agreeing_probe_result(json!({"format": "publish-v1"}))),
-                },
+                    SingleFileBehavior::RefuseNormalization { provider_defect },
+                ) if dense => {
+                    let mut raw = json!({"format": {"duration": "NaN"}});
+                    if provider_defect {
+                        raw["streams"] = json!({});
+                    }
+                    let error =
+                        voom_ffprobe_worker::normalize_ffprobe_json(raw, "test", T0).unwrap_err();
+                    let error = voom_ffprobe_worker::FfprobeError::from(error);
+                    single_file_error(
+                        request.lease_id,
+                        error.failure_class(),
+                        error.error_code(),
+                        error.to_string(),
+                        Some(error.payload()),
+                    )
+                }
+                (OperationKind::ProbeFile, SingleFileBehavior::RefuseDense) if dense => {
+                    single_file_error(
+                        request.lease_id,
+                        FailureClass::MalformedMedia,
+                        ErrorCode::MalformedMedia,
+                        "scripted oversized snapshot",
+                        None,
+                    )
+                }
+                (
+                    OperationKind::ProbeFile,
+                    SingleFileBehavior::Agree
+                    | SingleFileBehavior::RefuseDense
+                    | SingleFileBehavior::RefuseNormalization { .. },
+                ) => single_file_result(
+                    request.lease_id,
+                    json!(agreeing_probe_result(json!({"format": "publish-v1"}))),
+                ),
                 (OperationKind::ProbeFile, SingleFileBehavior::Reused) => {
                     let result = ProbeFileResult {
                         hash_source: Some(voom_core::HashSource::Reused),
                         ..agreeing_probe_result(json!({"format": "publish-v1"}))
                     };
-                    ProgressFrame::Result {
-                        lease_id: request.lease_id,
-                        seq: 0,
-                        emitted_at: time::OffsetDateTime::UNIX_EPOCH,
-                        payload: json!(result),
-                    }
+                    single_file_result(request.lease_id, json!(result))
                 }
                 (OperationKind::ProbeFile, SingleFileBehavior::ModifiedDrift) => {
                     let mut drifted = observed_agreeing();
@@ -672,35 +685,53 @@ impl ClientHandle for ScriptedSingleFileWorker {
                         snapshot: json!({"format": "publish-v1"}),
                         hash_source: None,
                     };
-                    ProgressFrame::Result {
-                        lease_id: request.lease_id,
-                        seq: 0,
-                        emitted_at: time::OffsetDateTime::UNIX_EPOCH,
-                        payload: json!(result),
-                    }
+                    single_file_result(request.lease_id, json!(result))
                 }
-                (_, SingleFileBehavior::NotFound) => ProgressFrame::Error {
-                    lease_id: request.lease_id,
-                    seq: 0,
-                    emitted_at: time::OffsetDateTime::UNIX_EPOCH,
-                    class: FailureClass::ArtifactUnavailable,
-                    code: ErrorCode::NotFound,
-                    message: "scripted absence".to_owned(),
-                    payload: None,
-                },
-                (_, _) => ProgressFrame::Error {
-                    lease_id: request.lease_id,
-                    seq: 0,
-                    emitted_at: time::OffsetDateTime::UNIX_EPOCH,
-                    class: FailureClass::ArtifactUnavailable,
-                    code: ErrorCode::Internal,
-                    message: "scripted unreadable".to_owned(),
-                    payload: None,
-                },
+                (_, SingleFileBehavior::NotFound) => single_file_error(
+                    request.lease_id,
+                    FailureClass::ArtifactUnavailable,
+                    ErrorCode::NotFound,
+                    "scripted absence",
+                    None,
+                ),
+                (_, _) => single_file_error(
+                    request.lease_id,
+                    FailureClass::ArtifactUnavailable,
+                    ErrorCode::Internal,
+                    "scripted unreadable",
+                    None,
+                ),
             };
             write_frame(&mut writer, &frame).await;
         });
         Ok(stream_for(&request, reader))
+    }
+}
+
+fn single_file_result(lease_id: LeaseId, payload: JsonValue) -> ProgressFrame {
+    ProgressFrame::Result {
+        lease_id,
+        seq: 0,
+        emitted_at: time::OffsetDateTime::UNIX_EPOCH,
+        payload,
+    }
+}
+
+fn single_file_error(
+    lease_id: LeaseId,
+    class: FailureClass,
+    code: ErrorCode,
+    message: impl Into<String>,
+    payload: Option<JsonValue>,
+) -> ProgressFrame {
+    ProgressFrame::Error {
+        lease_id,
+        seq: 0,
+        emitted_at: time::OffsetDateTime::UNIX_EPOCH,
+        class,
+        code,
+        message: message.into(),
+        payload,
     }
 }
 
@@ -1192,6 +1223,70 @@ async fn oversized_probe_refusal_degrades_only_that_file() {
             ("plain.mkv".to_owned(), true)
         ]
     );
+}
+
+#[tokio::test]
+async fn normalization_content_refusal_is_per_file_but_provider_defects_are_fatal() {
+    for provider_defect in [false, true] {
+        let fixture = pump_fixture().await;
+        let context = fixture.context();
+        let registry = registry_with(
+            ScriptedScanWorker::new(vec![
+                ScanFrame::Candidates(vec![candidate("plain.mkv"), candidate("dense.mkv")]),
+                ScanFrame::Result(2, 0),
+            ]),
+            ScriptedSingleFileWorker::new(OperationKind::HashFile, SingleFileBehavior::Agree),
+            ScriptedSingleFileWorker::new(
+                OperationKind::ProbeFile,
+                SingleFileBehavior::RefuseNormalization { provider_defect },
+            ),
+        );
+        let scan_worker = registry.resolve(OperationKind::ScanLibrary).unwrap();
+        let outcome = pump_scan_session(
+            &fixture.dispatch,
+            scan_worker.client.clone(),
+            &scan_worker.credentials,
+            &registry,
+            &fixture.client,
+            &context,
+        )
+        .await;
+        if provider_defect {
+            assert!(matches!(
+                outcome,
+                LeaseOutcome::Failure(FailureClass::MalformedWorkerResult, _, _)
+            ));
+            for _ in 0..100 {
+                if session_status(&fixture).await == "failed" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(session_status(&fixture).await, "failed");
+            continue;
+        }
+        let LeaseOutcome::Complete(summary) = outcome else {
+            unreachable!("one rejected content value must not fail a scan");
+        };
+        assert_eq!(summary["observed_count"], 2);
+        assert_eq!(summary["failed_content_count"], 1);
+        assert_eq!(session_status(&fixture).await, "succeeded");
+        let evidence: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT provider_relative_locator, evidence_json IS NOT NULL FROM scan_observations \
+             WHERE scan_session_id = ? ORDER BY provider_relative_locator",
+        )
+        .bind(i64::try_from(SESSION).unwrap())
+        .fetch_all(&fixture.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            evidence,
+            vec![
+                ("dense.mkv".to_owned(), false),
+                ("plain.mkv".to_owned(), true)
+            ]
+        );
+    }
 }
 
 #[tokio::test]
