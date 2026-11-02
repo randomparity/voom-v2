@@ -102,6 +102,11 @@ See [ADR0131](../../adr/0131-explicit-media-snapshot-refresh.md).
   assigns missing stream IDs and rejects nonobjects/missing numeric indices; store checked decoding and event helper propagate errors atomically.
 - Outside this change: compromised owner correctness is the existing trust model; byte
   mutation races and probe limits retain the existing worker/hash and scan fences.
+- Synthetic acceptance: a trusted local test/operator and trusted executables use a fresh
+  private temporary tree and database supplied by the Rust harness. Media commands use
+  argv and timeouts; Bootstrap binds loopback and protects/redacts credentials. Context
+  manager cleanup and the inherited process-group bound own child retirement. Arbitrary
+  existing application databases or library roots are outside this invocation contract.
 
 ## Global Constraints
 
