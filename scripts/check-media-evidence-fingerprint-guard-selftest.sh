@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove the #796 fingerprint guard fails on each forbidden token and on an empty scope.
+# Prove the fingerprint/reuse guard fails on each forbidden token and on an empty scope.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -18,7 +18,8 @@ expect_failure() {
 	fi
 }
 
-mkdir -p "$task_tmp/scripts" "$task_tmp/docs/media-evidence-baseline/fingerprint"
+mkdir -p "$task_tmp/scripts" "$task_tmp/docs/media-evidence-baseline/fingerprint" \
+	"$task_tmp/docs/media-evidence-baseline/reuse"
 expect_failure "empty scope"
 
 clean="$task_tmp/scripts/media-evidence-fingerprint.py"
@@ -31,7 +32,9 @@ tokens=(content_hash ObservedFileFacts HashFileResult file_versions blake3 sqlit
 	voom_store 'INSERT INTO' /v1/operations Worker replay_file HASH_FIELDS OBSERVED_FIELDS)
 for token in "${tokens[@]}"; do
 	for target in "$clean" "$task_tmp/scripts/media-evidence-fingerprint-selftest.py" \
-		"$task_tmp/docs/media-evidence-baseline/fingerprint/run.json"; do
+		"$task_tmp/docs/media-evidence-baseline/fingerprint/run.json" \
+		"$task_tmp/scripts/media-evidence-reuse-selftest.py" \
+		"$task_tmp/docs/media-evidence-baseline/reuse/run.json"; do
 		printf 'x = "%s"\n' "$token" >"$target.planted"
 		mv "$target.planted" "$target"
 		expect_failure "token '$token' in ${target#"$task_tmp"/}"

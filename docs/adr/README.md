@@ -118,3 +118,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0123](0123-control-plane-node-agent-protocol-match.md) | Control plane and node agent enforce an exact protocol version match |
 | [0125](0125-attached-pictures-are-remux-attachments.md) | Classify attached pictures as remux attachments |
 | [0126](0126-abandoned-media-evidence-workers.md) | Abandon timed-out media evidence workers |
+| [0127](0127-content-normalization-failures.md) | Content normalization failures affect one file |

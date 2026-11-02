@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Keep the #796 fingerprint experiment out of production identity evidence.
+# Keep the #796 fingerprint and #798 reuse experiments out of production identity evidence.
 #
-# The experiment's scripts and committed records must not name production hash fields,
+# The experiments' scripts and committed records must not name production hash fields,
 # protocol result types, store writers, or the #788 harness's worker replay. A textual
 # match is deliberately coarse: obfuscated references are left to review.
 set -euo pipefail
@@ -15,7 +15,9 @@ pattern+='|OBSERVED_FIELDS'
 scope=()
 count=0
 for path in "$root"/scripts/media-evidence-fingerprint*.py \
-	"$root"/docs/media-evidence-baseline/fingerprint/*.json; do
+	"$root"/scripts/media-evidence-reuse*.py \
+	"$root"/docs/media-evidence-baseline/fingerprint/*.json \
+	"$root"/docs/media-evidence-baseline/reuse/*.json; do
 	if [[ -f "$path" ]]; then
 		scope+=("$path")
 		count=$((count + 1))
@@ -29,7 +31,8 @@ fi
 
 if grep -nE -- "$pattern" "${scope[@]}"; then
 	echo "check-media-evidence-fingerprint-guard: experiment files reference production" \
-		"identity evidence (matches above); keep fingerprints in experiment artifacts" >&2
+		"identity evidence (matches above); keep fingerprints and reuse evidence" \
+		"in experiment artifacts" >&2
 	exit 1
 fi
 
