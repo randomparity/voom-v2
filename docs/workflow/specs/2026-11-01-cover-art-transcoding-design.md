@@ -34,8 +34,11 @@ staging root. Attach those bytes using `-attach PATH`, preserving observed filen
 and title; use deterministic cover names and codec-derived MIME only when source lacks them.
 Retain existing generic attachment mapping. For MP4 targets, copy supported JPEG/PNG covers
 as video streams after the primary, with explicit per-cover codec copy and attached_pic.
-Keep encoder/filter/tag options scoped to primary `v:0` so cover packets cannot be encoded,
-scaled, or assigned an HEVC/AV1 sample-entry tag. MP4 generic attachments and non-JPEG/PNG
+Scope existing pre-input decoder and per-stream hardware-decode options to `V:0`, including
+`-c:V:0`, `-hwaccel:V:0`, `-hwaccel_device:V:0` and `-hwaccel_output_format:V:0` where emitted.
+Global device initialization remains global. Covers retain their own image decoder during
+input discovery. Keep output encoder/filter/tag options scoped to primary `v:0` so cover
+packets cannot be encoded, scaled, or assigned an HEVC/AV1 sample-entry tag. MP4 generic attachments and non-JPEG/PNG
 covers are blocked. MKV supports JPEG/PNG/GIF/TIFF attached pictures; other cover codecs block.
 Unsupported cover shapes block before extraction/transcoding, and planning emits the existing
 UnsupportedMediaShape diagnostic when these facts are available. Compliant no-op files do not

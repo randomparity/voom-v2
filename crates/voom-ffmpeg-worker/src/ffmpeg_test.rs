@@ -534,8 +534,8 @@ async fn nvenc_cuda_decode_command_pins_decoder_and_zero_copy_filter() {
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(
         args.contains(
-            "-hwaccel\ncuda\n-hwaccel_device\n0\n-hwaccel_output_format\ncuda\n\
-             -c:v\nh264_cuvid\n-i\n"
+            "-hwaccel:V:0\ncuda\n-hwaccel_device:V:0\n0\n-hwaccel_output_format:V:0\ncuda\n\
+             -c:V:0\nh264_cuvid\n-i\n"
         ),
         "{args}"
     );
@@ -574,7 +574,10 @@ async fn videotoolbox_software_decode_uses_explicit_format_and_hardware_only_enc
         args.contains("-c:v\nhevc_videotoolbox\n-allow_sw\n0\n-b:v\n8000k\n"),
         "{args}"
     );
-    assert!(!args.contains("-hwaccel\n"), "{args}");
+    assert!(
+        !args.lines().any(|arg| arg.starts_with("-hwaccel")),
+        "{args}"
+    );
     assert!(!args.contains("allow_sw\n1"), "{args}");
 }
 
@@ -604,7 +607,9 @@ async fn videotoolbox_decode_without_scaling_keeps_hardware_frames() {
 
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(
-        args.contains("-hwaccel\nvideotoolbox\n-hwaccel_output_format\nvideotoolbox_vld\n-i\n"),
+        args.contains(
+            "-hwaccel:V:0\nvideotoolbox\n-hwaccel_output_format:V:0\nvideotoolbox_vld\n-i\n"
+        ),
         "{args}"
     );
     assert!(!args.contains("-vf\n"), "{args}");
@@ -1923,11 +1928,11 @@ async fn vaapi_hardware_decode_stays_in_hardware_frames_with_no_filter() {
     -hide_banner
     -nostdin
     -n
-    -hwaccel
+    -hwaccel:V:0
     vaapi
-    -hwaccel_device
+    -hwaccel_device:V:0
     <DIR>/renderD129
-    -hwaccel_output_format
+    -hwaccel_output_format:V:0
     vaapi
     -i
     <DIR>/input.mkv
@@ -1987,11 +1992,11 @@ async fn vaapi_hardware_decode_main10_names_profile_without_a_filter() {
     -hide_banner
     -nostdin
     -n
-    -hwaccel
+    -hwaccel:V:0
     vaapi
-    -hwaccel_device
+    -hwaccel_device:V:0
     <DIR>/renderD129
-    -hwaccel_output_format
+    -hwaccel_output_format:V:0
     vaapi
     -i
     <DIR>/input.mkv
@@ -2813,4 +2818,161 @@ JSON
         ),
         ("h264", 1920, 1080, 1)
     );
+}
+
+#[test]
+fn cover_art_hardware_input_options_select_primary() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = FfmpegConfig::new(
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("ffprobe"),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    for (config, profile) in [
+        (
+            base.clone().with_accelerator(nvidia_descriptor()),
+            profile_nvenc(voom_core::VideoDecodeMode::nvidia()),
+        ),
+        (
+            base.clone().with_vaapi_device(vaapi_binding(dir.path())),
+            profile_vaapi(voom_core::VideoDecodeMode::vaapi(), Some("nv12"), None),
+        ),
+        (
+            base.with_videotoolbox_device(videotoolbox_descriptor()),
+            profile_videotoolbox(
+                "hevc_videotoolbox",
+                "hevc",
+                "main",
+                None,
+                "yuv420p",
+                voom_core::VideoDecodeMode::video_toolbox(),
+            ),
+        ),
+    ] {
+        let mut command = Command::new("ffmpeg");
+        append_hardware_input_args(&mut command, &config, &profile, "h264", false).unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|arg| arg == "-hwaccel:V:0"), "{args:?}");
+        assert!(
+            args.iter().any(|arg| arg == "-hwaccel_output_format:V:0"),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| matches!(
+                arg.as_str(),
+                "-hwaccel" | "-hwaccel_device" | "-hwaccel_output_format" | "-c:v"
+            )),
+            "{args:?}"
+        );
+        if profile.decode.is_nvidia() {
+            assert!(args.windows(2).any(|args| args == ["-c:V:0", "h264_cuvid"]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn cover_art_forced_decoder_preserves_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = FfmpegConfig::new(
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("ffprobe"),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+    let image = dir.path().join("cover.jpg");
+    let source = dir.path().join("source.mkv");
+    let output = dir.path().join("output.mp4");
+    let mut command = Command::new(&config.ffmpeg_path);
+    command
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:size=16x16",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&image);
+    run_ffmpeg_command(&config, command).await.unwrap();
+    let mut command = Command::new(&config.ffmpeg_path);
+    command
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:size=64x64:rate=1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-attach",
+        ])
+        .arg(&image)
+        .args([
+            "-metadata:s:t",
+            "filename=cover.jpg",
+            "-metadata:s:t",
+            "mimetype=image/jpeg",
+        ])
+        .arg(&source);
+    run_ffmpeg_command(&config, command).await.unwrap();
+    let mut planned = Command::new(&config.ffmpeg_path);
+    append_hardware_input_args(
+        &mut planned,
+        &config.clone().with_accelerator(nvidia_descriptor()),
+        &profile_nvenc(voom_core::VideoDecodeMode::nvidia()),
+        "h264",
+        false,
+    )
+    .unwrap();
+    let args: Vec<_> = planned
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut command = Command::new(&config.ffmpeg_path);
+    command.args(["-v", "error"]);
+    // Retain production stream selectors while substituting CPU-only option values.
+    for pair in args.chunks_exact(2) {
+        let value = match pair[0].as_str() {
+            "-c:v" | "-c:V:0" => "h264",
+            "-hwaccel" | "-hwaccel:V:0" => "none",
+            "-hwaccel_device" | "-hwaccel_device:V:0" => "unused",
+            "-hwaccel_output_format" | "-hwaccel_output_format:V:0" => "yuv420p",
+            other => panic!("unexpected hardware input option {other}"),
+        };
+        command.arg(&pair[0]).arg(value);
+    }
+    command
+        .arg("-i")
+        .arg(&source)
+        .args([
+            "-map",
+            "0:V:0",
+            "-map",
+            "0:1",
+            "-c",
+            "copy",
+            "-disposition:v:1",
+            "attached_pic",
+        ])
+        .arg(&output);
+    run_ffmpeg_command(&config, command).await.unwrap();
+    let probe = probe_json(&config, &output).await.unwrap();
+    let streams = probe["streams"].as_array().unwrap();
+    assert_eq!(streams[0]["codec_name"], "h264");
+    assert_eq!(streams[1]["codec_name"], "mjpeg");
+    assert_eq!(streams[1]["width"], 16);
+    assert_eq!(streams[1]["disposition"]["attached_pic"], 1);
 }

@@ -16,7 +16,8 @@ Reuse ADR0125's normalized cover classification for primary planning facts. Re-p
 worker inputs, exclude attached pictures from primary selection/count, and map `0:V:0`.
 Preserve JPEG/PNG/GIF/TIFF covers as MKV attachments via stream-copy extraction into owned
 private scratch storage and `-attach`. Preserve JPEG/PNG as copied MP4 attached pictures.
-Scope video encoding/filter/tag options to the primary and verify cover bytes/count/tags
+Scope existing per-stream input decoder/acceleration options with `V:0` and output
+encoding/filter/tag options with `v:0`; verify cover bytes/count/tags
 before success. Explicitly block unsupported combinations before transcoding. Keep the
 request/snapshot wire shapes and source identity checks unchanged.
 

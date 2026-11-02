@@ -840,11 +840,11 @@ fn append_vaapi_input_args(
         )));
     }
     command
-        .arg("-hwaccel")
+        .arg("-hwaccel:V:0")
         .arg("vaapi")
-        .arg("-hwaccel_device")
+        .arg("-hwaccel_device:V:0")
         .arg(&binding.render_node)
-        .arg("-hwaccel_output_format")
+        .arg("-hwaccel_output_format:V:0")
         .arg("vaapi");
     Ok(())
 }
@@ -870,13 +870,13 @@ fn append_nvidia_input_args(
         ))
     })?;
     command
-        .arg("-hwaccel")
+        .arg("-hwaccel:V:0")
         .arg("cuda")
-        .arg("-hwaccel_device")
+        .arg("-hwaccel_device:V:0")
         .arg("0")
-        .arg("-hwaccel_output_format")
+        .arg("-hwaccel_output_format:V:0")
         .arg("cuda")
-        .arg("-c:v")
+        .arg("-c:V:0")
         .arg(decoder);
     Ok(())
 }
@@ -894,9 +894,9 @@ fn append_videotoolbox_input_args(
     }
     if profile.decode.is_video_toolbox() {
         command
-            .arg("-hwaccel")
+            .arg("-hwaccel:V:0")
             .arg("videotoolbox")
-            .arg("-hwaccel_output_format")
+            .arg("-hwaccel_output_format:V:0")
             .arg("videotoolbox_vld");
     }
     Ok(())
