@@ -29,8 +29,11 @@ Bounded to the code paths at `818cc91a`. The only production opener of a SQLite 
 `voom_store::pool::connect` / `connect_or_create` (`crates/voom-store/src/pool.rs`), which
 opens the configured `database_url` in WAL mode. That URL comes from the operator: the CLI
 `--database-url` flag, `VOOM_DATABASE_URL`, or the default `<data_dir>/voom.db`
-(`default_database_url`, `crates/voom-core/src/runtime/config.rs`). No production path
-imports, attaches, restores, or opens a database file received from another party.
+(`default_database_url`, `crates/voom-core/src/runtime/config.rs`). The `voom-api` server
+takes the same `--database-url` / `VOOM_DATABASE_URL` setting at process start
+(`crates/voom-api/src/config.rs`); it is the one process with network clients, and no
+request reaches the URL. No production path imports, attaches, restores, or opens a
+database file received from another party.
 
 Exploitation therefore needs a party less trusted than the operator to write a crafted
 `.db` + `-wal` pair at the path the operator configured. Shared or network filesystems
