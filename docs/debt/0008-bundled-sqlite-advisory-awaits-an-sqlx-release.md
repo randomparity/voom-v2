@@ -66,6 +66,22 @@ rg -l -i -e 'SqlitePool::connect|SqliteConnectOptions|SqlitePoolOptions' \
   -g '!crates/voom-fake*/**' -g '!crates/voom-conformance/**'
 ```
 
+Callers reach that opener through the store's public `voom_store::connect` and
+`voom_store::init`. At `818cc91a` this second predicate matches exactly three files —
+`crates/voom-control-plane/src/lib.rs`, `crates/voom-control-plane/src/health.rs`, and
+`crates/voom-cli/src/commands/system/init.rs` — each passing the configured
+`database_url`; a new file in its output must be checked against the rule above:
+
+```
+rg -l -e 'voom_store::(connect|init)\b' -e 'use voom_store::\{[^}]*\b(connect|init)\b' \
+  crates --type rust -g '!**/tests/**' -g '!**/*_test.rs' -g '!crates/voom-test-support/**' \
+  -g '!crates/voom-fake*/**' -g '!crates/voom-conformance/**' -g '!crates/voom-store/**'
+```
+
+The predicates see direct openers and their first callers only. A new path that hands a
+non-operator URL to an existing caller (for example `ControlPlane`'s constructor) is not
+visible to them; the rule above still governs it, and review is what holds it.
+
 The excluded paths are test-only crates and files; they open throwaway databases the test
 itself creates.
 
