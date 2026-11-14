@@ -30,7 +30,15 @@ Changed files, and nothing else:
 | `deny.toml` | `[advisories] ignore = [{ id = "RUSTSEC-2026-0459", reason = "<names docs/debt/0008>" }]` (cargo-deny 0.19 reasoned form) |
 | `.cargo/audit.toml` | add `RUSTSEC-2026-0459` to `ignore`, with a comment block in the RUSTSEC-2023-0071 style pointing at the debt record |
 | `docs/debt/0008-bundled-sqlite-advisory-awaits-an-sqlx-release.md` | new deferral record in the 0007 format |
-| `Cargo.lock` | `cargo update -p quinn-udp --precise 0.5.16` and `cargo update -p rustix --precise 1.1.6`; dry runs move only those two packages |
+| `Cargo.lock` | `cargo update -p quinn-udp --precise 0.5.16` and `cargo update -p rustix --precise 1.1.6`, then restore any other rewritten edge (below) |
+
+**Lockfile scope.** The two `cargo update` runs also rewire a `cfg(windows)` edge: `winapi-util`
+0.1.11 (`windows-sys = ">=0.48.0, <=0.61.*"`) moves from `windows-sys` 0.61.2 to 0.48.0, which
+makes `cargo deny check` fail `[bans]` (`multiple-versions = "deny"`). `--dry-run` reports only
+version moves, so it cannot show this. The implementation restores every non-target hunk to its
+base value, so the diff is exactly the two `version`/`checksum` pairs, and proves the result
+with `cargo metadata --locked` and `just deny`. Any `[bans]` failure that a restore does not
+clear stops the work; no `[bans]` skip is added.
 
 **Commit order.** The prek `cargo-deny` hook runs on `deny.toml`/`Cargo.*` changes and
 `cargo-audit` on `Cargo.lock` changes. Commit 1 carries the debt record and both ignores

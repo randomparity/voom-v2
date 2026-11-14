@@ -18,9 +18,12 @@ policy-file edits (~15 lines), and two lockfile entries (~8 lines).
 
 - Ignore exactly `RUSTSEC-2026-0459`. Never ignore `RUSTSEC-2026-0538` or `RUSTSEC-2026-0486`.
 - Do not change sqlx, `libsqlite3-sys`, any `Cargo.toml`, any workflow, or any source file.
-- `Cargo.lock` changes only `quinn-udp` 0.5.15 -> 0.5.16 and `rustix` 1.1.4 -> 1.1.6
-  (both resolved on crates.io by `cargo update --dry-run`, not yanked).
-- If any other advisory appears, stop and report; do not widen.
+- `Cargo.lock` changes only the `version`/`checksum` lines of `quinn-udp` 0.5.15 -> 0.5.16 and
+  `rustix` 1.1.4 -> 1.1.6 (both resolved on crates.io, not yanked). `cargo update` also
+  rewires `winapi-util`'s `cfg(windows)` edge to `windows-sys` 0.48.0; restore every such
+  non-target hunk to its base value.
+- If any other advisory appears, or `cargo deny check bans` fails after the restore, stop and
+  report; do not widen and add no `[bans]` skip.
 - Debt record number is `0008` (assigned); review-by `2027-02-14`.
 - Lines <= 100 chars; conventional commits; never `--no-verify`. Run commits with a raised
   timeout and check `git status` after each (prek can drop unstaged files on timeout).
@@ -93,17 +96,26 @@ Steps:
   exits 0.
 - Contract: workflow invocation is clean. `Mode: focused-test` — `cargo audit --json --file
   ./Cargo.lock | jq .vulnerabilities.found` from the repo root prints `false`.
-- Contract: lockfile scope. `Mode: focused-test` — `git diff -- Cargo.lock` shows only the
-  quinn-udp and rustix `version` and `checksum` lines.
+- Contract: lockfile scope. `Mode: focused-test` — red: after the two `cargo update` runs,
+  `cargo deny check bans` fails on duplicate `windows-sys`; green: after the restore,
+  `git diff -U0 -- Cargo.lock` shows only the quinn-udp and rustix `version`/`checksum`
+  lines, `cargo metadata --locked` exits 0, and `cargo deny check bans` exits 0.
 
 Steps:
 1. `cargo audit --deny warnings` — expect exit 1 with RUSTSEC-2026-0538 and
    RUSTSEC-2026-0486 only (red).
 2. `cargo update -p quinn-udp --precise 0.5.16` — expect `Updating quinn-udp v0.5.15 -> v0.5.16`.
 3. `cargo update -p rustix --precise 1.1.6` — expect `Updating rustix v1.1.4 -> v1.1.6`.
-4. `git diff --stat -- Cargo.lock` — expect `1 file changed, 4 insertions(+), 4 deletions(-)`.
-5. `just audit` and `just deny` — expect exit 0 each; run the JSON check — expect `false`.
-6. Commit: `fix(deps): bump quinn-udp and rustix for RUSTSEC-2026-0538/0486`; then
+4. `git diff -U0 -- Cargo.lock` — expect the two `version`/`checksum` pairs plus one hunk in
+   the `winapi-util` 0.1.11 entry changing `"windows-sys 0.61.2"` to `"windows-sys 0.48.0"`.
+   Edit that line back to `"windows-sys 0.61.2"`; restore any other non-target hunk the same
+   way. Then `git diff --stat -- Cargo.lock` — expect
+   `1 file changed, 4 insertions(+), 4 deletions(-)`.
+5. `cargo metadata --locked --format-version 1 >/dev/null` — expect exit 0 (cargo accepts the
+   lockfile without re-resolving). `cargo fetch --locked` — expect exit 0 (checksums match).
+6. `just audit` and `just deny` — expect exit 0 each; run the JSON check — expect `false`.
+   A `bans` failure here is a stop, not a skip.
+7. Commit: `fix(deps): bump quinn-udp and rustix for RUSTSEC-2026-0538/0486`; then
    `git status --short` — expect empty.
 
 ## Final guardrails
