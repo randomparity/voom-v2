@@ -60,7 +60,8 @@ skip = [
     # workspace never compiles), pulls the 0.48 Windows binding family; a targeted
     # `cargo update -p` re-resolves those cfg(windows) edges into the graph. On the
     # committed lockfile cargo-deny reports them as unmatched-skip warnings.
-    # Tolerate only these 0.48 versions; the 0.52/0.61 baselines remain unskipped.
+    # Tolerate only these 0.48 versions; the windows-sys 0.61.2 and windows-targets/
+    # windows_* 0.52.6 baselines remain unskipped.
     # Remove when sqlx 0.9 is adopted: sqlx-postgres 0.9 requires etcetera ^0.11,
     # which needs windows-sys ^0.61.
     { crate = "windows-sys@0.48.0", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
