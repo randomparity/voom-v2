@@ -32,17 +32,6 @@ updates:
           - "minor"
           - "patch"
 
-  - package-ecosystem: "uv"
-    directory: "/third_party/chaos-librarian"
-    schedule:
-      interval: "weekly"
-    cooldown:
-      default-days: 7
-    groups:
-      uv-dependencies:
-        patterns:
-          - "*"
-
   - package-ecosystem: "docker"
     directory: "/containers/ffmpeg"
     schedule:
