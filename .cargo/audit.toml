@@ -13,6 +13,16 @@
 # never compiles. Until cargo-audit grows feature-resolved scanning or sqlx
 # decouples its backend crates, keep this ignore narrow and document that
 # `cargo deny` is the authoritative advisory check in CI.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0459 — bundled SQLite CVE-2026-119375 in `libsqlite3-sys`.
+#
+# voom-store links `libsqlite3-sys` 0.30.1 with `bundled`, which builds an
+# affected SQLite. The fix is `libsqlite3-sys` >= 0.39, and no released sqlx
+# accepts it (`sqlx-sqlite` 0.8.6 requires ^0.30.1, 0.9.0 requires <0.38.0).
+# The `audit` workflow runs cargo-audit from the repo root and reads this
+# file too. Remove this ignore, and the one in deny.toml, when an sqlx release
+# permits the fixed crate. The deferral and its exposure analysis are recorded
+# in docs/debt/0008-bundled-sqlite-advisory-awaits-an-sqlx-release.md.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]
 informational_warnings = ["unmaintained", "notice"]
 severity_threshold = "low"
