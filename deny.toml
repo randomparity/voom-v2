@@ -56,6 +56,22 @@ skip = [
     # ring 0.17.14 retains the older Windows bindings. Tolerate only that transitive
     # version; the workspace's windows-sys 0.61.2 baseline remains unskipped.
     { crate = "windows-sys@0.52.0", reason = "ring TLS provider; baseline 0.61.2" },
+    # etcetera 0.8.0, a non-optional dependency of sqlx-postgres 0.8.6 (which the
+    # workspace never compiles), pulls the 0.48 Windows binding family; a targeted
+    # `cargo update -p` re-resolves those cfg(windows) edges into the graph. On the
+    # committed lockfile cargo-deny reports them as unmatched-skip warnings.
+    # Tolerate only these 0.48 versions; the 0.52/0.61 baselines remain unskipped.
+    # Remove when sqlx 0.9 is adopted: sqlx-postgres 0.9 requires etcetera ^0.11,
+    # which needs windows-sys ^0.61.
+    { crate = "windows-sys@0.48.0", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows-targets@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows_aarch64_gnullvm@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows_aarch64_msvc@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows_i686_gnu@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows_i686_msvc@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows_x86_64_gnu@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows_x86_64_gnullvm@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
+    { crate = "windows_x86_64_msvc@0.48.5", reason = "etcetera 0.8.0 via sqlx-postgres 0.8.6" },
     # reqwest 0.13.4 pulls tower-http 0.6.11; reqwest hasn't published a release
     # against tower-http 0.7 yet. Tolerate only that transitive version; the
     # workspace's tower-http 0.7.0 baseline remains unskipped.
