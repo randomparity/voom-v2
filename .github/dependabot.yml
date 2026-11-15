@@ -42,3 +42,14 @@ updates:
       uv-dependencies:
         patterns:
           - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/containers/ffmpeg"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      docker-all:
+        patterns:
+          - "*"
