@@ -141,6 +141,19 @@ class BufferTests(unittest.TestCase):
             source.write_text("    let mut buffer = vec![0_u8; 1024 * 1024];\n")
             self.assertEqual(observe.buffer_bytes("ffprobe", root), MIB)
 
+    def test_default_concurrency_reads_only_max_in_flight_so_the_1m_variant_runs(self):
+        self.assertEqual(observe.default_concurrency(), 4)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            relative, _ = observe.baseline.SOURCE_CONSTANTS["max_in_flight"]
+            (root / relative).parent.mkdir(parents=True)
+            (root / relative).write_text("const MAX_IN_FLIGHT: usize = 4;\n")
+            for name, path in observe.OBSERVE_SOURCES.items():
+                source = root / path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(observe.candidates.OBSERVE_1M)
+            self.assertEqual(observe.default_concurrency(root), 4)
+
 
 def valid_record():
     row = {"id": "f0001", "size_bytes": 3, "ext": ".mkv", "resident_bytes_before": 0,

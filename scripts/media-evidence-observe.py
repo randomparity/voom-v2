@@ -61,6 +61,13 @@ def buffer_bytes(path_name: str, repo_root: Path = REPO_ROOT) -> int:
                                   OBSERVE_SOURCES[path_name], BUFFER_PATTERN)
 
 
+def default_concurrency(repo_root: Path = REPO_ROOT) -> int:
+    """The scan's `MAX_IN_FLIGHT` alone: the #788 `read_constants` also reads the ffprobe
+    buffer with a pattern that the 1 MiB heap variant does not match."""
+    return baseline.read_constant(repo_root, "max_in_flight",
+                                  *baseline.SOURCE_CONSTANTS["max_in_flight"])
+
+
 def build_identity(example: Path) -> dict[str, Any]:
     commit = baseline.git_output("rev-parse", "HEAD")
     return {
@@ -198,8 +205,7 @@ def within_budget(files: list[dict[str, Any]], max_bytes: int) -> tuple[list, li
 def capture(args: argparse.Namespace) -> dict[str, Any]:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     root = Path(manifest["root"])
-    constants = baseline.read_constants(REPO_ROOT)
-    args.concurrency = args.concurrency or constants["max_in_flight"]
+    args.concurrency = args.concurrency or default_concurrency()
     selected = baseline.select_files(manifest, args.ids)
     fs_type = baseline.corpus_filesystem(root, selected)
     example = args.example_dir / f"observe-{args.path}"
