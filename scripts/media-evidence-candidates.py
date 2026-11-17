@@ -235,6 +235,10 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, An
                          ("parameters", "evict")):
         if baseline[section][key] != candidate[section][key]:
             raise CandidateError(f"cells differ in {section} {key}; they do not compare")
+    # A `/1` record predates probe hash reuse, so it ran with reuse off.
+    if baseline["parameters"].get("probe_hash_reuse", False) != \
+            candidate["parameters"].get("probe_hash_reuse", False):
+        raise CandidateError("cells differ in parameters probe_hash_reuse; they do not compare")
     base, base_first = series(baseline)
     cand, cand_first = series(candidate)
     if not base["wall"] or not cand["wall"]:

@@ -41,6 +41,13 @@ def facts(path):
     digest = "blake3:" + hashlib.sha256(data).hexdigest()
     return {"size_bytes": len(data), "content_hash": digest, "modified_at": "2026-01-01T00:00:00Z"}
 
+def hash_facts(path):
+    # The real hash worker reports the guard inputs; "nokey" files model a missing file key.
+    result = dict(facts(path), changed_at_ns=1, file_key={"dev": 1, "ino": 2, "nlink": 1})
+    if "nokey" in os.path.basename(path):
+        result["file_key"] = None
+    return result
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -65,6 +72,16 @@ class Handler(BaseHTTPRequestHandler):
                            "message": "cannot read " + path})
         elif "weird" in name and PROBE:
             frames.append({"kind": "surprise"})
+        elif "mismatch" in name and PROBE and "guard" in payload:
+            frames.append({"kind": "error", "class": "artifact_checksum_mismatch",
+                           "code": "ARTIFACT_CHECKSUM_MISMATCH", "message": "guard " + path})
+        elif PROBE and "guard" in payload:
+            # A guarded probe echoes the expected hash without reading the file (ADR 0120).
+            echoed = {key: payload["expected"][key]
+                      for key in ("size_bytes", "content_hash", "modified_at")}
+            frames.append({"kind": "result", "payload": {
+                "pre_probe": echoed, "post_probe": echoed, "snapshot": {},
+                "hash_source": "reused"}})
         elif "badpayload" in name and PROBE:
             frames.append({"kind": "result", "payload": {"pre_probe": {}}})
         elif PROBE:
@@ -72,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
             frames.append({"kind": "result", "payload": {
                 "pre_probe": observed, "post_probe": observed, "snapshot": {}}})
         else:
-            frames.append({"kind": "result", "payload": facts(path)})
+            frames.append({"kind": "result", "payload": hash_facts(path)})
         body = "\n".join(json.dumps(item) for item in [{"lease_id": lease}, *frames]) + "\n"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -88,14 +105,16 @@ server.shutdown()
 
 
 class HarnessFixture(unittest.TestCase):
+    NAMES = {"a/Alpha Title (2001).mkv": 64, "b/fail-Beta.mp4": 32,
+             "c/weird-Gamma.mkv": 16, "d/trunc-Delta.mkv": 8,
+             "e/badpayload-Epsilon.mkv": 8, "notes.txt": 8}
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name)
         self.root = self.base / "secret-library-root"
-        names = {"a/Alpha Title (2001).mkv": 64, "b/fail-Beta.mp4": 32,
-                 "c/weird-Gamma.mkv": 16, "d/trunc-Delta.mkv": 8,
-                 "e/badpayload-Epsilon.mkv": 8, "notes.txt": 8}
+        names = self.NAMES
         for relative, size in names.items():
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,10 +130,11 @@ class HarnessFixture(unittest.TestCase):
         manifest = harness.build_manifest(self.root, "fixture-corpus")
         self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    def run_args(self, max_bytes=10_000, evict=False):
+    def run_args(self, max_bytes=10_000, evict=False, probe_reuse="off"):
         return argparse.Namespace(
             manifest=self.manifest_path, worker_dir=self.workers, ids=None,
             max_bytes=max_bytes, repetitions=2, concurrency=None, evict=evict,
+            probe_reuse=probe_reuse,
         )
 
     def assert_redacted(self, record):
@@ -174,6 +194,16 @@ class ReplayTests(HarnessFixture):
         # Completed whole-file reads only: observed 3, probe_failed 1 (hash), hash_failed 0.
         self.assertEqual(record["repetitions"][0]["logical_bytes_read"], 64 * 3 + 16 + 8)
 
+    def test_off_records_three_reads_and_recomputed_sources(self):
+        record = harness.capture(self.run_args())
+        self.assertEqual(record["schema"], harness.SCHEMA_V2)
+        self.assertIs(record["parameters"]["probe_hash_reuse"], False)
+        rows = {row["id"]: row for row in record["repetitions"][0]["files"]}
+        self.assertEqual(rows["f0001"]["hash_source"], "recomputed")
+        # No probe result, no source: hash failures and probe failures alike.
+        for file_id in ("f0002", "f0003", "f0004", "f0005"):
+            self.assertIsNone(rows[file_id]["hash_source"])
+
     def test_budget_stops_scheduling_files_that_do_not_fit(self):
         record = harness.capture(self.run_args(max_bytes=64 * 3 + 16 * 3))
         self.assertEqual(record["corpus"]["selected_ids"], ["f0001", "f0003"])
@@ -208,6 +238,34 @@ class ReplayTests(HarnessFixture):
         for fs_type in ("cifs", "nfs4", "autofs", "fuse.rclone", harness.UNAVAILABLE):
             with self.subTest(fs_type=fs_type), self.assertRaises(harness.HarnessError):
                 harness.evict(self.root / "a" / "Alpha Title (2001).mkv", fs_type)
+
+
+class ReuseTests(HarnessFixture):
+    NAMES = {"a/Alpha.mkv": 64, "b/nokey-Beta.mkv": 32, "c/mismatch-Gamma.mkv": 16}
+
+    def test_reuse_on_sends_the_guard_only_with_ctime_and_file_key(self):
+        record = harness.capture(self.run_args(probe_reuse="on"))
+        self.assertEqual(harness.validate_run(record), [])
+        self.assert_redacted(record)
+        self.assertIs(record["parameters"]["probe_hash_reuse"], True)
+        rows = {row["id"]: row for row in record["repetitions"][0]["files"]}
+        self.assertEqual((rows["f0001"]["outcome"], rows["f0001"]["hash_source"]),
+                         ("observed", "reused"))
+        # Without a file key no guard can be sent, so the probe recomputes.
+        self.assertEqual((rows["f0002"]["outcome"], rows["f0002"]["hash_source"]),
+                         ("observed", "recomputed"))
+        # A guard mismatch is an error frame: no probe result, so no source.
+        self.assertEqual(rows["f0003"]["outcome"], "probe_failed")
+        self.assertIsNone(rows["f0003"]["hash_source"])
+        self.assertEqual(rows["f0003"]["failure"]["code"], "ARTIFACT_CHECKSUM_MISMATCH")
+        # Reused 1 read, recomputed 3, probe_failed 1 (the hash pass).
+        self.assertEqual(record["repetitions"][0]["logical_bytes_read"], 64 + 32 * 3 + 16)
+
+    def test_reuse_off_never_sends_the_guard(self):
+        record = harness.capture(self.run_args())
+        rows = record["repetitions"][0]["files"]
+        self.assertEqual({row["hash_source"] for row in rows}, {"recomputed"})
+        self.assertEqual(record["repetitions"][0]["logical_bytes_read"], (64 + 32 + 16) * 3)
 
 
 class StalledWorkerTests(HarnessFixture):
@@ -293,7 +351,7 @@ class StalledWorkerTests(HarnessFixture):
                 self.assertEqual(repetition["workers"][role],
                                  dict.fromkeys(harness.WORKER_KEYS, harness.UNAVAILABLE))
                 self.assertEqual(self.worker.lease, 1)
-                self.assertEqual(harness.repetition_problems(repetition), [])
+                self.assertEqual(harness.repetition_problems(repetition, v2=True), [])
                 stop.assert_called_once_with()
         self.assertEqual(len(self.accepted), 2)
 
@@ -425,8 +483,29 @@ class ContractTests(unittest.TestCase):
         del record["repetitions"][0]["workers"]
         self.assertIn("repetition workers", harness.validate_run(record))
 
+    def test_v2_requires_the_reuse_setting_and_each_row_source(self):
+        path = sorted(BASELINE_DIR.glob("*.json"))[0]
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(record["schema"], harness.SCHEMA)
+        record["schema"] = harness.SCHEMA_V2
+        problems = harness.validate_run(record)
+        self.assertIn("parameters probe_hash_reuse", problems)
+        self.assertIn("file hash_source", problems)
+        record["parameters"]["probe_hash_reuse"] = "yes"
+        for repetition in record["repetitions"]:
+            for row in repetition["files"]:
+                row["hash_source"] = "cached"
+        problems = harness.validate_run(record)
+        self.assertIn("parameters probe_hash_reuse", problems)
+        self.assertIn("file hash_source", problems)
+        record["parameters"]["probe_hash_reuse"] = True
+        for repetition in record["repetitions"]:
+            for row in repetition["files"]:
+                row["hash_source"] = "reused"
+        self.assertEqual(harness.validate_run(record), [])
+
     def test_committed_baseline_runs_satisfy_the_record_contract(self):
-        runs = sorted(BASELINE_DIR.glob("*.json"))
+        runs = sorted([*BASELINE_DIR.glob("*.json"), *BASELINE_DIR.glob("concurrency/*.json")])
         self.assertTrue(runs, "no committed baseline runs")
         for path in runs:
             with self.subTest(run=path.name):

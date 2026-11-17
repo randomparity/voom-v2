@@ -168,6 +168,17 @@ class CompareTests(unittest.TestCase):
             with self.assertRaises(candidates.CandidateError):
                 candidates.compare(baseline, other)
 
+    def test_cells_with_different_probe_reuse_are_refused(self):
+        # A /1 record predates reuse and reads as off; only a matching setting compares.
+        legacy = record([100.0] * 3)
+        reuse_off, reuse_on = record([100.0] * 3), record([40.0] * 3)
+        reuse_off["parameters"]["probe_hash_reuse"] = False
+        reuse_on["parameters"]["probe_hash_reuse"] = True
+        self.assertFalse(candidates.compare(legacy, reuse_off)["failed"])
+        for baseline, candidate in ((legacy, reuse_on), (reuse_off, reuse_on)):
+            with self.assertRaisesRegex(candidates.CandidateError, "probe_hash_reuse"):
+                candidates.compare(baseline, candidate)
+
     def test_as_found_cells_compare_repetitions_after_the_first(self):
         baseline = record([300.0, 100.0, 100.0], evict=False)
         candidate = record([10.0, 100.0, 100.0], evict=False)
