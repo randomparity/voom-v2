@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Prove the #838 observe-path harness accounts, redacts and judges as its spec states.
+
+The stub example speaks the `observe-<path>` line protocol with a SHA-256 digest in place of
+BLAKE3, so the harness's accounting runs without a Rust build; the real examples call
+production `observe_file_facts`. Comparison fixtures are synthetic records.
+"""
+
+import hashlib
+import importlib.util
+import json
+import stat
+import sys
+import tempfile
+import unittest
+from argparse import Namespace
+from pathlib import Path
+
+
+def load_script(name, filename):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+observe = load_script("media_observe", "media-evidence-observe.py")
+RECORD_DIR = observe.REPO_ROOT / "docs" / "media-evidence-baseline" / "observe"
+MIB = 1024 * 1024
+
+STUB = """\
+import hashlib, sys, time
+concurrency = int(sys.argv[1])
+paths = []
+for line in sys.stdin:
+    if line == "\\n":
+        break
+    paths.append(line.rstrip("\\n"))
+start = time.monotonic()
+for index, path in enumerate(paths):
+    begin = time.monotonic() - start
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        print(f"err {index} {begin:.6f} 0.000100 artifact_unavailable", flush=True)
+        continue
+    digest = hashlib.sha256(data).hexdigest()
+    print(f"ok {index} {begin:.6f} 0.000100 {len(data)} blake3:{digest}", flush=True)
+print("done", flush=True)
+sys.stdin.read()
+"""
+
+
+class Corpus:
+    """A scratch corpus, its private manifest and a stub example, removed on cleanup."""
+
+    def __init__(self, test, contents):
+        scratch = tempfile.TemporaryDirectory()
+        test.addCleanup(scratch.cleanup)
+        self.dir = Path(scratch.name)
+        root = self.dir / "media"
+        root.mkdir()
+        files = []
+        for index, (name, data) in enumerate(contents, start=1):
+            (root / name).write_bytes(data)
+            files.append({"id": f"f{index:04d}", "relative": name, "size_bytes": len(data),
+                          "mtime_ns": 0, "ext": ".mkv"})
+        self.manifest = self.dir / "manifest.json"
+        self.manifest.write_text(json.dumps({"label": "local-corpus", "root": str(root),
+                                             "files": files}))
+        self.examples = self.dir / "examples"
+        self.examples.mkdir()
+        stub = self.examples / "observe-ffmpeg"
+        stub.write_text(f"#!{sys.executable}\n{STUB}")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+
+    def capture(self, **overrides):
+        args = Namespace(manifest=self.manifest, path="ffmpeg", example_dir=self.examples,
+                         ids=None, max_bytes=10**12, repetitions=2, concurrency=1, evict=False)
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return observe.capture(args)
+
+
+class RunTests(unittest.TestCase):
+    def test_one_read_per_file_with_the_hash_set_and_no_host_path(self):
+        corpus = Corpus(self, [("a.mkv", b"abc"), ("b.mkv", b"x" * 5000)])
+        record = corpus.capture()
+        self.assertEqual(observe.validate_run(record), [])
+        first, second = record["repetitions"]
+        self.assertEqual([row["outcome"] for row in first["files"]], ["observed", "observed"])
+        self.assertEqual(first["logical_bytes_read"], 5003)
+        expected = hashlib.sha256("\n".join(sorted(
+            f"{file_id} blake3:{hashlib.sha256(data).hexdigest()}"
+            for file_id, data in (("f0001", b"abc"), ("f0002", b"x" * 5000)))).encode())
+        self.assertEqual(first["hash_set_sha256"], expected.hexdigest())
+        self.assertEqual(first["hash_set_sha256"], second["hash_set_sha256"])
+        self.assertIsInstance(first["process"]["cpu_seconds"], float)
+        self.assertNotIn(str(corpus.dir), json.dumps(record))
+        self.assertEqual(record["parameters"]["observe_buffer_bytes"], 16 * 1024)
+
+    def test_a_failed_read_is_a_row_with_its_variant_and_no_bytes(self):
+        corpus = Corpus(self, [("a.mkv", b"abc"), ("gone.mkv", b"zz")])
+        (corpus.dir / "media" / "gone.mkv").unlink()
+        repetition = corpus.capture(repetitions=1)["repetitions"][0]
+        failed = repetition["files"][1]
+        self.assertEqual((failed["outcome"], failed["failure"]),
+                         ("observe_failed", "artifact_unavailable"))
+        self.assertEqual(repetition["logical_bytes_read"], 3)
+
+    def test_a_size_other_than_the_manifest_fails_the_row(self):
+        corpus = Corpus(self, [("a.mkv", b"abc")])
+        (corpus.dir / "media" / "a.mkv").write_bytes(b"abcd")
+        row = corpus.capture(repetitions=1)["repetitions"][0]["files"][0]
+        self.assertEqual((row["outcome"], row["failure"]), ("observe_failed", "size_changed"))
+
+    def test_files_past_the_budget_are_skipped_and_recorded(self):
+        corpus = Corpus(self, [("a.mkv", b"abc"), ("b.mkv", b"x" * 100)])
+        record = corpus.capture(max_bytes=50, repetitions=1)
+        self.assertEqual(record["corpus"]["selected_ids"], ["f0001"])
+        self.assertEqual(record["corpus"]["skipped_budget_ids"], ["f0002"])
+
+    def test_malformed_or_incomplete_example_output_is_refused(self):
+        files = [{"id": "f0001", "size_bytes": 3, "ext": ".mkv"},
+                 {"id": "f0002", "size_bytes": 3, "ext": ".mkv"}]
+        for lines in (["ok 0 0 0 3"], ["ok 0 0 0 3 h", "ok 0 0 0 3 h"], ["ok 0 0 0 3 h"],
+                      ["ok 7 0 0 3 h", "ok 1 0 0 3 h"], ["boom"]):
+            with self.subTest(lines=lines), self.assertRaises(observe.HarnessError):
+                observe.parse_rows(lines, files)
+
+
+class BufferTests(unittest.TestCase):
+    def test_every_path_reads_16k_today_and_the_pattern_reads_the_1m_variant(self):
+        for name in observe.OBSERVE_SOURCES:
+            with self.subTest(path=name):
+                self.assertEqual(observe.buffer_bytes(name), 16 * 1024)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source = root / observe.OBSERVE_SOURCES["ffprobe"]
+            source.parent.mkdir(parents=True)
+            source.write_text("    let mut buffer = vec![0_u8; 1024 * 1024];\n")
+            self.assertEqual(observe.buffer_bytes("ffprobe", root), MIB)
+
+
+def valid_record():
+    row = {"id": "f0001", "size_bytes": 3, "ext": ".mkv", "resident_bytes_before": 0,
+           "queue_delay_seconds": 0.0, "observe_seconds": 1.0, "outcome": "observed",
+           "failure": None}
+    return {
+        "schema": observe.SCHEMA,
+        "corpus": {"label": "local-corpus", "storage_class": "local", "filesystem_type": "btrfs",
+                   "manifest_files": 1, "selected_ids": ["f0001"], "skipped_budget_ids": []},
+        "build": {"git_commit": "a" * 40, "git_changed_paths": [], "harness_sha256": "b" * 64,
+                  "example_sha256": "c" * 64},
+        "host": {"os": "Linux", "machine": "x86_64", "cpu_count": 1, "memory_bytes": 1,
+                 "python": "3"},
+        "parameters": {"path": "ffmpeg", "observe_buffer_bytes": 16384, "concurrency": 4,
+                       "max_bytes_per_repetition": 10, "repetitions": 1, "evict": True},
+        "repetitions": [{
+            "index": 1, "evicted": True, "wall_seconds": 1.0, "logical_bytes_read": 3,
+            "hash_set_sha256": "d" * 64,
+            "process": {"cpu_seconds": 1.0, "peak_rss_bytes": 1, "rchar": 3, "read_bytes": 3},
+            "host_counters": {"network_rx_bytes": 0, "cifs_bytes_read": "unavailable"},
+            "files": [row],
+        }],
+        "not_measured": dict(observe.NOT_MEASURED),
+    }
+
+
+class ValidateTests(unittest.TestCase):
+    def test_a_complete_record_is_valid(self):
+        self.assertEqual(observe.validate_run(valid_record()), [])
+
+    def test_each_contract_violation_is_reported(self):
+        cases = {
+            "schema": lambda r: r.update(schema="media-evidence-baseline-run/1"),
+            "parameters path": lambda r: r["parameters"].update(path="hash"),
+            "build example_sha256": lambda r: r["build"].pop("example_sha256"),
+            "repetition hash_set_sha256":
+                lambda r: r["repetitions"][0].update(hash_set_sha256="nope"),
+            "process cpu_seconds":
+                lambda r: r["repetitions"][0]["process"].update(cpu_seconds=-1),
+            "file outcome": lambda r: r["repetitions"][0]["files"][0].update(outcome="hashed"),
+            "file failure": lambda r: r["repetitions"][0]["files"][0].update(failure="x"),
+            "host path": lambda r: r["corpus"].update(label="/home/someone/media"),
+            "not_measured": lambda r: r["not_measured"].pop("operation"),
+        }
+        for problem, mutate in cases.items():
+            with self.subTest(problem=problem):
+                record = valid_record()
+                mutate(record)
+                self.assertIn(problem, observe.validate_run(record))
+
+    def test_a_failed_row_needs_a_variant_name(self):
+        record = valid_record()
+        record["repetitions"][0]["files"][0].update(outcome="observe_failed", failure=None)
+        self.assertIn("file failure", observe.validate_run(record))
+        record["repetitions"][0]["files"][0]["failure"] = "artifact_unavailable"
+        self.assertEqual(observe.validate_run(record), [])
+
+    def test_committed_records_are_valid(self):
+        for path in sorted(RECORD_DIR.glob("*.json")):
+            with self.subTest(record=path.name):
+                self.assertEqual(observe.validate_run(json.loads(path.read_text())), [])
+
+
+def cell(buffer, walls, cpu, rss=2 * MIB, evict=True, path="ffmpeg", hash_set="d" * 64,
+         outcome="observed", ids=("f0001",)):
+    record = valid_record()
+    record["corpus"]["selected_ids"] = list(ids)
+    record["parameters"].update(path=path, observe_buffer_bytes=buffer, evict=evict)
+    repetitions = []
+    for index, (wall, seconds) in enumerate(zip(walls, cpu), start=1):
+        repetition = json.loads(json.dumps(record["repetitions"][0]))
+        repetition.update(index=index, wall_seconds=wall, hash_set_sha256=hash_set)
+        repetition["process"].update(cpu_seconds=seconds, peak_rss_bytes=rss)
+        repetition["files"][0].update(observe_seconds=wall, outcome=outcome)
+        repetitions.append(repetition)
+    record["repetitions"] = repetitions
+    return record
+
+
+BASE = dict(buffer=16384, walls=[100.0, 100.0, 100.0], cpu=[50.0, 51.0, 49.0])
+
+
+class CompareTests(unittest.TestCase):
+    def test_cpu_improvement_without_regression_is_go(self):
+        result = observe.compare(cell(**BASE), cell(MIB, [99.0, 100.0, 100.0], [20.0] * 3))
+        self.assertEqual(result["metrics"]["cpu"]["verdict"], "improvement")
+        self.assertEqual(result["verdict"], "go")
+
+    def test_unchanged_cpu_is_inconclusive(self):
+        result = observe.compare(cell(**BASE), cell(MIB, [100.0] * 3, [50.0] * 3))
+        self.assertEqual(result["verdict"], "inconclusive")
+
+    def test_a_wall_regression_is_no_go_despite_cpu(self):
+        result = observe.compare(cell(**BASE), cell(MIB, [120.0] * 3, [20.0] * 3))
+        self.assertEqual(result["metrics"]["wall"]["verdict"], "regression")
+        self.assertEqual(result["verdict"], "no-go")
+
+    def test_a_failed_row_or_differing_hashes_is_no_go(self):
+        for candidate in (cell(MIB, [99.0] * 3, [20.0] * 3, outcome="observe_failed"),
+                          cell(MIB, [99.0] * 3, [20.0] * 3, hash_set="e" * 64)):
+            with self.subTest():
+                self.assertEqual(observe.compare(cell(**BASE), candidate)["verdict"], "no-go")
+
+    def test_memory_beyond_the_guardrail_is_no_go(self):
+        result = observe.compare(cell(**BASE), cell(MIB, [99.0] * 3, [20.0] * 3, rss=300 * MIB))
+        self.assertEqual(result["guardrails"], ["peak memory"])
+        self.assertEqual(result["verdict"], "no-go")
+
+    def test_as_found_compares_repetitions_after_the_first(self):
+        base = cell(16384, [300.0, 100.0, 100.0], [50.0, 50.0, 51.0], evict=False)
+        cand = cell(MIB, [10.0, 100.0, 100.0], [20.0, 20.0, 20.0], evict=False)
+        wall = observe.compare(base, cand)["metrics"]["wall"]
+        self.assertEqual((wall["baseline_first"], wall["candidate_first"]), (300.0, 10.0))
+        self.assertEqual(wall["baseline_median"], 100.0)
+
+    def test_mismatched_cells_are_refused(self):
+        for candidate in (cell(MIB, [99.0] * 3, [20.0] * 3, path="ffprobe"),
+                          cell(MIB, [99.0] * 3, [20.0] * 3, evict=False),
+                          cell(MIB, [99.0] * 3, [20.0] * 3, ids=("f0002",)),
+                          cell(16384, [99.0] * 3, [20.0] * 3)):
+            with self.subTest(), self.assertRaises(observe.HarnessError):
+                observe.compare(cell(**BASE), candidate)
+
+
+if __name__ == "__main__":
+    unittest.main()

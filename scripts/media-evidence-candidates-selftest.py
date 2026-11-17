@@ -90,6 +90,26 @@ class VariantEditTests(unittest.TestCase):
         self.assertIn('stat_facts("post_probe", &path, &request.expected)', edited)
         self.assertIn("modified_at != expected.modified_at", edited)
 
+    def test_observe1m_swaps_each_observe_buffer_to_one_heap_mebibyte(self):
+        files = candidates.VARIANTS["observe1m"]
+        self.assertEqual(sorted(files), sorted(candidates.OBSERVE_SOURCES.values()))
+        for name, path in candidates.OBSERVE_SOURCES.items():
+            with self.subTest(path=path):
+                edited = candidates.apply_edits(path, current(path), files[path])
+                self.assertNotIn("16 * 1024", edited)
+                self.assertEqual(edited, current(path).replace(candidates.OBSERVE_16K[name],
+                                                               candidates.OBSERVE_1M))
+        self.assertEqual(candidates.VARIANTS["observe16k"], {})
+
+    def test_observe_variants_build_the_four_examples_and_return_their_directory(self):
+        for name in ("observe16k", "observe1m"):
+            packages, subdirectory = candidates.BUILDS[name]
+            self.assertIn("--examples", packages)
+            self.assertEqual(subdirectory, "examples")
+            for crate in candidates.OBSERVE_SOURCES:
+                self.assertIn(f"voom-{crate}-worker", packages)
+        self.assertNotIn("buf8k", candidates.BUILDS)
+
     def test_drifted_source_fails_instead_of_building_the_wrong_variant(self):
         hash_edits = candidates.VARIANTS["buf8k"][candidates.HASH_SOURCE]
         with self.assertRaises(candidates.CandidateError):

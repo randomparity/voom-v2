@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Candidate tooling for the read-efficiency, scheduling (#789) and single-read (#801) stages.
+"""Candidate tooling for the read-efficiency, scheduling (#789), single-read (#801) and
+observe-path buffer (#838) stages.
 
 `prepare` builds a bench-only worker variant in a detached worktree of HEAD, so production
 source and defaults never change; the #788 harness in that worktree then records the
@@ -95,13 +96,34 @@ STAT_ONLY_PROBE = [
     (EXPECTED_CHECK, STAT_FACTS + EXPECTED_CHECK),
 ]
 
+# The four `observe_file_facts` paths (#838): transform input (ffmpeg, mkvtoolnix), output
+# verification (verify-artifact) and the probe re-hash (ffprobe). Each `observe-<name>` example
+# calls its crate's function; the 1 MiB variant is a heap buffer, as the hash worker's.
+OBSERVE_SOURCES = {
+    "ffmpeg": "crates/voom-ffmpeg-worker/src/observe.rs",
+    "mkvtoolnix": "crates/voom-mkvtoolnix-worker/src/observe.rs",
+    "verify-artifact": "crates/voom-verify-artifact-worker/src/observe.rs",
+    "ffprobe": "crates/voom-ffprobe-worker/src/observe.rs",
+}
+OBSERVE_16K = {name: "    let mut buffer = vec![0_u8; 16 * 1024];\n" for name in OBSERVE_SOURCES}
+OBSERVE_16K["ffprobe"] = "    let mut buffer = [0_u8; 16 * 1024];\n"
+OBSERVE_1M = "    let mut buffer = vec![0_u8; 1024 * 1024];\n"
+
 # Each variant maps a worker source to its (old, new) edits; every old text must occur
 # exactly once, so a drifted source fails rather than building something unmeasured.
 VARIANTS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "baseline": {},
     "buf8k": {HASH_SOURCE: [(CHUNK_CONSTANT, "pub const HASH_CHUNK_BYTES: usize = 8 * 1024;")]},
     "single-read": {PROBE_SOURCE: STAT_ONLY_PROBE},
+    "observe16k": {},
+    "observe1m": {OBSERVE_SOURCES[name]: [(OBSERVE_16K[name], OBSERVE_1M)]
+                  for name in OBSERVE_SOURCES},
 }
+WORKER_BUILD = (["-p", "voom-hash-worker", "-p", "voom-ffprobe-worker"], "")
+OBSERVE_BUILD = ([argument for name in OBSERVE_SOURCES
+                  for argument in ("-p", f"voom-{name}-worker")] + ["--examples"], "examples")
+# Cargo arguments and the built-binary subdirectory of target/release, per variant.
+BUILDS = {"observe16k": OBSERVE_BUILD, "observe1m": OBSERVE_BUILD}
 
 # Lower is better for every compared metric. Resource metrics are judged by the protocol's
 # guardrails for selection, not by the speed thresholds.
@@ -127,7 +149,7 @@ def apply_edits(path: str, source: str, edits: list[tuple[str, str]]) -> str:
 
 
 def prepare(variant: str, directory: Path) -> Path:
-    """Build `variant` in a detached worktree at `directory`; return its worker directory."""
+    """Build `variant` in a detached worktree at `directory`; return its binary directory."""
     if variant not in VARIANTS:
         raise CandidateError(f"unknown variant {variant}; choose one of {', '.join(VARIANTS)}")
     directory = directory.resolve()
@@ -144,13 +166,14 @@ def prepare(variant: str, directory: Path) -> Path:
     try:
         for path, source in edited.items():
             (directory / path).write_text(source, encoding="utf-8")
-        subprocess.run(["cargo", "build", "--release", "--locked", "-p", "voom-hash-worker",
-                        "-p", "voom-ffprobe-worker"], cwd=directory, check=True)
+        packages, subdirectory = BUILDS.get(variant, WORKER_BUILD)
+        subprocess.run(["cargo", "build", "--release", "--locked", *packages], cwd=directory,
+                       check=True)
     except BaseException:
         subprocess.run(["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force",
                         str(directory)], check=False)
         raise
-    return directory / "target" / "release"
+    return directory / "target" / "release" / subdirectory
 
 
 def completion(row: dict[str, Any]) -> float:

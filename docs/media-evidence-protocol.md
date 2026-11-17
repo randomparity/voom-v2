@@ -259,3 +259,18 @@ A `reused` row completed one whole-file read, and `logical_bytes_read` counts it
 `reads_per_file` stays 3, the budget's no-reuse bound. A reuse-on record is therefore not a
 three-read baseline, and `media-evidence-candidates.py compare` refuses to compare cells whose
 reuse setting differs, reading a `/1` record as off.
+
+Schema `media-evidence-observe-run/1` (#838) is written by `media-evidence-observe.py run`. It
+measures one `observe_file_facts` path (`parameters.path`: `ffmpeg`, `mkvtoolnix`,
+`verify-artifact` or `ffprobe`) at the buffer read from that crate's source
+(`parameters.observe_buffer_bytes`), one whole-file read per file through one example process.
+
+- `build`: `git_commit`, `git_changed_paths`, `harness_sha256` and `example_sha256`.
+- `parameters`: `path`, `observe_buffer_bytes`, `concurrency`, `max_bytes_per_repetition`,
+  `repetitions` and `evict`.
+- `repetitions[]`: as `/1`, with one `process` (`cpu_seconds`, `peak_rss_bytes`, `rchar`,
+  `read_bytes`) in place of `workers`, and `hash_set_sha256`: SHA-256 over the sorted
+  `id content_hash` lines of the observed rows. Per-file hashes are not recorded.
+- `files[]`: `id`, `size_bytes`, `ext`, `resident_bytes_before`, `queue_delay_seconds`,
+  `observe_seconds`, `outcome` (`observed` or `observe_failed`) and `failure`: `null`, the
+  error variant name, or `size_changed` when the observed size is not the manifest's.

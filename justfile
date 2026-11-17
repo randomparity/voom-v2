@@ -39,7 +39,8 @@ source-checks: check-host-paths check-host-paths-selftest check-workflows check-
     media-evidence-fingerprint-selftest check-media-evidence-fingerprint-guard \
     check-media-evidence-fingerprint-guard-selftest container-unit-check \
     media-evidence-lazy-selftest media-evidence-candidates-selftest \
-    media-evidence-reuse-selftest media-evidence-rollout-selftest
+    media-evidence-reuse-selftest media-evidence-rollout-selftest \
+    media-evidence-observe-selftest
 
 # Tracked root/docs Markdown must contain portable paths, without host identifiers.
 check-host-paths:
@@ -78,6 +79,10 @@ media-evidence-lazy-selftest:
 # Benchmark variants must apply exactly and be judged by the frozen protocol thresholds.
 media-evidence-candidates-selftest:
     python3 scripts/media-evidence-candidates-selftest.py
+
+# The #838 observe-path buffer harness must account, redact and judge as its spec states.
+media-evidence-observe-selftest:
+    python3 scripts/media-evidence-observe-selftest.py
 
 # The #798 change-time and random-sampling measurements must hold and stay redacted.
 media-evidence-reuse-selftest:
