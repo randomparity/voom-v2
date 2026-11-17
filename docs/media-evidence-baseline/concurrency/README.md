@@ -6,7 +6,9 @@ the subset-only concurrency-2 evidence behind the decision report's concurrency 
 measurements of one host, not a performance budget; [#471](https://github.com/randomparity/voom-v2/issues/471)
 owns scan SLOs, and no production default changes here. The raw records are the six JSON files
 beside this summary. Every number below comes from them, rounded for display. The verdict
-tables are output of `scripts/media-evidence-candidates.py compare`.
+tables are output of `scripts/media-evidence-candidates.py compare`. Its stage-1 selection
+line picks c2 at reuse off on summed hash seconds alone; that rule chose #789's hash buffer
+and does not govern scheduling, where the protocol ranks first durable observation first.
 
 ## What ran
 
@@ -88,9 +90,11 @@ Reading the result:
 - Summed hash seconds fall at c2 because fewer streams share the disk, so each hash call is
   shorter; it is a per-call measure, not throughput.
 
-**Decision input.** Concurrency 2 trades a later first replay completion for an 11% shorter
-read-once full pass. Neither metric is first durable observation, so this evidence does not
-select concurrency 2; a default change is a separate issue.
+**Decision input.** Concurrency 2 gives an 11% shorter read-once full pass. Its later first
+replay completion here comes from manifest order: on #789's six-file subset, where both cells
+start with `f0004`, c2 completed it sooner (7.0 vs 10.8 s). Neither metric is first durable
+observation, so this evidence does not select concurrency 2; a default change is a separate
+issue.
 
 ## Network subset, as-found (reported, not gating)
 
@@ -98,7 +102,7 @@ Reuse off only: CIFS is outside ADR 0120's reuse list, so `on` would recompute (
 
 | Cell | Rep 1 wall / first file (s) | Reps 2–3 wall (s) | Reps 2–3 first file (s) | Host CIFS read (GB) | Resident before (GB) |
 |---|---|---|---|---|---|
-| c4 | 45.4 / 36.5 | 16.1, 22.3 | 9.4, 5.9 | 24.7, 13.1, 17.5 | 0, 11.6, 7.2 |
+| c4 | 45.4 / 36.5 | 16.0, 22.3 | 9.4, 5.9 | 24.7, 13.1, 17.5 | 0, 11.6, 7.2 |
 | c2 | 31.4 / 14.0 | 34.3, 31.5 | 15.1, 14.0 | 24.7 each | 11.6 each |
 
 Reps 2–3 compare inconclusive on wall (c4 CV 23.2%), first file (32.5%) and physical bytes

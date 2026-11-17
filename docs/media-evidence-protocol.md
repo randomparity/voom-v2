@@ -249,8 +249,9 @@ Every metric is a number or the string `unavailable`.
 Schema `media-evidence-baseline-run/2` (#839) is written by `run --probe-reuse {off,on}` and
 adds two required fields to `/1`; `/1` records stay valid as written.
 
-- `parameters.probe_hash_reuse`: `true` when the probe request carried ADR 0120's guard
-  (ctime and file key from the hash result, sent only when the hash reported both).
+- `parameters.probe_hash_reuse`: `true` when the run used `--probe-reuse on`. Each probe
+  request then carries ADR 0120's guard (ctime and file key from the hash result) only when
+  the hash reported both.
 - `files[].hash_source`: `reused` when the probe result reports reuse, `recomputed` for any
   other probe result, `null` when no probe result exists (`hash_failed`, `probe_failed`).
 
