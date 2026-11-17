@@ -245,3 +245,16 @@ parameter keys, every metric, row outcomes and failures, and the absence of host
 - `not_measured`: each unmeasured metric with its reason.
 
 Every metric is a number or the string `unavailable`.
+
+Schema `media-evidence-baseline-run/2` (#839) is written by `run --probe-reuse {off,on}` and
+adds two required fields to `/1`; `/1` records stay valid as written.
+
+- `parameters.probe_hash_reuse`: `true` when the probe request carried ADR 0120's guard
+  (ctime and file key from the hash result, sent only when the hash reported both).
+- `files[].hash_source`: `reused` when the probe result reports reuse, `recomputed` for any
+  other probe result, `null` when no probe result exists (`hash_failed`, `probe_failed`).
+
+A `reused` row completed one whole-file read, and `logical_bytes_read` counts it once.
+`reads_per_file` stays 3, the budget's no-reuse bound. A reuse-on record is therefore not a
+three-read baseline, and `media-evidence-candidates.py compare` refuses to compare cells whose
+reuse setting differs, reading a `/1` record as off.
