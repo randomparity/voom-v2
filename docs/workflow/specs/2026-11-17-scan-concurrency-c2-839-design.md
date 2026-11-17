@@ -4,45 +4,44 @@
 
 The decision report rejects concurrency 2 only because no full-pass c2 cell exists. The #788
 replay (`scripts/media-evidence-baseline.py`) takes `--concurrency` but never sends ADR 0120's
-probe guard, so it cannot measure the selected reuse strategy.
+probe guard, so it cannot measure reuse.
 
 ## Scope
 
 - **Replay.** `run --probe-reuse {off,on}` (default `off`). With `on`, the probe request carries
   `guard = {changed_at_ns, file_key}` from the hash result when both are present; otherwise no
-  guard is sent and the worker recomputes. Each row records `hash_source`: `reused` when the
-  probe reports it, `recomputed` for any other probe result, `null` when no probe result
-  exists. A `reused` row counts one completed whole-file read; other rows keep the existing
-  per-outcome counts.
-- **Record.** New captures write schema `media-evidence-baseline-run/2`: `/1` plus
-  `parameters.probe_hash_reuse` and row `hash_source`, both required. `validate_run` checks each
-  schema's exact key set, so committed `/1` records stay valid unchanged.
+  guard is sent. Row `hash_source` is `reused` when a probe result reports it, `recomputed` for
+  another probe result, and `null` without one. A `reused` row counts one whole-file read.
+- **Record.** `SCHEMA` keeps naming `/1`; new captures write `SCHEMA_V2`
+  (`media-evidence-baseline-run/2`), which additionally requires `parameters.probe_hash_reuse`
+  and row `hash_source`. `validate_run` accepts both. `reads_per_file` stays the budget's
+  no-reuse bound; `logical_bytes_read` is actual.
 - **Compare.** `media-evidence-candidates.py compare` refuses cells whose reuse setting
   differs (`/1` reads as `off`).
-- **Capture.** Release workers from this branch. Local corpus (34 files), evicted,
-  3 repetitions: c4/c2 × reuse off/on, run c4 then c2 per setting, no builds during capture.
-  Network subset `f0049,f0074,f0063`, as-found, c4 and c2 with reuse off only: CIFS is outside
-  the reuse list, so `on` would recompute (G5).
+- **Capture.** Local corpus (34 files), evicted, 3 repetitions, c4/c2 × reuse off/on, all on
+  one commit. Order alternates: off c4 then c2, on c2 then c4. Network subset
+  `f0049,f0074,f0063`, as-found, c4 and c2, reuse off only: CIFS is outside the reuse list, so
+  `on` would recompute (G5).
 - **Report.** `docs/media-evidence-baseline/concurrency/README.md` with `compare` verdicts per
-  reuse setting; amend the decision-report row; update the protocol's record-format section.
-  No production default change.
+  reuse setting; amend the decision-report row; update the protocol's record format (a reuse-on
+  record is not a three-read baseline).
 
 ### Failure model
 
 1. Actors and deployments: one local operator on one Linux host; CI runs selftests only.
-2. Invariants and assets at stake: media bytes and timestamps never change; committed records
-   carry no host path or file name; `/1` records keep validating; c2/c4 verdicts compare only
-   matched cells.
-3. Accepted failure classes: drive/controller cache and other host activity are not controlled
-  , and network counters include rehearsal traffic: disclosed.
+2. Invariants and assets at stake: media content, size, mtime and ctime never change (reads
+   may update atime); committed records carry no host path or file name; `/1` records keep
+   validating; c2/c4 verdicts compare only cells with equal build and host sections.
+3. Accepted failure classes: drive/controller cache and other host activity are not
+   controlled, and network counters include rehearsal traffic: disclosed.
 4. Covered elsewhere: first durable observation (#841); ext4/xfs guard (#840); transform reads
-   (#838); default change (future issue); SLOs (#471).
+   (#838); default change; SLOs (#471).
 
 ## Success
 
-- Four committed local records (c4/c2 × off/on), valid `/2`, every row `observed`; `on` rows
-  `reused` on btrfs.
-- Per reuse setting, `compare` verdicts for wall, first file done, physical bytes and resource
+- Four local records (c4/c2 × off/on), valid `/2`, with identical `build` and `host` sections.
+  A non-`observed` row is reported as recorded and marks its comparison failed.
+- Per reuse setting, `compare` verdicts for wall, first file done, physical bytes and
   guardrails, in the README and decision row.
 - Two network records, reported as not gating.
 
@@ -50,10 +49,11 @@ probe guard, so it cannot measure the selected reuse strategy.
 
 | Contract | Mode | Evidence |
 |---|---|---|
-| Guard sent and reuse read accounting | focused-test | baseline selftest: stub probe echoes `reused` only when guarded; `on` record has 1 read per reused row, `off` has 3; red before the flag exists |
-| Guard omitted when hash lacks ctime or key | focused-test | baseline selftest: stub hash without `file_key` yields `recomputed` |
-| `/2` validation, `/1` unchanged | focused-test | baseline selftest: `/2` missing `hash_source` or `probe_hash_reuse` rejected; committed `/1` records pass |
-| Compare refuses mixed reuse | focused-test | candidates selftest: `off` vs `on` raises `CandidateError` |
-| Measurements and verdicts | task-test-not-applicable | real-media timings; the committed-record validation test covers their shape |
+| Guard and read accounting | focused-test | baseline selftest: stub reuses only when guarded; `on` counts 1 read per reused row, `off` 3; red before the flag |
+| Guard omitted; probe error | focused-test | baseline selftest: hash without `file_key` gives `recomputed`; probe error gives `null` |
+| `/2` validation, `/1` unchanged | focused-test | baseline selftest: `/2` lacking either key rejected; committed records, including `concurrency/`, pass |
+| Compare reuse match | focused-test | candidates selftest: `off` vs `on` refused; `/1` vs `/2` `off` compares |
+| Measurements and verdicts | task-test-not-applicable | real-media timings cannot run in CI |
 
-Green: `just media-evidence-baseline-selftest media-evidence-candidates-selftest`.
+Green: `just media-evidence-baseline-selftest media-evidence-candidates-selftest
+media-evidence-rollout-selftest`.
