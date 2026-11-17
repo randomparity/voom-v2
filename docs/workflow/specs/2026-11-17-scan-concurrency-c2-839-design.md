@@ -35,14 +35,14 @@ probe guard, so it cannot measure reuse.
 3. Accepted failure classes: drive/controller cache and other host activity are not
    controlled, and network counters include rehearsal traffic: disclosed.
 4. Covered elsewhere: first durable observation (#841); ext4/xfs guard (#840); transform reads
-   (#838); default change; SLOs (#471).
+   (#838); SLOs (#471).
 
 ## Success
 
 - Four local records (c4/c2 × off/on), valid `/2`, with identical `build` and `host` sections.
   A non-`observed` row is reported as recorded and marks its comparison failed.
-- Per reuse setting, `compare` verdicts for wall, first file done, physical bytes and
-  guardrails, in the README and decision row.
+- Per reuse setting, `compare` verdicts for wall, replay first-file completion (not durable
+  publication), physical bytes and guardrails, in the README and decision row.
 - Two network records, reported as not gating.
 
 ## Validation
@@ -55,5 +55,4 @@ probe guard, so it cannot measure reuse.
 | Compare reuse match | focused-test | candidates selftest: `off` vs `on` refused; `/1` vs `/2` `off` compares |
 | Measurements and verdicts | task-test-not-applicable | real-media timings cannot run in CI |
 
-Green: `just media-evidence-baseline-selftest media-evidence-candidates-selftest
-media-evidence-rollout-selftest`.
+Green: `just media-evidence-{baseline,candidates,rollout,lazy,fingerprint,reuse}-selftest`.
