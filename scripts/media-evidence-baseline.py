@@ -29,6 +29,10 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "media-evidence-baseline-run/1"
+# `/2` adds the probe hash reuse setting and each row's hash source (#839); `/1` records
+# predate reuse and keep their exact shape.
+SCHEMA_V2 = "media-evidence-baseline-run/2"
+HASH_SOURCES = {"reused", "recomputed"}
 UNAVAILABLE = "unavailable"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROGRESS_IDLE_DEADLINE_MS = 600_000
@@ -47,8 +51,9 @@ NETWORK_FILESYSTEMS = {
     "9p", "afs", "ceph", "cifs", "fuse.sshfs", "glusterfs", "ncpfs", "nfs", "nfs4", "smb3",
     "smbfs",
 }
-# Every read the replayed sequence performs: one hash-worker pass plus the probe
-# worker's pre- and post-probe observation passes.
+# Every read the replayed sequence performs without reuse: one hash-worker pass plus the
+# probe worker's pre- and post-probe observation passes. It bounds the budget; a reused
+# probe reads no file bytes, so its row completes one read.
 READS_PER_FILE = 3
 # Whole-file reads a row completed, by outcome; a failed operation's partial read is not
 # counted here, and worker `rchar` cross-checks the total.
@@ -451,12 +456,28 @@ def failure_of(stage: str, frame: dict[str, Any]) -> dict[str, Any]:
     return {"stage": stage, "class": frame.get("class", "harness"), "code": frame.get("code")}
 
 
+def probe_request(path: Path, facts: dict[str, Any], reuse: bool) -> dict[str, Any]:
+    """ProbeFile payload; with reuse on, ADR 0120's guard when the hash reported its inputs."""
+    payload: dict[str, Any] = {
+        "path": str(path),
+        "expected": {
+            "size_bytes": facts["size_bytes"], "content_hash": facts["content_hash"],
+            "modified_at": facts["modified_at"], "local_file_key": None,
+        },
+    }
+    if reuse and facts.get("changed_at_ns") is not None and facts.get("file_key") is not None:
+        payload["guard"] = {"changed_at_ns": facts["changed_at_ns"],
+                            "file_key": facts["file_key"]}
+    return payload
+
+
 def replay_file(entry: dict[str, Any], root: Path, workers: dict[str, Worker],
-                started: float) -> dict[str, Any]:
+                started: float, reuse: bool = False) -> dict[str, Any]:
     row: dict[str, Any] = {
         "id": entry["id"], "size_bytes": entry["size_bytes"], "ext": entry["ext"],
         "queue_delay_seconds": round(time.monotonic() - started, 6),
         "hash_seconds": UNAVAILABLE, "probe_seconds": UNAVAILABLE, "failure": None,
+        "hash_source": None,
     }
     begin = time.monotonic()
     hashed = workers["hash"].call("hash_file", {
@@ -471,13 +492,8 @@ def replay_file(entry: dict[str, Any], root: Path, workers: dict[str, Worker],
         return row
     facts = hashed["payload"]
     begin = time.monotonic()
-    probed = workers["probe"].call("probe_file", {
-        "path": str(root / entry["relative"]),
-        "expected": {
-            "size_bytes": facts["size_bytes"], "content_hash": facts["content_hash"],
-            "modified_at": facts["modified_at"], "local_file_key": None,
-        },
-    })
+    probed = workers["probe"].call(
+        "probe_file", probe_request(root / entry["relative"], facts, reuse))
     row["probe_seconds"] = round(time.monotonic() - begin, 6)
     if probed.get("kind") != "result":
         row.update(outcome="probe_failed", failure=failure_of("probe", probed))
@@ -488,11 +504,16 @@ def replay_file(entry: dict[str, Any], root: Path, workers: dict[str, Worker],
     if not sides or not all(has_fields(side, OBSERVED_FIELDS) for side in sides):
         row.update(outcome="probe_failed", failure=failure_of("probe", MALFORMED_RESULT))
         return row
+    row["hash_source"] = "reused" if observed.get("hash_source") == "reused" else "recomputed"
     agreed = all(
         side.get(field) == facts[field] for side in sides for field in HASH_FIELDS
     )
     row["outcome"] = "observed" if agreed else "disagree"
     return row
+
+
+def reads_completed(row: dict[str, Any]) -> int:
+    return 1 if row.get("hash_source") == "reused" else READS_COMPLETED[row["outcome"]]
 
 
 def within_budget(files: list[dict[str, Any]], max_bytes: int) -> tuple[list, list]:
@@ -523,7 +544,9 @@ def run_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, A
         counters = host_counters()
         started = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-            rows = list(pool.map(lambda entry: replay_file(entry, root, workers, started), files))
+            rows = list(pool.map(
+                lambda entry: replay_file(entry, root, workers, started, args.probe_reuse == "on"),
+                files))
         wall = time.monotonic() - started
         usage = {name: worker.usage() for name, worker in workers.items()}
         counters = counter_delta(counters, host_counters())
@@ -534,9 +557,7 @@ def run_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, A
         row["resident_bytes_before"] = residency[row["id"]]
     return {
         "index": index, "evicted": args.evict, "wall_seconds": round(wall, 6),
-        "logical_bytes_read": sum(
-            row["size_bytes"] * READS_COMPLETED[row["outcome"]] for row in rows
-        ),
+        "logical_bytes_read": sum(row["size_bytes"] * reads_completed(row) for row in rows),
         "files": rows, "workers": usage, "host_counters": counters,
     }
 
@@ -568,7 +589,7 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
         for index in range(1, args.repetitions + 1)
     ]
     return {
-        "schema": SCHEMA,
+        "schema": SCHEMA_V2,
         "corpus": {
             "label": manifest["label"], "filesystem_type": fs_type,
             "storage_class": storage_class(fs_type), "manifest_files": len(manifest["files"]),
@@ -579,7 +600,7 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
         "parameters": {
             **constants, "concurrency": args.concurrency, "reads_per_file": READS_PER_FILE,
             "max_bytes_per_repetition": args.max_bytes, "repetitions": args.repetitions,
-            "evict": args.evict,
+            "evict": args.evict, "probe_hash_reuse": args.probe_reuse == "on",
         },
         "repetitions": repetitions,
         "not_measured": NOT_MEASURED,
@@ -613,8 +634,10 @@ def missing(label: str, value: Any, keys: set[str]) -> list[str]:
     return [f"{label} {key}" for key in sorted(keys - present)]
 
 
-def row_problems(row: dict[str, Any]) -> list[str]:
-    problems = missing("file", row, ROW_KEYS)
+def row_problems(row: dict[str, Any], v2: bool) -> list[str]:
+    problems = missing("file", row, ROW_KEYS | ({"hash_source"} if v2 else set()))
+    if v2 and row.get("hash_source") not in HASH_SOURCES | {None}:
+        problems.append("file hash_source")
     if not re.fullmatch(r"f\d{4}", str(row.get("id", ""))):
         problems.append("file id")
     for key in ("size_bytes", "queue_delay_seconds", "hash_seconds", "probe_seconds",
@@ -633,7 +656,7 @@ def row_problems(row: dict[str, Any]) -> list[str]:
     return problems
 
 
-def repetition_problems(repetition: dict[str, Any]) -> list[str]:
+def repetition_problems(repetition: dict[str, Any], v2: bool) -> list[str]:
     problems = missing("repetition", repetition, REPETITION_KEYS)
     for key in ("wall_seconds", "logical_bytes_read"):
         if not is_metric(repetition.get(key)):
@@ -650,15 +673,16 @@ def repetition_problems(repetition: dict[str, Any]) -> list[str]:
     problems += missing("host_counters", counters, COUNTER_KEYS)
     problems += ["host counter" for value in counters.values() if not is_metric(value)]
     for row in rows:
-        problems += row_problems(row)
+        problems += row_problems(row, v2)
     return problems
 
 
 def validate_run(record: dict[str, Any]) -> list[str]:
     """Return every contract violation in a committed-safe run record."""
     problems = []
-    if record.get("schema") != SCHEMA:
+    if record.get("schema") not in (SCHEMA, SCHEMA_V2):
         problems.append("schema")
+    v2 = record.get("schema") == SCHEMA_V2
     for section in ("corpus", "build", "host", "parameters", "repetitions", "not_measured"):
         if section not in record:
             problems.append(f"missing {section}")
@@ -666,12 +690,14 @@ def validate_run(record: dict[str, Any]) -> list[str]:
         return problems
     for section, keys in REQUIRED_KEYS.items():
         problems += missing(section, record[section], keys)
+    if v2 and not isinstance(record["parameters"].get("probe_hash_reuse"), bool):
+        problems.append("parameters probe_hash_reuse")
     if set(record["not_measured"]) != set(NOT_MEASURED):
         problems.append("not_measured")
     if not record["repetitions"]:
         problems.append("repetitions")
     for repetition in record["repetitions"]:
-        problems += repetition_problems(repetition)
+        problems += repetition_problems(repetition, v2)
     text = json.dumps(record)
     if re.search(r'"/|\\\\|/home/|/Users/|/mnt/', text):
         problems.append("host path")
@@ -701,6 +727,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                      help="logical-read budget per repetition (size x reads per file)")
     run.add_argument("--repetitions", type=int, default=3)
     run.add_argument("--concurrency", type=int, help="default: source MAX_IN_FLIGHT")
+    run.add_argument("--probe-reuse", choices=["off", "on"], default="off",
+                     help="send ADR 0120's probe guard so the probe may reuse the owner hash")
     run.add_argument("--evict", action="store_true",
                      help="drop page cache for selected files first (local storage only)")
     return parser.parse_args(argv)
