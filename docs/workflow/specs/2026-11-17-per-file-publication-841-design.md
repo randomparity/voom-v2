@@ -55,15 +55,16 @@ Three deliverables, one research PR, no production source change on `main`:
    reviewed with the branch, not with this design.
 
 **Decision rule.** Verdicts are exactly what `compare` returns (the protocol's
-`candidates.classify`). Go — ADR 0132 proposes superseding ADR 0077's publication clause — when
+`candidates.classify`, where `inconclusive` means neither improvement nor regression, or a
+baseline CV above 20%). Go — ADR 0132 proposes superseding ADR 0077's publication clause — when
 first durable observation is `improvement` and complete is not `regression`. No-go when first
-durable observation is not `improvement` with a conclusive baseline, or complete is
-`regression`. Any `inconclusive` or `unavailable` verdict on either metric allows one more
-control/treatment pair within the cost bound; if still inconclusive the answer is a recorded
-no-go whose stated reason is that the evidence is inconclusive, so it is never reported as a
-measured regression. Every outcome
-answers absence reconciliation, ticket and lease authority, and partial-session failure,
-including publication that survives a completion commit-lock conflict or a failed session.
+durable observation is not `improvement` with a baseline CV at or below 20%, or complete is
+`regression`. Undecided when either metric is `unavailable` or `inconclusive` with a baseline
+CV above 20%: one more control/treatment pair is allowed within the cost bound, and if it is
+still undecided the answer is a recorded no-go whose stated reason is that the evidence is
+inconclusive, never a measured regression. Every outcome answers absence reconciliation, ticket
+and lease authority, and partial-session failure, including publication that survives a
+completion commit-lock conflict or a failed session.
 
 ### Not in scope
 
