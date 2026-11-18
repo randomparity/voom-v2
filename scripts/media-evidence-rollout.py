@@ -6,8 +6,8 @@
 repetition from the request to its first durable observation: the first live rooted file
 location the stack publishes. Completion publication (ADR 0077) publishes inside the
 completion transaction; the #841 per-file prototype publishes at batch acceptance. It records
-worker CPU, memory and I/O, the stored evidence's hash sources, and a digest of the published content hashes, so
-repeat scans compare without committing hashes. `serve` holds such a stack for the
+worker CPU, memory and I/O, the stored evidence's hash sources, and a digest of the published
+content hashes, so repeat scans compare without committing hashes. `serve` holds such a stack for the
 CLI-driven transform gates. `construct` drives the release hash and probe workers on a
 scratch copy to build the ADR 0120 guard cases on the filesystem that holds the copy.
 Records name files by manifest id only; host paths stay in private manifests and stack work
