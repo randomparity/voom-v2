@@ -167,9 +167,9 @@ Carried from the records:
   #796 and #798 also did not measure per-file physical bytes, peak memory or probing.
 - Not measured in #790: server-side or other-client changes on the network share, and
   transform-input reuse. #840 measured client-sent ChangeTime on a network scratch share (a
-  different share on the network corpus's server): the kernel client's ChangeTime (its current time) is not
-  what the server reports, which stays equal to LastWriteTime. A chosen ChangeTime value was
-  not sent (no authenticated user-space SMB client on the host).
+  different share on the network corpus's server): the kernel client's ChangeTime (its current
+  time) is not what the server reports, which stays equal to LastWriteTime. A chosen ChangeTime
+  value was not sent (no authenticated user-space SMB client on the host).
 - Not measured in #838: a whole transform or verification around the hash (outputs observed
   while their write is cached, CPU contention from ffmpeg or mkvmerge), the network corpus, and
   the 16 KiB hashes in `voom-control-plane` artifact promotion and the node agent's commit.

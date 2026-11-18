@@ -9,8 +9,8 @@ inode and inode generation move on a read, a content write, a utime() call, a wr
 mtime restored, a chmod and a rename. On network storage it then sets the mtime through the
 kernel SMB client, which also sends the client's current time as ChangeTime (#840), and
 classifies the ctime the server reports. Records carry booleans, counts, categories and
-filesystem types, never paths, timestamps, inode numbers, generations or seeds. The candidates themselves live
-in the #796 fingerprint script.
+filesystem types, never paths, timestamps, inode numbers, generations or seeds. The
+candidates themselves live in the #796 fingerprint script.
 """
 
 from __future__ import annotations
