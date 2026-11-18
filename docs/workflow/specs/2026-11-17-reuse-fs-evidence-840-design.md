@@ -15,18 +15,24 @@ client-sent ChangeTime was not measured.
 - `oracle --tick-wait SECONDS` (default `CLOCK_TICK_SECONDS`, 0.02; must be ≥ 0) replaces the
   fixed wait before each construction's change; the value is recorded as
   `parameters.tick_wait_seconds`.
-- `Oracle.compare` and `stale_cache` take the reference digest before the "before"
-  observation, so with `--tick-wait 0` only the change itself lies between the before
-  observation and the edit. A read does not move ctime, and the digest still precedes the
-  change, so the reference outcome is unchanged.
+- `Oracle.compare` and `stale_cache` take the reference digest first, then **prime**: set the
+  mtime to its current value, which stamps ctime without changing it or the bytes, immediately
+  before the before observation. With `--tick-wait 0` the primed ctime stamp and the change's
+  stamp are separated only by the observation and the change itself. A read does not move
+  ctime and the digest still precedes the change, so the reference outcome is unchanged.
 - O10 for `meta` and `meta-ctime` becomes the guard's window: stat (the facts before ffprobe),
-  a same-size edit of one byte with the mtime restored, stat again; `detected` when the two
-  fingerprints differ. The construction text says so. `meta` is the control: it must miss.
-- Each row gains `same_coarse_tick`: `true` when `CLOCK_REALTIME_COARSE` read immediately before
-  the before observation equals its value immediately after the change, `false` when it
-  advanced, `null` where the clock does not exist (non-Linux) or the row has no timed window
-  (`not-applicable` outcomes and O10 for sampling candidates). A `true` row is a same-tick
-  construction: a kernel stamping ctime from the coarse clock alone would give equal ctimes.
+  a reader opens the file and reads its first 64 KiB, a same-size edit of one byte with the
+  mtime restored lands while the reader holds the file, stat again; `detected` when the two
+  fingerprints differ. For a stat-only guard this is O1's stat/edit/stat shape plus an open
+  reader, and the report says so rather than counting it as independent evidence. `meta` is
+  the control: it must miss.
+- Each row gains `same_coarse_tick`: `true` when the coarse realtime clock (Linux
+  `CLOCK_REALTIME_COARSE`, clock id 5; Python's `time` module does not export the name) read
+  immediately before the prime equals its value immediately after the change, `false` when
+  it advanced, `null` off Linux or where the row has no timed window (`not-applicable`
+  outcomes and O10 for sampling candidates). A `true` row is a same-tick construction: a kernel
+  stamping ctime from the coarse clock alone would give the primed and the changed ctime the
+  same value, so only a fine-grained or multigrain ctime can detect it.
 - Validation accepts `/1` records unchanged and requires `same_coarse_tick` (bool or null) and
   `tick_wait_seconds` (number ≥ 0) in `/2`.
 
@@ -34,17 +40,21 @@ client-sent ChangeTime was not measured.
 
 - Each filesystem gains `client_change_time`. On network storage the probe sets mtime to
   `BUMPED_MTIME_NS` with `os.utime` through the mounted kernel SMB client, bracketing the call
-  with the realtime clock, waits `settle`, and classifies the settled ctime:
-  `not-kept` (equals the mtime just set), `kept-or-server-stamped` (within the bracket ± 2 s),
-  else `other`. Local storage records `not-applicable`: a local kernel takes no ctime from the
-  caller.
+  with the realtime clock, waits `settle` (2 s, beyond the share's 1 s attribute cache, so the
+  stat reads the server's value), and classifies the settled ctime: `follows-mtime` (equals
+  the mtime just set, not the ChangeTime the client sent), `client-time-or-server-stamp`
+  (within the bracket ± 2 s), else `other`. Local storage records `not-applicable`: a local
+  kernel takes no ctime from the caller.
 - Method: the kernel client sends `ChangeTime` = its current time beside `LastWriteTime` in
   SMB2 SET_INFO FileBasicInformation whenever a utimes call sets a time
-  (`fs/smb/client/inode.c`, `cifs_set_file_info`). It cannot send a chosen value, and an
-  authenticated user-space SMB client is unavailable (smbclient needs credentials this host
-  does not expose to the user; no new dependency). So `kept-or-server-stamped` cannot separate
-  "kept" from "server stamped its own time", while `not-kept` is conclusive. `not_measured`
-  replaces `client_set_change_time` with `client_set_chosen_change_time` saying this.
+  (`fs/smb/client/inode.c`, `cifs_set_file_info`, upstream; the wire is not captured, since
+  that needs root). It cannot send a chosen value, and no authenticated user-space SMB client
+  is available (smbclient needs credentials readable only by root; no new dependency).
+  `follows-mtime` answers the criterion: the server does not report a client-sent ChangeTime;
+  it reports LastWriteTime. `client-time-or-server-stamp` cannot separate "kept" from "server
+  stamped its own time", so it is reported as "not measurable with available tooling" (the
+  operator's stated fallback). `not_measured` replaces `client_set_change_time` with
+  `client_set_chosen_change_time` saying a chosen value was not sent.
 - Validation accepts `/1` unchanged; `/2` requires `client_change_time` in the four values,
   `not-applicable` exactly on non-network storage.
 
@@ -71,17 +81,19 @@ records stay byte-identical.
    timestamp, inode or host name (`privacy_problems`); every existing record keeps validating;
    every created loop device, mount, image and network directory is removed.
 3. Accepted failure classes: finite fixtures do not prove every race or a privileged forger
-   (ADR 0120 residual); `kept-or-server-stamped` is ambiguous by method (disclosed); coarse-tick
-   evidence on a fine-grained or multigrain kernel shows only that this kernel detects same-tick
-   edits, not that every kernel would.
+   (ADR 0120 residual); same-tick evidence shows only that this host's kernel (7.3, multigrain
+   ctime) detects same-tick edits, not that every kernel would, and selftests therefore assert
+   zero-wait detection on no CI kernel; the probe's wire claim rests on upstream source, not a
+   capture (needs root).
 4. Covered elsewhere: production reuse allowlist and ADR amendment — future post-verdict issue.
 
 ## Success
 
-- ext4 and xfs `/2` oracle records at both waits: every `meta-ctime` row in O1–O13 other than
-  O5/O8 detected, `meta` missing O1 and O10, no `invalid` row, and the zero-wait records report
+- ext4 and xfs `/2` oracle records at both waits: each `meta-ctime` row in O1–O13 detected except
+  O5 and O8 (no content change), `meta` missing O1 and O10, no `invalid` row, and the zero-wait records report
   how many rows had `same_coarse_tick: true`.
-- One `/2` probe record covering ext4, xfs and the network share with its `client_change_time`.
+- One `/2` probe record covering ext4, xfs and the network share; the report states the
+  network answer, or "not measurable with available tooling" for an ambiguous outcome.
 - The decision report states per filesystem whether ADR 0120's O1/O10 bar is met.
 - `just media-evidence-fingerprint-selftest`, `just media-evidence-reuse-selftest` and
   `just ci` pass; every committed record validates.
