@@ -29,11 +29,16 @@ First durable observation improves by 98.4% under the protocol's thresholds; com
 reads and CPU show no regression. The same content hashes were published in every repetition.
 
 ADR 0077 rejected "publish identity during batch acceptance" because a failed session would
-leave partial catalog mutations that cleanup must undo. That ground assumes retirement and
-publication have to move together. ADR 0067 already separates them: absence is decided only
-at completion, from the session's observed locators against its start high-water mark, and a
-location the session creates sits above that mark, so it is never one of that session's
-retirement candidates.
+leave partial catalog mutations that cleanup must undo. ADR 0067 rejected stamping
+`last_scan_session_id` onto locations as batches arrive, because a failed or malicious partial
+stream would mutate authoritative catalog state and make later absence classification depend
+on cleanup of provisional writes. Both grounds concern absence. Absence is decided only at
+completion, from the session's observed locators against its start high-water mark; a location
+the session creates sits above that mark, so it is never one of that session's retirement
+candidates, and nothing here stamps `last_scan_session_id` early. Published identity is not
+absence state, and the owner agent is already trusted to submit the evidence completion
+publishes verbatim: per-batch publication changes when that evidence becomes durable, not who
+may supply it.
 
 ## Decision
 
@@ -43,8 +48,13 @@ reconciliation at completion.
 - **Publication.** Inside the batch-acceptance transaction, after the batch's observation rows
   are accepted, publish each evidence-bearing observation of the batch with ADR 0077's existing
   logic (same-address replay, hardlink attach, fresh ingest, media snapshot, sidecar bundle)
-  under a savepoint. A publication error rolls back the whole batch. Exact replays and ledger
-  replays return the stored outcome and publish nothing. Completion publishes nothing.
+  under a savepoint, and mark the batch published. A publication error rolls back the whole
+  batch. Exact replays and ledger replays return the stored outcome and publish nothing.
+- **Completion publishes only unmarked batches.** Completion publishes the evidence of any
+  accepted batch not marked published, in sequence order, before reconciling absence. That
+  covers a batch accepted by a control plane that predates this decision, for example one
+  upgraded while a scan runs; in steady state it publishes nothing. The mark is an additive
+  column (ADR 0013).
 - **Cadence.** The owner pump submits each observation without waiting to fill a batch. The
   1,000-observation and byte budgets stay as upper bounds.
 - **Absence reconciliation is unchanged.** Completion stays the only absence linearization
@@ -61,16 +71,17 @@ reconciliation at completion.
   published, and retires nothing. Each is agreed hash and probe evidence that a successful
   completion would have published unchanged. No rollback or cleanup path exists; the next scan
   reconciles absence.
-- **No setting.** Batch-time publication replaces completion publication.
+- **No setting.** Batch-time publication replaces completion publication; completion keeps
+  only the backstop above.
 
 ## Consequences
 
-- On the measured corpus a file is plannable about 11 s after the scan request instead of
-  about 11 minutes.
+- On the measured corpus the first identity is durable about 11 s after the scan request
+  instead of about 11 minutes.
 - A plan made while a scan runs sees a partly refreshed root: some files carry this session's
-  identity and snapshot (ADR 0131), the rest only earlier ones. Transform input re-verifies the
-  full hash (ADR 0120), so a plan built on superseded facts fails closed instead of acting on
-  other bytes.
+  identity and snapshot (ADR 0131), the rest only earlier ones. Whether that is safe for
+  planning and transforms is not claimed here; ADR 0120's transform-input full hash is the
+  existing guard, and #841 did not exercise it.
 - A failed session can leave new identities without a succeeded session. A reader must not
   treat "published" as "scanned by a completed session"; `last_scan_session_id` stays that
   signal. No reader makes the equation today.
@@ -79,9 +90,12 @@ reconciliation at completion.
 - One writer transaction per batch replaces one large completion transaction: more, shorter
   write locks. On the measured corpus 34 batches cost nothing measurable on complete time;
   roots of many small files were not measured.
-- The control plane and owner agent change together: an old agent's large batches would still
-  publish, just later, and a new agent against an old control plane publishes at completion as
-  today. Neither pairing loses or duplicates identity.
+- Mixed versions publish everything once. An old agent's large batches publish when each is
+  accepted, just later. A new agent against an old control plane publishes at completion as
+  today. A control plane upgraded mid-scan publishes the old batches at completion through the
+  backstop. A control plane downgraded mid-scan publishes at completion again, and the
+  same-address path resolves locations an earlier batch already published to the same
+  identity, recording one more media snapshot each.
 - The 100,000-observation session ceiling and per-observation evidence bounds are unchanged.
 - Not measured: the network corpus, probe-reuse-on cells, failure and restart paths, and
   concurrent planning during a scan.
