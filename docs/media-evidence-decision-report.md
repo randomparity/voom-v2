@@ -8,7 +8,8 @@ re-scope drafts behind [ADR 0120](adr/0120-phase-specific-media-evidence.md), fo
 (34 files, 935.3 GB) and a three-file subset (24.7 GB) of a network corpus shared with an
 active rehearsal. Every figure is copied from the committed records and READMEs named in each
 row. Nothing was re-measured for this report; the concurrency row was amended on 2026-11-17
-with the full-pass records of #839.
+with the full-pass records of #839, and the observe-buffer row was added on 2026-11-17 from
+#838.
 
 ## Evidence
 
@@ -19,6 +20,7 @@ as-found subset. A constructed miss shows a candidate *can* miss. It is not a ra
 |---|---|---|---|---|---|
 | Current: three full reads, 8 KiB hash, concurrency 4 | #788 [README](media-evidence-baseline/README.md) | Local 2,805.9 GB logical, 2,765.8 GB physical, wall 613.9 s, hash CPU 684.5 s, probe CPU 805.0 s; network 74.0 GB logical | baseline | none in O1–O12 | Kept in every phase except where a row below replaces it |
 | 64 KiB, 1 MiB, 4 MiB hash buffer; batched 8 KiB loop | #789 [stages 1–2](media-evidence-baseline/stages-1-2.md) | Hash CPU 222.9 / 157.1 / 170.5 / 230.4 s; summed hash 805.8 / 798.5 / 803.9 / 818.2 s; hash peak RSS 5.7 / 14.9 / 38.8 / 4.8 MiB | CPU improvement for all four; summed hash improvement except batch8k; wall inconclusive | none (no trust change) | **1 MiB selected** for the owner hash; others rejected |
+| 1 MiB buffer in `observe_file_facts` (transform input, output verification, probe re-hash) against 16 KiB | #838 [observe](media-evidence-baseline/observe/README.md) | Local, 4 in flight, one read per file, evicted and as-found: CPU 333.4–360.6 → 150.4–155.3 s per pass (−54 to −58%); wall 223–225 s and physical 926.5–935.2 GB unchanged; peak RSS about 4 → 21 MiB; identical hashes | CPU improvement on all four paths in both cache states; wall, summed observe seconds and physical inconclusive; no guardrail breach; 1 MiB **go** | none (no trust change) | Production change tracked in #879; the ADR 0120 phase rows are unchanged until it lands |
 | Concurrency 8 (local) | #789 | Wall 642.3 vs 619.2 s; first file 17.1 vs 10.3 s; summed hash 1,814.9 vs 798.5 s | wall inconclusive; first file and summed hash regression | none | Rejected |
 | Concurrency 1, 2 (c1: 6-file local subset; c2: full local pass, network subset) | #789; #839 [concurrency](media-evidence-baseline/concurrency/README.md) (amended 2026-11-17) | Full pass, c2 vs matched c4, reuse on: wall 200.0 vs 225.0 s, first file done 9.3 vs 6.2 s, physical 935.5 GB both; reuse off: wall 603.3 vs 659.4 s, first file done 27.1 vs 10.8 s, physical 2,686.9 vs 2,736.0 GB. Subset (same first file in both cells): c2 first file 7.0 vs 10.8 s; c1 wall 98.6 vs 78.1 s | Reuse on: wall improvement, first file regression; reuse off: wall, first file and physical inconclusive (first-file baseline CV 21.8%); c1 wall regression; network inconclusive (CV above 20%, unmatched cache) | none | Not selected: c2 shortens the read-once pass 11%; its later full-pass first replay completion comes from manifest order (c2's first window holds two large files), and neither metric is first durable observation (#841); concurrency stays 4 |
 | Bounded incremental publication, flush cadence | #789 (modelled) | Under the completion barrier no cadence moves first durable observation | modelled only | none | Not selected |
@@ -165,6 +167,9 @@ Carried from the records:
   #796 and #798 also did not measure per-file physical bytes, peak memory or probing.
 - Not measured in #790: server-side or other-client changes on the network share, whether a
   client-sent ChangeTime is honoured, and transform-input reuse.
+- Not measured in #838: a whole transform or verification around the hash (outputs observed
+  while their write is cached, CPU contention from ffmpeg or mkvmerge), the network corpus, and
+  the 16 KiB hashes in `voom-control-plane` artifact promotion and the node agent's commit.
 - ctime behaviour was measured on btrfs and tmpfs only, on a kernel with fine-grained ctime.
   The oracle waited 20 ms before each edit, so same-tick edits on a coarse-clock kernel were
   not constructed.
