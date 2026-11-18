@@ -223,3 +223,113 @@ the runs, so no detection rate was observed.
   written.
 - The tmpfs and btrfs probes and oracles wrote only to scratch directories they removed. The
   btrfs scratch directory is on the local corpus's filesystem, outside the corpus.
+
+## ext4, xfs and network ChangeTime (#840)
+
+Captured on 2026-11-17 from `27bf545d` with a clean tree, under the
+[#840 design](../../workflow/specs/2026-11-17-reuse-fs-evidence-840-design.md). Kernel
+7.3.3 (Fedora 44), whose ext4 and xfs use multigrain timestamps. The four oracle records use
+schema `media-evidence-fingerprint-oracle/2` and the probe record uses
+`media-evidence-reuse-ctime-probe/2`. Schema 1 records above are unchanged.
+
+Schema 2 changes three things in the oracle:
+
+- `--tick-wait` sets the wait before each construction's change. Earlier records waited 20 ms.
+- Before the "before" observation, the oracle primes ctime by setting the mtime to its own value.
+  Each row then records `same_coarse_tick`. It is true when the Linux coarse realtime clock did
+  not advance between the prime and the change. A true row is a same-tick construction: a kernel
+  that stamps ctime from the coarse clock alone would give equal ctimes.
+- O10 for `meta` and `meta-ctime` is now constructed. It reproduces the reuse guard's window:
+  stat, then a same-size edit with the mtime restored while a reader holds the file, then stat
+  again. For a stat-only guard this is O1's stat/edit/stat shape plus an open reader, so it is
+  not independent evidence. `meta` is the control and must miss it.
+
+### Setup
+
+The scratch filesystems were 1 GiB sparse image files, formatted as the user with default
+`mkfs.ext4` (256-byte inodes, `extra_isize`) and default `mkfs.xfs`. They were loop-mounted
+`rw,relatime`, and the operator did the mounting. Fixtures were written only inside the
+oracle's and the probe's own scratch directories, and both remove those directories.
+
+The network scratch share is a fresh directory under the operator-designated scratch share. It
+is **a different share on the same server** as the network corpus the 2026-10-29 sections
+above describe. The client mounts it SMB 3.0 with `nounix,mapposix` and a 1 s attribute cache.
+The probe removed its own directory and the run removed the parent directory it had created; a
+listing afterwards showed no residue.
+
+```sh
+python3 scripts/media-evidence-fingerprint.py oracle --candidates meta,meta-ctime \
+  --tick-wait 0.02 --scratch-parent <ext4-mount> \
+  --output docs/media-evidence-baseline/reuse/2026-11-17-reuse-oracle-ext4.json
+python3 scripts/media-evidence-fingerprint.py oracle --candidates meta,meta-ctime \
+  --tick-wait 0 --scratch-parent <ext4-mount> \
+  --output docs/media-evidence-baseline/reuse/2026-11-17-reuse-oracle-ext4-no-wait.json
+# the same two commands for xfs
+python3 scripts/media-evidence-reuse.py ctime-probe \
+  --manifest <private-dir>/local-manifest.json --manifest <private-dir>/network-manifest.json \
+  --scratch-parent <ext4-mount> --scratch-parent <xfs-mount> \
+  --scratch-parent <fresh-dir-on-the-scratch-share> \
+  --output docs/media-evidence-baseline/reuse/2026-11-17-reuse-ctime-probe-ext4-xfs-network.json
+```
+
+### Oracle
+
+At both waits and on both filesystems the outcomes are identical, with no `invalid` row:
+
+| Case | `meta` (control) | `meta-ctime` |
+|---|---|---|
+| O1 interior edit, mtime restored | missed | **detected** |
+| O2, O3, O4, O6, O12 edits, mtime restored | missed | detected |
+| O5 empty: append, truncate | false-change | false-change |
+| O7 mtime differs only in ns | detected | detected |
+| O8 rename | equal | false-change |
+| O9 replacement, same size and mtime | detected | detected |
+| O10 edit under a reader, between the guard's stats | missed | **detected** |
+| O11 ordinary write before use | detected | detected |
+| O13 stale cache, mtime restored | missed | **detected** |
+
+In the zero-wait records the coarse clock stayed in one tick for 11 of 13 `meta-ctime` rows on
+ext4 and 12 of 13 on xfs. On both filesystems those rows include O1, O10 and O13. So the
+detections in the ADR 0120 bar hold for **same-tick** edits on this kernel. They are not evidence
+for a kernel without fine-grained or multigrain ctime. In the 20 ms records every witness is
+`false`, as the wait spans more than one 1 ms tick.
+
+### Probe
+
+| Step | ext4 | xfs | network scratch share |
+|---|---|---|---|
+| read (control) | unchanged | unchanged | unchanged |
+| content write | changed | changed | changed |
+| `utime()` | changed | changed | changed |
+| content write, mtime restored (O1) | changed | changed | changed at once, **unchanged after 2 s** |
+| `chmod` | changed | changed | changed at once, **unchanged after 2 s** |
+| rename | changed | changed | unchanged |
+
+No step changed the inode. The inode generation was `unchanged` on ext4 and xfs and
+`unsupported` on the share. This share behaves as the 2026-10-29 network mount did: the ctime the
+client reports follows the mtime.
+
+**Client-set ChangeTime: not kept** (`client_change_time: follows-mtime`). The probe set the
+mtime with `utime()` through the mounted kernel SMB client. Per upstream `fs/smb/client/inode.c`
+(`cifs_set_file_info`), that client sends its current time as `ChangeTime`, alongside
+`LastWriteTime`, in one SMB2 SET_INFO FileBasicInformation request. The wire itself was not
+captured, which would need root. After a 2 s settle, beyond the 1 s attribute cache, the server
+reported a ChangeTime equal to the LastWriteTime just set, not the client's time. A client-sent
+ChangeTime is therefore not what this server reports.
+
+Not measured (the record's `not_measured`): sending a chosen ChangeTime value, which needs an
+authenticated user-space SMB client this host does not have, and server-side changes.
+
+### Verdict against ADR 0120's bar
+
+ADR 0120 requires the hash-to-probe O1 and mid-read O10 constructions to be detected before a
+filesystem joins the reuse list.
+
+- **ext4: met** by this oracle, at 20 ms and same-tick on kernel 7.3.3.
+- **xfs: met** by this oracle, at 20 ms and same-tick on kernel 7.3.3.
+- **Network scratch share: not met.** ctime follows mtime, so O1 cannot be detected, and the
+  server does not report a client-sent ChangeTime.
+
+The instrument is the Python oracle's stat model of the guard. #794's production rollout guard
+cases were not run on ext4 or xfs. Adding a filesystem to `reuse_listed` stays a separate change
+with its own ADR amendment.
