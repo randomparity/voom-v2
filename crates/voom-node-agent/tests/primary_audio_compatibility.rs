@@ -99,6 +99,7 @@ fn owner_config(
                 provider_locator: root.to_path_buf(),
             }],
             probe_hash_reuse: false,
+            scan_per_file_publication: false,
             workers,
         },
         node_token: SecretString::from(token.to_owned()),

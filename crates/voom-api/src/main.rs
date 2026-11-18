@@ -29,7 +29,7 @@ impl StartupDiagnostic {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     init_tracing();
-    match run().await {
+    match Box::pin(run()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(diagnostic) => {
             tracing::error!(
@@ -75,6 +75,7 @@ async fn run() -> Result<(), StartupDiagnostic> {
     let control_plane = ControlPlane::open(&runtime_config.database_url)
         .await
         .map_err(|error| database_diagnostic("open_control_plane_database", &error))?;
+    let control_plane = server_config.configure_control_plane(control_plane);
     let termination = termination_signal()?;
     let recovery = voom_api::recovery::run(control_plane.clone());
     let router = router_with_control_plane(health_plane, control_plane);

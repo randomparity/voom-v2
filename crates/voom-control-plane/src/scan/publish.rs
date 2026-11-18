@@ -54,6 +54,17 @@ pub(super) async fn publish_session_evidence_in_tx(
 ) -> Result<PublicationSummary, VoomError> {
     let observations =
         SqliteScanSessionRepo::session_observations_in_tx(tx, scan_session_id).await?;
+    publish_observations_in_tx(control_plane, tx, &observations, storage_root_id, now).await
+}
+
+/// Publish identity for the evidence-bearing members of `observations`, in order.
+pub(super) async fn publish_observations_in_tx(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    observations: &[ScanObservation],
+    storage_root_id: StorageRootId,
+    now: OffsetDateTime,
+) -> Result<PublicationSummary, VoomError> {
     let mut summary = PublicationSummary {
         published: 0,
         hardlinked: 0,
@@ -65,7 +76,7 @@ pub(super) async fn publish_session_evidence_in_tx(
         let hardlink = publish_one(
             control_plane,
             tx,
-            &observation,
+            observation,
             &evidence,
             storage_root_id,
             now,

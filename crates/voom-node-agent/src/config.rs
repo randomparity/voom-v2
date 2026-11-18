@@ -36,6 +36,10 @@ pub struct AgentConfig {
     /// unless set; turning it off is the rollback.
     #[serde(default)]
     pub probe_hash_reuse: bool,
+    /// Research spike (#841): flush every scan observation as its own batch so
+    /// a per-file-publishing control plane can publish it at once.
+    #[serde(default)]
+    pub scan_per_file_publication: bool,
     pub workers: Vec<WorkerConfig>,
 }
 

@@ -55,6 +55,8 @@ pub(crate) struct ScanPumpContext {
     pub storage_roots: HashMap<u64, PathBuf>,
     /// Send the ADR 0120 reuse guard with each primary probe.
     pub probe_hash_reuse: bool,
+    /// Flush each observation as its own batch (#841 spike).
+    pub scan_per_file_publication: bool,
 }
 
 /// What one candidate contributed to the run counters.
@@ -966,6 +968,14 @@ async fn wait_for_endpoint(
     }
 }
 
+/// The count and byte budgets bound every batch; per-file publication (#841
+/// spike) flushes each observation as soon as it is buffered.
+fn flush_due(buffered: usize, estimated_bytes: usize, per_file: bool) -> bool {
+    (per_file && buffered > 0)
+        || buffered >= FLUSH_OBSERVATION_COUNT
+        || estimated_bytes >= FLUSH_ESTIMATED_BYTES
+}
+
 /// Ordered idempotent batch submission with a byte-aware flush rule.
 struct BatchSubmitter<'a> {
     client: &'a ControlPlaneClient,
@@ -1001,8 +1011,11 @@ impl<'a> BatchSubmitter<'a> {
     }
 
     fn should_flush(&self) -> bool {
-        self.buffer.len() >= FLUSH_OBSERVATION_COUNT
-            || self.estimated_bytes >= FLUSH_ESTIMATED_BYTES
+        flush_due(
+            self.buffer.len(),
+            self.estimated_bytes,
+            self.context.scan_per_file_publication,
+        )
     }
 
     async fn flush_if_nonempty(&mut self) -> Result<(), PumpFailure> {

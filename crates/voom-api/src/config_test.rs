@@ -147,3 +147,27 @@ fn limits_reject_each_zero_value() -> TestResult {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn scan_per_file_publication_flag_reaches_the_control_plane() -> TestResult {
+    let database = voom_test_support::TempDatabase::new()?;
+    let url = voom_store::test_support::sqlite_url_for(database.path());
+    voom_store::init(&url).await?;
+    for (arguments, expected) in [
+        (vec!["voom-api", "--allow-cleartext-loopback"], false),
+        (
+            vec![
+                "voom-api",
+                "--allow-cleartext-loopback",
+                "--scan-per-file-publication",
+            ],
+            true,
+        ),
+    ] {
+        let config = Cli::try_parse_from(arguments)?.validate()?;
+        let control_plane =
+            config.configure_control_plane(voom_control_plane::ControlPlane::open(&url).await?);
+        assert_eq!(control_plane.scan_per_file_publication(), expected);
+    }
+    Ok(())
+}

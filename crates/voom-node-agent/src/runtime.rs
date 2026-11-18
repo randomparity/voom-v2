@@ -583,6 +583,7 @@ impl AgentRuntime {
                 worker: (*worker).clone(),
                 storage_roots: storage_roots.clone(),
                 probe_hash_reuse: self.config.config.probe_hash_reuse,
+                scan_per_file_publication: self.config.config.scan_per_file_publication,
                 fatal_tx: fatal_tx.clone(),
             };
             let coordinator_rng = derive_schedule_rng(schedule_rng);
@@ -760,6 +761,8 @@ pub(crate) struct CoordinatorContext {
     pub(crate) storage_roots: HashMap<u64, PathBuf>,
     /// Owner-node `probe_hash_reuse` setting, consumed by the scan pump.
     pub(crate) probe_hash_reuse: bool,
+    /// Owner-node `scan_per_file_publication` setting (#841 spike).
+    pub(crate) scan_per_file_publication: bool,
     pub(crate) fatal_tx: mpsc::UnboundedSender<RuntimeFatal>,
 }
 
@@ -1336,6 +1339,7 @@ async fn scan_library_outcome(
             progress_timeout: context.progress_timeout,
             storage_roots: context.storage_roots.clone(),
             probe_hash_reuse: context.probe_hash_reuse,
+            scan_per_file_publication: context.scan_per_file_publication,
         },
     )
     .await

@@ -381,6 +381,7 @@ fn context(
         endpoints,
         storage_roots,
         probe_hash_reuse: false,
+        scan_per_file_publication: false,
         fatal_tx: tokio::sync::mpsc::unbounded_channel().0,
     }
 }

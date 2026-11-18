@@ -507,14 +507,17 @@ impl ControlPlane {
         let mut mutation =
             voom_store::tx::begin_savepoint(&mut tx, "scan completion publication savepoint")
                 .await?;
-        super::publish::publish_session_evidence_in_tx(
-            self,
-            &mut mutation,
-            session.id,
-            session.storage_root_id,
-            now,
-        )
-        .await?;
+        // Per-file publication (#841 spike) already published at batch acceptance.
+        if !self.scan_per_file_publication {
+            super::publish::publish_session_evidence_in_tx(
+                self,
+                &mut mutation,
+                session.id,
+                session.storage_root_id,
+                now,
+            )
+            .await?;
+        }
         let completion = self
             .scan_sessions
             .complete_in_tx(
@@ -575,6 +578,9 @@ impl ControlPlane {
                 .stale_remote_scan(tx, &replay, session, error, now)
                 .await;
         }
+        let published = self
+            .scan_per_file_publication
+            .then(|| input.observations.clone());
         let outcome = self
             .scan_sessions
             .accepted_batch_in_tx(
@@ -596,6 +602,21 @@ impl ControlPlane {
             Ok(outcome) => RemoteScanBatchOutcome::from(outcome),
             Err(error) => return self.finish_scan_error(tx, &replay, error).await,
         };
+        if let Some(observations) = published {
+            // Any publication error rolls back the whole batch transaction.
+            let mut mutation =
+                voom_store::tx::begin_savepoint(&mut tx, "scan batch publication savepoint")
+                    .await?;
+            super::publish::publish_observations_in_tx(
+                self,
+                &mut mutation,
+                &observations,
+                session.storage_root_id,
+                now,
+            )
+            .await?;
+            commit_tx(mutation).await?;
+        }
         append_batch_event(self, &mut tx, &outcome, now).await?;
         self.complete_scan_ok_in_tx(&mut tx, &replay, &outcome)
             .await?;

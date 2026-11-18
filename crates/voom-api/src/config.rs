@@ -35,6 +35,10 @@ pub struct Cli {
     /// Explicitly allow HTTP when --bind is IPv4 or IPv6 loopback.
     #[arg(long)]
     allow_cleartext_loopback: bool,
+
+    /// Research spike (#841): publish agreed scan evidence at batch acceptance.
+    #[arg(long)]
+    scan_per_file_publication: bool,
 }
 
 impl Cli {
@@ -69,6 +73,7 @@ impl Cli {
             bind: self.bind,
             transport,
             limits: ServerLimits::default(),
+            scan_per_file_publication: self.scan_per_file_publication,
         })
     }
 }
@@ -154,9 +159,19 @@ pub struct ServerConfig {
     bind: SocketAddr,
     transport: TransportConfig,
     limits: ServerLimits,
+    scan_per_file_publication: bool,
 }
 
 impl ServerConfig {
+    /// Apply this server's scan publication setting (#841 spike) to its control plane.
+    #[must_use]
+    pub fn configure_control_plane(
+        &self,
+        control_plane: voom_control_plane::ControlPlane,
+    ) -> voom_control_plane::ControlPlane {
+        control_plane.with_scan_per_file_publication(self.scan_per_file_publication)
+    }
+
     #[must_use]
     pub fn database_url(&self) -> Option<&str> {
         self.database_url.as_deref()

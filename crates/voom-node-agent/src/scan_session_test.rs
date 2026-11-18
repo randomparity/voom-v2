@@ -253,6 +253,7 @@ async fn pump_fixture() -> PumpFixture {
                 name: "VOOM_TEST_TOKEN".to_owned(),
             },
             probe_hash_reuse: false,
+            scan_per_file_publication: false,
             workers: Vec::new(),
             storage_roots: Vec::new(),
         },
@@ -310,6 +311,7 @@ fn pump_context(node_id: NodeId, incarnation_id: NodeIncarnationId) -> ScanPumpC
         progress_timeout: Duration::from_secs(5),
         storage_roots: std::collections::HashMap::new(),
         probe_hash_reuse: false,
+        scan_per_file_publication: false,
     }
 }
 
@@ -1758,4 +1760,12 @@ async fn guarded_probe_crash_publishes_nothing() {
 #[tokio::test]
 async fn hash_crash_publishes_nothing() {
     assert_crash_publishes_nothing(SingleFileBehavior::StreamEnd, SingleFileBehavior::Agree).await;
+}
+
+#[test]
+fn per_file_publication_flushes_every_observation() {
+    assert!(!super::flush_due(0, 0, true));
+    assert!(super::flush_due(1, 10, true));
+    assert!(!super::flush_due(1, 10, false));
+    assert!(super::flush_due(1000, 10, false));
 }

@@ -151,6 +151,9 @@ pub struct ControlPlane {
     clock: Arc<dyn Clock>,
     rng: SharedRng,
     local_node_id: Option<NodeId>,
+    /// Research spike (#841): publish agreed scan evidence at batch acceptance
+    /// instead of in the completion transaction. Off unless set at startup.
+    scan_per_file_publication: bool,
     pub(crate) events: SqliteEventRepo,
     pub(crate) jobs: SqliteJobRepo,
     pub(crate) tickets: SqliteTicketRepo,
@@ -205,6 +208,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("artifact_commit_intents", &self.artifact_commit_intents)
             .field("remote_idempotency", &self.remote_idempotency)
             .field("scan_sessions", &self.scan_sessions)
+            .field("scan_per_file_publication", &self.scan_per_file_publication)
             .field("artifact_access_plans", &self.artifact_access_plans)
             .field("artifacts", &self.artifacts)
             .field("audio_extract_operations", &self.audio_extract_operations)
@@ -354,7 +358,21 @@ impl ControlPlane {
             clock,
             rng,
             local_node_id: None,
+            scan_per_file_publication: false,
         }
+    }
+
+    /// Research spike (#841): move scan publication from completion to batch
+    /// acceptance. Absence reconciliation stays at completion either way.
+    #[must_use]
+    pub fn with_scan_per_file_publication(mut self, enabled: bool) -> Self {
+        self.scan_per_file_publication = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn scan_per_file_publication(&self) -> bool {
+        self.scan_per_file_publication
     }
 
     /// Configure the exact logical node whose filesystem namespace this

@@ -680,3 +680,24 @@ fn root_activation_config_rejects_zero_duplicate_and_oversized_bindings() {
     config.storage_roots.pop();
     config.validate().unwrap();
 }
+
+#[test]
+fn scan_per_file_publication_defaults_off_and_parses() {
+    let fixture = ConfigFixture::new("token");
+    assert!(
+        !AgentConfig::load(&fixture.config_path)
+            .unwrap()
+            .config
+            .scan_per_file_publication
+    );
+    fixture.rewrite(&fixture.document.replace(
+        "shutdown_grace_seconds = 10\n",
+        "shutdown_grace_seconds = 10\nscan_per_file_publication = true\n",
+    ));
+    assert!(
+        AgentConfig::load(&fixture.config_path)
+            .unwrap()
+            .config
+            .scan_per_file_publication
+    );
+}
