@@ -37,7 +37,10 @@ _spec = importlib.util.spec_from_file_location(
 baseline = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(baseline)
 
-ORACLE_SCHEMA = "media-evidence-fingerprint-oracle/1"
+ORACLE_SCHEMA_V1 = "media-evidence-fingerprint-oracle/1"
+# /2 (#840): a configurable tick wait, a coarse-tick witness per row, metadata O10 constructed.
+ORACLE_SCHEMA = "media-evidence-fingerprint-oracle/2"
+ORACLE_SCHEMAS = {ORACLE_SCHEMA_V1, ORACLE_SCHEMA}
 RUN_SCHEMA = "media-evidence-fingerprint-run/1"
 UNAVAILABLE = baseline.UNAVAILABLE
 RECORD_DIR = baseline.REPO_ROOT / "docs" / "media-evidence-baseline" / "fingerprint"
@@ -74,6 +77,9 @@ SIDECAR_BYTES = 4 * KIB
 # Kernels without fine-grained timestamps stamp ctime from a clock that ticks every few ms. A
 # construction waits this long so it never shares a tick with the observation before it.
 CLOCK_TICK_SECONDS = 0.02
+# Linux CLOCK_REALTIME_COARSE (linux/time.h id 5), the clock coarse ctime stamps come from.
+# Python's time module does not export the name.
+COARSE_CLOCK = 5 if sys.platform.startswith("linux") else None
 # An even whole second, so +100 ns and +900 ns share their 1 s and 2 s buckets (O7).
 BASE_MTIME_NS = 1_600_000_000 * 1_000_000_000
 BUMPED_MTIME_NS = BASE_MTIME_NS + 1_000_000_000
@@ -94,7 +100,9 @@ CONSTRUCTIONS = {
     "O8": "large fixture renamed within its directory; bytes unchanged",
     "O9": "replacement written under a temporary name with an interior edit and the same "
           "size and mtime, renamed over the still-open original",
-    "O10": "a byte already read is changed and mtime set 1 s later between two reads",
+    "O10": "a byte already read is changed and mtime set 1 s later between two reads; for "
+           "meta and meta-ctime, a same-size edit with mtime restored while a reader holds "
+           "the file, between the stat before and the stat after",
     "O11": "fingerprint, then an interior edit with mtime set 1 s later, then re-fingerprint "
            "before use",
     "O12": "4 KiB sidecar beside an unchanged primary; sidecar edit at the first unread byte; "
@@ -282,10 +290,12 @@ def edit_restoring_mtime(path: Path, offset: int) -> None:
 class Oracle:
     """Builds each case in its own directory under one scratch root."""
 
-    def __init__(self, scratch: Path, large: bytes):
+    def __init__(self, scratch: Path, large: bytes, tick_wait: float):
         self.scratch = scratch
         self.large = large
+        self.tick_wait = tick_wait
         self.seed = 0
+        self.same_tick: bool | None = None
         self.cases = {
             "O1": self.interior_edit, "O2": self.head_edit, "O3": self.tail_edit,
             "O4": self.short_file, "O5": self.empty_file, "O6": self.overlap,
@@ -299,6 +309,7 @@ class Oracle:
         self.seed = random.Random(f"{case}-{candidate}").getrandbits(64)
         directory = self.scratch / f"{case}-{candidate}"
         directory.mkdir()
+        self.same_tick = None
         try:
             outcome, reference = self.cases[case](directory, candidate)
             reason = None
@@ -308,14 +319,27 @@ class Oracle:
         finally:
             shutil.rmtree(directory)
         return {"case": case, "candidate": candidate, "outcome": outcome,
-                "reference": reference, "reason": reason}
+                "reference": reference, "reason": reason, "same_coarse_tick": self.same_tick}
+
+    def prime(self, path: Path) -> int | None:
+        """Stamp ctime now without changing mtime or bytes; return the coarse clock first."""
+        start = coarse_now()
+        set_mtime(path, os.stat(path).st_mtime_ns)
+        return start
+
+    def note_tick(self, start: int | None) -> None:
+        """Whether the coarse clock stayed in one tick from the prime through the change."""
+        self.same_tick = None if start is None else start == coarse_now()
 
     def compare(self, path: Path, candidate: str, change: Callable[[Path], Path],
                 expect_change: bool) -> tuple[str, str]:
         """Fingerprint, apply `change` (which returns the path to re-observe), and classify."""
-        before, reference = self.fingerprint(path, candidate), reference_digest(path)
-        time.sleep(CLOCK_TICK_SECONDS)
+        reference = reference_digest(path)
+        start = self.prime(path)
+        before = self.fingerprint(path, candidate)
+        time.sleep(self.tick_wait)
         after_path = change(path)
+        self.note_tick(start)
         after = self.fingerprint(after_path, candidate)
         changed = reference_digest(after_path) != reference
         require(changed == expect_change, "reference_mismatch")
@@ -417,7 +441,7 @@ class Oracle:
 
     def change_during_observation(self, directory, candidate):
         if candidate in METADATA_CANDIDATES:
-            return "not-applicable", "not-applicable"
+            return self.guard_window(directory, candidate)
         path = self.large_fixture(directory)
         reference = reference_digest(path)
 
@@ -432,6 +456,18 @@ class Oracle:
             outcome = "detected"
         require(reference_digest(path) != reference, "reference_mismatch")
         return outcome, "changed"
+
+    def guard_window(self, directory, candidate):
+        """The reuse guard's window: stat, a reader mid-file meets an edit, stat again."""
+        path = self.large_fixture(directory)
+        offset = self.first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
+
+        def edit_under_reader(target: Path) -> Path:
+            with target.open("rb") as reader:
+                reader.read(SAMPLE_BYTES)
+                return edit_and_return(target, offset)
+
+        return self.compare(path, candidate, edit_under_reader, True)
 
     def change_during_use(self, directory, candidate):
         path = self.large_fixture(directory)
@@ -457,14 +493,20 @@ class Oracle:
 
     def stale_cache(self, directory, candidate):
         path = self.large_fixture(directory)
-        cache = {self.fingerprint(path, candidate): reference_digest(path)}
+        reference = reference_digest(path)
         offset = self.first_unread(candidate, len(self.large), MIB, len(self.large) - MIB)
-        time.sleep(CLOCK_TICK_SECONDS)
+        start = self.prime(path)
+        cache = {self.fingerprint(path, candidate): reference}
+        time.sleep(self.tick_wait)
         edit_restoring_mtime(path, offset)
+        self.note_tick(start)
         cached = cache.get(self.fingerprint(path, candidate))
-        current = reference_digest(path)
-        require(current not in cache.values(), "reference_mismatch")
+        require(reference_digest(path) != reference, "reference_mismatch")
         return ("missed" if cached is not None else "detected"), "changed"
+
+
+def coarse_now() -> int | None:
+    return None if COARSE_CLOCK is None else time.clock_gettime_ns(COARSE_CLOCK)
 
 
 def edit_and_return(path: Path, offset: int) -> Path:
@@ -486,12 +528,13 @@ def failure_code(error: BaseException) -> str:
     return errno.errorcode.get(getattr(error, "errno", None) or 0, "io_error")
 
 
-def run_oracle(scratch_parent: Path, candidates: list[str] | None = None) -> dict[str, Any]:
+def run_oracle(scratch_parent: Path, candidates: list[str] | None = None,
+               tick_wait: float = CLOCK_TICK_SECONDS) -> dict[str, Any]:
     candidates = candidates or list(CANDIDATES)
     large = random.Random(796).randbytes(LARGE_BYTES)
     scratch = Path(tempfile.mkdtemp(prefix="fingerprint-oracle-", dir=scratch_parent))
     try:
-        oracle = Oracle(scratch, large)
+        oracle = Oracle(scratch, large, tick_wait)
         rows = [oracle.run(case, candidate) for case in CONSTRUCTIONS for candidate in candidates]
         scratch_type = baseline.filesystem_type(scratch)
     finally:
@@ -504,7 +547,7 @@ def run_oracle(scratch_parent: Path, candidates: list[str] | None = None) -> dic
             "candidates": candidate_parameters(candidates),
             "large_fixture_bytes": LARGE_BYTES, "short_fixture_bytes": SHORT_BYTES,
             "overlap_fixture_bytes": OVERLAP_BYTES, "sidecar_bytes": SIDECAR_BYTES,
-            "scratch_filesystem_type": scratch_type,
+            "scratch_filesystem_type": scratch_type, "tick_wait_seconds": tick_wait,
         },
         "constructions": CONSTRUCTIONS,
         "excluded_cases": EXCLUDED_CASES,
@@ -710,8 +753,10 @@ HOST_KEYS = {"os", "machine", "cpu_count", "memory_bytes", "python"}
 CASE_KEYS = {"case", "candidate", "outcome", "reference", "reason"}
 
 
-def case_problems(row: dict[str, Any], candidates: set[str]) -> list[str]:
+def case_problems(row: dict[str, Any], candidates: set[str], v2: bool) -> list[str]:
     problems = baseline.missing("case", row, CASE_KEYS)
+    if v2 and row.get("same_coarse_tick", "missing") not in (True, False, None):
+        problems.append("case same_coarse_tick")
     if row.get("case") not in CONSTRUCTIONS or row.get("candidate") not in candidates:
         problems.append("case identity")
     if row.get("outcome") not in OUTCOMES or row.get("reference") not in REFERENCES:
@@ -719,8 +764,13 @@ def case_problems(row: dict[str, Any], candidates: set[str]) -> list[str]:
     return problems
 
 
+def tick_wait_valid(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+
+
 def validate_oracle(record: dict[str, Any]) -> list[str]:
-    problems = [] if record.get("schema") == ORACLE_SCHEMA else ["schema"]
+    v2 = record.get("schema") == ORACLE_SCHEMA
+    problems = [] if record.get("schema") in ORACLE_SCHEMAS else ["schema"]
     for section in ("build", "host", "parameters", "constructions", "excluded_cases", "cases"):
         if section not in record:
             problems.append(f"missing {section}")
@@ -731,8 +781,10 @@ def validate_oracle(record: dict[str, Any]) -> list[str]:
     candidates = set(record["parameters"].get("candidates", {}))
     if not candidates <= set(ALL_CANDIDATES):
         problems.append("candidates")
+    if v2 and not tick_wait_valid(record["parameters"].get("tick_wait_seconds")):
+        problems.append("tick_wait_seconds")
     for row in record["cases"]:
-        problems += case_problems(row, candidates)
+        problems += case_problems(row, candidates, v2)
     seen = {(row.get("case"), row.get("candidate")) for row in record["cases"]}
     if seen != {(case, name) for case in CONSTRUCTIONS for name in candidates}:
         problems.append("case coverage")
@@ -818,6 +870,13 @@ def validate_run(record: dict[str, Any]) -> list[str]:
     return problems + privacy_problems(record)
 
 
+def non_negative_seconds(text: str) -> float:
+    value = float(text)
+    if not 0 <= value < float("inf"):
+        raise argparse.ArgumentTypeError("--tick-wait must be a finite number >= 0")
+    return value
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -826,6 +885,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     oracle.add_argument("--scratch-parent", type=Path, default=Path(tempfile.gettempdir()))
     oracle.add_argument("--candidates", type=lambda text: text.split(","),
                         default=list(CANDIDATES))
+    oracle.add_argument("--tick-wait", type=non_negative_seconds, default=CLOCK_TICK_SECONDS,
+                        help="seconds between the before observation and the change")
     run = commands.add_parser("run", help="measure candidate cost over a manifest subset")
     run.add_argument("manifest", type=Path)
     run.add_argument("--output", type=Path, required=True)
@@ -847,7 +908,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         if args.command == "oracle":
-            record = run_oracle(args.scratch_parent, args.candidates)
+            record = run_oracle(args.scratch_parent, args.candidates, args.tick_wait)
             problems = validate_oracle(record)
         else:
             record = capture(args)

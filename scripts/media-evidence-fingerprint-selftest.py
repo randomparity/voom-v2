@@ -5,7 +5,9 @@ The oracle runs on synthetic fixtures in a scratch directory, so it runs on any 
 Real-corpus evidence is the committed records, which are validated here too.
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -169,7 +171,7 @@ class OracleTests(unittest.TestCase):
         for candidate in experiment.CANDIDATES:
             self.assertEqual(self.outcomes["O8", candidate], "equal")
             self.assertEqual(self.outcomes["O9", candidate], "detected")
-        self.assertEqual(self.outcomes["O10", "meta"], "not-applicable")
+        self.assertEqual(self.outcomes["O10", "meta"], "missed")
         self.assertEqual(self.outcomes["O10", "ht64"], "detected")
         self.assertEqual(self.outcomes["O12", "meta"], "missed")
 
@@ -180,9 +182,9 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(experiment.validate_oracle(record), [])
         outcomes = {(row["case"], row["candidate"]): row["outcome"] for row in record["cases"]}
         self.assertNotIn("invalid", outcomes.values())
-        for case in ("O1", "O13", "O12"):
+        # The default wait spans a coarse tick, so any CI kernel's ctime moves.
+        for case in ("O1", "O10", "O13", "O12"):
             self.assertEqual(outcomes[case, "meta-ctime"], "detected")
-        self.assertEqual(outcomes["O10", "meta-ctime"], "not-applicable")
         for candidate in ("rnd64-i8", "rnd64-i32"):
             self.assertEqual(outcomes["O1", candidate], "missed")
             self.assertEqual(outcomes["O13", candidate], "missed")
@@ -191,6 +193,50 @@ class OracleTests(unittest.TestCase):
 
     def test_scratch_directory_is_removed(self):
         self.assertEqual(list(Path(self.parent.name).iterdir()), [])
+
+    def test_v2_rows_carry_the_tick_witness(self):
+        with tempfile.TemporaryDirectory() as parent:
+            record = experiment.run_oracle(Path(parent), candidates=["meta", "meta-ctime"],
+                                           tick_wait=0)
+        self.assertEqual(record["schema"], experiment.ORACLE_SCHEMA)
+        self.assertEqual(record["parameters"]["tick_wait_seconds"], 0)
+        self.assertEqual(experiment.validate_oracle(record), [])
+        rows = {(row["case"], row["candidate"]): row for row in record["cases"]}
+        self.assertTrue(all(row["same_coarse_tick"] in (True, False, None)
+                            for row in rows.values()))
+        on_linux = sys.platform.startswith("linux")
+        self.assertEqual(experiment.COARSE_CLOCK, 5 if on_linux else None)
+        timed = [row["same_coarse_tick"] for row in rows.values()]
+        if on_linux:
+            self.assertTrue(all(isinstance(value, bool) for value in timed))
+        else:
+            self.assertTrue(all(value is None for value in timed))
+        # The control: size and mtime alone never see a mtime-restored edit, at any wait.
+        self.assertEqual(rows["O10", "meta"]["outcome"], "missed")
+        self.assertEqual(rows["O1", "meta"]["outcome"], "missed")
+        self.assertNotIn("invalid", {row["outcome"] for row in rows.values()})
+
+    def test_validator_accepts_v1_and_checks_the_v2_fields(self):
+        v1 = json.loads(json.dumps(self.record))
+        v1["schema"] = experiment.ORACLE_SCHEMA_V1
+        del v1["parameters"]["tick_wait_seconds"]
+        for row in v1["cases"]:
+            del row["same_coarse_tick"]
+        self.assertEqual(experiment.validate_oracle(v1), [])
+        for mutate in (lambda row: row.update(same_coarse_tick="yes"),
+                       lambda row: row.pop("same_coarse_tick")):
+            record = json.loads(json.dumps(self.record))
+            mutate(record["cases"][0])
+            self.assertIn("case same_coarse_tick", experiment.validate_oracle(record))
+        for wait in (-1, True, "0"):
+            record = json.loads(json.dumps(self.record))
+            record["parameters"]["tick_wait_seconds"] = wait
+            self.assertIn("tick_wait_seconds", experiment.validate_oracle(record))
+
+    def test_negative_or_non_finite_tick_wait_is_refused(self):
+        for wait in ("-0.1", "nan", "inf"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                experiment.parse_args(["oracle", "--output", "x.json", "--tick-wait", wait])
 
     def test_broken_precondition_is_invalid_not_an_outcome(self):
         original = experiment.set_mtime
@@ -288,7 +334,7 @@ class CorpusBoundTests(unittest.TestCase):
 class CommittedRecordTests(unittest.TestCase):
     def test_committed_records_validate_and_cover_both_corpora(self):
         records = [json.loads(path.read_text()) for path in sorted(RECORD_DIR.glob("*.json"))]
-        oracles = [record for record in records if record["schema"] == experiment.ORACLE_SCHEMA]
+        oracles = [record for record in records if record["schema"] in experiment.ORACLE_SCHEMAS]
         runs = [record for record in records if record["schema"] == experiment.RUN_SCHEMA]
         self.assertEqual(len(oracles) + len(runs), len(records))
         self.assertTrue(oracles)

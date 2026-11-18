@@ -155,7 +155,7 @@ class CommittedRecordTests(unittest.TestCase):
         for record in records:
             by_schema.setdefault(record["schema"], []).append(record)
         validators = {
-            fingerprint.ORACLE_SCHEMA: fingerprint.validate_oracle,
+            fingerprint.ORACLE_SCHEMA_V1: fingerprint.validate_oracle,
             fingerprint.RUN_SCHEMA: fingerprint.validate_run,
             reuse.PROBABILITY_SCHEMA: reuse.validate_probability,
             reuse.PROBE_SCHEMA: reuse.validate_probe,
@@ -164,7 +164,7 @@ class CommittedRecordTests(unittest.TestCase):
         for schema, group in by_schema.items():
             for record in group:
                 self.assertEqual(validators[schema](record), [], schema)
-        oracles = by_schema[fingerprint.ORACLE_SCHEMA]
+        oracles = by_schema[fingerprint.ORACLE_SCHEMA_V1]
         self.assertEqual({record["parameters"]["scratch_filesystem_type"] for record in oracles},
                          {"tmpfs", "btrfs"})
         for record in oracles:
