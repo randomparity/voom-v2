@@ -89,12 +89,16 @@ records stay byte-identical.
 
 ## Success
 
-- ext4 and xfs `/2` oracle records at both waits: each `meta-ctime` row in O1–O13 detected except
-  O5 and O8 (no content change), `meta` missing O1 and O10, no `invalid` row, and the zero-wait records report
-  how many rows had `same_coarse_tick: true`.
+- ext4 and xfs `/2` oracle records at both waits covering O1–O13 for `meta` and `meta-ctime`
+  with no `invalid` row and `meta` missing O1 and O10 (the control). The `meta-ctime` outcomes
+  are reported as measured, not gated: a miss is a recorded "bar not met". A zero-wait record
+  with no `same_coarse_tick: true` row is reported as "same-tick not constructed" for that
+  filesystem.
 - One `/2` probe record covering ext4, xfs and the network share; the report states the
   network answer, or "not measurable with available tooling" for an ambiguous outcome.
-- The decision report states per filesystem whether ADR 0120's O1/O10 bar is met.
+- The decision report states per filesystem whether ADR 0120's O1/O10 bar is met, names the
+  instrument (the Python oracle's stat model), and says #794's production rollout guard cases
+  were not run on ext4 or xfs.
 - `just media-evidence-fingerprint-selftest`, `just media-evidence-reuse-selftest` and
   `just ci` pass; every committed record validates.
 
