@@ -20,7 +20,9 @@ Three deliverables, one research PR, no production source change on `main`:
      it on, `accept_new_scan_batch` publishes the batch's evidence-bearing observations with
      ADR 0077's existing `publish_one` logic inside the batch transaction, after the batch rows
      are accepted; completion then skips publication and still runs absence reconciliation
-     (`complete_in_tx`) unchanged. With it off, behaviour is byte-for-byte today's.
+     (`complete_in_tx`). Retirement is unchanged, but publication is no longer rolled back when
+     a completion commit-lock conflict leaves the session running: that is a partial-session
+     case ADR 0132 must answer. With it off, behaviour is byte-for-byte today's.
    - owner node agent: config key `scan_per_file_publication = true` makes the pump's
      `BatchSubmitter` flush after every pushed observation (flush-one). Off keeps the count and
      byte flush rules.
@@ -31,12 +33,19 @@ Three deliverables, one research PR, no production source change on `main`:
    key and appends the API flag only for `per-file`; a binary without the prototype refuses the
    unknown flag or key (clap and `deny_unknown_fields`), so the treatment cannot silently run
    as the control. Scan records move to schema `media-evidence-rollout-scan/2`, adding
-   `cell.publication`, per-repetition `batches` (rows in `scan_observation_batches` for the
-   cell's sessions) and `build.binaries_git_commit` / `build.binaries_git_changed_paths` read
-   from the `--bin-dir` checkout. Schema `/1` records keep validating under `/1` rules. A `/2`
-   per-file record is invalid unless every repetition's `batches` equals its observation count.
-   `compare` accepts a pair that differs in exactly one setting — reuse off→on or publication
-   completion→per-file — with no kill, and refuses anything else.
+   `cell.publication`; per repetition, `batches` (rows in `scan_observation_batches` for the
+   cell's sessions) and `published_before_complete` (the most live locations any poll saw
+   before every session was terminal); and `build.binaries_git_commit` /
+   `build.binaries_git_changed_paths` read from the `--bin-dir` checkout. The checkout must be
+   clean, and its HEAD and the binary SHA-256s are read before the first repetition and again
+   after the last; a difference fails the capture. Schema `/1` records keep validating under
+   `/1` rules. A `/2` record without a kill is invalid unless every session of every repetition
+   `succeeded`. A `/2` per-file record is also invalid unless every repetition's `batches`
+   equals its observation count and its `published_before_complete` is above zero — the second
+   proves the control-plane half acted, the first the agent half. `compare` accepts a pair that
+   differs in exactly one setting — reuse off→on or publication completion→per-file — with no
+   kill, and refuses anything else. `serve` keeps completion publication. The module docstring
+   stops defining first durable observation as completion-only.
 3. **Records and decision.** Under `docs/media-evidence-baseline/per-file-publication/`: a
    matched stage-0 control (full local corpus, evicted, reuse off, completion, 3 repetitions)
    captured before the treatment (same cell, per-file), both on one spike release build, plus a
@@ -45,11 +54,15 @@ Three deliverables, one research PR, no production source change on `main`:
    `docs/media-evidence-decision-report.md`. The ADR is written from the measurement, so it is
    reviewed with the branch, not with this design.
 
-**Decision rule.** Go (ADR 0132 proposes superseding ADR 0077's publication clause) only if
-the treatment's first durable observation is a protocol improvement (`max(10%, 2×CV)`, baseline
-CV ≤ 20%) and its complete time is not a protocol regression (`max(5%, 2×CV)`); otherwise a
-no-go is recorded in ADR 0132 and the report row. Either way the ADR or no-go answers absence
-reconciliation, ticket and lease authority, and partial-session failure.
+**Decision rule.** Verdicts are exactly what `compare` returns (the protocol's
+`candidates.classify`). Go — ADR 0132 proposes superseding ADR 0077's publication clause — when
+first durable observation is `improvement` and complete is not `regression`. No-go when first
+durable observation is not `improvement` with a conclusive baseline, or complete is
+`regression`. Any `inconclusive` or `unavailable` verdict on either metric allows one more
+control/treatment pair within the cost bound; if still inconclusive the answer is recorded as
+inconclusive (no supersession proposed on this evidence), never as a no-go. Every outcome
+answers absence reconciliation, ticket and lease authority, and partial-session failure,
+including publication that survives a completion commit-lock conflict or a failed session.
 
 ### Not in scope
 
@@ -89,7 +102,9 @@ measured). Reuse-on cells are optional context, not gating.
 - Both cells exist as validated `/2` records on one spike build whose binary SHA-256s match
   across the pair, the control captured first.
 - `compare` produces a verdict for first durable observation and complete; the README states
-  both medians, CVs and verdicts, the spike commit SHA, and the batch counts.
+  both medians, CVs and verdicts, the spike commit SHA, the batch counts, and the new control
+  beside #794's stage-0 figures (670.8–674.6 s) as context without a verdict, since the builds
+  differ.
 - ADR 0132 (Proposed) or a recorded no-go covers the three named topics; the ADR index
   check passes; the decision-report per-file row cites the records.
 - `just source-checks` passes with every committed record validating.
@@ -98,10 +113,12 @@ measured). Reuse-on cells are optional context, not gating.
 
 - Spike, per contract: a control-plane test that a per-file batch publishes a live location
   before completion and that completion then publishes nothing twice; a test that the flag off
-  publishes nothing at batch acceptance; a node-agent test that flush-one submits one
-  observation per batch. Run with the spike's focused `cargo test` commands and its hooks.
+  publishes nothing at batch acceptance; a `voom-api` test that the flag reaches the control
+  plane it builds; a node-agent test that flush-one submits one observation per batch. Run with the spike's focused `cargo test` commands and its hooks.
 - Instrument: selftests for the `--publication` stack wiring (agent key and API flag present
-  only for per-file), the `/2` validator (missing keys, per-file batch mismatch, `/1` records
-  still valid), `compare` pairing (publication pair accepted, two-setting and reversed pairs
+  only for per-file; `serve` defaults to completion), `published_before_complete` from a
+  scratch database, the `/2` validator (missing keys, a failed session, per-file batch
+  mismatch, per-file with nothing published before completion, `/1` records still valid),
+  build drift during capture, `compare` pairing (publication pair accepted, two-setting and reversed pairs
   refused), and batch counting from a scratch database.
 - Real media: the two captured cells themselves.
