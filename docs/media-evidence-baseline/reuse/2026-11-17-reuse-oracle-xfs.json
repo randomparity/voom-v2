@@ -1,0 +1,269 @@
+{
+  "build": {
+    "git_changed_paths": [],
+    "git_commit": "27bf545d2d495553725f826fc7c1081661980133",
+    "helper_sha256": "527f9e64a7052eca68a5d6b79a62b2a918a6189c2a6f689003a758e23197d415",
+    "script_sha256": "d27781287ade706b8fbe2f4e996696f8e83aedbe25e68b9fed39896f36bee8a9"
+  },
+  "cases": [
+    {
+      "candidate": "meta",
+      "case": "O1",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O1",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O2",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O2",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O3",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O3",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O4",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O4",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O5",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O5",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O6",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O6",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O7",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O7",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O8",
+      "outcome": "equal",
+      "reason": null,
+      "reference": "unchanged",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O8",
+      "outcome": "false-change",
+      "reason": null,
+      "reference": "unchanged",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O9",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O9",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O10",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O10",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O11",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O11",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O12",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O12",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta",
+      "case": "O13",
+      "outcome": "missed",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    },
+    {
+      "candidate": "meta-ctime",
+      "case": "O13",
+      "outcome": "detected",
+      "reason": null,
+      "reference": "changed",
+      "same_coarse_tick": false
+    }
+  ],
+  "constructions": {
+    "O1": "large fixture; same-size edit at the first unread byte past 1 MiB; mtime restored",
+    "O10": "a byte already read is changed and mtime set 1 s later between two reads; for meta and meta-ctime, a same-size edit with mtime restored while a reader holds the file, between the stat before and the stat after",
+    "O11": "fingerprint, then an interior edit with mtime set 1 s later, then re-fingerprint before use",
+    "O12": "4 KiB sidecar beside an unchanged primary; sidecar edit at the first unread byte; mtime restored",
+    "O13": "fingerprint-keyed cache of the reference; interior edit with mtime restored; lookup after the change",
+    "O2": "large fixture; same-size edit at the first unread byte of the first 64 KiB; mtime restored",
+    "O3": "large fixture; same-size edit at the first unread byte of the last 64 KiB; mtime restored",
+    "O4": "100 KiB fixture; same-size edit at the first unread byte; mtime restored",
+    "O5": "empty fixture; one byte appended and truncated; mtime set 1 s later",
+    "O6": "96 KiB fixture; edit at 48 KiB, inside the head/tail and sample overlap; mtime restored",
+    "O7": "large fixture; edit at the first unread interior byte; mtime moves +100 ns to +900 ns within one 2 s bucket",
+    "O8": "large fixture renamed within its directory; bytes unchanged",
+    "O9": "replacement written under a temporary name with an interior edit and the same size and mtime, renamed over the still-open original"
+  },
+  "excluded_cases": {
+    "O14": "#797 lazy hash lifecycle",
+    "O15": "#797 lazy hash lifecycle"
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133614112768,
+    "os": "Linux",
+    "python": "3.14.10"
+  },
+  "parameters": {
+    "candidates": {
+      "meta": {
+        "ctime": false,
+        "edge_bytes": 0,
+        "interior_samples": 0,
+        "sample_bytes": 0,
+        "sampling": "none"
+      },
+      "meta-ctime": {
+        "ctime": true,
+        "edge_bytes": 0,
+        "interior_samples": 0,
+        "sample_bytes": 0,
+        "sampling": "none"
+      }
+    },
+    "large_fixture_bytes": 8388608,
+    "overlap_fixture_bytes": 98304,
+    "scratch_filesystem_type": "xfs",
+    "short_fixture_bytes": 102400,
+    "sidecar_bytes": 4096,
+    "tick_wait_seconds": 0.02
+  },
+  "schema": "media-evidence-fingerprint-oracle/2"
+}

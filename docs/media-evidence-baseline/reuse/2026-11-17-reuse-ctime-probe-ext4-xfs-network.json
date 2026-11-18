@@ -1,0 +1,226 @@
+{
+  "build": {
+    "git_changed_paths": [],
+    "git_commit": "27bf545d2d495553725f826fc7c1081661980133",
+    "helper_sha256": "d27781287ade706b8fbe2f4e996696f8e83aedbe25e68b9fed39896f36bee8a9",
+    "script_sha256": "352fb126c31a17f27e766cb05bd9a52ee1f4e51117cc94ac93fe8a48c3e0800d"
+  },
+  "filesystems": [
+    {
+      "bytes_written": 65538,
+      "client_change_time": "not-applicable",
+      "ctime_subsecond_nonzero": true,
+      "filesystem_type": "ext4",
+      "scratch_removed": true,
+      "steps": [
+        {
+          "ctime_changed_at_once": false,
+          "ctime_changed_settled": false,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "read"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": true,
+          "size_unchanged": true,
+          "step": "content-write"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": true,
+          "size_unchanged": true,
+          "step": "utime"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "write-restoring-mtime"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "chmod"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "rename"
+        }
+      ],
+      "storage_class": "local"
+    },
+    {
+      "bytes_written": 65538,
+      "client_change_time": "not-applicable",
+      "ctime_subsecond_nonzero": true,
+      "filesystem_type": "xfs",
+      "scratch_removed": true,
+      "steps": [
+        {
+          "ctime_changed_at_once": false,
+          "ctime_changed_settled": false,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "read"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": true,
+          "size_unchanged": true,
+          "step": "content-write"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": true,
+          "size_unchanged": true,
+          "step": "utime"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "write-restoring-mtime"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "chmod"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unchanged",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "rename"
+        }
+      ],
+      "storage_class": "local"
+    },
+    {
+      "bytes_written": 65538,
+      "client_change_time": "follows-mtime",
+      "ctime_subsecond_nonzero": true,
+      "filesystem_type": "cifs",
+      "scratch_removed": true,
+      "steps": [
+        {
+          "ctime_changed_at_once": false,
+          "ctime_changed_settled": false,
+          "generation_change": "unsupported",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "read"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unsupported",
+          "inode_changed": false,
+          "mtime_changed": true,
+          "size_unchanged": true,
+          "step": "content-write"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": true,
+          "generation_change": "unsupported",
+          "inode_changed": false,
+          "mtime_changed": true,
+          "size_unchanged": true,
+          "step": "utime"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": false,
+          "generation_change": "unsupported",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "write-restoring-mtime"
+        },
+        {
+          "ctime_changed_at_once": true,
+          "ctime_changed_settled": false,
+          "generation_change": "unsupported",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "chmod"
+        },
+        {
+          "ctime_changed_at_once": false,
+          "ctime_changed_settled": false,
+          "generation_change": "unsupported",
+          "inode_changed": false,
+          "mtime_changed": false,
+          "size_unchanged": true,
+          "step": "rename"
+        }
+      ],
+      "storage_class": "network"
+    }
+  ],
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133614112768,
+    "os": "Linux",
+    "python": "3.14.10"
+  },
+  "not_measured": {
+    "client_set_chosen_change_time": "the kernel SMB client sends only its current time as ChangeTime; a chosen value needs an authenticated SMB client this host lacks",
+    "server_side_change": "no access to the file server; only this client's writes are probed"
+  },
+  "parameters": {
+    "probe_bytes": 65536,
+    "settle_seconds": 2.0,
+    "steps": [
+      "read",
+      "content-write",
+      "utime",
+      "write-restoring-mtime",
+      "chmod",
+      "rename"
+    ]
+  },
+  "schema": "media-evidence-reuse-ctime-probe/2"
+}

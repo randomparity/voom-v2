@@ -214,9 +214,11 @@ class CommittedRecordTests(unittest.TestCase):
             by_schema.setdefault(record["schema"], []).append(record)
         validators = {
             fingerprint.ORACLE_SCHEMA_V1: fingerprint.validate_oracle,
+            fingerprint.ORACLE_SCHEMA: fingerprint.validate_oracle,
             fingerprint.RUN_SCHEMA: fingerprint.validate_run,
             reuse.PROBABILITY_SCHEMA: reuse.validate_probability,
             reuse.PROBE_SCHEMA_V1: reuse.validate_probe,
+            reuse.PROBE_SCHEMA: reuse.validate_probe,
         }
         self.assertEqual(set(by_schema), set(validators))
         for schema, group in by_schema.items():
@@ -237,6 +239,25 @@ class CommittedRecordTests(unittest.TestCase):
         probes = by_schema[reuse.PROBE_SCHEMA_V1]
         self.assertEqual({filesystem["storage_class"] for record in probes
                           for filesystem in record["filesystems"]}, {"local", "network"})
+
+    def test_filesystem_oracles_cover_ext4_and_xfs_at_both_waits(self):
+        """#840: coverage and the `meta` control; the `meta-ctime` outcomes are the finding."""
+        records = [json.loads(path.read_text()) for path in sorted(reuse.RECORD_DIR.glob("*.json"))]
+        oracles = [record for record in records if record["schema"] == fingerprint.ORACLE_SCHEMA]
+        self.assertEqual({(record["parameters"]["scratch_filesystem_type"],
+                           record["parameters"]["tick_wait_seconds"]) for record in oracles},
+                         {(fs, wait) for fs in ("ext4", "xfs") for wait in (0, 0.02)})
+        for record in oracles:
+            self.assertEqual(set(record["parameters"]["candidates"]), {"meta", "meta-ctime"})
+            outcomes = {(row["case"], row["candidate"]): row["outcome"]
+                        for row in record["cases"]}
+            self.assertNotIn("invalid", outcomes.values())
+            self.assertEqual(outcomes["O1", "meta"], "missed")
+            self.assertEqual(outcomes["O10", "meta"], "missed")
+        probes = [record for record in records if record["schema"] == reuse.PROBE_SCHEMA]
+        self.assertEqual(sorted((filesystem["filesystem_type"], filesystem["storage_class"])
+                                for record in probes for filesystem in record["filesystems"]),
+                         [("cifs", "network"), ("ext4", "local"), ("xfs", "local")])
 
 
 if __name__ == "__main__":
