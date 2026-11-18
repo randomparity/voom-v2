@@ -123,3 +123,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0129](0129-cover-art-transcoding.md) | Preserve cover art during video transcoding |
 | [0130](0130-eac3-preserved-audio-contract.md) | Preserve channels during E-AC-3 transcoding | accepted |
 | [0131](0131-explicit-media-snapshot-refresh.md) | Explicit scans refresh media snapshots while retaining historical pins |
+| [0132](0132-per-file-scan-publication.md) | Publish agreed scan evidence at batch acceptance | Proposed |
