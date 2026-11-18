@@ -95,7 +95,11 @@ class RunTests(unittest.TestCase):
             for file_id, data in (("f0001", b"abc"), ("f0002", b"x" * 5000)))).encode())
         self.assertEqual(first["hash_set_sha256"], expected.hexdigest())
         self.assertEqual(first["hash_set_sha256"], second["hash_set_sha256"])
-        self.assertIsInstance(first["process"]["cpu_seconds"], float)
+        # The protocol records a counter the host lacks as `unavailable` (no /proc on BSD).
+        if Path("/proc/self/stat").exists():
+            self.assertIsInstance(first["process"]["cpu_seconds"], float)
+        else:
+            self.assertEqual(first["process"]["cpu_seconds"], observe.UNAVAILABLE)
         self.assertNotIn(str(corpus.dir), json.dumps(record))
         self.assertEqual(record["parameters"]["observe_buffer_bytes"], 16 * 1024)
 
@@ -199,7 +203,7 @@ class ValidateTests(unittest.TestCase):
             "per-file hash":
                 lambda r: r["repetitions"][0]["files"][0].update(ext="blake3:" + "0" * 64),
             "process read_bytes":
-                lambda r: r["repetitions"][0]["process"].update(read_bytes="unavailable"),
+                lambda r: r["repetitions"][0]["process"].update(read_bytes=-1),
             "not_measured": lambda r: r["not_measured"].pop("operation"),
         }
         for problem, mutate in cases.items():

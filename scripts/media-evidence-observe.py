@@ -277,9 +277,8 @@ def repetition_problems(repetition: dict[str, Any]) -> list[str]:
         problems.append("repetition hash_set_sha256")
     process = repetition.get("process") or {}
     problems += baseline.missing("process", process, PROCESS_KEYS)
-    # Local-only: every process counter exists here, so `unavailable` is a capture fault.
     problems += [f"process {key}" for key, value in process.items()
-                 if not baseline.is_metric(value) or value == UNAVAILABLE]
+                 if not baseline.is_metric(value)]
     counters = repetition.get("host_counters") or {}
     problems += baseline.missing("host_counters", counters, COUNTER_KEYS)
     problems += ["host counter" for value in counters.values() if not baseline.is_metric(value)]
