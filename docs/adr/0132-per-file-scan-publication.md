@@ -5,7 +5,9 @@
 Proposed
 
 Drafted 2026-11-17 for #841. If accepted it supersedes ADR 0077's completion-only publication
-and amends ADR 0067's consequence that batch acceptance is provisional catalog evidence. ADR 0077
+and amends two parts of ADR 0067: the consequence that batch acceptance is provisional catalog
+evidence, and the decision that failed, cancelled and stale sessions never update file
+locations (they still never retire one). ADR 0077
 stays Accepted, and governs, until the maintainer decides; implementation needs its own issues.
 
 ## Context
@@ -68,9 +70,11 @@ reconciliation at completion.
   burst; tickets still route work and events still schedule nothing (ADR 0001).
 - **A partial session keeps what it published.** A session that fails, is cancelled, goes stale
   or meets a completion commit-lock conflict keeps the identities its accepted batches
-  published, and retires nothing. Each is agreed hash and probe evidence that a successful
-  completion would have published unchanged. No rollback or cleanup path exists; the next scan
-  reconciles absence.
+  published, and retires nothing. Each is hash and probe evidence that agreed when its batch
+  was accepted under the then-current owner, incarnation and root epoch, which the batch route
+  checks. A session that later goes stale because the epoch or owner changed could never have
+  completed, so its identities are true as of observation only; the next scan under the new
+  epoch re-observes them and reconciles absence. No rollback or cleanup path exists.
 - **No setting.** Batch-time publication replaces completion publication; completion keeps
   only the backstop above.
 
