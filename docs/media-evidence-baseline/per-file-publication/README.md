@@ -67,12 +67,13 @@ observations carried evidence, and all six published the same content-hash set
 | Probe CPU | 755.8 s | 750.7 s | inconclusive |
 
 "Inconclusive" here is the protocol's neither-improvement-nor-regression: every baseline CV
-is under 5%. Peak RSS stayed within 15.6–16.8 MiB (hash) and 8.2–9.1 MiB (probe) in both cells.
+is under 5%. Peak RSS stayed within 14.8–16.0 MiB (hash) and 7.8–8.7 MiB (probe) in both cells.
 
 **Reading the numbers.**
 - Per-file first durable observation is the first file's own hash and probe time: three full
   reads of whichever file finishes first among the four in flight. That was `f0004` (6.08 GB)
-  in every repetition (lowest location id in each private database). Repetition 2 took 18.2 s
+  in every repetition: the lowest location id in each repetition's private database, which is
+  the one figure here not taken from the committed records. Repetition 2 took 18.2 s
   for the same file; the records do not show why. The verdict needs every treatment repetition
   below the control median, and the slowest is 37 times faster.
 - The control's batch count is 2, not 1: the 512 KiB estimated-byte budget splits 34
