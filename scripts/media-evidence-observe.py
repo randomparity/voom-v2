@@ -277,8 +277,9 @@ def repetition_problems(repetition: dict[str, Any]) -> list[str]:
         problems.append("repetition hash_set_sha256")
     process = repetition.get("process") or {}
     problems += baseline.missing("process", process, PROCESS_KEYS)
+    # Local-only: every process counter exists here, so `unavailable` is a capture fault.
     problems += [f"process {key}" for key, value in process.items()
-                 if not baseline.is_metric(value)]
+                 if not baseline.is_metric(value) or value == UNAVAILABLE]
     counters = repetition.get("host_counters") or {}
     problems += baseline.missing("host_counters", counters, COUNTER_KEYS)
     problems += ["host counter" for value in counters.values() if not baseline.is_metric(value)]
@@ -308,8 +309,11 @@ def validate_run(record: dict[str, Any]) -> list[str]:
         problems.append("repetitions")
     for repetition in record["repetitions"]:
         problems += repetition_problems(repetition)
-    if re.search(r'"/|\\\\|/home/|/Users/|/mnt/', json.dumps(record)):
+    text = json.dumps(record)
+    if re.search(r'"/|\\\\|/home/|/Users/|/mnt/', text):
         problems.append("host path")
+    if "blake3:" in text:
+        problems.append("per-file hash")
     return problems
 
 

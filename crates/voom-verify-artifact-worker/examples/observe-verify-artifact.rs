@@ -1,5 +1,6 @@
 //! Bench-only (#838): time this crate's `observe_file_facts` on the worker's runtime shape.
-//! The shared runner describes the input and output lines.
+//! The shared runner describes the input and output lines. It lives with the ffprobe
+//! example so all four paths are timed by one copy.
 
 #[path = "../../voom-ffprobe-worker/examples/support/observe_runner.rs"]
 mod observe_runner;

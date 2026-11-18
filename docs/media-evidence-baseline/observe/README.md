@@ -22,7 +22,8 @@ Both buffers were built by `media-evidence-candidates.py prepare observe16k|obse
 detached worktrees of `e2c29167`. `observe1m` changes only the buffer line in the four
 `observe.rs` files to `vec![0_u8; 1024 * 1024]`; each 1 MiB record's `git_changed_paths` names
 those four files, and `observe_buffer_bytes` is read from the edited source. Harness SHA-256
-`7c4457e4…` in every record. Host: Linux x86_64, 32 CPUs, 124 GiB RAM.
+`7c4457e4…` in every record; later commits change only the harness's record validation and
+selftests, not capture. Host: Linux x86_64, 32 CPUs, 124 GiB RAM.
 
 Cells ran 18:52–21:51 UTC, 670–683 s each (budget 60 minutes), in this order, so neither
 buffer always ran second: evicted ffmpeg 16k, 1m; mkvtoolnix 1m, 16k; verify-artifact 16k, 1m;
@@ -70,12 +71,13 @@ the four agreeing verdicts are one result measured four times, not four independ
 
 - **The read is disk-bound; the buffer only changes CPU.** At 4 in flight both buffers read the
   corpus at about 4.2 GB/s. The 16 KiB loop hands about 57 million reads per pass to tokio's
-  blocking pool against about 0.9 million at 1 MiB; that handoff is the CPU difference.
+  blocking pool against about 0.9 million at 1 MiB; that handoff is the likely source of the
+  CPU difference (not profiled).
 - **Per transform.** CPU per byte falls from about 0.36–0.39 to about 0.16 CPU-seconds per GB.
   A transform reads its input twice and its output once through these paths, so on a 27.5 GB
   (corpus-mean) input the 16 KiB loop spends about 20 CPU-seconds on input hashing where 1 MiB
   spends about 9. The time a transform waits on these reads does not change on this storage.
-- **As-found is mostly cold.** The corpus is about 7.5× RAM. Residency before each as-found
+- **As-found is mostly cold.** The corpus is about 7× RAM. Residency before each as-found
   repetition was 28–32 GB, but physical reads fell only 6–9 GB below the corpus size: most
   resident pages belonged to files read late in the previous pass and were evicted before
   their turn.

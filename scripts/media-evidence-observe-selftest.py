@@ -196,6 +196,10 @@ class ValidateTests(unittest.TestCase):
             "file outcome": lambda r: r["repetitions"][0]["files"][0].update(outcome="hashed"),
             "file failure": lambda r: r["repetitions"][0]["files"][0].update(failure="x"),
             "host path": lambda r: r["corpus"].update(label="/home/someone/media"),
+            "per-file hash":
+                lambda r: r["repetitions"][0]["files"][0].update(ext="blake3:" + "0" * 64),
+            "process read_bytes":
+                lambda r: r["repetitions"][0]["process"].update(read_bytes="unavailable"),
             "not_measured": lambda r: r["not_measured"].pop("operation"),
         }
         for problem, mutate in cases.items():
@@ -230,6 +234,11 @@ def cell(buffer, walls, cpu, rss=2 * MIB, evict=True, path="ffmpeg", hash_set="d
         repetition["files"][0].update(observe_seconds=wall, outcome=outcome)
         repetitions.append(repetition)
     record["repetitions"] = repetitions
+    return record
+
+
+def concurrency(record, value):
+    record["parameters"]["concurrency"] = value
     return record
 
 
@@ -269,10 +278,30 @@ class CompareTests(unittest.TestCase):
         self.assertEqual((wall["baseline_first"], wall["candidate_first"]), (300.0, 10.0))
         self.assertEqual(wall["baseline_median"], 100.0)
 
+    def test_an_observe_seconds_regression_alone_is_no_go(self):
+        candidate = cell(MIB, [100.0] * 3, [20.0] * 3)
+        for repetition in candidate["repetitions"]:
+            repetition["files"][0]["observe_seconds"] = 130.0
+        result = observe.compare(cell(**BASE), candidate)
+        self.assertEqual(result["metrics"]["wall"]["verdict"], "inconclusive")
+        self.assertEqual(result["metrics"]["observe_seconds"]["verdict"], "regression")
+        self.assertEqual(result["verdict"], "no-go")
+
+    def test_cpu_beyond_half_again_without_a_quarter_wall_gain_breaches_the_guardrail(self):
+        result = observe.compare(cell(**BASE), cell(MIB, [95.0] * 3, [80.0] * 3))
+        self.assertEqual(result["guardrails"], ["cpu"])
+        self.assertEqual(result["verdict"], "no-go")
+
+    def test_the_hash_set_digest_ignores_completion_order(self):
+        lines = ["f0002 blake3:bb", "f0001 blake3:aa", "f0003 blake3:cc"]
+        self.assertEqual(observe.hash_set_sha256(lines),
+                         observe.hash_set_sha256(list(reversed(lines))))
+
     def test_mismatched_cells_are_refused(self):
         for candidate in (cell(MIB, [99.0] * 3, [20.0] * 3, path="ffprobe"),
                           cell(MIB, [99.0] * 3, [20.0] * 3, evict=False),
                           cell(MIB, [99.0] * 3, [20.0] * 3, ids=("f0002",)),
+                          concurrency(cell(MIB, [99.0] * 3, [20.0] * 3), 2),
                           cell(16384, [99.0] * 3, [20.0] * 3)):
             with self.subTest(), self.assertRaises(observe.HarnessError):
                 observe.compare(cell(**BASE), candidate)
