@@ -1,0 +1,1157 @@
+{
+  "build": {
+    "example_sha256": "59782304afe054300a2226d0da8a8497588046143e8b94bb566e362db63225bf",
+    "git_changed_paths": [
+      "crates/voom-ffmpeg-worker/src/observe.rs",
+      "crates/voom-ffprobe-worker/src/observe.rs",
+      "crates/voom-mkvtoolnix-worker/src/observe.rs",
+      "crates/voom-verify-artifact-worker/src/observe.rs"
+    ],
+    "git_commit": "e2c291677e0ad61f8d0c87f0acc96110f000deab",
+    "harness_sha256": "7c4457e45dcfcd04e962159a6c653036dbd65058d0bb25c0733c5a4df0fc81c1"
+  },
+  "corpus": {
+    "filesystem_type": "btrfs",
+    "label": "local-corpus",
+    "manifest_files": 34,
+    "selected_ids": [
+      "f0001",
+      "f0002",
+      "f0003",
+      "f0004",
+      "f0005",
+      "f0006",
+      "f0007",
+      "f0008",
+      "f0009",
+      "f0010",
+      "f0011",
+      "f0012",
+      "f0013",
+      "f0014",
+      "f0015",
+      "f0016",
+      "f0017",
+      "f0018",
+      "f0019",
+      "f0020",
+      "f0021",
+      "f0022",
+      "f0023",
+      "f0024",
+      "f0025",
+      "f0026",
+      "f0027",
+      "f0028",
+      "f0029",
+      "f0030",
+      "f0031",
+      "f0032",
+      "f0033",
+      "f0034"
+    ],
+    "skipped_budget_ids": [],
+    "storage_class": "local"
+  },
+  "host": {
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "memory_bytes": 133614112768,
+    "os": "Linux",
+    "python": "3.14.10"
+  },
+  "not_measured": {
+    "network_corpus": "excluded from #838; owned by the maintainer",
+    "operation": "the examples call observe_file_facts only; no transform, ffprobe or verification runs",
+    "output_write_cache": "outputs are read from the corpus; a real output is observed while its write may still be cached",
+    "transform_cpu_contention": "no transform competes with the hash for CPU"
+  },
+  "parameters": {
+    "concurrency": 4,
+    "evict": false,
+    "max_bytes_per_repetition": 3000000000000,
+    "observe_buffer_bytes": 1048576,
+    "path": "mkvtoolnix",
+    "repetitions": 3
+  },
+  "repetitions": [
+    {
+      "evicted": false,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0001",
+          "observe_seconds": 35.962528,
+          "outcome": "observed",
+          "queue_delay_seconds": 1.3e-05,
+          "resident_bytes_before": 1653919744,
+          "size_bytes": 37990440428
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0002",
+          "observe_seconds": 20.063853,
+          "outcome": "observed",
+          "queue_delay_seconds": 5.1e-05,
+          "resident_bytes_before": 1566113792,
+          "size_bytes": 21801097511
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0003",
+          "observe_seconds": 29.124568,
+          "outcome": "observed",
+          "queue_delay_seconds": 9e-05,
+          "resident_bytes_before": 1610985472,
+          "size_bytes": 31030179822
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0004",
+          "observe_seconds": 4.723189,
+          "outcome": "observed",
+          "queue_delay_seconds": 0.000107,
+          "resident_bytes_before": 1497272320,
+          "size_bytes": 6080870033
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0005",
+          "observe_seconds": 17.025208,
+          "outcome": "observed",
+          "queue_delay_seconds": 4.723315,
+          "resident_bytes_before": 130048000,
+          "size_bytes": 17557320827
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0006",
+          "observe_seconds": 6.13836,
+          "outcome": "observed",
+          "queue_delay_seconds": 20.063915,
+          "resident_bytes_before": 1691648,
+          "size_bytes": 6133744474
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0007",
+          "observe_seconds": 27.911693,
+          "outcome": "observed",
+          "queue_delay_seconds": 21.748532,
+          "resident_bytes_before": 3321856,
+          "size_bytes": 28508359333
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0008",
+          "observe_seconds": 6.583686,
+          "outcome": "observed",
+          "queue_delay_seconds": 26.202285,
+          "resident_bytes_before": 1613824,
+          "size_bytes": 6632256356
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0009",
+          "observe_seconds": 25.047866,
+          "outcome": "observed",
+          "queue_delay_seconds": 29.12467,
+          "resident_bytes_before": 3858432,
+          "size_bytes": 25824716796
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0010",
+          "observe_seconds": 29.467061,
+          "outcome": "observed",
+          "queue_delay_seconds": 32.785982,
+          "resident_bytes_before": 8208384,
+          "size_bytes": 30419525224
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0011",
+          "observe_seconds": 29.614097,
+          "outcome": "observed",
+          "queue_delay_seconds": 35.962553,
+          "resident_bytes_before": 6512640,
+          "size_bytes": 30860411814
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0012",
+          "observe_seconds": 38.37918,
+          "outcome": "observed",
+          "queue_delay_seconds": 49.660238,
+          "resident_bytes_before": 10055680,
+          "size_bytes": 40336448075
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0013",
+          "observe_seconds": 25.064604,
+          "outcome": "observed",
+          "queue_delay_seconds": 54.17255,
+          "resident_bytes_before": 7086080,
+          "size_bytes": 26361761976
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0014",
+          "observe_seconds": 26.285976,
+          "outcome": "observed",
+          "queue_delay_seconds": 62.253054,
+          "resident_bytes_before": 7417856,
+          "size_bytes": 27636697625
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0015",
+          "observe_seconds": 39.183339,
+          "outcome": "observed",
+          "queue_delay_seconds": 65.576665,
+          "resident_bytes_before": 8433664,
+          "size_bytes": 41017980921
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0016",
+          "observe_seconds": 30.208045,
+          "outcome": "observed",
+          "queue_delay_seconds": 79.237165,
+          "resident_bytes_before": 5894144,
+          "size_bytes": 31517427237
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0017",
+          "observe_seconds": 29.993244,
+          "outcome": "observed",
+          "queue_delay_seconds": 88.039429,
+          "resident_bytes_before": 9576448,
+          "size_bytes": 30916551392
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0018",
+          "observe_seconds": 32.633524,
+          "outcome": "observed",
+          "queue_delay_seconds": 88.539041,
+          "resident_bytes_before": 5169152,
+          "size_bytes": 33837777161
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0019",
+          "observe_seconds": 34.033593,
+          "outcome": "observed",
+          "queue_delay_seconds": 104.760016,
+          "resident_bytes_before": 6180864,
+          "size_bytes": 34824789204
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0020",
+          "observe_seconds": 29.812287,
+          "outcome": "observed",
+          "queue_delay_seconds": 109.445221,
+          "resident_bytes_before": 9539584,
+          "size_bytes": 30531832894
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0021",
+          "observe_seconds": 34.63315,
+          "outcome": "observed",
+          "queue_delay_seconds": 118.032685,
+          "resident_bytes_before": 9580544,
+          "size_bytes": 35560995734
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0022",
+          "observe_seconds": 8.574435,
+          "outcome": "observed",
+          "queue_delay_seconds": 121.172577,
+          "resident_bytes_before": 4902912,
+          "size_bytes": 8936706238
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0023",
+          "observe_seconds": 38.553977,
+          "outcome": "observed",
+          "queue_delay_seconds": 129.747023,
+          "resident_bytes_before": 8212480,
+          "size_bytes": 39587664898
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0024",
+          "observe_seconds": 32.860777,
+          "outcome": "observed",
+          "queue_delay_seconds": 138.793621,
+          "resident_bytes_before": 8400896,
+          "size_bytes": 34006233910
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0025",
+          "observe_seconds": 7.33804,
+          "outcome": "observed",
+          "queue_delay_seconds": 139.257522,
+          "resident_bytes_before": 1826816,
+          "size_bytes": 7409964744
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0026",
+          "observe_seconds": 28.117589,
+          "outcome": "observed",
+          "queue_delay_seconds": 146.595572,
+          "resident_bytes_before": 9437184,
+          "size_bytes": 29561967125
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0027",
+          "observe_seconds": 38.094386,
+          "outcome": "observed",
+          "queue_delay_seconds": 152.665848,
+          "resident_bytes_before": 4251648,
+          "size_bytes": 40590412109
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0028",
+          "observe_seconds": 33.35257,
+          "outcome": "observed",
+          "queue_delay_seconds": 168.30101,
+          "resident_bytes_before": 5197824,
+          "size_bytes": 35434157476
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0029",
+          "observe_seconds": 20.276316,
+          "outcome": "observed",
+          "queue_delay_seconds": 171.654409,
+          "resident_bytes_before": 2297856,
+          "size_bytes": 21560018363
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0030",
+          "observe_seconds": 27.309841,
+          "outcome": "observed",
+          "queue_delay_seconds": 174.713172,
+          "resident_bytes_before": 4177920,
+          "size_bytes": 28713346968
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0031",
+          "observe_seconds": 31.335584,
+          "outcome": "observed",
+          "queue_delay_seconds": 190.760246,
+          "resident_bytes_before": 4884246528,
+          "size_bytes": 34244443281
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0032",
+          "observe_seconds": 25.477389,
+          "outcome": "observed",
+          "queue_delay_seconds": 191.930737,
+          "resident_bytes_before": 5468160,
+          "size_bytes": 26420951081
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0033",
+          "observe_seconds": 22.035249,
+          "outcome": "observed",
+          "queue_delay_seconds": 201.653592,
+          "resident_bytes_before": 8443994112,
+          "size_bytes": 26639167947
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0034",
+          "observe_seconds": 21.810626,
+          "outcome": "observed",
+          "queue_delay_seconds": 202.023029,
+          "resident_bytes_before": 9250402304,
+          "size_bytes": 26814442489
+        }
+      ],
+      "hash_set_sha256": "c4ceb9b95932860f9afe5116336f03dd9a55817b58ddd6671e5293c228c65d21",
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 1926423
+      },
+      "index": 1,
+      "logical_bytes_read": 935300661466,
+      "process": {
+        "cpu_seconds": 155.45,
+        "peak_rss_bytes": 21815296,
+        "rchar": 935300674741,
+        "read_bytes": 928593588224
+      },
+      "wall_seconds": 223.834771
+    },
+    {
+      "evicted": false,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0001",
+          "observe_seconds": 35.437217,
+          "outcome": "observed",
+          "queue_delay_seconds": 1.9e-05,
+          "resident_bytes_before": 1668751360,
+          "size_bytes": 37990440428
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0002",
+          "observe_seconds": 19.795502,
+          "outcome": "observed",
+          "queue_delay_seconds": 4.4e-05,
+          "resident_bytes_before": 1579851776,
+          "size_bytes": 21801097511
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0003",
+          "observe_seconds": 28.833048,
+          "outcome": "observed",
+          "queue_delay_seconds": 6e-05,
+          "resident_bytes_before": 1625317376,
+          "size_bytes": 31030179822
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0004",
+          "observe_seconds": 4.727916,
+          "outcome": "observed",
+          "queue_delay_seconds": 7.3e-05,
+          "resident_bytes_before": 1510039552,
+          "size_bytes": 6080870033
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0005",
+          "observe_seconds": 16.94087,
+          "outcome": "observed",
+          "queue_delay_seconds": 4.728003,
+          "resident_bytes_before": 132337664,
+          "size_bytes": 17557320827
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0006",
+          "observe_seconds": 6.158484,
+          "outcome": "observed",
+          "queue_delay_seconds": 19.795558,
+          "resident_bytes_before": 1757184,
+          "size_bytes": 6133744474
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0007",
+          "observe_seconds": 27.892888,
+          "outcome": "observed",
+          "queue_delay_seconds": 21.668885,
+          "resident_bytes_before": 4476928,
+          "size_bytes": 28508359333
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0008",
+          "observe_seconds": 6.544187,
+          "outcome": "observed",
+          "queue_delay_seconds": 25.954055,
+          "resident_bytes_before": 1802240,
+          "size_bytes": 6632256356
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0009",
+          "observe_seconds": 25.050763,
+          "outcome": "observed",
+          "queue_delay_seconds": 28.833117,
+          "resident_bytes_before": 5529600,
+          "size_bytes": 25824716796
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0010",
+          "observe_seconds": 29.347492,
+          "outcome": "observed",
+          "queue_delay_seconds": 32.498252,
+          "resident_bytes_before": 8355840,
+          "size_bytes": 30419525224
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0011",
+          "observe_seconds": 29.743558,
+          "outcome": "observed",
+          "queue_delay_seconds": 35.437247,
+          "resident_bytes_before": 7561216,
+          "size_bytes": 30860411814
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0012",
+          "observe_seconds": 38.283027,
+          "outcome": "observed",
+          "queue_delay_seconds": 49.561786,
+          "resident_bytes_before": 11939840,
+          "size_bytes": 40336448075
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0013",
+          "observe_seconds": 25.008013,
+          "outcome": "observed",
+          "queue_delay_seconds": 53.883891,
+          "resident_bytes_before": 8273920,
+          "size_bytes": 26361761976
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0014",
+          "observe_seconds": 26.435061,
+          "outcome": "observed",
+          "queue_delay_seconds": 61.845755,
+          "resident_bytes_before": 8974336,
+          "size_bytes": 27636697625
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0015",
+          "observe_seconds": 38.795772,
+          "outcome": "observed",
+          "queue_delay_seconds": 65.180816,
+          "resident_bytes_before": 12304384,
+          "size_bytes": 41017980921
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0016",
+          "observe_seconds": 30.37874,
+          "outcome": "observed",
+          "queue_delay_seconds": 78.891914,
+          "resident_bytes_before": 6356992,
+          "size_bytes": 31517427237
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0017",
+          "observe_seconds": 29.762512,
+          "outcome": "observed",
+          "queue_delay_seconds": 87.844826,
+          "resident_bytes_before": 12693504,
+          "size_bytes": 30916551392
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0018",
+          "observe_seconds": 32.609732,
+          "outcome": "observed",
+          "queue_delay_seconds": 88.280828,
+          "resident_bytes_before": 6111232,
+          "size_bytes": 33837777161
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0019",
+          "observe_seconds": 34.244415,
+          "outcome": "observed",
+          "queue_delay_seconds": 103.976599,
+          "resident_bytes_before": 7659520,
+          "size_bytes": 34824789204
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0020",
+          "observe_seconds": 29.732436,
+          "outcome": "observed",
+          "queue_delay_seconds": 109.270665,
+          "resident_bytes_before": 11268096,
+          "size_bytes": 30531832894
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0021",
+          "observe_seconds": 34.637454,
+          "outcome": "observed",
+          "queue_delay_seconds": 117.607353,
+          "resident_bytes_before": 10412032,
+          "size_bytes": 35560995734
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0022",
+          "observe_seconds": 8.563343,
+          "outcome": "observed",
+          "queue_delay_seconds": 120.890571,
+          "resident_bytes_before": 5488640,
+          "size_bytes": 8936706238
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0023",
+          "observe_seconds": 38.581279,
+          "outcome": "observed",
+          "queue_delay_seconds": 129.453925,
+          "resident_bytes_before": 8523776,
+          "size_bytes": 39587664898
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0024",
+          "observe_seconds": 33.001942,
+          "outcome": "observed",
+          "queue_delay_seconds": 138.221026,
+          "resident_bytes_before": 9068544,
+          "size_bytes": 34006233910
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0025",
+          "observe_seconds": 7.249898,
+          "outcome": "observed",
+          "queue_delay_seconds": 139.003111,
+          "resident_bytes_before": 1830912,
+          "size_bytes": 7409964744
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0026",
+          "observe_seconds": 28.288679,
+          "outcome": "observed",
+          "queue_delay_seconds": 146.253021,
+          "resident_bytes_before": 10334208,
+          "size_bytes": 29561967125
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0027",
+          "observe_seconds": 38.410636,
+          "outcome": "observed",
+          "queue_delay_seconds": 152.244816,
+          "resident_bytes_before": 4710400,
+          "size_bytes": 40590412109
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0028",
+          "observe_seconds": 33.386432,
+          "outcome": "observed",
+          "queue_delay_seconds": 168.035216,
+          "resident_bytes_before": 5472256,
+          "size_bytes": 35434157476
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0029",
+          "observe_seconds": 20.366607,
+          "outcome": "observed",
+          "queue_delay_seconds": 171.222982,
+          "resident_bytes_before": 2494464,
+          "size_bytes": 21560018363
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0030",
+          "observe_seconds": 27.495571,
+          "outcome": "observed",
+          "queue_delay_seconds": 174.54171,
+          "resident_bytes_before": 4390912,
+          "size_bytes": 28713346968
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0031",
+          "observe_seconds": 31.30852,
+          "outcome": "observed",
+          "queue_delay_seconds": 190.655463,
+          "resident_bytes_before": 4905791488,
+          "size_bytes": 34244443281
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0032",
+          "observe_seconds": 25.458963,
+          "outcome": "observed",
+          "queue_delay_seconds": 191.589599,
+          "resident_bytes_before": 5750784,
+          "size_bytes": 26420951081
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0033",
+          "observe_seconds": 22.131525,
+          "outcome": "observed",
+          "queue_delay_seconds": 201.421659,
+          "resident_bytes_before": 8557473792,
+          "size_bytes": 26639167947
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0034",
+          "observe_seconds": 21.724587,
+          "outcome": "observed",
+          "queue_delay_seconds": 202.037294,
+          "resident_bytes_before": 9154015232,
+          "size_bytes": 26814442489
+        }
+      ],
+      "hash_set_sha256": "c4ceb9b95932860f9afe5116336f03dd9a55817b58ddd6671e5293c228c65d21",
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 2471352
+      },
+      "index": 2,
+      "logical_bytes_read": 935300661466,
+      "process": {
+        "cpu_seconds": 154.31,
+        "peak_rss_bytes": 19435520,
+        "rchar": 935300674746,
+        "read_bytes": 928509329408
+      },
+      "wall_seconds": 223.762861
+    },
+    {
+      "evicted": false,
+      "files": [
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0001",
+          "observe_seconds": 35.876297,
+          "outcome": "observed",
+          "queue_delay_seconds": 5.2e-05,
+          "resident_bytes_before": 1682288640,
+          "size_bytes": 37990440428
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0002",
+          "observe_seconds": 19.983761,
+          "outcome": "observed",
+          "queue_delay_seconds": 6.5e-05,
+          "resident_bytes_before": 1593540608,
+          "size_bytes": 21801097511
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0003",
+          "observe_seconds": 28.922284,
+          "outcome": "observed",
+          "queue_delay_seconds": 8.4e-05,
+          "resident_bytes_before": 1638322176,
+          "size_bytes": 31030179822
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0004",
+          "observe_seconds": 4.646091,
+          "outcome": "observed",
+          "queue_delay_seconds": 0.0001,
+          "resident_bytes_before": 1523552256,
+          "size_bytes": 6080870033
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0005",
+          "observe_seconds": 16.92365,
+          "outcome": "observed",
+          "queue_delay_seconds": 4.646205,
+          "resident_bytes_before": 133320704,
+          "size_bytes": 17557320827
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0006",
+          "observe_seconds": 6.251339,
+          "outcome": "observed",
+          "queue_delay_seconds": 19.983836,
+          "resident_bytes_before": 1859584,
+          "size_bytes": 6133744474
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0007",
+          "observe_seconds": 27.938747,
+          "outcome": "observed",
+          "queue_delay_seconds": 21.569869,
+          "resident_bytes_before": 4853760,
+          "size_bytes": 28508359333
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0008",
+          "observe_seconds": 6.573095,
+          "outcome": "observed",
+          "queue_delay_seconds": 26.235186,
+          "resident_bytes_before": 1802240,
+          "size_bytes": 6632256356
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0009",
+          "observe_seconds": 25.041323,
+          "outcome": "observed",
+          "queue_delay_seconds": 28.922378,
+          "resident_bytes_before": 5763072,
+          "size_bytes": 25824716796
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0010",
+          "observe_seconds": 29.114603,
+          "outcome": "observed",
+          "queue_delay_seconds": 32.808293,
+          "resident_bytes_before": 8462336,
+          "size_bytes": 30419525224
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0011",
+          "observe_seconds": 29.95133,
+          "outcome": "observed",
+          "queue_delay_seconds": 35.876359,
+          "resident_bytes_before": 7774208,
+          "size_bytes": 30860411814
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0012",
+          "observe_seconds": 38.652686,
+          "outcome": "observed",
+          "queue_delay_seconds": 49.508626,
+          "resident_bytes_before": 12451840,
+          "size_bytes": 40336448075
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0013",
+          "observe_seconds": 25.348741,
+          "outcome": "observed",
+          "queue_delay_seconds": 53.963714,
+          "resident_bytes_before": 8564736,
+          "size_bytes": 26361761976
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0014",
+          "observe_seconds": 26.360232,
+          "outcome": "observed",
+          "queue_delay_seconds": 61.922908,
+          "resident_bytes_before": 9142272,
+          "size_bytes": 27636697625
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0015",
+          "observe_seconds": 38.952267,
+          "outcome": "observed",
+          "queue_delay_seconds": 65.8277,
+          "resident_bytes_before": 13508608,
+          "size_bytes": 41017980921
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0016",
+          "observe_seconds": 30.492368,
+          "outcome": "observed",
+          "queue_delay_seconds": 79.312468,
+          "resident_bytes_before": 6356992,
+          "size_bytes": 31517427237
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0017",
+          "observe_seconds": 30.023255,
+          "outcome": "observed",
+          "queue_delay_seconds": 88.161321,
+          "resident_bytes_before": 13135872,
+          "size_bytes": 30916551392
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0018",
+          "observe_seconds": 32.570239,
+          "outcome": "observed",
+          "queue_delay_seconds": 88.28315,
+          "resident_bytes_before": 6598656,
+          "size_bytes": 33837777161
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0019",
+          "observe_seconds": 33.896157,
+          "outcome": "observed",
+          "queue_delay_seconds": 104.779978,
+          "resident_bytes_before": 9383936,
+          "size_bytes": 34824789204
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0020",
+          "observe_seconds": 29.757676,
+          "outcome": "observed",
+          "queue_delay_seconds": 109.804848,
+          "resident_bytes_before": 12304384,
+          "size_bytes": 30531832894
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0021",
+          "observe_seconds": 34.822638,
+          "outcome": "observed",
+          "queue_delay_seconds": 118.184586,
+          "resident_bytes_before": 11444224,
+          "size_bytes": 35560995734
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0022",
+          "observe_seconds": 8.671514,
+          "outcome": "observed",
+          "queue_delay_seconds": 120.853403,
+          "resident_bytes_before": 6258688,
+          "size_bytes": 8936706238
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0023",
+          "observe_seconds": 38.742003,
+          "outcome": "observed",
+          "queue_delay_seconds": 129.524928,
+          "resident_bytes_before": 10010624,
+          "size_bytes": 39587664898
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0024",
+          "observe_seconds": 33.205946,
+          "outcome": "observed",
+          "queue_delay_seconds": 138.676145,
+          "resident_bytes_before": 9809920,
+          "size_bytes": 34006233910
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0025",
+          "observe_seconds": 7.331078,
+          "outcome": "observed",
+          "queue_delay_seconds": 139.562537,
+          "resident_bytes_before": 2453504,
+          "size_bytes": 7409964744
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0026",
+          "observe_seconds": 28.475662,
+          "outcome": "observed",
+          "queue_delay_seconds": 146.893625,
+          "resident_bytes_before": 10649600,
+          "size_bytes": 29561967125
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0027",
+          "observe_seconds": 38.701514,
+          "outcome": "observed",
+          "queue_delay_seconds": 153.007235,
+          "resident_bytes_before": 8024064,
+          "size_bytes": 40590412109
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0028",
+          "observe_seconds": 33.547434,
+          "outcome": "observed",
+          "queue_delay_seconds": 168.26695,
+          "resident_bytes_before": 7598080,
+          "size_bytes": 35434157476
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0029",
+          "observe_seconds": 20.332136,
+          "outcome": "observed",
+          "queue_delay_seconds": 171.8821,
+          "resident_bytes_before": 3870720,
+          "size_bytes": 21560018363
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0030",
+          "observe_seconds": 27.430646,
+          "outcome": "observed",
+          "queue_delay_seconds": 175.369298,
+          "resident_bytes_before": 5799936,
+          "size_bytes": 28713346968
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0031",
+          "observe_seconds": 31.053963,
+          "outcome": "observed",
+          "queue_delay_seconds": 191.70876,
+          "resident_bytes_before": 4814213120,
+          "size_bytes": 34244443281
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0032",
+          "observe_seconds": 25.335149,
+          "outcome": "observed",
+          "queue_delay_seconds": 192.214245,
+          "resident_bytes_before": 6389760,
+          "size_bytes": 26420951081
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0033",
+          "observe_seconds": 22.2386,
+          "outcome": "observed",
+          "queue_delay_seconds": 201.814395,
+          "resident_bytes_before": 8451764224,
+          "size_bytes": 26639167947
+        },
+        {
+          "ext": ".mkv",
+          "failure": null,
+          "id": "f0034",
+          "observe_seconds": 21.553828,
+          "outcome": "observed",
+          "queue_delay_seconds": 202.799954,
+          "resident_bytes_before": 9338826752,
+          "size_bytes": 26814442489
+        }
+      ],
+      "hash_set_sha256": "c4ceb9b95932860f9afe5116336f03dd9a55817b58ddd6671e5293c228c65d21",
+      "host_counters": {
+        "cifs_bytes_read": 0,
+        "network_rx_bytes": 2260364
+      },
+      "index": 3,
+      "logical_bytes_read": 935300661466,
+      "process": {
+        "cpu_seconds": 153.94,
+        "peak_rss_bytes": 21082112,
+        "rchar": 935300674741,
+        "read_bytes": 928430448640
+      },
+      "wall_seconds": 224.354458
+    }
+  ],
+  "schema": "media-evidence-observe-run/1"
+}
