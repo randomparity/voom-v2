@@ -92,6 +92,11 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(list(self.parent.iterdir()), [])
         self.assertEqual(filesystem["bytes_written"], 64 * KIB + 2)
 
+    def test_local_storage_takes_no_client_change_time(self):
+        self.assertEqual(self.record["schema"], reuse.PROBE_SCHEMA)
+        self.assertEqual(self.record["filesystems"][0]["client_change_time"], "not-applicable")
+        self.assertNotIn("client_set_change_time", self.record["not_measured"])
+
     def test_restored_mtime_still_moves_ctime_and_a_read_moves_nothing(self):
         restored = self.steps["write-restoring-mtime"]
         self.assertFalse(restored["mtime_changed"])
@@ -119,6 +124,59 @@ class ProbeTests(unittest.TestCase):
         record = json.loads(json.dumps(self.record))
         record["filesystems"][0]["filesystem_type"] = "/mnt/share"
         self.assertIn("host path", reuse.validate_probe(record))
+
+
+class ClientChangeTimeTests(unittest.TestCase):
+    SENT_FROM, SENT_TO = 1_800_000_000 * 10**9, 1_800_000_000 * 10**9 + 5_000_000
+    REQUESTED = fingerprint.BUMPED_MTIME_NS
+
+    def classify(self, ctime_ns: int) -> str:
+        return reuse.classify_client_change_time(ctime_ns, self.REQUESTED, self.SENT_FROM,
+                                                 self.SENT_TO)
+
+    def test_classification(self):
+        # A reported ctime equal to the mtime just set means the sent ChangeTime is not shown.
+        self.assertEqual(self.classify(self.REQUESTED), "follows-mtime")
+        self.assertEqual(self.classify(self.SENT_FROM + 1_000), "client-time-or-server-stamp")
+        self.assertEqual(self.classify(self.SENT_FROM - 1_999_999_999),
+                         "client-time-or-server-stamp")
+        self.assertEqual(self.classify(self.SENT_TO + 2_000_000_000),
+                         "client-time-or-server-stamp")
+        self.assertEqual(self.classify(self.SENT_TO + 10 * 10**9), "other")
+        self.assertEqual(self.classify(self.REQUESTED + 1), "other")
+
+    def test_network_storage_runs_the_case(self):
+        original = reuse.baseline.storage_class
+        reuse.baseline.storage_class = lambda fs_type: "network"
+        try:
+            with tempfile.TemporaryDirectory() as parent:
+                record = reuse.run_ctime_probe([Path(parent)], [], settle=0.01)
+        finally:
+            reuse.baseline.storage_class = original
+        # A local kernel stamps its own time, which is inside the send bracket.
+        self.assertEqual(record["filesystems"][0]["client_change_time"],
+                         "client-time-or-server-stamp")
+        self.assertEqual(reuse.validate_probe(record), [])
+
+    def test_probe_validator_versions(self):
+        with tempfile.TemporaryDirectory() as parent:
+            record = reuse.run_ctime_probe([Path(parent)], [], settle=0.01)
+        v1 = json.loads(json.dumps(record))
+        v1["schema"] = reuse.PROBE_SCHEMA_V1
+        v1["not_measured"] = reuse.NOT_MEASURED_V1
+        del v1["filesystems"][0]["client_change_time"]
+        self.assertEqual(reuse.validate_probe(v1), [])
+        wrong = json.loads(json.dumps(record))
+        wrong["filesystems"][0]["client_change_time"] = "follows-mtime"
+        self.assertIn("filesystem client_change_time", reuse.validate_probe(wrong))
+        wrong["filesystems"][0]["storage_class"] = "network"
+        wrong["filesystems"][0]["client_change_time"] = "not-applicable"
+        self.assertIn("filesystem client_change_time", reuse.validate_probe(wrong))
+        wrong["filesystems"][0]["client_change_time"] = "kept"
+        self.assertIn("filesystem client_change_time", reuse.validate_probe(wrong))
+        old_keys = json.loads(json.dumps(record))
+        old_keys["not_measured"] = reuse.NOT_MEASURED_V1
+        self.assertIn("not_measured", reuse.validate_probe(old_keys))
 
 
 class GuardTests(unittest.TestCase):
@@ -158,7 +216,7 @@ class CommittedRecordTests(unittest.TestCase):
             fingerprint.ORACLE_SCHEMA_V1: fingerprint.validate_oracle,
             fingerprint.RUN_SCHEMA: fingerprint.validate_run,
             reuse.PROBABILITY_SCHEMA: reuse.validate_probability,
-            reuse.PROBE_SCHEMA: reuse.validate_probe,
+            reuse.PROBE_SCHEMA_V1: reuse.validate_probe,
         }
         self.assertEqual(set(by_schema), set(validators))
         for schema, group in by_schema.items():
@@ -176,7 +234,7 @@ class CommittedRecordTests(unittest.TestCase):
                          {"local", "network"})
         for record in by_schema[reuse.PROBABILITY_SCHEMA]:
             self.assertTrue(all(cell["within_bound"] for cell in record["cells"]))
-        probes = by_schema[reuse.PROBE_SCHEMA]
+        probes = by_schema[reuse.PROBE_SCHEMA_V1]
         self.assertEqual({filesystem["storage_class"] for record in probes
                           for filesystem in record["filesystems"]}, {"local", "network"})
 

@@ -6,8 +6,10 @@ interior edit with the mtime restored, against the analytic fraction k/M, on syn
 fixtures in a scratch directory it creates and removes. `ctime-probe` writes one small file
 in a fresh scratch directory on each given filesystem and records whether the change time,
 inode and inode generation move on a read, a content write, a utime() call, a write with the
-mtime restored, a chmod and a rename. Records carry booleans, counts and filesystem types,
-never paths, timestamps, inode numbers, generations or seeds. The candidates themselves live
+mtime restored, a chmod and a rename. On network storage it then sets the mtime through the
+kernel SMB client, which also sends the client's current time as ChangeTime (#840), and
+classifies the ctime the server reports. Records carry booleans, counts, categories and
+filesystem types, never paths, timestamps, inode numbers, generations or seeds. The candidates themselves live
 in the #796 fingerprint script.
 """
 
@@ -38,7 +40,9 @@ _spec.loader.exec_module(fingerprint)
 baseline = fingerprint.baseline
 
 PROBABILITY_SCHEMA = "media-evidence-reuse-probability/1"
-PROBE_SCHEMA = "media-evidence-reuse-ctime-probe/1"
+PROBE_SCHEMA_V1 = "media-evidence-reuse-ctime-probe/1"
+# /2 (#840): each filesystem carries `client_change_time`.
+PROBE_SCHEMA = "media-evidence-reuse-ctime-probe/2"
 RECORD_DIR = baseline.REPO_ROOT / "docs" / "media-evidence-baseline" / "reuse"
 KIB = 1024
 MIB = 1024 * KIB
@@ -51,11 +55,21 @@ PROBE_BYTES = 64 * KIB
 SETTLE_SECONDS = 2.0
 # _IOR('v', 1, long): the inode generation, which filesystems that support it set at creation.
 FS_IOC_GETVERSION = 0x80087601
-NOT_MEASURED = {
+NOT_MEASURED_V1 = {
     "server_side_change": "no access to the file server; only this client's writes are probed",
     "client_set_change_time": "an SMB client can send ChangeTime in SET_INFO; whether the "
                               "server honours it was not tested",
 }
+NOT_MEASURED = {
+    "server_side_change": NOT_MEASURED_V1["server_side_change"],
+    "client_set_chosen_change_time": "the kernel SMB client sends only its current time as "
+                                     "ChangeTime; a chosen value needs an authenticated SMB "
+                                     "client this host lacks",
+}
+CLIENT_CHANGE_TIMES = {"follows-mtime", "client-time-or-server-stamp", "other",
+                       "not-applicable"}
+# Allowance for the coarse clock the client stamps with and for client/server clock skew.
+CLOCK_SKEW_NS = 2_000_000_000
 
 
 def build_identity() -> dict[str, Any]:
@@ -221,6 +235,26 @@ def probe_step(path: Path, action: Callable[[Path], Path],
     return row, path, [before.st_ctime_ns, at_once.st_ctime_ns, settled.st_ctime_ns]
 
 
+def classify_client_change_time(ctime_ns: int, requested_mtime_ns: int, sent_from_ns: int,
+                                sent_to_ns: int) -> str:
+    """Which ChangeTime the server reports after a SET_INFO that also carried one."""
+    if ctime_ns == requested_mtime_ns:
+        return "follows-mtime"
+    if sent_from_ns - CLOCK_SKEW_NS <= ctime_ns <= sent_to_ns + CLOCK_SKEW_NS:
+        return "client-time-or-server-stamp"
+    return "other"
+
+
+def client_change_time(path: Path, settle: float) -> str:
+    """utime() through the kernel SMB client also sends ChangeTime = the client's time."""
+    sent_from = time.time_ns()
+    fingerprint.set_mtime(path, fingerprint.BUMPED_MTIME_NS)
+    sent_to = time.time_ns()
+    time.sleep(settle)
+    return classify_client_change_time(os.stat(path).st_ctime_ns,
+                                       fingerprint.BUMPED_MTIME_NS, sent_from, sent_to)
+
+
 def probe_filesystem(parent: Path, settle: float) -> dict[str, Any]:
     directory = Path(tempfile.mkdtemp(prefix="reuse-ctime-probe-", dir=parent))
     steps, ctimes, written = [], [], 0
@@ -235,6 +269,8 @@ def probe_filesystem(parent: Path, settle: float) -> dict[str, Any]:
             ctimes += observed
             written += STEP_BYTES_WRITTEN.get(name, 0)
         fs_type = baseline.filesystem_type(directory)
+        change_time = (client_change_time(path, settle)
+                       if baseline.storage_class(fs_type) == "network" else "not-applicable")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
         if directory.exists():
@@ -243,7 +279,7 @@ def probe_filesystem(parent: Path, settle: float) -> dict[str, Any]:
         "filesystem_type": fs_type, "storage_class": baseline.storage_class(fs_type),
         "bytes_written": written, "scratch_removed": not directory.exists(),
         "ctime_subsecond_nonzero": any(value % 1_000_000_000 for value in ctimes),
-        "steps": steps,
+        "steps": steps, "client_change_time": change_time,
     }
 
 
@@ -329,17 +365,29 @@ def step_problems(step: dict[str, Any]) -> list[str]:
     return problems
 
 
+def client_change_time_problems(filesystem: dict[str, Any]) -> list[str]:
+    value = filesystem.get("client_change_time")
+    local = filesystem.get("storage_class") != "network"
+    if value not in CLIENT_CHANGE_TIMES or (value == "not-applicable") != local:
+        return ["filesystem client_change_time"]
+    return []
+
+
 def validate_probe(record: dict[str, Any]) -> list[str]:
-    problems = common_problems(record, PROBE_SCHEMA,
+    v2 = record.get("schema") == PROBE_SCHEMA
+    problems = common_problems(record, PROBE_SCHEMA if v2 else PROBE_SCHEMA_V1,
                                ("build", "host", "parameters", "filesystems", "not_measured"))
     if problems:
         return problems
-    if set(record["not_measured"]) != set(NOT_MEASURED):
+    if set(record["not_measured"]) != set(NOT_MEASURED if v2 else NOT_MEASURED_V1):
         problems.append("not_measured")
     if not record["filesystems"]:
         problems.append("filesystems")
+    keys = FILESYSTEM_KEYS | ({"client_change_time"} if v2 else set())
     for filesystem in record["filesystems"]:
-        problems += baseline.missing("filesystem", filesystem, FILESYSTEM_KEYS)
+        problems += baseline.missing("filesystem", filesystem, keys)
+        if v2:
+            problems += client_change_time_problems(filesystem)
         if [step.get("step") for step in filesystem.get("steps", [])] != list(STEPS):
             problems.append("filesystem steps")
         for step in filesystem.get("steps", []):
