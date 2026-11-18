@@ -59,8 +59,9 @@ Three deliverables, one research PR, no production source change on `main`:
 first durable observation is `improvement` and complete is not `regression`. No-go when first
 durable observation is not `improvement` with a conclusive baseline, or complete is
 `regression`. Any `inconclusive` or `unavailable` verdict on either metric allows one more
-control/treatment pair within the cost bound; if still inconclusive the answer is recorded as
-inconclusive (no supersession proposed on this evidence), never as a no-go. Every outcome
+control/treatment pair within the cost bound; if still inconclusive the answer is a recorded
+no-go whose stated reason is that the evidence is inconclusive, so it is never reported as a
+measured regression. Every outcome
 answers absence reconciliation, ticket and lease authority, and partial-session failure,
 including publication that survives a completion commit-lock conflict or a failed session.
 
@@ -117,7 +118,8 @@ measured). Reuse-on cells are optional context, not gating.
   plane it builds; a node-agent test that flush-one submits one observation per batch. Run with the spike's focused `cargo test` commands and its hooks.
 - Instrument: selftests for the `--publication` stack wiring (agent key and API flag present
   only for per-file; `serve` defaults to completion), `published_before_complete` from a
-  scratch database, the `/2` validator (missing keys, a failed session, per-file batch
+  scratch database with the writes applied deterministically between polls (the poll's sleep
+  is patched to apply the next scripted write, so no wall-clock race like #881's), the `/2` validator (missing keys, a failed session, per-file batch
   mismatch, per-file with nothing published before completion, `/1` records still valid),
   build drift during capture, `compare` pairing (publication pair accepted, two-setting and reversed pairs
   refused), and batch counting from a scratch database.
