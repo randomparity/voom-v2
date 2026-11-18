@@ -3,9 +3,11 @@
 
 Synthetic checks use scratch directories and a scratch SQLite database shaped like the
 stack's tables, so they run on any CI host without built workers. Real-storage evidence is
-the committed records under docs/media-evidence-baseline/rollout/, validated here.
+the committed records under docs/media-evidence-baseline/rollout/ (#794) and
+docs/media-evidence-baseline/per-file-publication/ (#841), validated here.
 """
 
+import argparse
 import importlib.util
 import json
 import os
@@ -26,7 +28,8 @@ rollout = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = rollout
 spec.loader.exec_module(rollout)
 
-RECORDS = Path(__file__).resolve().parents[1] / "docs" / "media-evidence-baseline" / "rollout"
+BASELINE = Path(__file__).resolve().parents[1] / "docs" / "media-evidence-baseline"
+RECORD_DIRECTORIES = (BASELINE / "rollout", BASELINE / "per-file-publication")
 HASH_A = "blake3:" + "a" * 64
 HASH_B = "blake3:" + "b" * 64
 
@@ -40,6 +43,7 @@ def scratch_database(path: Path) -> sqlite3.Connection:
         "provider_relative_locator TEXT, evidence_json TEXT);"
         "CREATE TABLE file_locations (id INTEGER PRIMARY KEY, storage_root_id INTEGER, "
         "address_state TEXT, retired_at TEXT);"
+        "CREATE TABLE scan_observation_batches (scan_session_id INTEGER, sequence INTEGER);"
     )
     return connection
 
@@ -162,7 +166,7 @@ class PublicationTimingTests(unittest.TestCase):
     def test_first_durable_observation_is_the_first_published_location(self):
         self.later(0.3, ["INSERT INTO file_locations VALUES (1, 7, 'rooted', NULL)"])
         self.later(0.6, ["UPDATE scan_sessions SET status = 'succeeded'"])
-        first, complete, states = rollout.wait_for_publication(
+        first, complete, states, _ = rollout.wait_for_publication(
             self.database, [7], [1], time.monotonic(), 10, lambda: None)
         self.assertGreaterEqual(first, 0.3)
         self.assertLess(first, complete)
@@ -172,10 +176,48 @@ class PublicationTimingTests(unittest.TestCase):
         self.later(0.1, ["INSERT INTO file_locations VALUES (1, 7, 'rooted', 'retired')",
                          "INSERT INTO file_locations VALUES (2, 8, 'rooted', NULL)"])
         self.later(0.3, ["UPDATE scan_sessions SET status = 'failed'"])
-        first, _, states = rollout.wait_for_publication(
+        first, _, states, _ = rollout.wait_for_publication(
             self.database, [7], [1], time.monotonic(), 10, lambda: None)
         self.assertEqual(first, rollout.UNAVAILABLE)
         self.assertEqual(states, {1: "failed"})
+
+    def scripted(self, writes):
+        """Poll with each sleep applying the next write: no wall-clock race between them."""
+        pending = list(writes)
+
+        def step(_seconds):
+            if pending:
+                connection = sqlite3.connect(self.database)
+                for statement in pending.pop(0):
+                    connection.execute(statement)
+                connection.commit()
+                connection.close()
+
+        with patch.object(rollout.time, "sleep", step):
+            return rollout.wait_for_publication(
+                self.database, [7], [1], time.monotonic(), 10, lambda: None)
+
+    def test_publication_at_completion_is_not_before_complete(self):
+        # Completion publication: the location and the terminal status commit together.
+        _, _, _, before = self.scripted([
+            [], ["INSERT INTO file_locations VALUES (1, 7, 'rooted', NULL)",
+                 "UPDATE scan_sessions SET status = 'succeeded'"]])
+        self.assertEqual(before, 0)
+
+    def test_publication_while_running_counts_before_complete(self):
+        _, _, _, before = self.scripted([
+            ["INSERT INTO file_locations VALUES (1, 7, 'rooted', NULL)"],
+            ["INSERT INTO file_locations VALUES (2, 7, 'rooted', NULL)"],
+            ["UPDATE scan_sessions SET status = 'succeeded'"]])
+        self.assertEqual(before, 2)
+
+    def test_batches_count_only_the_selected_sessions(self):
+        connection = sqlite3.connect(self.database)
+        connection.executemany("INSERT INTO scan_observation_batches VALUES (?, ?)",
+                               [(1, 0), (1, 1), (2, 0)])
+        connection.commit()
+        connection.close()
+        self.assertEqual(rollout.observation_batches(self.database, [1]), 2)
 
     def test_a_dead_stack_stops_the_wait(self):
         def dead():
@@ -190,6 +232,42 @@ class PublicationTimingTests(unittest.TestCase):
 
 
 class StackTests(unittest.TestCase):
+    def stack(self, temp, tools, reuse, publication):
+        args = rollout.stack_args(Path(temp) / "work", [Path(temp) / "input"], tools)
+        stack = rollout.Stack.__new__(rollout.Stack)
+        stack.reuse, stack.publication = reuse, publication
+        stack.args, stack.roots, stack.node_id, stack.bin_dir = args, [], 3, tools
+        return stack
+
+    def test_per_file_publication_turns_on_the_agent_key_and_the_api_flag(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tools = Path(temp) / "tools"
+            tools.mkdir()
+            env = {}
+            for name in ("ffmpeg", "ffprobe", "mkvmerge"):
+                (tools / name).touch()
+                env[f"VOOM_{name.upper()}_BIN"] = str(tools / name)
+            launched = []
+            with patch.dict(os.environ, env), patch.object(
+                    rollout.bootstrap.Bootstrap, "launch",
+                    lambda _self, name, arguments: launched.append((name, arguments))):
+                for publication, expected in (("completion", None), ("per-file", True)):
+                    stack = self.stack(temp, tools, False, publication)
+                    parsed = tomllib.loads(stack.configuration(Path(temp) / "token", "http://x"))
+                    self.assertIs(parsed.get(rollout.PER_FILE_AGENT_KEY), expected)
+                    stack.launch("voom-api", ["--bind", "x"])
+                    stack.launch("voom-node-agent", ["--config", "y"])
+        self.assertEqual(launched, [
+            ("voom-api", ["--bind", "x"]), ("voom-node-agent", ["--config", "y"]),
+            ("voom-api", ["--bind", "x", rollout.PER_FILE_API_FLAG]),
+            ("voom-node-agent", ["--config", "y"])])
+
+    def test_an_unknown_publication_is_refused_and_serve_keeps_completion(self):
+        with self.assertRaises(rollout.HarnessError):
+            rollout.Stack(argparse.Namespace(), False, "batch")
+        with patch.object(rollout.bootstrap.Bootstrap, "__init__", lambda _self, _args: None):
+            self.assertEqual(rollout.Stack(argparse.Namespace(), True).publication, "completion")
+
     def test_reuse_setting_is_a_top_level_key(self):
         with tempfile.TemporaryDirectory() as temp:
             tools = Path(temp) / "tools"
@@ -204,6 +282,7 @@ class StackTests(unittest.TestCase):
                 for reuse in (True, False):
                     stack = rollout.Stack.__new__(rollout.Stack)
                     stack.reuse, stack.args, stack.roots, stack.node_id = reuse, args, [], 3
+                    stack.publication = "completion"
                     stack.bin_dir = tools
                     parsed = tomllib.loads(stack.configuration(Path(temp) / "token", "http://x"))
                     self.assertIs(parsed["probe_hash_reuse"], reuse)
@@ -234,7 +313,8 @@ class UsageTests(unittest.TestCase):
             rollout.worker_pids(os.getpid())
 
 
-def cell(first_durable, evict=True, storage="local", ids=("f0001",), reuse=False, kill=None):
+def cell(first_durable, evict=True, storage="local", ids=("f0001",), reuse=False, kill=None,
+         publication="completion"):
     """A scan record reduced to what `compare_scans` reads."""
     repetitions = []
     for value in first_durable:
@@ -244,7 +324,8 @@ def cell(first_durable, evict=True, storage="local", ids=("f0001",), reuse=False
                             "complete_seconds": value, "workers": workers,
                             "host_counters": {"cifs_bytes_read": 7}})
     return {"corpus": {"label": "c", "selected_ids": list(ids), "storage_class": storage},
-            "cell": {"evict": evict, "probe_hash_reuse": reuse, "kill": kill},
+            "cell": {"evict": evict, "probe_hash_reuse": reuse, "kill": kill,
+                     "publication": publication},
             "build": {"binaries_sha256": {"voom": "1"}}, "repetitions": repetitions}
 
 
@@ -276,6 +357,28 @@ class CompareTests(unittest.TestCase):
         rebuilt["build"]["binaries_sha256"] = {"voom": "2"}
         with self.assertRaises(rollout.HarnessError):
             rollout.compare_scans(rebuilt, on)
+
+    def test_per_file_publication_compares_against_completion_with_reuse_fixed(self):
+        for reuse in (False, True):
+            result = rollout.compare_scans(
+                cell([600.0, 601.0, 602.0], reuse=reuse),
+                cell([20.0, 21.0, 20.5], reuse=reuse, publication="per-file"))
+            self.assertEqual(result["first_durable_observation"]["verdict"], "improvement")
+
+    def test_two_settings_or_a_reversed_publication_do_not_compare(self):
+        for baseline, candidate in (
+                (cell([1.0]), cell([1.0], reuse=True, publication="per-file")),
+                (cell([1.0], publication="per-file"), cell([1.0])),
+                (cell([1.0], publication="per-file"),
+                 cell([1.0], reuse=True, publication="per-file", kill={"w": 1}))):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.compare_scans(baseline, candidate)
+
+    def test_a_schema_one_record_compares_as_completion(self):
+        old = cell([10.0, 10.1, 9.9])
+        del old["cell"]["publication"]
+        result = rollout.compare_scans(old, cell([2.0, 2.1, 2.0], reuse=True))
+        self.assertEqual(result["first_durable_observation"]["verdict"], "improvement")
 
     def test_only_an_off_baseline_against_an_on_candidate_compares(self):
         # A reversed pair or a kill cell would report a meaningless "improvement".
@@ -449,13 +552,77 @@ class RecordTests(unittest.TestCase):
             "workers": {name: {key: 1 for key in rollout.baseline.WORKER_KEYS}
                         for name in rollout.WORKER_PROGRAMS},
             "host_counters": {}, "corpus_unchanged": True,
+            "batches": 1, "published_before_complete": 0,
         }
         record = {"schema": rollout.SCAN_SCHEMA, "repetitions": [repetition],
                   "not_measured": dict(rollout.NOT_MEASURED)}
         for section, keys in rollout.SCAN_KEYS.items():
             record[section] = dict.fromkeys(keys, "x")
         record["cell"]["kill"] = None
+        record["cell"]["publication"] = "completion"
+        record["build"]["binaries_git_changed_paths"] = []
         return record
+
+    def per_file_record(self):
+        record = self.scan_record()
+        record["cell"]["publication"] = "per-file"
+        repetition = record["repetitions"][0]
+        repetition["evidence"]["observations"] = 34
+        repetition["batches"], repetition["published_before_complete"] = 34, 33
+        return record
+
+    def test_a_per_file_record_proves_both_halves_of_the_prototype(self):
+        self.assertEqual(rollout.validate_scan(self.per_file_record()), [])
+        record = self.per_file_record()
+        record["repetitions"][0]["batches"] = 1
+        self.assertIn("repetition 1 per-file batches", rollout.validate_scan(record))
+        record = self.per_file_record()
+        record["repetitions"][0]["published_before_complete"] = 0
+        self.assertIn("repetition 1 per-file publication", rollout.validate_scan(record))
+
+    def test_a_failed_session_voids_a_clean_cell(self):
+        record = self.per_file_record()
+        record["repetitions"][0]["session_status"] = ["failed"]
+        self.assertIn("repetition 1 sessions", rollout.validate_scan(record))
+
+    def test_schema_two_needs_its_keys_and_a_clean_binaries_checkout(self):
+        record = self.scan_record()
+        del record["cell"]["publication"]
+        del record["repetitions"][0]["batches"]
+        problems = rollout.validate_scan(record)
+        self.assertEqual(problems, ["cell publication", "repetition batches"])
+        record = self.scan_record()
+        record["build"]["binaries_git_changed_paths"] = ["crates/x.rs"]
+        self.assertIn("binaries checkout dirty", rollout.validate_scan(record))
+        record = self.scan_record()
+        record["cell"]["publication"] = "batch"
+        self.assertIn("publication", rollout.validate_scan(record))
+
+    def test_schema_one_records_keep_their_own_rules(self):
+        record = self.scan_record()
+        record["schema"] = rollout.SCAN_SCHEMA_V1
+        del record["cell"]["publication"]
+        for key in ("binaries_git_commit", "binaries_git_changed_paths"):
+            del record["build"][key]
+        for key in ("batches", "published_before_complete"):
+            del record["repetitions"][0][key]
+        self.assertEqual(rollout.validate_scan(record), [])
+
+    def test_a_capture_refuses_binaries_that_change_underneath_it(self):
+        builds = iter([{"binaries_git_commit": "a"}, {"binaries_git_commit": "b"}])
+        with tempfile.TemporaryDirectory() as temp:
+            args = rollout.parse_args([
+                "scan", str(Path(temp) / "manifest.json"), "--reuse", "off",
+                "--workdir", str(Path(temp) / "work"), "--output", str(Path(temp) / "out"),
+                "--repetitions", "1"])
+            Path(args.manifest).write_text(json.dumps({"label": "local-corpus", "root": temp,
+                                                       "files": []}))
+            with patch.object(rollout, "binaries_build", lambda _bin: next(builds)), \
+                    patch.object(rollout.baseline, "select_files", lambda *_: []), \
+                    patch.object(rollout.baseline, "corpus_filesystem", lambda *_: "btrfs"), \
+                    patch.object(rollout, "scan_repetition", lambda *_: {}):
+                with self.assertRaises(rollout.HarnessError):
+                    rollout.capture_scan(args)
 
     def test_a_complete_scan_record_validates(self):
         self.assertEqual(rollout.validate_scan(self.scan_record()), [])
@@ -503,9 +670,11 @@ class RecordTests(unittest.TestCase):
     def test_committed_records_validate(self):
         # G1's harness cells keep the #788 schema and its validator.
         validators = {rollout.SCAN_SCHEMA: rollout.validate_scan,
+                      rollout.SCAN_SCHEMA_V1: rollout.validate_scan,
                       rollout.CONSTRUCT_SCHEMA: rollout.validate_construct,
                       rollout.baseline.SCHEMA: rollout.baseline.validate_run}
-        for path in sorted(RECORDS.glob("*.json")):
+        paths = [path for directory in RECORD_DIRECTORIES for path in directory.glob("*.json")]
+        for path in sorted(paths):
             record = json.loads(path.read_text(encoding="utf-8"))
             with self.subTest(path.name):
                 self.assertIn(record.get("schema"), validators)

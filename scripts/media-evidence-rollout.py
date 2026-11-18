@@ -4,9 +4,10 @@
 `scan` runs a real local control plane, owner node agent and bundled workers through
 `acceptance-bootstrap.py` (#339's stack), requests one scan session per root, and times each
 repetition from the request to its first durable observation: the first live rooted file
-location the completion transaction publishes (ADR 0077). It records worker CPU, memory and
-I/O, the stored evidence's hash sources, and a digest of the published content hashes, so
-repeat scans compare without committing hashes. `serve` holds such a stack for the
+location the stack publishes. Completion publication (ADR 0077) publishes inside the
+completion transaction; the #841 per-file prototype publishes at batch acceptance. It records
+worker CPU, memory and I/O, the stored evidence's hash sources, and a digest of the published
+content hashes, so repeat scans compare without committing hashes. `serve` holds such a stack for the
 CLI-driven transform gates. `construct` drives the release hash and probe workers on a
 scratch copy to build the ADR 0120 guard cases on the filesystem that holds the copy.
 Records name files by manifest id only; host paths stay in private manifests and stack work
@@ -51,7 +52,12 @@ candidates = load("media_evidence_candidates", "media-evidence-candidates.py")
 
 UNAVAILABLE = baseline.UNAVAILABLE
 HarnessError = baseline.HarnessError
-SCAN_SCHEMA = "media-evidence-rollout-scan/1"
+SCAN_SCHEMA_V1 = "media-evidence-rollout-scan/1"
+SCAN_SCHEMA = "media-evidence-rollout-scan/2"
+PUBLICATIONS = ("completion", "per-file")
+# The #841 prototype's switches; a build without them refuses both (clap, deny_unknown_fields).
+PER_FILE_AGENT_KEY = "scan_per_file_publication"
+PER_FILE_API_FLAG = "--scan-per-file-publication"
 CONSTRUCT_SCHEMA = "media-evidence-rollout-construct/1"
 POLL_SECONDS = 0.05
 WORKER_PROGRAMS = {"hash": "voom-hash-worker", "probe": "voom-ffprobe-worker"}
@@ -71,15 +77,28 @@ NOT_MEASURED = {
 
 
 class Stack(bootstrap.Bootstrap):
-    """The #339 acceptance stack with the owner-node reuse setting written explicitly."""
+    """The #339 acceptance stack with the owner-node reuse setting written explicitly.
 
-    def __init__(self, args: argparse.Namespace, reuse: bool):
+    `per-file` publication also turns on the #841 prototype in the API and the agent.
+    """
+
+    def __init__(self, args: argparse.Namespace, reuse: bool, publication: str = "completion"):
+        if publication not in PUBLICATIONS:
+            raise HarnessError(f"unknown publication {publication!r}")
         self.reuse = reuse
+        self.publication = publication
         super().__init__(args)
 
     def configuration(self, credential: Path, base_url: str) -> str:
         setting = f"probe_hash_reuse = {'true' if self.reuse else 'false'}\n"
+        if self.publication == "per-file":
+            setting += f"{PER_FILE_AGENT_KEY} = true\n"
         return setting + super().configuration(credential, base_url)
+
+    def launch(self, name: str, arguments: list[str]) -> Any:
+        if name == "voom-api" and self.publication == "per-file":
+            arguments = [*arguments, PER_FILE_API_FLAG]
+        return super().launch(name, arguments)
 
 
 def scan_roots(manifest: dict[str, Any], files: list[dict[str, Any]]) -> list[Path]:
@@ -189,27 +208,47 @@ def session_states(connection: sqlite3.Connection, session_ids: list[int]) -> di
 TERMINAL = {"succeeded", "failed", "cancelled", "stale"}
 
 
-def wait_for_publication(database: Path, root_ids: list[int], session_ids: list[int],
-                         started: float, limit: float,
-                         alive: Callable[[], None]) -> tuple[Any, Any, dict[int, str]]:
-    """Poll until every session is terminal; return first-durable and complete seconds.
+def observation_batches(database: Path, session_ids: list[int]) -> int:
+    """Accepted batches of these sessions: one per observation proves the agent flushed each."""
+    marks = ",".join("?" * len(session_ids))
+    connection = read_only(database)
+    try:
+        return connection.execute(
+            f"SELECT count(*) FROM scan_observation_batches WHERE scan_session_id IN ({marks})",
+            session_ids).fetchone()[0]
+    finally:
+        connection.close()
 
-    `alive` raises when the stack has exited or a stop was requested.
+
+def wait_for_publication(database: Path, root_ids: list[int], session_ids: list[int],
+                         started: float, limit: float, alive: Callable[[], None],
+                         ) -> tuple[Any, Any, dict[int, str], int]:
+    """Poll until every session is terminal.
+
+    Returns first-durable and complete seconds, the terminal states, and the most live
+    locations any poll saw while some session was still running: above zero only when
+    publication preceded completion. `alive` raises when the stack has exited or a stop was
+    requested.
     """
     first = complete = UNAVAILABLE
+    before_complete = 0
     connection = read_only(database)
     try:
         while True:
             alive()
             elapsed = time.monotonic() - started
-            if first == UNAVAILABLE and published_locations(connection, root_ids) > 0:
-                first = round(elapsed, 3)
+            # Read publication first: a location seen while a session still runs was
+            # published before that session's completion committed.
+            published = published_locations(connection, root_ids)
             states = session_states(connection, session_ids)
             if len(states) == len(session_ids) and set(states.values()) <= TERMINAL:
                 complete = round(elapsed, 3)
                 if first == UNAVAILABLE and published_locations(connection, root_ids) > 0:
                     first = complete
-                return first, complete, states
+                return first, complete, states, before_complete
+            before_complete = max(before_complete, published)
+            if first == UNAVAILABLE and published > 0:
+                first = round(elapsed, 3)
             if elapsed > limit:
                 raise HarnessError("scan sessions did not reach a terminal state in time")
             time.sleep(POLL_SECONDS)
@@ -317,7 +356,8 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
                     args: argparse.Namespace, fs_type: str) -> dict[str, Any]:
     roots = scan_roots(manifest, files)
     workdir = args.workdir / f"rep-{index}"
-    with Stack(stack_args(workdir, roots, args.bin_dir), args.reuse == "on") as stack:
+    with Stack(stack_args(workdir, roots, args.bin_dir), args.reuse == "on",
+               args.publication) as stack:
         corpus_root = Path(manifest["root"])
         by_root = {Path(root["provider_locator"]): root["root_id"] for root in stack.roots}
         locators = {}
@@ -338,7 +378,7 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
         timer = kill_at(pids[args.kill], started + args.kill_after) if args.kill else None
         try:
             sessions = request_scans(stack)
-            first, complete, states = wait_for_publication(
+            first, complete, states, before_complete = wait_for_publication(
                 workdir / "voom.db", list(set(by_root.values())), sessions, started,
                 args.limit, stack.require_alive)
         finally:
@@ -350,10 +390,12 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
                    else usage_delta(before[name], process_usage(pid))
                    for name, pid in pids.items()}
         evidence = stored_evidence(workdir / "voom.db", sessions, locators)
+        batches = observation_batches(workdir / "voom.db", sessions)
     return {
         "index": index, "evicted": args.evict, "resident_bytes_before": residency,
         "first_durable_observation_seconds": first, "complete_seconds": complete,
         "session_status": sorted(states.values()), "worker_restarted": restarted,
+        "batches": batches, "published_before_complete": before_complete,
         "evidence": evidence, "workers": workers, "host_counters": counters,
         "corpus_unchanged": corpus_unchanged(manifest, files),
     }
@@ -361,6 +403,16 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
 
 def binary_identity(bin_dir: Path) -> dict[str, str]:
     return {name: baseline.sha256_file(bin_dir / name) for name in BINARIES}
+
+
+def binaries_build(bin_dir: Path) -> dict[str, Any]:
+    """The binaries and the checkout that holds them; a dirty checkout is not reproducible."""
+    commit = baseline.git_output("rev-parse", "HEAD", repo_root=bin_dir)
+    changed = baseline.tracked_changes(repo_root=bin_dir)
+    if commit is None or changed:
+        raise HarnessError("--bin-dir must sit in a clean git checkout of the built source")
+    return {"binaries_sha256": binary_identity(bin_dir),
+            "binaries_git_commit": commit.strip(), "binaries_git_changed_paths": changed}
 
 
 def capture_scan(args: argparse.Namespace) -> dict[str, Any]:
@@ -371,12 +423,16 @@ def capture_scan(args: argparse.Namespace) -> dict[str, Any]:
     if args.workdir.exists():
         raise HarnessError("the stack work directory must not exist yet; choose a new one")
     args.workdir.mkdir(parents=True, mode=0o700)
+    built = binaries_build(args.bin_dir)
     repetitions = [scan_repetition(index, manifest, files, args, fs_type)
                    for index in range(1, args.repetitions + 1)]
+    if binaries_build(args.bin_dir) != built:
+        raise HarnessError("the binaries or their checkout changed during the capture")
     commit = baseline.git_output("rev-parse", "HEAD")
     return {
         "schema": SCAN_SCHEMA,
-        "cell": {"probe_hash_reuse": args.reuse == "on", "evict": args.evict,
+        "cell": {"probe_hash_reuse": args.reuse == "on", "publication": args.publication,
+                 "evict": args.evict,
                  "repetitions": args.repetitions,
                  "kill": {"worker": args.kill, "after_seconds": args.kill_after}
                  if args.kill else None},
@@ -390,7 +446,7 @@ def capture_scan(args: argparse.Namespace) -> dict[str, Any]:
                   "git_changed_paths": baseline.tracked_changes(),
                   "instrument_sha256": baseline.sha256_file(Path(__file__).resolve()),
                   "bootstrap_sha256": baseline.sha256_file(SCRIPTS / "acceptance-bootstrap.py"),
-                  "binaries_sha256": binary_identity(args.bin_dir),
+                  **built,
                   "ffprobe_version": baseline.ffprobe_version()},
         "host": baseline.host_identity(),
         "repetitions": repetitions,
@@ -398,7 +454,7 @@ def capture_scan(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-SCAN_KEYS = {
+SCAN_KEYS_V1 = {
     "cell": {"probe_hash_reuse", "evict", "repetitions", "kill"},
     "corpus": {"label", "filesystem_type", "storage_class", "manifest_files", "selected_ids",
                "selected_bytes", "roots"},
@@ -406,16 +462,22 @@ SCAN_KEYS = {
               "binaries_sha256", "ffprobe_version"},
     "host": {"os", "machine", "cpu_count", "memory_bytes", "python"},
 }
-SCAN_REPETITION_KEYS = {"index", "evicted", "resident_bytes_before",
-                        "first_durable_observation_seconds", "complete_seconds",
-                        "session_status", "worker_restarted", "evidence", "workers",
-                        "host_counters", "corpus_unchanged"}
+SCAN_REPETITION_KEYS_V1 = {"index", "evicted", "resident_bytes_before",
+                           "first_durable_observation_seconds", "complete_seconds",
+                           "session_status", "worker_restarted", "evidence", "workers",
+                           "host_counters", "corpus_unchanged"}
+# Schema /2 (#841) adds the publication setting, its proof, and the binaries' own checkout.
+SCAN_KEYS = dict(SCAN_KEYS_V1, cell=SCAN_KEYS_V1["cell"] | {"publication"},
+                 build=SCAN_KEYS_V1["build"] | {"binaries_git_commit",
+                                                "binaries_git_changed_paths"})
+SCAN_REPETITION_KEYS = SCAN_REPETITION_KEYS_V1 | {"batches", "published_before_complete"}
 EVIDENCE_KEYS = {"observations", "with_evidence", "reused", "recomputed_without_source",
                  "other_source", "unmatched", "hash_set_sha256"}
 
 
-def scan_repetition_problems(repetition: dict[str, Any]) -> list[str]:
-    problems = baseline.missing("repetition", repetition, SCAN_REPETITION_KEYS)
+def scan_repetition_problems(repetition: dict[str, Any],
+                             keys: set[str] = SCAN_REPETITION_KEYS) -> list[str]:
+    problems = baseline.missing("repetition", repetition, keys)
     if problems:
         return problems
     problems += baseline.missing("evidence", repetition["evidence"], EVIDENCE_KEYS)
@@ -431,22 +493,50 @@ def scan_repetition_problems(repetition: dict[str, Any]) -> list[str]:
 
 
 def validate_scan(record: dict[str, Any]) -> list[str]:
-    """Every contract violation in a committed-safe scan record."""
+    """Every contract violation in a committed-safe scan record, `/1` or `/2`."""
+    if record.get("schema") == SCAN_SCHEMA_V1:
+        return scan_problems(record, SCAN_KEYS_V1, SCAN_REPETITION_KEYS_V1)
     if record.get("schema") != SCAN_SCHEMA:
         return ["schema"]
+    problems = scan_problems(record, SCAN_KEYS, SCAN_REPETITION_KEYS)
+    return problems or publication_problems(record)
+
+
+def publication_problems(record: dict[str, Any]) -> list[str]:
+    """A `/2` cell must have run as labelled: every session done, per-file proven both ways."""
+    problems = []
+    if record["cell"]["publication"] not in PUBLICATIONS:
+        problems.append("publication")
+    if record["build"]["binaries_git_changed_paths"]:
+        problems.append("binaries checkout dirty")
+    for repetition in record["repetitions"]:
+        # A failed session can still publish under per-file, so it is never a clean cell.
+        if not record["cell"]["kill"] and set(repetition["session_status"]) != {"succeeded"}:
+            problems.append(f"repetition {repetition['index']} sessions")
+        if record["cell"]["publication"] != "per-file":
+            continue
+        if repetition["batches"] != repetition["evidence"]["observations"]:
+            problems.append(f"repetition {repetition['index']} per-file batches")
+        if repetition["published_before_complete"] <= 0:
+            problems.append(f"repetition {repetition['index']} per-file publication")
+    return problems
+
+
+def scan_problems(record: dict[str, Any], keys: dict[str, set[str]],
+                  repetition_keys: set[str]) -> list[str]:
     problems = []
     # A kill that never landed would pass a clean scan off as an interruption cell.
     if record.get("cell", {}).get("kill") and not all(
             repetition.get("worker_restarted") for repetition in record.get("repetitions", [])):
         problems.append("kill not delivered")
-    for section, keys in SCAN_KEYS.items():
-        problems += baseline.missing(section, record.get(section, {}), keys)
+    for section, section_keys in keys.items():
+        problems += baseline.missing(section, record.get(section, {}), section_keys)
     if set(record.get("not_measured", {})) != set(NOT_MEASURED):
         problems.append("not_measured")
     if not record.get("repetitions"):
         problems.append("repetitions")
     for repetition in record.get("repetitions", []):
-        problems += scan_repetition_problems(repetition)
+        problems += scan_repetition_problems(repetition, repetition_keys)
     return problems + host_path_problems(record)
 
 
@@ -476,10 +566,17 @@ def compare_scans(baseline_record: dict[str, Any], candidate: dict[str, Any]) ->
                          ("build", "binaries_sha256")):
         if baseline_record[section][key] != candidate[section][key]:
             raise HarnessError(f"cells differ in {section} {key}; they do not compare")
-    pairing = [(record["cell"]["probe_hash_reuse"], record["cell"]["kill"])
-               for record in (baseline_record, candidate)]
-    if pairing != [(False, None), (True, None)]:
-        raise HarnessError("compare a setting-off baseline with a setting-on candidate, no kills")
+    if baseline_record["cell"]["kill"] or candidate["cell"]["kill"]:
+        raise HarnessError("kill cells do not compare")
+    # Exactly one setting moves from its baseline value to its treatment value.
+    settings = [(record["cell"]["probe_hash_reuse"],
+                 record["cell"].get("publication", "completion") == "per-file")
+                for record in (baseline_record, candidate)]
+    turned_on = [not before and after for before, after in zip(*settings)]
+    if settings[0] == settings[1] or turned_on.count(True) != 1 or \
+            any(before and not after for before, after in zip(*settings)):
+        raise HarnessError("compare a baseline with a candidate that turns exactly one setting "
+                           "on (reuse, or per-file publication), no kills")
     skip = 0 if baseline_record["cell"]["evict"] else 1
     series = []
     for record in (baseline_record, candidate):
@@ -669,6 +766,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     scan = commands.add_parser("scan", help="time real scan sessions to first durable observation")
     scan.add_argument("manifest", type=Path)
     scan.add_argument("--reuse", choices=["on", "off"], required=True)
+    scan.add_argument("--publication", choices=PUBLICATIONS, default="completion",
+                      help="per-file needs a build with the #841 prototype")
     scan.add_argument("--ids", help="comma-separated manifest ids; default is every file")
     scan.add_argument("--repetitions", type=int, default=3)
     scan.add_argument("--evict", action="store_true",

@@ -8,8 +8,8 @@ re-scope drafts behind [ADR 0120](adr/0120-phase-specific-media-evidence.md), fo
 (34 files, 935.3 GB) and a three-file subset (24.7 GB) of a network corpus shared with an
 active rehearsal. Every figure is copied from the committed records and READMEs named in each
 row. Nothing was re-measured for this report; the concurrency row was amended on 2026-11-17
-with the full-pass records of #839, and the observe-buffer row was added on 2026-11-17 from
-#838.
+with the full-pass records of #839, the observe-buffer row was added on 2026-11-17 from
+#838, and the per-file publication row was amended on 2026-11-17 with the records of #841.
 
 ## Evidence
 
@@ -24,7 +24,7 @@ as-found subset. A constructed miss shows a candidate *can* miss. It is not a ra
 | Concurrency 8 (local) | #789 | Wall 642.3 vs 619.2 s; first file 17.1 vs 10.3 s; summed hash 1,814.9 vs 798.5 s | wall inconclusive; first file and summed hash regression | none | Rejected |
 | Concurrency 1, 2 (c1: 6-file local subset; c2: full local pass, network subset) | #789; #839 [concurrency](media-evidence-baseline/concurrency/README.md) (amended 2026-11-17) | Full pass, c2 vs matched c4, reuse on: wall 200.0 vs 225.0 s, first file done 9.3 vs 6.2 s, physical 935.5 GB both; reuse off: wall 603.3 vs 659.4 s, first file done 27.1 vs 10.8 s, physical 2,686.9 vs 2,736.0 GB. Subset (same first file in both cells): c2 first file 7.0 vs 10.8 s; c1 wall 98.6 vs 78.1 s | Reuse on: wall improvement, first file regression; reuse off: wall, first file and physical inconclusive (first-file baseline CV 21.8%); c1 wall regression; network inconclusive (CV above 20%, unmatched cache) | none | Not selected: c2 shortens the read-once pass 11%; its later full-pass first replay completion comes from manifest order (c2's first window holds two large files), and neither metric is first durable observation (#841); concurrency stays 4 |
 | Bounded incremental publication, flush cadence | #789 (modelled) | Under the completion barrier no cadence moves first durable observation | modelled only | none | Not selected |
-| Per-file publication readiness | #789, #801 (modelled) | Modelled first ready 6.2 s vs barrier 212.5 s with single read | first durable observation `not measured` | none | Not selected: unmeasured, and needs an ADR superseding ADR 0077 publication |
+| Per-file publication readiness | #789, #801 (modelled); #841 [per-file publication](media-evidence-baseline/per-file-publication/README.md) (amended 2026-11-17) | Modelled first ready 6.2 s vs barrier 212.5 s with single read. Measured, full local pass, reuse off, unmerged prototype vs matched G3 stage-0: first durable observation 678.1 → 10.7 s; complete 678.1 → 669.8 s; 2 → 34 batches | First durable observation improvement (−98.4%); complete, reads and CPU inconclusive (no regression) | none (no trust change) | Go proposed in [ADR 0132](adr/0132-per-file-scan-publication.md) (Proposed): publish at batch acceptance, absence still at completion; ADR 0077 governs until the maintainer decides |
 | Single read: probe trusts owner hash under a size + mtime stat check | #801 [single-read](media-evidence-baseline/single-read/README.md) | Local wall 212.5 s; physical 935.5 GB (1.00× corpus); probe CPU 2.5 s; summed hash +5.1% vs buf1m; network: speed inconclusive, probe CPU 17.5 → 0.24 s | wall, physical, probe CPU improvement locally; summed hash regression | Same-size interior edit with mtime restored between hash and probe (#801 operator-recorded manual check; `meta` misses O1 in the committed #796 oracle) | Rejected with this guard |
 | R1: probe reuses owner hash; re-hashes replaced by a metadata guard | #797 [lazy](media-evidence-baseline/lazy/README.md), #798 [790 report](media-evidence-790-report.md) | Logical bytes −66.7% on both corpora; network wire saving not observed (24.66 GB fetched in repetition 1 under both) | logical improvement | Exactly the guard's misses | **Selected** with the `meta-ctime` guard on btrfs and tmpfs, setting default off |
 | `meta` (size, mtime ns, file key) | #796 [fingerprint](media-evidence-baseline/fingerprint/README.md) | 0 bytes | n/a | O1–O4, O6, O12, O13 missed | Rejected as identity evidence |
@@ -170,6 +170,9 @@ Carried from the records:
 - Not measured in #838: a whole transform or verification around the hash (outputs observed
   while their write is cached, CPU contention from ffmpeg or mkvmerge), the network corpus, and
   the 16 KiB hashes in `voom-control-plane` artifact promotion and the node agent's commit.
+- Not measured in #841: per-file publication with probe reuse on, on the network corpus, or on
+  roots of many small files; session failure, cancellation, commit-lock conflicts and restarts
+  under it; planning while a scan runs.
 - ctime behaviour was measured on btrfs and tmpfs only, on a kernel with fine-grained ctime.
   The oracle waited 20 ms before each edit, so same-tick edits on a coarse-clock kernel were
   not constructed.
