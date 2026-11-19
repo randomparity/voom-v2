@@ -512,9 +512,9 @@ def read_compared(path: Path) -> tuple[Any, list[str]]:
         return record, ["not a JSON object"]
     try:
         return record, validate_scan(record)
-    except (AttributeError, TypeError):
+    except (AttributeError, TypeError) as error:
         # A hand-edited section of the wrong JSON type; the validator reads sections as objects.
-        return record, ["malformed sections"]
+        return record, [f"malformed sections ({error})"]
 
 
 def compared_records(args: argparse.Namespace) -> list[dict[str, Any]]:

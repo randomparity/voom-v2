@@ -10,14 +10,14 @@ truncated or wrong-kind record can still be judged and print verdicts.
 
 - `scripts/media-evidence-rollout.py`: a new module function `read_compared(path)` returns
   `(record, problems)`: `["not valid JSON"]` when the file does not decode or parse,
-  `["not a JSON object"]` for a non-object, `["malformed sections"]` when `validate_scan`
+  `["not a JSON object"]` for a non-object, `["malformed sections (<error>)"]` when `validate_scan`
   raises `AttributeError`/`TypeError` on wrong nested types, else `validate_scan(record)`.
   `main` reads the baseline, then the candidate, and when either has problems raises
   `HarnessError` before `compare_scans` runs, naming each failing input by role and the path
   the operator gave, e.g. `baseline a.json failed validation: not_measured; candidate b.json
   failed validation: schema`. The existing handler prints it and exits 1. A construct or
   baseline-run record refuses on `schema`; an unreadable path keeps the existing `OSError`.
-- `scripts/media-evidence-rollout-selftest.py`: `CompareTests` gains end-to-end cases that call
+- `scripts/media-evidence-rollout-selftest.py`: new `CompareInputTests` cases call
   `rollout.main(["compare", ...])` (detailed under Validation).
 - No ownership transition: `validate_scan` stays the scan contract's one owner.
 
