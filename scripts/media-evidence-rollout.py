@@ -646,6 +646,13 @@ def hash_then_probe(workers: dict[str, Any], path: Path, between: Any) -> dict[s
     return probe(workers, path, hashed["payload"])
 
 
+def start_edit(delay: float, edit: Callable[[], None]) -> threading.Timer:
+    """Run case (b)'s edit `delay` seconds into the hash read; the selftest replaces this."""
+    timer = threading.Timer(delay, edit)
+    timer.start()
+    return timer
+
+
 def edit_during_hash(workers: dict[str, Any], path: Path, delay: float) -> dict[str, Any]:
     """Case (b): edit while the hash worker reads, mtime restored before its post-read stat."""
     edited_at: list[float] = []
@@ -654,11 +661,10 @@ def edit_during_hash(workers: dict[str, Any], path: Path, delay: float) -> dict[
         same_size_edit(path, restore_mtime=True)
         edited_at.append(time.monotonic())
 
-    timer = threading.Timer(delay, edit)
-    timer.start()
+    pending = start_edit(delay, edit)
     hashed = hash_file(workers, path)
     finished = time.monotonic()
-    timer.join()
+    pending.join()
     if not edited_at or edited_at[0] >= finished:
         raise HarnessError("case (b) edit landed after the hash read ended; lower --edit-delay")
     return outcome("hash", hashed)

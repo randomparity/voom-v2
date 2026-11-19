@@ -18,6 +18,7 @@ import time
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
@@ -418,9 +419,20 @@ class ConstructionTests(unittest.TestCase):
         self.assertEqual(result["marker"], "pre_probe_guard")
         self.assertNotIn("/private/path", json.dumps(result))
 
+    def test_the_edit_starts_on_a_timer_of_the_given_delay(self):
+        later = rollout.start_edit(5.0, lambda: None)
+        later.cancel()
+        self.assertEqual(later.interval, 5.0)
+        ran = []
+        rollout.start_edit(0.0, lambda: ran.append(True)).join()
+        self.assertEqual(ran, [True])
+
 
 class FakeWorker:
     """Hash and probe workers reduced to the stat checks the real ones make."""
+
+    # Case (b)'s edit, handed over by the patched `start_edit` and run inside the hash read.
+    edit = None
 
     def __init__(self, binary):
         self.program = Path(binary).name
@@ -436,7 +448,12 @@ class FakeWorker:
         if operation == "hash_file":
             path = Path(payload["provider_locator"], payload["provider_relative_locator"])
             before = self.facts(path)
+            # The read takes time, so a coarse ctime still ticks past `before` (and, for
+            # cases (a) and (c), past the hash) before any edit.
             time.sleep(0.3)
+            edit, FakeWorker.edit = FakeWorker.edit, None
+            if edit:
+                edit()
             if self.facts(path) != before:
                 return {"kind": "error", "code": rollout.MISMATCH,
                         "payload": {"stage": "hash_drift"}}
@@ -464,11 +481,20 @@ class CaseTests(unittest.TestCase):
         self.scratch = root / "scratch"
         self.scratch.mkdir()
         self.args = rollout.parse_args(["construct", str(self.source), "--label", "fixture",
-                                        "--scratch", str(self.scratch), "--edit-delay", "0.1",
+                                        "--scratch", str(self.scratch), "--edit-delay", "0.25",
                                         "--output", str(root / "out.json")])
-        patcher = patch.object(rollout.baseline, "Worker", FakeWorker)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (patch.object(rollout.baseline, "Worker", FakeWorker),
+                        patch.object(rollout, "start_edit", self.edit_in_hash)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, FakeWorker, "edit", None)
+        self.delays = []
+
+    def edit_in_hash(self, delay, edit):
+        """Hand case (b)'s edit to the fake hash, so it lands inside the read on any runner."""
+        self.delays.append(delay)
+        FakeWorker.edit = edit
+        return SimpleNamespace(join=lambda: None)
 
     def test_every_case_behaves_as_its_gate_defines(self):
         before = self.source.read_bytes()
@@ -478,6 +504,7 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(results["a_restored_mtime_edit_before_probe"]["marker"],
                          "pre_probe_guard")
         self.assertEqual(results["b_restored_mtime_edit_during_hash"]["marker"], "hash_drift")
+        self.assertEqual(self.delays, [0.25])
         for name in list(rollout.CASES)[1:]:
             self.assertTrue(results[name]["detected"], name)
         # The source is never edited and every copy is removed.
@@ -509,9 +536,10 @@ class CaseTests(unittest.TestCase):
         self.assertFalse(result["detected"])
 
     def test_an_edit_after_the_hash_read_refuses_case_b(self):
-        self.args.edit_delay = 1.0
-        with self.assertRaises(rollout.HarnessError):
-            rollout.run_case("b_restored_mtime_edit_during_hash", self.args, "tmpfs")
+        # The edit runs only when the case joins it, which is after the hash read returned.
+        with patch.object(rollout, "start_edit", lambda _, edit: SimpleNamespace(join=edit)):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.run_case("b_restored_mtime_edit_during_hash", self.args, "tmpfs")
 
     def test_a_hash_result_without_guard_facts_refuses_the_probe(self):
         def no_guard_facts(worker, operation, payload):
