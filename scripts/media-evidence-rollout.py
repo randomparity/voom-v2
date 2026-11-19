@@ -502,6 +502,34 @@ def validate_scan(record: dict[str, Any]) -> list[str]:
     return problems or publication_problems(record)
 
 
+def read_compared(path: Path) -> tuple[Any, list[str]]:
+    """A record named on the `compare` command line, with every reason it may not be judged."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None, ["not valid JSON"]
+    if not isinstance(record, dict):
+        return record, ["not a JSON object"]
+    try:
+        return record, validate_scan(record)
+    except (AttributeError, TypeError):
+        # A hand-edited section of the wrong JSON type; the validator reads sections as objects.
+        return record, ["malformed sections"]
+
+
+def compared_records(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Both `compare` inputs, refused together, by role and path, unless each passes validation."""
+    records, refusals = [], []
+    for role, path in (("baseline", args.baseline), ("candidate", args.candidate)):
+        record, problems = read_compared(path)
+        records.append(record)
+        if problems:
+            refusals.append(f"{role} {path} failed validation: " + ", ".join(problems))
+    if refusals:
+        raise HarnessError("; ".join(refusals))
+    return records
+
+
 def publication_problems(record: dict[str, Any]) -> list[str]:
     """A `/2` cell must have run as labelled: every session done, per-file proven both ways."""
     problems = []
@@ -815,9 +843,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         if args.command == "compare":
-            records = [json.loads(path.read_text(encoding="utf-8"))
-                       for path in (args.baseline, args.candidate)]
-            print(json.dumps(compare_scans(*records), indent=2))
+            print(json.dumps(compare_scans(*compared_records(args)), indent=2))
             return 0
         if args.command == "serve":
             serve(args)
