@@ -20,7 +20,8 @@ CPU −54 to −58%, wall unchanged, peak RSS about 4 → 21 MiB, identical hash
   are updated. Selftests follow.
 - Decision report: the observe-buffer row records #879 landed; the phase table's transform
   input, output verification and probe rows name the 1 MiB buffer. ADR 0120 is unchanged.
-- Excluded: control-plane and node-agent 16 KiB hashes (#889); transform-input reuse (rejected, ADR 0120).
+- Excluded: control-plane and node-agent 16 KiB hashes (#889); transform-input reuse
+  (rejected, ADR 0120).
 
 ### Failure model
 
