@@ -14,7 +14,6 @@ import os
 import sqlite3
 import sys
 import tempfile
-import threading
 import time
 import tomllib
 import unittest
@@ -151,51 +150,49 @@ class PublicationTimingTests(unittest.TestCase):
         connection.commit()
         connection.close()
 
-    def later(self, delay, statements):
-        def apply():
-            time.sleep(delay)
-            connection = sqlite3.connect(self.database)
-            for statement in statements:
-                connection.execute(statement)
-            connection.commit()
-            connection.close()
-        thread = threading.Thread(target=apply)
-        thread.start()
-        self.addCleanup(thread.join)
+    def scripted(self, writes):
+        """Poll on a fake clock: each sleep advances it one interval and applies the next write.
+
+        A write is seen by the next poll only and every elapsed time is a whole number of
+        intervals, so no runner speed can merge two writes into one poll or one time.
+        """
+        database, pending = self.database, list(writes)
+
+        class Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+                if pending:
+                    connection = sqlite3.connect(database)
+                    for statement in pending.pop(0):
+                        connection.execute(statement)
+                    connection.commit()
+                    connection.close()
+
+        with patch.object(rollout, "time", Clock()):
+            return rollout.wait_for_publication(
+                self.database, [7], [1], 0.0, 10, lambda: None)
 
     def test_first_durable_observation_is_the_first_published_location(self):
-        self.later(0.3, ["INSERT INTO file_locations VALUES (1, 7, 'rooted', NULL)"])
-        self.later(0.6, ["UPDATE scan_sessions SET status = 'succeeded'"])
-        first, complete, states, _ = rollout.wait_for_publication(
-            self.database, [7], [1], time.monotonic(), 10, lambda: None)
-        self.assertGreaterEqual(first, 0.3)
+        first, complete, states, _ = self.scripted([
+            [], ["INSERT INTO file_locations VALUES (1, 7, 'rooted', NULL)"],
+            ["UPDATE scan_sessions SET status = 'succeeded'"]])
+        self.assertEqual(first, round(2 * rollout.POLL_SECONDS, 3))
+        self.assertEqual(complete, round(3 * rollout.POLL_SECONDS, 3))
         self.assertLess(first, complete)
         self.assertEqual(states, {1: "succeeded"})
 
     def test_retired_and_other_root_locations_are_not_publication(self):
-        self.later(0.1, ["INSERT INTO file_locations VALUES (1, 7, 'rooted', 'retired')",
-                         "INSERT INTO file_locations VALUES (2, 8, 'rooted', NULL)"])
-        self.later(0.3, ["UPDATE scan_sessions SET status = 'failed'"])
-        first, _, states, _ = rollout.wait_for_publication(
-            self.database, [7], [1], time.monotonic(), 10, lambda: None)
+        first, _, states, _ = self.scripted([
+            ["INSERT INTO file_locations VALUES (1, 7, 'rooted', 'retired')",
+             "INSERT INTO file_locations VALUES (2, 8, 'rooted', NULL)"],
+            ["UPDATE scan_sessions SET status = 'failed'"]])
         self.assertEqual(first, rollout.UNAVAILABLE)
         self.assertEqual(states, {1: "failed"})
-
-    def scripted(self, writes):
-        """Poll with each sleep applying the next write: no wall-clock race between them."""
-        pending = list(writes)
-
-        def step(_seconds):
-            if pending:
-                connection = sqlite3.connect(self.database)
-                for statement in pending.pop(0):
-                    connection.execute(statement)
-                connection.commit()
-                connection.close()
-
-        with patch.object(rollout.time, "sleep", step):
-            return rollout.wait_for_publication(
-                self.database, [7], [1], time.monotonic(), 10, lambda: None)
 
     def test_publication_at_completion_is_not_before_complete(self):
         # Completion publication: the location and the terminal status commit together.
