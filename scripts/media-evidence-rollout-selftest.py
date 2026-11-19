@@ -677,6 +677,7 @@ class RecordTests(unittest.TestCase):
     def per_file_record(self):
         record = self.scan_record()
         record["cell"]["publication"] = "per-file"
+        record["corpus"]["roots"] = 1
         repetition = record["repetitions"][0]
         repetition["evidence"]["observations"] = 34
         repetition["batches"], repetition["published_before_complete"] = 34, 33
@@ -690,6 +691,37 @@ class RecordTests(unittest.TestCase):
         record = self.per_file_record()
         record["repetitions"][0]["published_before_complete"] = 0
         self.assertIn("repetition 1 per-file publication", rollout.validate_scan(record))
+
+    def test_a_multi_root_per_file_cell_is_refused(self):
+        # Cell-wide aggregates: the other root's in-session publication would cover a root
+        # that published only at completion, so the proof holds only for one root.
+        record = self.per_file_record()
+        record["corpus"]["roots"] = 2
+        self.assertIn("per-file roots", rollout.validate_scan(record))
+        record["corpus"]["roots"] = "x"
+        self.assertIn("per-file roots", rollout.validate_scan(record))
+        record["corpus"]["roots"] = 2
+        record["cell"]["publication"] = "completion"
+        self.assertEqual(rollout.validate_scan(record), [])
+
+    def test_a_per_file_capture_refuses_more_than_one_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = rollout.parse_args([
+                "scan", str(Path(temp) / "manifest.json"), "--reuse", "off",
+                "--publication", "per-file", "--workdir", str(Path(temp) / "work"),
+                "--output", str(Path(temp) / "out"), "--repetitions", "1"])
+            Path(args.manifest).write_text(json.dumps({"label": "local-corpus", "root": temp,
+                                                       "files": []}))
+            roots = [Path(temp) / "a", Path(temp) / "b"]
+            with patch.object(rollout, "binaries_build", lambda _bin: {}), \
+                    patch.object(rollout.baseline, "select_files", lambda *_: []), \
+                    patch.object(rollout.baseline, "corpus_filesystem", lambda *_: "btrfs"), \
+                    patch.object(rollout, "scan_roots", lambda *_: roots), \
+                    patch.object(rollout, "scan_repetition",
+                                 lambda *_: self.fail("a refused capture ran a repetition")):
+                with self.assertRaisesRegex(rollout.HarnessError, "2 roots"):
+                    rollout.capture_scan(args)
+            self.assertFalse(args.workdir.exists())
 
     def test_a_failed_session_voids_a_clean_cell(self):
         record = self.per_file_record()
