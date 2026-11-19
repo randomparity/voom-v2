@@ -12,8 +12,8 @@ of `wait_for_publication`, `first == complete` and `first < complete` fails (mac
   patches only `sleep` and reads the real clock, so two fast polls can round to one time) gains
   a fake clock: it replaces `rollout.time` with an object whose `sleep(s)` advances the clock by
   `s` and applies the next scripted write, and whose `monotonic()` returns the clock; `started`
-  is the fake clock's 0. Each write is seen by the next poll only, and elapsed times are whole
-  poll intervals. Every existing `scripted` caller keeps its assertions.
+  is the fake clock's non-zero start. Each write is seen by the next poll only, and elapsed
+  times are whole poll intervals. Every existing `scripted` caller keeps its assertions.
 - The first-durable test becomes `scripted([[], [insert], [complete]])` and asserts
   `first == round(2 * POLL_SECONDS, 3)`, `complete == round(3 * POLL_SECONDS, 3)` (the
   instrument rounds), and `first < complete` unchanged. The retired/other-root test, the

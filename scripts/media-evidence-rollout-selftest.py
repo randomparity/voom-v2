@@ -159,7 +159,8 @@ class PublicationTimingTests(unittest.TestCase):
         database, pending = self.database, list(writes)
 
         class Clock:
-            now = 0.0
+            # Not zero, so a wait that stopped subtracting `started` would report wrong times.
+            now = 1000.0
 
             def monotonic(self):
                 return self.now
@@ -173,9 +174,10 @@ class PublicationTimingTests(unittest.TestCase):
                     connection.commit()
                     connection.close()
 
-        with patch.object(rollout, "time", Clock()):
+        clock = Clock()
+        with patch.object(rollout, "time", clock):
             return rollout.wait_for_publication(
-                self.database, [7], [1], 0.0, 10, lambda: None)
+                self.database, [7], [1], clock.now, 10, lambda: None)
 
     def test_first_durable_observation_is_the_first_published_location(self):
         first, complete, states, _ = self.scripted([
