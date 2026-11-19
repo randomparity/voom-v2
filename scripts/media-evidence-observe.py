@@ -118,16 +118,15 @@ def process_usage(pid: int, proc_root: Path = Path("/proc")) -> dict[str, int | 
             found, cause = {}, "no /proc on this host"
         else:
             try:
-                found, cause = parse((proc_root / str(pid) / source).read_text()), None
+                found = parse((proc_root / str(pid) / source).read_text())
+                cause = f"{source}: field absent"
             except (OSError, IndexError, ValueError) as error:
                 found, cause = {}, f"{source}: {type(error).__name__}"
         for counter in counters:
-            if counter in found:
-                usage[counter] = found[counter]
-            else:
-                usage[counter] = UNAVAILABLE
-                print(f"media-evidence-observe: process {counter} unavailable: "
-                      f"{cause or f'{source}: field absent'}", file=sys.stderr)
+            usage[counter] = found.get(counter, UNAVAILABLE)
+            if counter not in found:
+                print(f"media-evidence-observe: process {counter} unavailable: {cause}",
+                      file=sys.stderr)
     return usage
 
 
