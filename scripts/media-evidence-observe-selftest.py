@@ -6,7 +6,10 @@ BLAKE3, so the harness's accounting runs without a Rust build; the real examples
 production `observe_file_facts`. Comparison fixtures are synthetic records.
 """
 
+import contextlib
 import hashlib
+import io
+import os
 import importlib.util
 import json
 import stat
@@ -131,6 +134,86 @@ class RunTests(unittest.TestCase):
                       ["ok 7 0 0 3 h", "ok 1 0 0 3 h"], ["boom"]):
             with self.subTest(lines=lines), self.assertRaises(observe.HarnessError):
                 observe.parse_rows(lines, files)
+
+
+class ProcessUsageTests(unittest.TestCase):
+    """`unavailable` stays a valid value; stderr names each unavailable counter's cause."""
+
+    STAT = "123 (observe ffmpeg) S" + " 0" * 10 + " 100 50 25 25 0 0"
+    STATUS = "Name:\tobserve-ffmpeg\nVmHWM:\t    2048 kB\n"
+    IO = "rchar: 5000\nwchar: 0\nread_bytes: 4096\n"
+
+    def usage(self, sources=None, make_root=True):
+        """`process_usage` over a scratch /proc holding `sources` for pid 123."""
+        with tempfile.TemporaryDirectory() as scratch:
+            proc = Path(scratch) / "proc"
+            if make_root:
+                proc.mkdir()
+            if sources is not None:
+                (proc / "123").mkdir()
+                for name, text in sources.items():
+                    (proc / "123" / name).write_text(text)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                usage = observe.process_usage(123, proc)
+        return usage, stderr.getvalue().splitlines()
+
+    def complete(self, **overrides):
+        return {"stat": self.STAT, "status": self.STATUS, "io": self.IO, **overrides}
+
+    def assert_causes(self, lines, expected):
+        self.assertEqual(lines, [f"media-evidence-observe: process {counter} unavailable: {cause}"
+                                 for counter, cause in expected])
+
+    def test_readable_sources_give_every_counter_and_no_cause(self):
+        usage, lines = self.usage(self.complete())
+        self.assertEqual(usage, {"cpu_seconds": round(200 / os.sysconf("SC_CLK_TCK"), 3),
+                                 "peak_rss_bytes": 2048 * 1024, "rchar": 5000,
+                                 "read_bytes": 4096})
+        self.assertEqual(lines, [])
+
+    def test_a_host_without_proc_says_so_for_every_counter(self):
+        usage, lines = self.usage(make_root=False)
+        self.assertEqual(set(usage.values()), {observe.UNAVAILABLE})
+        self.assert_causes(lines, [(counter, "no /proc on this host")
+                                   for counter in ("cpu_seconds", "peak_rss_bytes", "rchar",
+                                                   "read_bytes")])
+
+    def test_a_missing_process_reports_the_read_error_per_source(self):
+        usage, lines = self.usage()
+        self.assertEqual(set(usage.values()), {observe.UNAVAILABLE})
+        self.assert_causes(lines, [("cpu_seconds", "stat: FileNotFoundError"),
+                                   ("peak_rss_bytes", "status: FileNotFoundError"),
+                                   ("rchar", "io: FileNotFoundError"),
+                                   ("read_bytes", "io: FileNotFoundError")])
+
+    def test_a_bad_stat_leaves_only_cpu_unavailable(self):
+        for stat_text, cause in (("123 (x) S 0 0 0 0 0 0 0 0 0 0 a b c d", "stat: ValueError"),
+                                 ("123 x S", "stat: IndexError"),
+                                 ("123 (x) S 0 0 0 0 0 0 0 0 0 0 1 1", "stat: field absent")):
+            with self.subTest(stat=stat_text):
+                usage, lines = self.usage(self.complete(stat=stat_text))
+                self.assertEqual(usage["cpu_seconds"], observe.UNAVAILABLE)
+                self.assertEqual((usage["peak_rss_bytes"], usage["rchar"], usage["read_bytes"]),
+                                 (2048 * 1024, 5000, 4096))
+                self.assert_causes(lines, [("cpu_seconds", cause)])
+
+    def test_a_bad_status_leaves_only_peak_memory_unavailable(self):
+        for status_text, cause in (("Name:\tx\n", "status: field absent"),
+                                   ("VmHWM:\t x kB\n", "status: ValueError")):
+            with self.subTest(status=status_text):
+                usage, lines = self.usage(self.complete(status=status_text))
+                self.assertEqual(usage["peak_rss_bytes"], observe.UNAVAILABLE)
+                self.assertIsInstance(usage["cpu_seconds"], float)
+                self.assert_causes(lines, [("peak_rss_bytes", cause)])
+
+    def test_a_bad_io_leaves_only_its_counters_unavailable(self):
+        usage, lines = self.usage(self.complete(io="rchar: 5000\n"))
+        self.assertEqual((usage["rchar"], usage["read_bytes"]), (5000, observe.UNAVAILABLE))
+        self.assert_causes(lines, [("read_bytes", "io: field absent")])
+        usage, lines = self.usage(self.complete(io="rchar 5000\n"))
+        self.assertEqual((usage["rchar"], usage["read_bytes"]), (observe.UNAVAILABLE,) * 2)
+        self.assert_causes(lines, [("rchar", "io: ValueError"), ("read_bytes", "io: ValueError")])
 
 
 class BufferTests(unittest.TestCase):
