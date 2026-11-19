@@ -35,7 +35,9 @@ one-file subset; no measurement uses a larger per-file subset.
     directory is created, a `--publication per-file` capture whose selection yields more than
     one `scan_roots` root raises `HarnessError` naming the root count, so an operator does not
     run a long capture that validation then refuses, and a refused run leaves no work directory.
-    The root list is computed once and reused for `corpus.roots`.
+    The root list is computed once, for every publication mode, and reused for
+    `corpus.roots`; a subset whose files share a directory therefore refuses in `scan_roots`
+    before the work directory exists, not later inside `scan_repetition`.
 - `scripts/media-evidence-rollout-selftest.py`: `RecordTests` cases (under Validation).
 - No ownership transition: `publication_problems` stays the per-file contract's one owner;
   `capture_scan` is its caller.
