@@ -28,7 +28,7 @@ as-found subset. A constructed miss shows a candidate *can* miss. It is not a ra
 | Single read: probe trusts owner hash under a size + mtime stat check | #801 [single-read](media-evidence-baseline/single-read/README.md) | Local wall 212.5 s; physical 935.5 GB (1.00× corpus); probe CPU 2.5 s; summed hash +5.1% vs buf1m; network: speed inconclusive, probe CPU 17.5 → 0.24 s | wall, physical, probe CPU improvement locally; summed hash regression | Same-size interior edit with mtime restored between hash and probe (#801 operator-recorded manual check; `meta` misses O1 in the committed #796 oracle) | Rejected with this guard |
 | R1: probe reuses owner hash; re-hashes replaced by a metadata guard | #797 [lazy](media-evidence-baseline/lazy/README.md), #798 [790 report](media-evidence-790-report.md) | Logical bytes −66.7% on both corpora; network wire saving not observed (24.66 GB fetched in repetition 1 under both) | logical improvement | Exactly the guard's misses | **Selected** with the `meta-ctime` guard on btrfs and tmpfs, setting default off |
 | `meta` (size, mtime ns, file key) | #796 [fingerprint](media-evidence-baseline/fingerprint/README.md) | 0 bytes | n/a | O1–O4, O6, O12, O13 missed | Rejected as identity evidence |
-| `meta-ctime` (`meta` + ctime ns) | #798 [reuse](media-evidence-baseline/reuse/README.md) | 0 bytes; stat of 34 files about 1–3 ms | Added after the freeze; no stage-0 verdict claimed | Local: no miss in O1–O13 (O10 not applicable); false change on O5, O8. Network: ctime follows mtime, O1 and O13 missed | Selected only as R1's guard on btrfs and tmpfs |
+| `meta-ctime` (`meta` + ctime ns) | #798, #840 [reuse](media-evidence-baseline/reuse/README.md) | 0 bytes; stat of 34 files about 1–3 ms | Added after the freeze; no stage-0 verdict claimed | btrfs, tmpfs: no miss in O1–O13 (O10 not applicable). ext4, xfs (#840, kernel 7.3.3): no miss in O1–O13, with O10 constructed as the guard's window, at 20 ms and same-tick. False change on O5, O8. Network: ctime follows mtime, O1 and O13 missed; a client-sent ChangeTime is not reported | Selected only as R1's guard on btrfs and tmpfs; ext4 and xfs meet ADR 0120's O1/O10 bar in the oracle, and listing them is a separate change |
 | `ht64`, `ht1m`, `ht64-i8`, `ht64-i32` | #796 | Local 4.46 / 71.30 / 22.28 / 75.76 MB per pass | n/a | O1, O13 missed | Rejected |
 | `rnd64-i8`, `rnd64-i32` | #798 | As `ht64-i8`/`-i32`, plus a 457 MB block table built by one full read | Detection probability equals the sampled fraction: under 0.04% per check | O1, O13 missed when the seed is known | Rejected |
 | Lazy provisional evidence with deferred full hash | #797 | Eventual logical 935.31 GB local (one full read); provisional within 0.03 s; zero wasted work observed | logical improvement comes from dropping the re-reads, not from deferral | Interior O13 and O15 missed; plan becomes committable | Rejected |
@@ -165,17 +165,24 @@ Carried from the records:
   transformation start, first verified output, complete library, sidecar hashing, retries,
   and ffprobe child memory and I/O (`not_measured` in the #788, #789, #797 and #801 records).
   #796 and #798 also did not measure per-file physical bytes, peak memory or probing.
-- Not measured in #790: server-side or other-client changes on the network share, whether a
-  client-sent ChangeTime is honoured, and transform-input reuse.
+- Not measured in #790: server-side or other-client changes on the network share, and
+  transform-input reuse. #840 measured client-sent ChangeTime on a network scratch share (a
+  different share on the network corpus's server): the kernel client's ChangeTime (its current
+  time) is not what the server reports, which stays equal to LastWriteTime. A chosen ChangeTime
+  value was not sent (no authenticated user-space SMB client on the host).
 - Not measured in #838: a whole transform or verification around the hash (outputs observed
   while their write is cached, CPU contention from ffmpeg or mkvmerge), the network corpus, and
   the 16 KiB hashes in `voom-control-plane` artifact promotion and the node agent's commit.
 - Not measured in #841: per-file publication with probe reuse on, on the network corpus, or on
   roots of many small files; session failure, cancellation, commit-lock conflicts and restarts
   under it; planning while a scan runs.
-- ctime behaviour was measured on btrfs and tmpfs only, on a kernel with fine-grained ctime.
-  The oracle waited 20 ms before each edit, so same-tick edits on a coarse-clock kernel were
-  not constructed.
+- ctime behaviour was measured on btrfs and tmpfs (#798, 20 ms wait before each edit) and on
+  ext4 and xfs (#840, kernel 7.3.3 with multigrain timestamps). The ext4 and xfs oracles also
+  ran with no wait: the coarse clock stayed in one tick for O1, O10 and O13 on both, and
+  `meta-ctime` detected them. **Per ADR 0120's O1/O10 bar:** ext4 met and xfs met in
+  the Python oracle's stat model only, since #794's production rollout guard cases were not
+  run on them; the network scratch share not met. No kernel without fine-grained or
+  multigrain ctime was measured.
 - The `meta-ctime` and `rnd64` candidates were added after the protocol froze, so no verdict
   against stage 0 is claimed for them (#798).
 - The #801 constructed miss is an operator-recorded manual check, not a committed record.
