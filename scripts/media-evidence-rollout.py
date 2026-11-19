@@ -419,6 +419,10 @@ def capture_scan(args: argparse.Namespace) -> dict[str, Any]:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     public_label(manifest["label"])
     files = baseline.select_files(manifest, args.ids)
+    root_count = len(scan_roots(manifest, files))
+    if args.publication == "per-file" and root_count != 1:
+        raise HarnessError(f"per-file publication proves one root only; this selection has "
+                           f"{root_count} roots (use a full pass or a single file)")
     fs_type = baseline.corpus_filesystem(Path(manifest["root"]), files)
     if args.workdir.exists():
         raise HarnessError("the stack work directory must not exist yet; choose a new one")
@@ -441,7 +445,7 @@ def capture_scan(args: argparse.Namespace) -> dict[str, Any]:
                    "manifest_files": len(manifest["files"]),
                    "selected_ids": [entry["id"] for entry in files],
                    "selected_bytes": sum(entry["size_bytes"] for entry in files),
-                   "roots": len(scan_roots(manifest, files))},
+                   "roots": root_count},
         "build": {"git_commit": commit.strip() if commit else UNAVAILABLE,
                   "git_changed_paths": baseline.tracked_changes(),
                   "instrument_sha256": baseline.sha256_file(Path(__file__).resolve()),
@@ -535,6 +539,10 @@ def publication_problems(record: dict[str, Any]) -> list[str]:
     problems = []
     if record["cell"]["publication"] not in PUBLICATIONS:
         problems.append("publication")
+    # The proof's batches and publication are cell-wide: with a second root, that root's
+    # in-session publication would cover one that published only at completion.
+    if record["cell"]["publication"] == "per-file" and record["corpus"]["roots"] != 1:
+        problems.append("per-file roots")
     if record["build"]["binaries_git_changed_paths"]:
         problems.append("binaries checkout dirty")
     for repetition in record["repetitions"]:
