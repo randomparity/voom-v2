@@ -20,18 +20,21 @@ The record cannot support a per-root proof. A repetition carries `batches`,
 the record holds is the count `corpus.roots`. A per-root proof would need new per-root fields,
 a third scan schema, and a new capture path in `wait_for_publication`, `observation_batches` and
 `stored_evidence`. Nothing needs a multi-root per-file cell: the committed per-file record is a
-full pass with `corpus.roots == 1`, and a full pass always scans one root. The refusal costs
-only subset per-file cells across several directories, which no measurement uses.
+full pass with `corpus.roots == 1`, and a full pass always scans one root. `scan_roots` gives
+each file of a subset its own root, so the refusal leaves per-file cells only for a full pass or a
+one-file subset; no measurement uses a larger per-file subset.
 
 ## Scope
 
 - `scripts/media-evidence-rollout.py`:
   - `publication_problems`: a per-file record whose `corpus.roots` is not exactly `1` adds the
-    problem `per-file roots`. The check compares with `!= 1`, so a non-integer value refuses
-    instead of raising. The two existing per-repetition checks are unchanged.
-  - `capture_scan`: after `select_files`, a `--publication per-file` capture whose selection
-    yields more than one `scan_roots` root raises `HarnessError` naming the root count before
-    any stack starts, so an operator does not run a long capture that validation then refuses.
+    problem `per-file roots`. The check compares with `!= 1`, so a value that is not equal to 1
+    (for example a hand-edited string) refuses instead of raising; `capture_scan` always writes
+    an integer count. The two existing per-repetition checks are unchanged.
+  - `capture_scan`: directly after `select_files`, before `corpus_filesystem` and the work
+    directory is created, a `--publication per-file` capture whose selection yields more than
+    one `scan_roots` root raises `HarnessError` naming the root count, so an operator does not
+    run a long capture that validation then refuses, and a refused run leaves no work directory.
     The root list is computed once and reused for `corpus.roots`.
 - `scripts/media-evidence-rollout-selftest.py`: `RecordTests` cases (under Validation).
 - No ownership transition: `publication_problems` stays the per-file contract's one owner;
@@ -59,14 +62,18 @@ only subset per-file cells across several directories, which no measurement uses
 ## Validation
 
 - Contract: a multi-root per-file proof is refused. Mode: focused-test.
+  `RecordTests.per_file_record` sets `corpus.roots = 1` (the shared fixture fills every corpus
+  key with `"x"`, which the new check refuses).
   `test_a_multi_root_per_file_cell_is_refused` builds the passing per-file fixture with
   `corpus.roots = 2` (one root's publication would satisfy the aggregate) and asserts
-  `per-file roots`; the same record as a completion cell validates. Red without the check:
-  `validate_scan` returns `[]`.
+  `per-file roots`; it also asserts a `"x"` root count refuses; the same record as a completion
+  cell validates. Red without the check: `validate_scan` returns `[]`.
 - Contract: capture refuses before any stack. Mode: focused-test.
-  `test_a_per_file_capture_refuses_more_than_one_root` patches `scan_roots` to two roots and
-  `scan_repetition` to fail if called, and asserts `HarnessError`. Red without the check:
-  `scan_repetition` is reached.
+  `test_a_per_file_capture_refuses_more_than_one_root` patches `select_files`,
+  `corpus_filesystem` and `binaries_build` as the sibling capture test does, patches
+  `scan_roots` to two roots and `scan_repetition` to `self.fail`, and asserts
+  `assertRaisesRegex(HarnessError, "2 roots")` and that no work directory was created. Red
+  without the check: `scan_repetition` is reached and the test fails.
 - Contract: committed records still validate. Mode: existing focused-test
   `test_committed_records_validate`.
 - Green command: `just media-evidence-rollout-selftest`; gate: `just source-checks`.
