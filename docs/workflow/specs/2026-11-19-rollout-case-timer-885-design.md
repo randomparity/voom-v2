@@ -22,13 +22,14 @@ every rollout timer 0.5 s late reproduces it on `main`.
     existing 0.3 s read, runs the edit after that read and before its post-read stat, then
     compares facts as today. The edit is therefore inside the hash window by construction.
   - `CaseTests.setUp` patches `rollout.start_edit` with a function that hands the edit to
-    `FakeWorker.edit` and returns a no-op joinable; cleanup clears the slot. `--edit-delay` is
-    dropped from the fixture arguments because nothing reads it.
+    `FakeWorker.edit`, records the delay it was given, and returns a no-op joinable; cleanup
+    clears the slot. The fixture keeps a distinctive `--edit-delay 0.25`, and case (b)'s test
+    asserts the recorded delay is that value, so the operator's flag still reaches the seam.
   - `test_an_edit_after_the_hash_read_refuses_case_b` stops relying on a 1.0 s timer outliving
     the 0.3 s read: its `start_edit` returns a joinable whose `join` runs the edit, so the edit
     lands after `hash_file` returns by construction.
-  - One new test pins the production seam: `start_edit(0.0, edit)` returns a `threading.Timer`
-    whose interval is the given delay, and joining it runs the edit.
+  - One new test pins the production seam: `start_edit(5.0, edit)` returns a `threading.Timer`
+    whose interval is 5.0 (then cancelled), and joining `start_edit(0.0, edit)` runs the edit.
 - No ownership transition: the timer start keeps its owner (`edit_during_hash`'s module) and
   gains a name.
 
@@ -53,6 +54,9 @@ every rollout timer 0.5 s late reproduces it on `main`.
    coarse-grained ctime (some Linux kernels tick at 4–10 ms) differ between the pre-read stat and
    the edit, and between the hash and the later probe in cases (a) and (c). Removing it would
    trade the scheduling race for a timestamp-granularity flake.
+5. The refusal compares two same-thread `time.monotonic()` reads with `>=`; an edit that ran
+   inside the hash could only tie with `finished` on a clock coarser than one stat call. Linux and
+   macOS monotonic clocks are nanosecond-resolution, so this is accepted, not engineered around.
 4. Accepted: the selftest no longer exercises the real timer thread racing a real hash; the new
    seam test pins its delay and join. The real race is the instrument's own documented limit
    (`--edit-delay` must fall inside the real read), which the refusal reports.
@@ -73,6 +77,7 @@ every rollout timer 0.5 s late reproduces it on `main`.
   assertion.
 - focused-test: `CaseTests.test_an_edit_after_the_hash_read_refuses_case_b`. Red: removing the
   refusal from `edit_during_hash` fails the `assertRaises`; deterministic under the same forcing.
-- focused-test: the new `start_edit` seam test. Red: a `start_edit` that ignores `delay` fails
-  the interval assertion.
+- focused-test: the new `start_edit` seam test. Red: a `start_edit` that hard-codes its delay
+  fails the 5.0 interval assertion. Case (b)'s recorded-delay assertion: red when the case stops
+  passing `args.edit_delay`.
 - Green: `just media-evidence-rollout-selftest`, `just source-checks`.
