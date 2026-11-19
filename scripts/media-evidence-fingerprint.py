@@ -20,6 +20,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
 import random
 import re
 import resource
@@ -39,8 +40,10 @@ _spec.loader.exec_module(baseline)
 
 ORACLE_SCHEMA_V1 = "media-evidence-fingerprint-oracle/1"
 # /2 (#840): a configurable tick wait, a coarse-tick witness per row, metadata O10 constructed.
-ORACLE_SCHEMA = "media-evidence-fingerprint-oracle/2"
-ORACLE_SCHEMAS = {ORACLE_SCHEMA_V1, ORACLE_SCHEMA}
+ORACLE_SCHEMA_V2 = "media-evidence-fingerprint-oracle/2"
+# /3 (#891): `parameters.kernel_release`, since ctime granularity depends on the kernel.
+ORACLE_SCHEMA = "media-evidence-fingerprint-oracle/3"
+ORACLE_SCHEMAS = {ORACLE_SCHEMA_V1, ORACLE_SCHEMA_V2, ORACLE_SCHEMA}
 RUN_SCHEMA = "media-evidence-fingerprint-run/1"
 UNAVAILABLE = baseline.UNAVAILABLE
 RECORD_DIR = baseline.REPO_ROOT / "docs" / "media-evidence-baseline" / "fingerprint"
@@ -548,6 +551,7 @@ def run_oracle(scratch_parent: Path, candidates: list[str] | None = None,
             "large_fixture_bytes": LARGE_BYTES, "short_fixture_bytes": SHORT_BYTES,
             "overlap_fixture_bytes": OVERLAP_BYTES, "sidecar_bytes": SIDECAR_BYTES,
             "scratch_filesystem_type": scratch_type, "tick_wait_seconds": tick_wait,
+            "kernel_release": kernel_release(),
         },
         "constructions": CONSTRUCTIONS,
         "excluded_cases": EXCLUDED_CASES,
@@ -764,12 +768,23 @@ def case_problems(row: dict[str, Any], candidates: set[str], v2: bool) -> list[s
     return problems
 
 
+def kernel_release() -> str:
+    return platform.release() or UNAVAILABLE
+
+
+def kernel_release_problems(parameters: dict[str, Any], required: bool) -> list[str]:
+    """Oracle and ctime-probe /3 require a non-empty `parameters.kernel_release`."""
+    value = parameters.get("kernel_release")
+    return ["kernel_release"] if required and not (isinstance(value, str) and value) else []
+
+
 def tick_wait_valid(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
 
 
 def validate_oracle(record: dict[str, Any]) -> list[str]:
-    v2 = record.get("schema") == ORACLE_SCHEMA
+    v2 = record.get("schema") in (ORACLE_SCHEMA_V2, ORACLE_SCHEMA)
+    v3 = record.get("schema") == ORACLE_SCHEMA
     problems = [] if record.get("schema") in ORACLE_SCHEMAS else ["schema"]
     for section in ("build", "host", "parameters", "constructions", "excluded_cases", "cases"):
         if section not in record:
@@ -783,6 +798,7 @@ def validate_oracle(record: dict[str, Any]) -> list[str]:
         problems.append("candidates")
     if v2 and not tick_wait_valid(record["parameters"].get("tick_wait_seconds")):
         problems.append("tick_wait_seconds")
+    problems += kernel_release_problems(record["parameters"], v3)
     for row in record["cases"]:
         problems += case_problems(row, candidates, v2)
     seen = {(row.get("case"), row.get("candidate")) for row in record["cases"]}

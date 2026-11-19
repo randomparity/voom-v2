@@ -92,6 +92,10 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(list(self.parent.iterdir()), [])
         self.assertEqual(filesystem["bytes_written"], 64 * KIB + 2)
 
+    def test_record_carries_the_kernel_release(self):
+        self.assertEqual(self.record["parameters"]["kernel_release"],
+                         fingerprint.platform.release())
+
     def test_local_storage_takes_no_client_change_time(self):
         self.assertEqual(self.record["schema"], reuse.PROBE_SCHEMA)
         self.assertEqual(self.record["filesystems"][0]["client_change_time"], "not-applicable")
@@ -161,7 +165,16 @@ class ClientChangeTimeTests(unittest.TestCase):
     def test_probe_validator_versions(self):
         with tempfile.TemporaryDirectory() as parent:
             record = reuse.run_ctime_probe([Path(parent)], [], settle=0.01)
-        v1 = json.loads(json.dumps(record))
+        for value in (None, "", 7):
+            v3 = json.loads(json.dumps(record))
+            v3["parameters"]["kernel_release"] = value
+            self.assertIn("kernel_release", reuse.validate_probe(v3))
+        v2 = json.loads(json.dumps(record))
+        del v2["parameters"]["kernel_release"]
+        self.assertIn("kernel_release", reuse.validate_probe(v2))
+        v2["schema"] = reuse.PROBE_SCHEMA_V2
+        self.assertEqual(reuse.validate_probe(v2), [])
+        v1 = json.loads(json.dumps(v2))
         v1["schema"] = reuse.PROBE_SCHEMA_V1
         v1["not_measured"] = reuse.NOT_MEASURED_V1
         del v1["filesystems"][0]["client_change_time"]
@@ -214,11 +227,11 @@ class CommittedRecordTests(unittest.TestCase):
             by_schema.setdefault(record["schema"], []).append(record)
         validators = {
             fingerprint.ORACLE_SCHEMA_V1: fingerprint.validate_oracle,
-            fingerprint.ORACLE_SCHEMA: fingerprint.validate_oracle,
+            fingerprint.ORACLE_SCHEMA_V2: fingerprint.validate_oracle,
             fingerprint.RUN_SCHEMA: fingerprint.validate_run,
             reuse.PROBABILITY_SCHEMA: reuse.validate_probability,
             reuse.PROBE_SCHEMA_V1: reuse.validate_probe,
-            reuse.PROBE_SCHEMA: reuse.validate_probe,
+            reuse.PROBE_SCHEMA_V2: reuse.validate_probe,
         }
         self.assertEqual(set(by_schema), set(validators))
         for schema, group in by_schema.items():
@@ -243,7 +256,7 @@ class CommittedRecordTests(unittest.TestCase):
     def test_filesystem_oracles_cover_ext4_and_xfs_at_both_waits(self):
         """#840: coverage and the `meta` control; the `meta-ctime` outcomes are the finding."""
         records = [json.loads(path.read_text()) for path in sorted(reuse.RECORD_DIR.glob("*.json"))]
-        oracles = [record for record in records if record["schema"] == fingerprint.ORACLE_SCHEMA]
+        oracles = [record for record in records if record["schema"] == fingerprint.ORACLE_SCHEMA_V2]
         self.assertEqual({(record["parameters"]["scratch_filesystem_type"],
                            record["parameters"]["tick_wait_seconds"]) for record in oracles},
                          {(fs, wait) for fs in ("ext4", "xfs") for wait in (0, 0.02)})
@@ -254,7 +267,7 @@ class CommittedRecordTests(unittest.TestCase):
             self.assertNotIn("invalid", outcomes.values())
             self.assertEqual(outcomes["O1", "meta"], "missed")
             self.assertEqual(outcomes["O10", "meta"], "missed")
-        probes = [record for record in records if record["schema"] == reuse.PROBE_SCHEMA]
+        probes = [record for record in records if record["schema"] == reuse.PROBE_SCHEMA_V2]
         self.assertEqual(sorted((filesystem["filesystem_type"], filesystem["storage_class"])
                                 for record in probes for filesystem in record["filesystems"]),
                          [("cifs", "network"), ("ext4", "local"), ("xfs", "local")])

@@ -274,3 +274,10 @@ measures one `observe_file_facts` path (`parameters.path`: `ffmpeg`, `mkvtoolnix
 - `files[]`: `id`, `size_bytes`, `ext`, `resident_bytes_before`, `queue_delay_seconds`,
   `observe_seconds`, `outcome` (`observed` or `observe_failed`) and `failure`: `null`, the
   error variant name, or `size_changed` when the observed size is not the manifest's.
+
+Oracle schema `media-evidence-fingerprint-oracle/3` and ctime-probe schema
+`media-evidence-reuse-ctime-probe/3` (#891) each add one required field to their `/2`:
+`parameters.kernel_release`, the harness host's `platform.release()`, or `unavailable` when
+Python reports none. Change-time granularity depends on the kernel, so a same-tick result is
+read against it. The OS name is `host.os`. For a network filesystem it is the client's
+kernel, not the server's. `/1` and `/2` records stay valid as written.
