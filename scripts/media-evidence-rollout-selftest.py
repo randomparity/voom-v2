@@ -710,13 +710,14 @@ class RecordTests(unittest.TestCase):
                 "scan", str(Path(temp) / "manifest.json"), "--reuse", "off",
                 "--publication", "per-file", "--workdir", str(Path(temp) / "work"),
                 "--output", str(Path(temp) / "out"), "--repetitions", "1"])
+            # A two-file subset in separate directories: scan_roots gives each its own root.
+            files = [{"id": name, "relative": f"{name}/movie.mkv"} for name in ("a", "b", "c")]
             Path(args.manifest).write_text(json.dumps({"label": "local-corpus", "root": temp,
-                                                       "files": []}))
-            roots = [Path(temp) / "a", Path(temp) / "b"]
+                                                       "files": files}))
             with patch.object(rollout, "binaries_build", lambda _bin: {}), \
-                    patch.object(rollout.baseline, "select_files", lambda *_: []), \
+                    patch.object(rollout.baseline, "select_files",
+                                 lambda manifest, _ids: manifest["files"][:2]), \
                     patch.object(rollout.baseline, "corpus_filesystem", lambda *_: "btrfs"), \
-                    patch.object(rollout, "scan_roots", lambda *_: roots), \
                     patch.object(rollout, "scan_repetition",
                                  lambda *_: self.fail("a refused capture ran a repetition")):
                 with self.assertRaisesRegex(rollout.HarnessError, "2 roots"):

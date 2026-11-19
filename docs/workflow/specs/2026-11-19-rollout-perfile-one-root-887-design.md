@@ -72,8 +72,9 @@ one-file subset; no measurement uses a larger per-file subset.
   cell validates. Red without the check: `validate_scan` returns `[]`.
 - Contract: capture refuses before any stack. Mode: focused-test.
   `test_a_per_file_capture_refuses_more_than_one_root` patches `select_files`,
-  `corpus_filesystem` and `binaries_build` as the sibling capture test does, patches
-  `scan_roots` to two roots and `scan_repetition` to `self.fail`, and asserts
+  `corpus_filesystem` and `binaries_build` as the sibling capture test does, selects two of
+  three manifest files in separate directories so the real `scan_roots` yields two roots,
+  patches `scan_repetition` to `self.fail`, and asserts
   `assertRaisesRegex(HarnessError, "2 roots")` and that no work directory was created. Red
   without the check: `scan_repetition` is reached and the test fails.
 - Contract: committed records still validate. Mode: existing focused-test
