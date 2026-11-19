@@ -9,6 +9,7 @@ docs/media-evidence-baseline/per-file-publication/ (#841), validated here.
 
 import argparse
 import importlib.util
+import io
 import json
 import os
 import sqlite3
@@ -17,7 +18,9 @@ import tempfile
 import time
 import tomllib
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
@@ -387,6 +390,78 @@ class CompareTests(unittest.TestCase):
                 rollout.compare_scans(baseline, candidate)
 
 
+COMPARABLE_PAIRS = (
+    ("rollout/2026-10-30-g3-stage0-off-local-corpus-evicted-after-816.json",
+     "rollout/2026-10-30-g2-g3-on-local-corpus-evicted-after-816.json"),
+    ("rollout/2026-10-30-canary-off-local-subset-evicted-after-816.json",
+     "rollout/2026-10-30-canary-on-local-subset-evicted-after-816.json"),
+    ("rollout/2026-10-30-net-off-network-subset-as-found.json",
+     "rollout/2026-10-30-net-on-network-subset-as-found.json"),
+    ("per-file-publication/2026-11-17-stage0-completion-local-corpus-evicted.json",
+     "per-file-publication/2026-11-17-per-file-local-corpus-evicted.json"),
+)
+
+
+def never_compared(*_records):
+    raise AssertionError("compare_scans ran on a record that failed validation")
+
+
+class CompareInputTests(unittest.TestCase):
+    """`compare` judges only records that pass the scan contract (#886)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.baseline, self.candidate = (BASELINE / path for path in COMPARABLE_PAIRS[0])
+
+    def written(self, name: str, text: str) -> Path:
+        path = Path(self.temp.name) / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def refusal(self, baseline: Path, candidate: Path) -> str:
+        stderr = io.StringIO()
+        with patch.object(rollout, "compare_scans", never_compared), redirect_stderr(stderr):
+            self.assertEqual(rollout.main(["compare", str(baseline), str(candidate)]), 1)
+        return stderr.getvalue()
+
+    def test_compare_refuses_an_invalid_baseline(self):
+        record = json.loads(self.baseline.read_text(encoding="utf-8"))
+        del record["not_measured"]
+        edited = self.written("edited.json", json.dumps(record))
+        message = self.refusal(edited, self.candidate)
+        self.assertIn(f"baseline {edited} failed validation: not_measured", message)
+        self.assertNotIn("candidate", message)
+
+    def test_compare_refuses_an_invalid_candidate(self):
+        array = self.written("array.json", "[]")
+        message = self.refusal(self.baseline, array)
+        self.assertIn(f"candidate {array} failed validation: not a JSON object", message)
+        self.assertNotIn("baseline", message)
+
+    def test_compare_names_unparseable_and_malformed_records(self):
+        truncated = self.written("truncated.json", self.baseline.read_text(encoding="utf-8")[:40])
+        record = json.loads(self.candidate.read_text(encoding="utf-8"))
+        record["cell"] = []
+        malformed = self.written("malformed.json", json.dumps(record))
+        message = self.refusal(truncated, malformed)
+        self.assertIn(f"baseline {truncated} failed validation: not valid JSON", message)
+        self.assertIn(f"candidate {malformed} failed validation: malformed sections", message)
+
+    def test_committed_records_pass_compare_validation(self):
+        paths = [path for directory in RECORD_DIRECTORIES for path in directory.glob("*.json")]
+        for path in sorted(paths):
+            record, problems = rollout.read_compared(path)
+            if str(record.get("schema", "")).startswith("media-evidence-rollout-scan/"):
+                with self.subTest(path.name):
+                    self.assertEqual(problems, [])
+        for pair in COMPARABLE_PAIRS:
+            stdout = io.StringIO()
+            with self.subTest(pair[0]), redirect_stdout(stdout):
+                self.assertEqual(rollout.main(["compare", *(str(BASELINE / p) for p in pair)]), 0)
+                self.assertIn("verdict", json.loads(stdout.getvalue())["complete"])
+
+
 class ConstructionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -418,9 +493,20 @@ class ConstructionTests(unittest.TestCase):
         self.assertEqual(result["marker"], "pre_probe_guard")
         self.assertNotIn("/private/path", json.dumps(result))
 
+    def test_the_edit_starts_on_a_timer_of_the_given_delay(self):
+        later = rollout.start_edit(5.0, lambda: None)
+        later.cancel()
+        self.assertEqual(later.interval, 5.0)
+        ran = []
+        rollout.start_edit(0.0, lambda: ran.append(True)).join()
+        self.assertEqual(ran, [True])
+
 
 class FakeWorker:
     """Hash and probe workers reduced to the stat checks the real ones make."""
+
+    # Case (b)'s edit, handed over by the patched `start_edit` and run inside the hash read.
+    edit = None
 
     def __init__(self, binary):
         self.program = Path(binary).name
@@ -436,7 +522,12 @@ class FakeWorker:
         if operation == "hash_file":
             path = Path(payload["provider_locator"], payload["provider_relative_locator"])
             before = self.facts(path)
+            # The read takes time, so a coarse ctime still ticks past `before` (and, for
+            # cases (a) and (c), past the hash) before any edit.
             time.sleep(0.3)
+            edit, FakeWorker.edit = FakeWorker.edit, None
+            if edit:
+                edit()
             if self.facts(path) != before:
                 return {"kind": "error", "code": rollout.MISMATCH,
                         "payload": {"stage": "hash_drift"}}
@@ -464,11 +555,20 @@ class CaseTests(unittest.TestCase):
         self.scratch = root / "scratch"
         self.scratch.mkdir()
         self.args = rollout.parse_args(["construct", str(self.source), "--label", "fixture",
-                                        "--scratch", str(self.scratch), "--edit-delay", "0.1",
+                                        "--scratch", str(self.scratch), "--edit-delay", "0.25",
                                         "--output", str(root / "out.json")])
-        patcher = patch.object(rollout.baseline, "Worker", FakeWorker)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (patch.object(rollout.baseline, "Worker", FakeWorker),
+                        patch.object(rollout, "start_edit", self.edit_in_hash)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, FakeWorker, "edit", None)
+        self.delays = []
+
+    def edit_in_hash(self, delay, edit):
+        """Hand case (b)'s edit to the fake hash, so it lands inside the read on any runner."""
+        self.delays.append(delay)
+        FakeWorker.edit = edit
+        return SimpleNamespace(join=lambda: None)
 
     def test_every_case_behaves_as_its_gate_defines(self):
         before = self.source.read_bytes()
@@ -478,6 +578,7 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(results["a_restored_mtime_edit_before_probe"]["marker"],
                          "pre_probe_guard")
         self.assertEqual(results["b_restored_mtime_edit_during_hash"]["marker"], "hash_drift")
+        self.assertEqual(self.delays, [0.25])
         for name in list(rollout.CASES)[1:]:
             self.assertTrue(results[name]["detected"], name)
         # The source is never edited and every copy is removed.
@@ -509,9 +610,20 @@ class CaseTests(unittest.TestCase):
         self.assertFalse(result["detected"])
 
     def test_an_edit_after_the_hash_read_refuses_case_b(self):
-        self.args.edit_delay = 1.0
-        with self.assertRaises(rollout.HarnessError):
-            rollout.run_case("b_restored_mtime_edit_during_hash", self.args, "tmpfs")
+        joined = []
+
+        def after_hash(_, edit):
+            # The edit runs only when the case joins it, which is after the hash read returned.
+            def join():
+                edit()
+                joined.append(True)
+            return SimpleNamespace(join=join)
+
+        with patch.object(rollout, "start_edit", after_hash):
+            with self.assertRaises(rollout.HarnessError):
+                rollout.run_case("b_restored_mtime_edit_during_hash", self.args, "tmpfs")
+        # The case waits for its edit before refusing, so no edit outlives the case's copy.
+        self.assertEqual(len(joined), 1)
 
     def test_a_hash_result_without_guard_facts_refuses_the_probe(self):
         def no_guard_facts(worker, operation, payload):
