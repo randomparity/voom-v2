@@ -536,10 +536,20 @@ class CaseTests(unittest.TestCase):
         self.assertFalse(result["detected"])
 
     def test_an_edit_after_the_hash_read_refuses_case_b(self):
-        # The edit runs only when the case joins it, which is after the hash read returned.
-        with patch.object(rollout, "start_edit", lambda _, edit: SimpleNamespace(join=edit)):
+        joined = []
+
+        def after_hash(_, edit):
+            # The edit runs only when the case joins it, which is after the hash read returned.
+            def join():
+                edit()
+                joined.append(True)
+            return SimpleNamespace(join=join)
+
+        with patch.object(rollout, "start_edit", after_hash):
             with self.assertRaises(rollout.HarnessError):
                 rollout.run_case("b_restored_mtime_edit_during_hash", self.args, "tmpfs")
+        # The case waits for its edit before refusing, so no edit outlives the case's copy.
+        self.assertEqual(len(joined), 1)
 
     def test_a_hash_result_without_guard_facts_refuses_the_probe(self):
         def no_guard_facts(worker, operation, payload):
