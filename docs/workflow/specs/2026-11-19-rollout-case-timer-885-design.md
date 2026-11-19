@@ -76,7 +76,8 @@ every rollout timer 0.5 s late reproduces it on `main`.
   Red on the new driver: a fake that skips the handed-over edit fails the `hash_drift` marker
   assertion.
 - focused-test: `CaseTests.test_an_edit_after_the_hash_read_refuses_case_b`. Red: removing the
-  refusal from `edit_during_hash` fails the `assertRaises`; deterministic under the same forcing.
+  refusal from `edit_during_hash` fails the `assertRaises`; removing its `join` fails the
+  test's joined-once assertion. Deterministic under the same forcing.
 - focused-test: the new `start_edit` seam test. Red: a `start_edit` that hard-codes its delay
   fails the 5.0 interval assertion. Case (b)'s recorded-delay assertion: red when the case stops
   passing `args.edit_delay`.
