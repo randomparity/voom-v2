@@ -16,7 +16,7 @@ CPU −54 to −58%, wall unchanged, peak RSS about 4 → 21 MiB, identical hash
   current source (`{}`) and `observe16k` restores the old 16 KiB lines (ffprobe's stack
   array included), as `buf8k` did after #810. `media-evidence-baseline.py` widens the
   `probe_observe_buffer_bytes` regex to accept `vec!`; the record key is unchanged.
-  `media-evidence-observe.py` comments (`:9-11`, `:45`, `:65-66`) and `candidates.py:101`
+  `media-evidence-observe.py` comments (`:45`, `:65-66`) and `candidates.py:101`
   are updated. Selftests follow.
 - Decision report: the observe-buffer row records #879 landed; the phase table's transform
   input, output verification and probe rows name the 1 MiB buffer. ADR 0120 is unchanged.
