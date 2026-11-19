@@ -419,11 +419,6 @@ class CompareInputTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
-    def without_not_measured(self, source: Path) -> Path:
-        record = json.loads(source.read_text(encoding="utf-8"))
-        del record["not_measured"]
-        return self.written("edited.json", json.dumps(record))
-
     def refusal(self, baseline: Path, candidate: Path) -> str:
         stderr = io.StringIO()
         with patch.object(rollout, "compare_scans", never_compared), redirect_stderr(stderr):
@@ -431,7 +426,9 @@ class CompareInputTests(unittest.TestCase):
         return stderr.getvalue()
 
     def test_compare_refuses_an_invalid_baseline(self):
-        edited = self.without_not_measured(self.baseline)
+        record = json.loads(self.baseline.read_text(encoding="utf-8"))
+        del record["not_measured"]
+        edited = self.written("edited.json", json.dumps(record))
         message = self.refusal(edited, self.candidate)
         self.assertIn(f"baseline {edited} failed validation: not_measured", message)
         self.assertNotIn("candidate", message)
