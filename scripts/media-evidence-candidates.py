@@ -98,7 +98,8 @@ STAT_ONLY_PROBE = [
 
 # The four `observe_file_facts` paths (#838): transform input (ffmpeg, mkvtoolnix), output
 # verification (verify-artifact) and the probe re-hash (ffprobe). Each `observe-<name>` example
-# calls its crate's function; the 1 MiB variant is a heap buffer, as the hash worker's.
+# calls its crate's function. Since #879 each reads 1 MiB into a heap buffer, so `observe1m` is
+# the current source and `observe16k` restores the former 16 KiB reads for comparison.
 OBSERVE_SOURCES = {
     "ffmpeg": "crates/voom-ffmpeg-worker/src/observe.rs",
     "mkvtoolnix": "crates/voom-mkvtoolnix-worker/src/observe.rs",
@@ -115,9 +116,9 @@ VARIANTS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "baseline": {},
     "buf8k": {HASH_SOURCE: [(CHUNK_CONSTANT, "pub const HASH_CHUNK_BYTES: usize = 8 * 1024;")]},
     "single-read": {PROBE_SOURCE: STAT_ONLY_PROBE},
-    "observe16k": {},
-    "observe1m": {OBSERVE_SOURCES[name]: [(OBSERVE_16K[name], OBSERVE_1M)]
-                  for name in OBSERVE_SOURCES},
+    "observe16k": {OBSERVE_SOURCES[name]: [(OBSERVE_1M, OBSERVE_16K[name])]
+                   for name in OBSERVE_SOURCES},
+    "observe1m": {},
 }
 WORKER_BUILD = (["-p", "voom-hash-worker", "-p", "voom-ffprobe-worker"], "")
 OBSERVE_BUILD = ([argument for name in OBSERVE_SOURCES

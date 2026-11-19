@@ -67,7 +67,7 @@ SOURCE_CONSTANTS = {
     ),
     "probe_observe_buffer_bytes": (
         "crates/voom-ffprobe-worker/src/observe.rs",
-        r"let mut buffer = \[0_u8; ([0-9_ *]+)\];",
+        r"let mut buffer = (?:vec!)?\[0_u8; ([0-9_ *]+)\];",
     ),
     "max_in_flight": (
         "crates/voom-node-agent/src/scan_session.rs",

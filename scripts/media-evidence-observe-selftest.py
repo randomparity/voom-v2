@@ -101,7 +101,7 @@ class RunTests(unittest.TestCase):
         else:
             self.assertEqual(first["process"]["cpu_seconds"], observe.UNAVAILABLE)
         self.assertNotIn(str(corpus.dir), json.dumps(record))
-        self.assertEqual(record["parameters"]["observe_buffer_bytes"], 16 * 1024)
+        self.assertEqual(record["parameters"]["observe_buffer_bytes"], MIB)
 
     def test_a_failed_read_is_a_row_with_its_variant_and_no_bytes(self):
         corpus = Corpus(self, [("a.mkv", b"abc"), ("gone.mkv", b"zz")])
@@ -134,16 +134,16 @@ class RunTests(unittest.TestCase):
 
 
 class BufferTests(unittest.TestCase):
-    def test_every_path_reads_16k_today_and_the_pattern_reads_the_1m_variant(self):
+    def test_every_path_reads_1m_today_and_the_pattern_reads_the_16k_variant(self):
         for name in observe.OBSERVE_SOURCES:
             with self.subTest(path=name):
-                self.assertEqual(observe.buffer_bytes(name), 16 * 1024)
+                self.assertEqual(observe.buffer_bytes(name), MIB)
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             source = root / observe.OBSERVE_SOURCES["ffprobe"]
             source.parent.mkdir(parents=True)
-            source.write_text("    let mut buffer = vec![0_u8; 1024 * 1024];\n")
-            self.assertEqual(observe.buffer_bytes("ffprobe", root), MIB)
+            source.write_text(observe.candidates.OBSERVE_16K["ffprobe"])
+            self.assertEqual(observe.buffer_bytes("ffprobe", root), 16 * 1024)
 
     def test_default_concurrency_reads_only_max_in_flight_so_the_1m_variant_runs(self):
         self.assertEqual(observe.default_concurrency(), 4)
