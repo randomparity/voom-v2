@@ -175,9 +175,10 @@ class EngineTests(unittest.TestCase):
                 patch.object(runtime, "capture", return_value=native.encode()) as native_temp, \
                 patch.object(runtime, "unix_endpoint", return_value="unix:///native/engine.sock"), \
                 patch.object(runtime, "json_capture", side_effect=[machine, info, image]) as inspect:
-            engine = runtime.Engine(config)
+            budget = runtime.Budget.start("setup", runtime.SETUP_BUDGET)
+            engine = runtime.Engine(config, budget)
             self.assertEqual(inspect.call_args_list[0].kwargs.get("env", {}).get("TMPDIR"), native)
-            native_temp.assert_called_once_with(["getconf", "DARWIN_USER_TEMP_DIR"])
+            native_temp.assert_called_once_with(["getconf", "DARWIN_USER_TEMP_DIR"], budget)
             self.assertEqual(os.environ["TMPDIR"], "/worker/staging")
             self.assertEqual(engine.prefix, ["podman", "--url", "unix:///native/engine.sock"])
 
@@ -188,7 +189,7 @@ class EngineTests(unittest.TestCase):
             with self.subTest(name=name), patch.dict(os.environ, {name: "untrusted"}, clear=True), \
                     patch.object(runtime, "json_capture") as run:
                 with self.assertRaises(runtime.SetupError):
-                    runtime.Engine(config)
+                    runtime.Engine(config, runtime.Budget.start("setup", runtime.SETUP_BUDGET))
                 run.assert_not_called()
         for endpoint in ("tcp://localhost:2375", "ssh://remote", "/tmp/socket"):
             with self.assertRaises(runtime.SetupError):
@@ -209,7 +210,7 @@ class EngineTests(unittest.TestCase):
                     patch.object(runtime, "unix_endpoint", return_value="unix:///engine"), \
                     patch.object(runtime, "json_capture", side_effect=[context, engine_info, [image_info]]):
                 with self.assertRaises(runtime.SetupError):
-                    runtime.Engine(config)
+                    runtime.Engine(config, runtime.Budget.start("setup", runtime.SETUP_BUDGET))
 
 
 class CallerTests(unittest.TestCase):
@@ -266,12 +267,12 @@ class CleanupTests(unittest.TestCase):
         engine = self.engine()
         identity = "a" * 64
         with patch.object(runtime, "capture", side_effect=[runtime.SetupError("gone"), b""]) as run:
-            engine.remove(identity, runtime.time.monotonic() + 5)
+            engine.remove(identity, runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
         self.assertIn("id=" + identity, run.call_args.args[0])
         for result in [runtime.SetupError("engine unavailable"), identity.encode()]:
             with patch.object(runtime, "capture", side_effect=[runtime.SetupError("rm failed"), result]):
                 with self.assertRaises(runtime.SetupError):
-                    engine.remove(identity, runtime.time.monotonic() + 5)
+                    engine.remove(identity, runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
 
     def test_interrupted_create_never_removes_a_foreign_name_or_label(self):
         engine = self.engine()
@@ -280,7 +281,7 @@ class CleanupTests(unittest.TestCase):
                     patch.object(runtime, "json_capture", return_value=[
                         {"Name": name, "Config": {"Labels": {runtime.LABEL: label}}}]), \
                     patch.object(engine, "remove") as remove:
-                engine.reconcile("owned", runtime.time.monotonic() + 5)
+                engine.reconcile("owned", runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
                 remove.assert_not_called()
 
     def test_interrupted_create_removes_only_verified_exact_identity(self):
@@ -290,7 +291,7 @@ class CleanupTests(unittest.TestCase):
                 patch.object(runtime, "json_capture", return_value=[
                     {"Name": "/owned", "Config": {"Labels": {runtime.LABEL: "owned"}}}]), \
                 patch.object(engine, "remove") as remove:
-            engine.reconcile("owned", runtime.time.monotonic() + 5)
+            engine.reconcile("owned", runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
             self.assertEqual(remove.call_args.args[0], identity)
 
     def test_podman_maps_server_identity_to_nonroot_image_user_without_host_uid_guess(self):
@@ -308,6 +309,89 @@ class CleanupTests(unittest.TestCase):
                 patch.object(target, method, side_effect=ProcessLookupError("caller exited")):
             with self.assertRaises(runtime.SetupError):
                 runtime.CallerWatch()
+
+
+class BudgetTests(unittest.TestCase):
+    ENDPOINT = "unix:///private/engine.sock"
+
+    def test_budgets_are_pinned_and_each_outer_timeout_exceeds_what_it_wraps(self):
+        self.assertEqual((runtime.SETUP_BUDGET, runtime.CLEANUP_BUDGET, runtime.LAUNCH_MARGIN),
+                         (30, 15, 15))
+        self.assertEqual(runtime.OPERATION_TIMEOUT, 60)
+        self.assertGreater(runtime.OPERATION_TIMEOUT,
+                           runtime.SETUP_BUDGET + runtime.CLEANUP_BUDGET)
+        config = runtime.Config("docker", "unused", ("/source",), ("/stage", "/other"))
+        timeout = runtime.check_config_timeout(config)
+        self.assertEqual(timeout, 3 * runtime.OPERATION_TIMEOUT + runtime.LAUNCH_MARGIN)
+        self.assertGreater(timeout, 3 * runtime.OPERATION_TIMEOUT)
+
+    def test_engine_timeout_names_command_and_budget_without_endpoint(self):
+        cases = [(["docker", "--host", self.ENDPOINT, "create", "--name", "owned"],
+                  "docker create"),
+                 (["docker", "--host", self.ENDPOINT, "info", "--format", "{{json .}}"],
+                  "docker info"),
+                 (["docker", "context", "inspect", "default"], "docker context inspect"),
+                 (["podman", "--remote=false", "image", "inspect", "sha256:1"],
+                  "podman image inspect"),
+                 (["podman", "--url", self.ENDPOINT, "rm", "-f", "--time", "0", "id"],
+                  "podman rm")]
+        for argv, name in cases:
+            budget = runtime.Budget.start("setup", runtime.SETUP_BUDGET)
+            expired = runtime.subprocess.TimeoutExpired(argv, 30)
+            with self.subTest(name=name), \
+                    patch.object(runtime.subprocess, "run", side_effect=expired) as run:
+                with self.assertRaises(runtime.SetupError) as raised:
+                    runtime.capture(argv, budget)
+                self.assertEqual(str(raised.exception),
+                                 f"engine command '{name}' exceeded the setup budget of 30 s")
+                self.assertLessEqual(run.call_args.kwargs["timeout"], 30)
+                self.assertGreater(run.call_args.kwargs["timeout"], 29)
+
+    def test_nonzero_exit_names_command_without_endpoint(self):
+        argv = ["docker", "--host", self.ENDPOINT, "create", "--name", "owned"]
+        failed = runtime.subprocess.CompletedProcess(argv, 1, b"", b"no space left\n")
+        with patch.object(runtime.subprocess, "run", return_value=failed):
+            with self.assertRaises(runtime.SetupError) as raised:
+                runtime.capture(argv, runtime.Budget.start("setup", runtime.SETUP_BUDGET))
+        self.assertEqual(str(raised.exception),
+                         "engine command 'docker create' exited 1: no space left")
+
+    def test_setup_capture_bounds_one_operation_with_the_operation_timeout(self):
+        done = runtime.subprocess.CompletedProcess([], 0, b"proof", b"")
+        with patch.object(runtime.subprocess, "run", return_value=done) as run:
+            self.assertEqual(runtime.setup_capture("/bin/sh", ["-c", "true"]), b"proof")
+        self.assertEqual(run.call_args.kwargs["timeout"], runtime.OPERATION_TIMEOUT)
+
+    def test_guardian_shares_one_setup_budget_and_starts_a_fresh_cleanup_budget(self):
+        engines = []
+
+        class FakeEngine:
+            prefix = ["docker"]
+
+            def __init__(self, config, budget):
+                self.setup, self.cleanup = budget, None
+                engines.append(self)
+
+            def create_args(self, name, executable, argv):
+                return ["create", name]
+
+            def remove(self, identity, budget):
+                self.cleanup = budget
+
+        attachment = SimpleNamespace(poll=lambda: 0, returncode=0)
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        with patch.object(runtime, "Engine", FakeEngine), \
+                patch.object(runtime, "capture", return_value=b"a" * 64) as create, \
+                patch.object(runtime.subprocess, "Popen", return_value=attachment):
+            self.assertEqual(runtime.guardian(None, "/bin/sh", [], read_fd), 0)
+        engine, = engines
+        self.assertIs(create.call_args.args[1], engine.setup)
+        self.assertEqual((engine.setup.name, engine.setup.seconds), ("setup", runtime.SETUP_BUDGET))
+        self.assertEqual((engine.cleanup.name, engine.cleanup.seconds),
+                         ("cleanup", runtime.CLEANUP_BUDGET))
+        self.assertGreaterEqual(engine.cleanup.expires, engine.setup.expires - runtime.SETUP_BUDGET
+                                + runtime.CLEANUP_BUDGET)
 
 
 if __name__ == "__main__":

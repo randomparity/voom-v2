@@ -15,13 +15,42 @@ import sys
 import time
 import uuid
 
-DEADLINE = 5
+# One total deadline for engine selection plus create, and one for cleanup; sized for a cold
+# engine on a shared CI runner, where single commands exceeded the former 5 s deadline (#897).
+SETUP_BUDGET = 30
+CLEANUP_BUDGET = 15
+# Interpreter start, caller watch, the attachment and a short setup tool.
+LAUNCH_MARGIN = 15
+# Outer bound for one launcher operation whose tool is short (setup tools, -version).
+OPERATION_TIMEOUT = SETUP_BUDGET + CLEANUP_BUDGET + LAUNCH_MARGIN
+OPTION_VALUES = ("--host", "--url")
+SUBCOMMAND_GROUPS = ("context", "image", "machine")
 INTERVAL = 0.05
 LABEL = "io.voom.media-operation"
 
 
 class SetupError(Exception):
     """An unmet operator prerequisite or failed operation cleanup."""
+
+
+@dataclass(frozen=True)
+class Budget:
+    name: str
+    seconds: int
+    expires: float
+
+    @classmethod
+    def start(cls, name, seconds):
+        return cls(name, seconds, time.monotonic() + seconds)
+
+    def remaining(self):
+        return self.expires - time.monotonic()
+
+
+def check_config_timeout(config):
+    """Outer bound for check-config: one setup operation per configured root."""
+    roots = len(config.read_only_roots) + len(config.read_write_roots)
+    return roots * OPERATION_TIMEOUT + LAUNCH_MARGIN
 
 
 @dataclass(frozen=True)
@@ -150,22 +179,40 @@ class CallerWatch:
         self.close()
 
 
-def capture(argv, timeout=DEADLINE, data=None, env=None):
+def command_name(argv):
+    """Name an engine command without its endpoint, e.g. 'docker create'."""
+    words = [argv[0]]
+    arguments = iter(argv[1:])
+    for argument in arguments:
+        if argument in OPTION_VALUES:
+            next(arguments, None)
+        elif not argument.startswith("-"):
+            words.append(argument)
+            if argument not in SUBCOMMAND_GROUPS:
+                break
+    return " ".join(words)
+
+
+def capture(argv, budget, data=None, env=None):
+    name = command_name(argv)
     try:
         result = subprocess.run(argv, input=data, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, timeout=max(timeout, 0.01),
+                                stderr=subprocess.PIPE, timeout=max(budget.remaining(), 0.01),
                                 close_fds=True, env=env)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise SetupError(f"container command failed ({argv[0]}): {error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise SetupError(f"engine command '{name}' exceeded the {budget.name} budget of "
+                         f"{budget.seconds} s") from error
+    except OSError as error:
+        raise SetupError(f"engine command '{name}' failed: {error}") from error
     if result.returncode:
-        raise SetupError(f"container command {argv[1:3]} exited {result.returncode}: "
+        raise SetupError(f"engine command '{name}' exited {result.returncode}: "
                          f"{result.stderr.decode(errors='replace').strip()}")
     return result.stdout
 
 
-def json_capture(argv, timeout=DEADLINE, env=None):
+def json_capture(argv, budget, env=None):
     try:
-        return json.loads(capture(argv, timeout, env=env))
+        return json.loads(capture(argv, budget, env=env))
     except (ValueError, TypeError) as error:
         raise SetupError("container engine returned malformed JSON") from error
 
@@ -182,7 +229,7 @@ def unix_endpoint(endpoint):
 
 
 class Engine:
-    def __init__(self, config):
+    def __init__(self, config, budget):
         self.config = config
         for name in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
                      "CONTAINER_HOST", "CONTAINER_CONNECTION"):
@@ -190,10 +237,10 @@ class Engine:
                 raise SetupError(f"unset conflicting engine steering {name}; use the configuration")
         if config.engine == "docker":
             context = config.desktop or "default"
-            records = json_capture(["docker", "context", "inspect", context])
+            records = json_capture(["docker", "context", "inspect", context], budget)
             endpoint = unix_endpoint(records[0]["Endpoints"]["docker"]["Host"])
             self.prefix = ["docker", "--host", endpoint]
-            info = json_capture(self.prefix + ["info", "--format", "{{json .}}"])
+            info = json_capture(self.prefix + ["info", "--format", "{{json .}}"], budget)
             if info.get("OSType") != "linux":
                 raise SetupError("Docker must run Linux containers")
             security = " ".join(info.get("SecurityOptions", []))
@@ -205,10 +252,10 @@ class Engine:
         else:
             if config.desktop:
                 # Podman derives this endpoint from TMPDIR, unlike the worker's media temp root.
-                native_temp = capture(["getconf", "DARWIN_USER_TEMP_DIR"]).decode().strip()
+                native_temp = capture(["getconf", "DARWIN_USER_TEMP_DIR"], budget).decode().strip()
                 if not os.path.isabs(native_temp) or not os.path.isdir(native_temp):
                     raise SetupError("macOS did not provide its native user temporary directory")
-                record = json_capture(["podman", "machine", "inspect", config.desktop],
+                record = json_capture(["podman", "machine", "inspect", config.desktop], budget,
                                       env={**os.environ, "TMPDIR": native_temp})[0]
                 if record.get("Name") != config.desktop or record.get("State") != "running" or \
                         record.get("Rootful") is not False:
@@ -217,12 +264,12 @@ class Engine:
                 self.prefix = ["podman", "--url", endpoint]
             else:
                 self.prefix = ["podman", "--remote=false"]
-            info = json_capture(self.prefix + ["info", "--format", "json"])
+            info = json_capture(self.prefix + ["info", "--format", "json"], budget)
             if not info["host"]["security"]["rootless"]:
                 raise SetupError("Podman profile requires a rootless engine")
             architecture = info["host"]["arch"]
         architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(architecture, architecture)
-        image = json_capture(self.prefix + ["image", "inspect", config.image])[0]
+        image = json_capture(self.prefix + ["image", "inspect", config.image], budget)[0]
         if image.get("Os") != "linux" or image.get("Architecture") != architecture or \
                 architecture not in ("amd64", "arm64"):
             raise SetupError("build the configured image for the engine's native amd64/arm64 platform")
@@ -243,27 +290,26 @@ class Engine:
                          (",readonly" if readonly else "")]
         return args + ["--entrypoint", executable, self.image] + argv
 
-    def remove(self, identity, deadline):
+    def remove(self, identity, budget):
         args = ["rm", "-f"] + (["--time", "0"] if self.config.engine == "podman" else [])
         try:
-            capture(self.prefix + args + [identity], deadline - time.monotonic())
+            capture(self.prefix + args + [identity], budget)
         except SetupError:
             # Only a successful exact-ID inventory can prove absence after a failed rm.
             remaining = capture(self.prefix + ["ps", "-a", "--no-trunc", "--filter",
-                                "id=" + identity, "--format", "{{.ID}}"],
-                                deadline - time.monotonic())
+                                "id=" + identity, "--format", "{{.ID}}"], budget)
             if remaining.strip():
                 raise SetupError(f"cleanup failed; remove owned container {identity}")
 
-    def reconcile(self, name, deadline):
+    def reconcile(self, name, budget):
         records = capture(self.prefix + ["ps", "-a", "--no-trunc", "--filter", "name=" + name,
                           "--filter", "label=" + LABEL + "=" + name, "--format", "{{.ID}}"],
-                          deadline - time.monotonic()).decode().splitlines()
+                          budget).decode().splitlines()
         for identity in records:
-            record = json_capture(self.prefix + ["inspect", identity], deadline - time.monotonic())[0]
+            record = json_capture(self.prefix + ["inspect", identity], budget)[0]
             if record["Name"].lstrip("/") == name and \
                     record["Config"]["Labels"].get(LABEL) == name:
-                self.remove(identity, deadline)
+                self.remove(identity, budget)
 
 
 def lease_closed(fd):
@@ -284,10 +330,11 @@ def guardian(config, executable, argv, lease):
     name = "voom-media-" + uuid.uuid4().hex
     status = 125
     try:
-        engine = Engine(config)
+        setup = Budget.start("setup", SETUP_BUDGET)
+        engine = Engine(config, setup)
         if lease_closed(lease):
             return 125
-        result = capture(engine.prefix + engine.create_args(name, executable, argv))
+        result = capture(engine.prefix + engine.create_args(name, executable, argv), setup)
         identity = result.decode().strip()
         if not re.fullmatch(r"[0-9a-f]{64}", identity):
             identity = None
@@ -302,20 +349,20 @@ def guardian(config, executable, argv, lease):
     except (SetupError, OSError, KeyError, TypeError, IndexError) as error:
         diagnostic(error)
     finally:
-        deadline = time.monotonic() + DEADLINE
+        cleanup = Budget.start("cleanup", CLEANUP_BUDGET)
         try:
             if engine is not None:
                 if identity:
-                    engine.remove(identity, deadline)
+                    engine.remove(identity, cleanup)
                 else:
-                    engine.reconcile(name, deadline)
+                    engine.reconcile(name, cleanup)
         except (SetupError, OSError, KeyError, TypeError, IndexError) as error:
             diagnostic(f"cleanup unconfirmed for owned operation {identity or name}: {error}")
             status = 125
         if attachment is not None and attachment.poll() is None:
             attachment.terminate()
             try:
-                attachment.wait(timeout=max(0.01, deadline - time.monotonic()))
+                attachment.wait(timeout=max(0.01, cleanup.remaining()))
             except subprocess.TimeoutExpired:
                 attachment.kill()
                 attachment.wait()
@@ -385,9 +432,11 @@ def setup_capture(executable, argv, data=None):
     env = {**os.environ, "VOOM_MEDIA_CALLER_PID": str(os.getpid())}
     try:
         result = subprocess.run([sys.executable, __file__, "setup-tool", executable] + argv,
-                                input=data, capture_output=True, env=env, timeout=20)
+                                input=data, capture_output=True, env=env,
+                                timeout=OPERATION_TIMEOUT)
     except subprocess.TimeoutExpired as error:
-        raise SetupError("container access check timed out; inspect the configured engine and shares") from error
+        raise SetupError(f"container access check exceeded the {OPERATION_TIMEOUT} s operation "
+                         "timeout; inspect the configured engine and shares") from error
     if result.returncode:
         raise SetupError("container access check failed; provision accessible same-path roots: " +
                          result.stderr.decode(errors="replace"))

@@ -62,16 +62,16 @@ def write_private(path, data, mode):
         target.write(data)
 
 
-def validate_install(destination, context, witnesses, tools):
+def validate_install(destination, config, context, witnesses, tools):
     env = {**context, "VOOM_MEDIA_CONTAINER_CONFIG": str(destination / "config.json")}
     args = [sys.executable, "-I", str(destination / "runtime.py"), "check-config"]
     for witness in witnesses:
         args += ["--source-witness", str(witness)]
-    calls = [(args, env)] + [([tool, "-version"],
-                             {"VOOM_MEDIA_CALLER_PID": str(os.getpid())})
-                            for tool in tools.values()]
-    for command, environment in calls:
-        result = subprocess.run(command, env=environment, capture_output=True, timeout=60,
+    calls = [(args, env, runtime.check_config_timeout(config))] + [
+        ([tool, "-version"], {"VOOM_MEDIA_CALLER_PID": str(os.getpid())},
+         runtime.OPERATION_TIMEOUT) for tool in tools.values()]
+    for command, environment, timeout in calls:
+        result = subprocess.run(command, env=environment, capture_output=True, timeout=timeout,
                                 check=False)
         if result.returncode:
             raise runtime.SetupError("installed tool setup failed; verify engine, account, "
@@ -114,7 +114,7 @@ def install(config_path, destination, witnesses):
             text = prefix + "exec " + shlex.join(command) + ' "$@"\n'
             write_private(path, text.encode(), 0o700)
             tools[tool + "_bin"] = str(path)
-        validate_install(destination, context, witnesses, tools)
+        validate_install(destination, config, context, witnesses, tools)
         return tools
     except BaseException:
         shutil.rmtree(destination)

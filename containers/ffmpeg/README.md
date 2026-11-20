@@ -201,10 +201,15 @@ its exact owned container and reaps its attachment process. Normal exit also
 removes the container before returning the tool's exit status. No pruning or
 prefix-based removal occurs; unrelated containers remain untouched.
 
-Each setup/create RPC has a five-second deadline. Cleanup has a total five-second
-budget; cancellation during create can require roughly ten seconds of attempts.
+Engine selection (context or machine inspection, `info`, image inspection) and
+`create` share one 30-second setup budget; cleanup has a separate 15-second
+budget, so removal after cancellation during create can take about 45 seconds.
+A command that overruns names itself and the budget it exceeded. Setup checks
+and `-version` validation are bounded from outside by a 60-second operation
+timeout (both budgets plus a 15-second launch margin), and `check-config` by
+that timeout per configured root plus the margin.
 This requires a responding engine and surviving guardian. Engine outages, daemon
-creation committed after the RPC deadline, or killing the guardian/whole cgroup
+creation committed after the setup budget, or killing the guardian/whole cgroup
 cannot guarantee removal. A failure reports the exact owned operation/container
 identifier and returns nonzero when reporting remains possible. Investigate that
 identifier on the **same configured endpoint**, verify its `io.voom.media-operation`
