@@ -112,6 +112,20 @@ class VariantEditTests(unittest.TestCase):
                 self.assertIn(f"voom-{crate}-worker", packages)
         self.assertNotIn("buf8k", candidates.BUILDS)
 
+    def test_copy1m_edits_only_the_shared_read_buffer_constant_and_copy16k_nothing(self):
+        files = candidates.VARIANTS["copy1m"]
+        self.assertEqual(list(files), [candidates.COPY_SOURCE])
+        source = current(candidates.COPY_SOURCE)
+        edited = candidates.apply_edits(candidates.COPY_SOURCE, source,
+                                        files[candidates.COPY_SOURCE])
+        self.assertEqual(edited, source.replace(candidates.COPY_16K, candidates.COPY_1M))
+        self.assertIn("const READ_BUFFER_BYTES: usize = 1024 * 1024;", edited)
+        self.assertNotIn("16 * 1024", edited)
+        self.assertEqual(candidates.VARIANTS["copy16k"], {})
+        for name in ("copy16k", "copy1m"):
+            self.assertEqual(candidates.BUILDS[name],
+                             (["-p", "voom-node-agent", "--examples"], "examples"))
+
     def test_drifted_source_fails_instead_of_building_the_wrong_variant(self):
         hash_edits = candidates.VARIANTS["buf8k"][candidates.HASH_SOURCE]
         with self.assertRaises(candidates.CandidateError):
