@@ -507,6 +507,70 @@ class ProcUsageTests(unittest.TestCase):
         self.assertEqual(lines, [])
 
 
+class HostCountersTests(unittest.TestCase):
+    """`unavailable` stays a valid value; stderr names each unavailable counter's cause, except
+    a missing CIFS stats file, which only means the host has no CIFS client to count."""
+
+    NET_DEV = ("Inter-|   Receive\n face |bytes    packets\n"
+               "    lo: 999 1 0 0 0 0 0 0 999 1\n"
+               "  eth0: 1000 5 0 0 0 0 0 0 10 1\n"
+               "  wlan0: 24 1 0 0 0 0 0 0 10 1\n")
+    CIFS = "Resources in use\n1) \\\\nas\\media\nBytes read: 700  Bytes written: 1\n" \
+           "2) \\\\nas\\other\nBytes read: 77  Bytes written: 1\n"
+
+    def counters(self, files=None, make_root=True):
+        """`host_counters` over a scratch /proc holding `files` (relative path to text)."""
+        with tempfile.TemporaryDirectory() as scratch:
+            proc = Path(scratch) / "proc"
+            if make_root:
+                proc.mkdir()
+            for name, text in (files or {}).items():
+                (proc / name).parent.mkdir(parents=True, exist_ok=True)
+                (proc / name).write_text(text)
+            stderr = io.StringIO()
+            with mock.patch.object(harness, "PROC_ROOT", proc), \
+                    contextlib.redirect_stderr(stderr):
+                counters = harness.host_counters("media-evidence-test")
+        return counters, stderr.getvalue().splitlines()
+
+    def assert_causes(self, lines, expected):
+        self.assertEqual(lines, [f"media-evidence-test: host {counter} unavailable: {cause}"
+                                 for counter, cause in expected])
+
+    def test_readable_files_give_both_counters_and_no_cause(self):
+        counters, lines = self.counters({"net/dev": self.NET_DEV, "fs/cifs/Stats": self.CIFS})
+        self.assertEqual(counters, {"network_rx_bytes": 1024, "cifs_bytes_read": 777})
+        self.assertEqual(lines, [])
+
+    def test_a_host_without_proc_says_so_for_both_counters(self):
+        counters, lines = self.counters(make_root=False)
+        self.assertEqual(counters, dict.fromkeys(harness.COUNTER_KEYS, harness.UNAVAILABLE))
+        self.assert_causes(lines, [("network_rx_bytes", "no /proc on this host"),
+                                   ("cifs_bytes_read", "no /proc on this host")])
+
+    def test_a_host_without_a_cifs_client_stays_quiet_about_cifs(self):
+        counters, lines = self.counters({"net/dev": self.NET_DEV})
+        self.assertEqual(counters, {"network_rx_bytes": 1024,
+                                    "cifs_bytes_read": harness.UNAVAILABLE})
+        self.assertEqual(lines, [])
+
+    def test_an_unreadable_cifs_file_names_its_error(self):
+        counters, lines = self.counters({"net/dev": self.NET_DEV, "fs/cifs/Stats/x": ""})
+        self.assertEqual(counters["cifs_bytes_read"], harness.UNAVAILABLE)
+        self.assert_causes(lines, [("cifs_bytes_read", "fs/cifs/Stats: IsADirectoryError")])
+
+    def test_a_missing_or_bad_network_file_names_its_error(self):
+        cifs = {"fs/cifs/Stats": self.CIFS}
+        for files, cause in (({}, "net/dev: FileNotFoundError"),
+                             ({"net/dev": "h\nh\n  eth0 1000 5\n"}, "net/dev: IndexError"),
+                             ({"net/dev": "h\nh\n  eth0: x 5\n"}, "net/dev: ValueError")):
+            with self.subTest(cause=cause):
+                counters, lines = self.counters({**files, **cifs})
+                self.assertEqual(counters, {"network_rx_bytes": harness.UNAVAILABLE,
+                                            "cifs_bytes_read": 777})
+                self.assert_causes(lines, [("network_rx_bytes", cause)])
+
+
 class WorkerUsageTests(unittest.TestCase):
     """The worker sampler reads each /proc source on its own and never samples an abandoned
     worker, whose cause the row failure `worker_abandoned` already records."""

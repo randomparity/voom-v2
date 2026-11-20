@@ -597,7 +597,7 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
     residency = {file_id: baseline.resident_bytes(path) for file_id, path in paths.items()}
     with tempfile.TemporaryDirectory(prefix="lazy-run-") as scratch:
         lifecycle = Lifecycle(StateFile(Path(scratch) / "state.json"))
-        usage, counters = process_usage(), baseline.host_counters()
+        usage, counters = process_usage(), baseline.host_counters("media-evidence-lazy")
         started = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             rows = list(pool.map(
@@ -609,7 +609,7 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
             ))
         wall = time.monotonic() - started
         usage = usage_delta(usage, process_usage())
-        counters = baseline.counter_delta(counters, baseline.host_counters())
+        counters = baseline.counter_delta(counters, baseline.host_counters("media-evidence-lazy"))
         for row in rows:
             row.update(state=lifecycle.state(row["id"]), resident_bytes_before=residency[row["id"]])
     return {

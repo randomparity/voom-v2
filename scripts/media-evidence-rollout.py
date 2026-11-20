@@ -358,7 +358,7 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
         agent = next(process for name, process in stack.children if name == "voom-node-agent")
         pids = worker_pids(agent.pid)
         before = {name: process_usage(pid) for name, pid in pids.items()}
-        counters = baseline.host_counters()
+        counters = baseline.host_counters("media-evidence-rollout")
         started = time.monotonic()
         timer = kill_at(pids[args.kill], started + args.kill_after) if args.kill else None
         try:
@@ -369,7 +369,8 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
         finally:
             if timer:
                 timer.cancel()
-        counters = baseline.counter_delta(counters, baseline.host_counters())
+        counters = baseline.counter_delta(
+            counters, baseline.host_counters("media-evidence-rollout"))
         restarted = worker_pids(agent.pid) != pids
         workers = {name: dict.fromkeys(baseline.WORKER_KEYS, UNAVAILABLE) if restarted
                    else usage_delta(before[name], process_usage(pid))
