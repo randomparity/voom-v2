@@ -15,6 +15,11 @@ import uuid
 
 import runtime
 
+# A killed or signalled launcher's pipes stay open until its guardian finishes cleanup.
+REAP_WAIT = runtime.CLEANUP_BUDGET + runtime.LAUNCH_MARGIN
+# Reaching create or the tool's first output spends the setup budget after interpreter start.
+START_WAIT = runtime.SETUP_BUDGET + runtime.LAUNCH_MARGIN
+
 
 def probe():
     return runtime.Budget.start("probe", runtime.SETUP_BUDGET)
@@ -50,7 +55,7 @@ def finish(process, data=b"", expected=0):
         stdout, stderr = process.communicate(data, timeout=runtime.OPERATION_TIMEOUT)
     except BaseException:
         process.kill()
-        process.communicate(timeout=15)
+        process.communicate(timeout=REAP_WAIT)
         raise
     assert process.returncode == expected, (process.returncode, stderr.decode(errors="replace"))
     return stdout, stderr
@@ -139,26 +144,26 @@ def exercise(args, root):
         wrapper.chmod(0o755)
         process = launch("echo ready; sleep 60", {**env, "PATH": str(intercept) + os.pathsep + env["PATH"]}, stage)
         try:
-            deadline = time.monotonic() + runtime.SETUP_BUDGET
+            deadline = time.monotonic() + START_WAIT
             while not marker.exists() and time.monotonic() < deadline:
                 select.select([], [], [], 0.02)
             assert marker.exists(), "engine did not create the barrier container"
             identity = marker.read_text().strip()
             process.kill()
             release.touch()
-            process.communicate(timeout=15)
+            process.communicate(timeout=REAP_WAIT)
             wait_absent(engine, identity)
             results.append("launcher-kill-during-create-response")
         finally:
             release.touch()
             if process.poll() is None:
                 process.kill()
-                process.communicate(timeout=15)
+                process.communicate(timeout=REAP_WAIT)
         for parent in (False, True):
             for sig in (signal.SIGTERM, signal.SIGKILL, None):
                 process = launch("echo ready; sleep 60", env, stage, parent)
                 try:
-                    assert select.select([process.stdout], [], [], runtime.SETUP_BUDGET)[0], \
+                    assert select.select([process.stdout], [], [], START_WAIT)[0], \
                         "operation did not start"
                     assert process.stdout.readline() == b"ready\n"
                     identities = owned_ids(engine) - baseline
@@ -172,14 +177,14 @@ def exercise(args, root):
                             process.kill()
                     else:
                         process.send_signal(sig)
-                    process.communicate(timeout=15)
+                    process.communicate(timeout=REAP_WAIT)
                     wait_absent(engine, identities.pop())
                     results.append({"cancellation": "caller" if parent else "launcher",
                                     "signal": sig.name if sig else "timeout", "seconds": round(time.monotonic() - before, 3)})
                 finally:
                     if process.poll() is None:
                         process.kill()
-                        process.communicate(timeout=15)
+                        process.communicate(timeout=REAP_WAIT)
                 assert runtime.json_capture(engine.prefix + ["inspect", sentinel],
                                             probe())[0]["Id"] == sentinel
         assert owned_ids(engine) == baseline, "operation cleanup left containers"
