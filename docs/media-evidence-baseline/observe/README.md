@@ -98,7 +98,8 @@ Decided on 2026-11-19 from source at `a793d4e0`, with no new measurement, under 
 [the #889 spec](../../workflow/specs/2026-11-19-observe-hash-cp-na-889-design.md). A loop is
 extrapolated only if it matches the loop measured here (ffmpeg `observe.rs` at `e2c29167`):
 `tokio::fs::File::read` into a 16 KiB heap `Vec<u8>`, `blake3::Hasher::update` on the filled
-slice, and nothing else per chunk.
+slice, and nothing else per chunk. #879 has since landed 1 MiB on the four observe paths; the
+three loops below still read 16 KiB.
 
 | Loop | Source at `a793d4e0` | Work beyond the measured loop | Decision | Verdict 1 MiB |
 |---|---|---|---|---|
