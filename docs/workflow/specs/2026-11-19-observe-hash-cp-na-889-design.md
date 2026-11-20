@@ -23,11 +23,12 @@ slice, and no other statement per chunk.
   it. It is private, and timing it needs a production visibility change outside this
   surface. Recorded as unmeasured; follow-up candidate to measure it before any change to the
   shared constant.
-- The hash loops are not measured either: neither function is reachable from an example
-  (`pub(crate) mod fs`; `pub(crate) fn`), and a replica of an identical loop re-measures #838.
-- Disclosed limits: the production runtimes use tokio's default multi-thread runtime; the
-  examples used 2 worker threads at 4 in flight. Both hand each read to the same blocking pool,
-  so per-read cost does not depend on worker count. Call-site concurrency was not measured.
+- The hash loops are not measured either: neither is directly callable from an example (a
+  `pub fn` in `pub(crate) mod fs`, reached only via store-backed `show_artifact`; a
+  `pub(crate) fn`), and a replica of an identical loop re-measures #838.
+- Only the direction transfers: 1 MiB makes 64x fewer blocking-pool reads on any runtime
+  shape. #838's magnitudes do not: production runs tokio's default worker count, #838 ran 2
+  workers at 4 in flight, and call-site concurrency was not measured.
 - Outputs: a section in `docs/media-evidence-baseline/observe/README.md` and the
   decision report's observe row and #838 not-measured line. No record, harness or code change.
   The extrapolated verdict is labelled extrapolated, never measured.
@@ -45,7 +46,7 @@ slice, and no other statement per chunk.
 ## Success
 
 - The README and report name, for each of the three loops, its decision (extrapolated go,
-  or unmeasured), the commit, and the structural reason.
+  or unmeasured), the commit, and the structural reason, and quote no #838 figure as theirs.
 - The report says a single `READ_BUFFER_BYTES` change also changes the unmeasured copy loop.
 - `just source-checks` exits 0.
 
