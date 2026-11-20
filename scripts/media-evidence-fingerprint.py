@@ -45,6 +45,7 @@ ORACLE_SCHEMA_V2 = "media-evidence-fingerprint-oracle/2"
 ORACLE_SCHEMA = "media-evidence-fingerprint-oracle/3"
 ORACLE_SCHEMAS = {ORACLE_SCHEMA_V1, ORACLE_SCHEMA_V2, ORACLE_SCHEMA}
 RUN_SCHEMA = "media-evidence-fingerprint-run/1"
+HARNESS = "media-evidence-fingerprint"
 UNAVAILABLE = baseline.UNAVAILABLE
 RECORD_DIR = baseline.REPO_ROOT / "docs" / "media-evidence-baseline" / "fingerprint"
 KIB = 1024
@@ -575,7 +576,7 @@ def check_corpus_bounds(storage: str, file_count: int, evict: bool) -> None:
 
 
 def process_io() -> dict[str, int | float | str]:
-    return baseline.proc_usage("self", "media-evidence-fingerprint", ("io",))
+    return baseline.proc_usage("self", HARNESS, ("io",))
 
 
 def cpu_seconds() -> float:
@@ -611,7 +612,7 @@ def run_repetition(index: int, candidate: str, root: Path, files: list[dict[str,
         for path in paths.values():
             baseline.evict(path, fs_type)
     residency = {file_id: baseline.resident_bytes(path) for file_id, path in paths.items()}
-    counters = baseline.host_counters("media-evidence-fingerprint")
+    counters = baseline.host_counters(HARNESS)
     io_before, cpu_before = process_io(), cpu_seconds()
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
@@ -621,7 +622,7 @@ def run_repetition(index: int, candidate: str, root: Path, files: list[dict[str,
     cpu = cpu_seconds() - cpu_before
     io_delta = baseline.counter_delta(io_before, process_io())
     counters = baseline.counter_delta(
-        counters, baseline.host_counters("media-evidence-fingerprint"))
+        counters, baseline.host_counters(HARNESS))
     rows = [row for row, _ in results]
     for row in rows:
         row["resident_bytes_before"] = residency[row["id"]]

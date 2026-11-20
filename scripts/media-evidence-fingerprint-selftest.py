@@ -5,6 +5,7 @@ The oracle runs on synthetic fixtures in a scratch directory, so it runs on any 
 Real-corpus evidence is the committed records, which are validated here too.
 """
 
+import ast
 import contextlib
 import importlib.util
 import io
@@ -412,6 +413,29 @@ class CommittedRecordTests(unittest.TestCase):
             self.assertNotIn("invalid", {row["outcome"] for row in record["cases"]})
         for record in runs:
             self.assertEqual(experiment.validate_run(record), [])
+
+
+class HarnessNameTests(unittest.TestCase):
+    """Every counter-helper call names this harness through its one constant (#915)."""
+
+    HARNESS_ARG = {"host_counters": 0, "proc_usage": 1}
+
+    def test_every_counter_helper_call_passes_the_harness_constant(self):
+        self.assertEqual(experiment.HARNESS, "media-evidence-fingerprint")
+        seen = set()
+        for node in ast.walk(ast.parse(Path(experiment.__file__).read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            helper = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if helper not in self.HARNESS_ARG:
+                continue
+            seen.add(helper)
+            argument = node.args[self.HARNESS_ARG[helper]]
+            with self.subTest(helper=helper, line=node.lineno):
+                self.assertEqual((type(argument), getattr(argument, "id", None)),
+                                 (ast.Name, "HARNESS"))
+        self.assertEqual(seen, set(self.HARNESS_ARG))
 
 
 if __name__ == "__main__":

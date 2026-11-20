@@ -54,6 +54,7 @@ UNAVAILABLE = baseline.UNAVAILABLE
 HarnessError = baseline.HarnessError
 SCAN_SCHEMA_V1 = "media-evidence-rollout-scan/1"
 SCAN_SCHEMA = "media-evidence-rollout-scan/2"
+HARNESS = "media-evidence-rollout"
 PUBLICATIONS = ("completion", "per-file")
 # The #841 prototype's switches; a build without them refuses both (clap, deny_unknown_fields).
 PER_FILE_AGENT_KEY = "scan_per_file_publication"
@@ -154,7 +155,7 @@ def worker_pids(agent_pid: int) -> dict[str, int]:
 
 def process_usage(pid: int) -> dict[str, int | float | str]:
     """CPU and I/O include reaped children such as ffprobe; memory is this process only."""
-    return baseline.proc_usage(pid, "media-evidence-rollout")
+    return baseline.proc_usage(pid, HARNESS)
 
 
 def usage_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
@@ -358,7 +359,7 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
         agent = next(process for name, process in stack.children if name == "voom-node-agent")
         pids = worker_pids(agent.pid)
         before = {name: process_usage(pid) for name, pid in pids.items()}
-        counters = baseline.host_counters("media-evidence-rollout")
+        counters = baseline.host_counters(HARNESS)
         started = time.monotonic()
         timer = kill_at(pids[args.kill], started + args.kill_after) if args.kill else None
         try:
@@ -370,7 +371,7 @@ def scan_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, 
             if timer:
                 timer.cancel()
         counters = baseline.counter_delta(
-            counters, baseline.host_counters("media-evidence-rollout"))
+            counters, baseline.host_counters(HARNESS))
         restarted = worker_pids(agent.pid) != pids
         workers = {name: dict.fromkeys(baseline.WORKER_KEYS, UNAVAILABLE) if restarted
                    else usage_delta(before[name], process_usage(pid))

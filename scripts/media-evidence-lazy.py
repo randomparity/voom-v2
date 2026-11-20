@@ -38,6 +38,7 @@ _spec.loader.exec_module(baseline)
 UNAVAILABLE = baseline.UNAVAILABLE
 HarnessError = baseline.HarnessError
 RUN_SCHEMA = "media-evidence-lazy-run/1"
+HARNESS = "media-evidence-lazy"
 MATRIX_SCHEMA = "media-evidence-lazy-matrix/1"
 DIGEST_PREFIX = "exp-blake2b:"
 # The fixed provisional fingerprint is an instrument, not a selection; #796 owns that search.
@@ -537,7 +538,7 @@ def process_usage() -> dict[str, int | float | str]:
     """This process's CPU (all threads), lifetime peak RSS and I/O counters."""
     times = os.times()
     return {"cpu_seconds": round(times.user + times.system, 3),
-            **baseline.proc_usage("self", "media-evidence-lazy", ("status", "io"))}
+            **baseline.proc_usage("self", HARNESS, ("status", "io"))}
 
 
 def usage_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
@@ -597,7 +598,7 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
     residency = {file_id: baseline.resident_bytes(path) for file_id, path in paths.items()}
     with tempfile.TemporaryDirectory(prefix="lazy-run-") as scratch:
         lifecycle = Lifecycle(StateFile(Path(scratch) / "state.json"))
-        usage, counters = process_usage(), baseline.host_counters("media-evidence-lazy")
+        usage, counters = process_usage(), baseline.host_counters(HARNESS)
         started = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             rows = list(pool.map(
@@ -609,7 +610,7 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
             ))
         wall = time.monotonic() - started
         usage = usage_delta(usage, process_usage())
-        counters = baseline.counter_delta(counters, baseline.host_counters("media-evidence-lazy"))
+        counters = baseline.counter_delta(counters, baseline.host_counters(HARNESS))
         for row in rows:
             row.update(state=lifecycle.state(row["id"]), resident_bytes_before=residency[row["id"]])
     return {

@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+HARNESS = "media-evidence-baseline"
 SCHEMA = "media-evidence-baseline-run/1"
 # `/2` adds the probe hash reuse setting and each row's hash source (#839); `/1` records
 # predate reuse and keep their exact shape.
@@ -462,7 +463,7 @@ class Worker:
         with self.lock:
             if self.abandoned:
                 return dict.fromkeys(WORKER_KEYS, UNAVAILABLE)
-        return proc_usage(self.process.pid, "media-evidence-baseline")
+        return proc_usage(self.process.pid, HARNESS)
 
     def stop(self) -> None:
         if self.process.stdin and not self.process.stdin.closed:
@@ -590,7 +591,7 @@ def run_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, A
         "probe": Worker(args.worker_dir / "voom-ffprobe-worker"),
     }
     try:
-        counters = host_counters("media-evidence-baseline")
+        counters = host_counters(HARNESS)
         started = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             rows = list(pool.map(
@@ -598,7 +599,7 @@ def run_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, A
                 files))
         wall = time.monotonic() - started
         usage = {name: worker.usage() for name, worker in workers.items()}
-        counters = counter_delta(counters, host_counters("media-evidence-baseline"))
+        counters = counter_delta(counters, host_counters(HARNESS))
     finally:
         for worker in workers.values():
             worker.stop()

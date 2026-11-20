@@ -37,6 +37,7 @@ baseline = _load("media_evidence_baseline", "media-evidence-baseline.py")
 candidates = _load("media_evidence_candidates", "media-evidence-candidates.py")
 
 SCHEMA = "media-evidence-observe-run/1"
+HARNESS = "media-evidence-observe"
 UNAVAILABLE = baseline.UNAVAILABLE
 HarnessError = baseline.HarnessError
 REPO_ROOT = baseline.REPO_ROOT
@@ -78,7 +79,7 @@ def build_identity(example: Path) -> dict[str, Any]:
 
 def process_usage(pid: int) -> dict[str, int | float | str]:
     """CPU and I/O include reaped children; peak memory is this process only."""
-    return baseline.proc_usage(pid, "media-evidence-observe")
+    return baseline.proc_usage(pid, HARNESS)
 
 
 def observe_all(example: Path, concurrency: int,
@@ -155,9 +156,9 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
         for path in paths:
             baseline.evict(path, fs_type)
     residency = [baseline.resident_bytes(path) for path in paths]
-    counters = baseline.host_counters("media-evidence-observe")
+    counters = baseline.host_counters(HARNESS)
     lines, wall, usage = observe_all(example, args.concurrency, paths)
-    counters = baseline.counter_delta(counters, baseline.host_counters("media-evidence-observe"))
+    counters = baseline.counter_delta(counters, baseline.host_counters(HARNESS))
     rows, hashes = parse_rows(lines, files)
     for row, resident in zip(rows, residency):
         row["resident_bytes_before"] = resident
