@@ -35,8 +35,9 @@ constant changes it too. It was never measured.
   `-baseline.py` and `-candidates.py` as modules and editing none of them.
   `run <manifest> --scratch-dir <dir> --max-bytes N --output <json> [--ids] [--repetitions 3]
   [--evict] [--example-dir]` refuses a scratch directory that is missing, not empty, inside the
-  corpus root, or on a different device (`st_dev`) from the corpus root, and refuses a run that
-  leaves anything in it after a repetition. Concurrency is fixed at 1: the coordinator drives
+  corpus root, on a different device (`st_dev`) from the corpus root, or with less free space
+  than twice the largest selected file, and refuses a run that leaves anything in it after a
+  repetition. Concurrency is fixed at 1: the coordinator drives
   commit intents one at a time, and one copy at a time bounds the scratch space to the largest
   file. Schema `media-evidence-copy-run/1` is the observe record with `path` fixed to
   `node-agent-copy`, `copy_buffer_bytes` read from the `READ_BUFFER_BYTES` line, `wchar` and
@@ -53,11 +54,21 @@ constant changes it too. It was never measured.
   sets differ, a guardrail is breached, or CPU, wall or summed copy seconds regresses;
   otherwise **inconclusive**. Physical bytes are reported, not judged. 16 KiB, the current
   value, is reported as the baseline in every cell. No cell is rerun at 5 repetitions.
+  The cache states run the buffers in opposite order (below), so drive-state drift cannot
+  favour one buffer in both. The **overall** 1 MiB verdict is go when both cache states are go,
+  no-go when both are no-go or either has a failed row, differing hashes or a breached
+  guardrail, and otherwise inconclusive; a wall or copy-seconds regression in one cache state
+  only is reported as confounded with run order. Process CPU covers the loop's user and system
+  time, not kernel writeback, compression or discard; the README and decision report say so
+  beside each verdict.
 - **Capture.** Local corpus, the same private manifest as #838. The host's corpus disk is a QLC
   NVMe with a dynamic SLC write cache and btrfs `compress=zstd:1`; a full-corpus copy writes
   935 GB per repetition, past any SLC cache, and wear grows with every cell. The run therefore
-  uses a recorded subset of 7 ids spanning the size range (6–40 GB, about 150 GB), 3
-  repetitions, four cells in alternating order: evicted 16k, 1m; as-found 1m, 16k. The scratch
+  uses a subset fixed here: sort the manifest by size (ties by id) and take ranks
+  `round(i × (n − 1) / 6)` for i = 0…6, so the smallest, the largest and five evenly spaced
+  files (7 ids, about 192 GB; the README lists them). Three repetitions per cell write about
+  575 GB, past the SLC cache too: the subset bounds wear and time, not cache exposure. Four
+  cells, 10 minutes idle before each: evicted 16k, 1m; then as-found 1m, 16k. The scratch
   directory is a new sibling of the corpus on the same btrfs subvolume, removed at the end.
   Media is opened read-only. A cell over the 60-minute budget is recorded, never dropped.
 - **Report.** `docs/media-evidence-baseline/copy/README.md` (compare tables, verdicts,
@@ -72,8 +83,9 @@ constant changes it too. It was never measured.
    directory and are removed per file; committed records carry no host path, file name or
    per-file hash; production behaviour and defaults are unchanged.
 3. Accepted failure classes, disclosed: the drive's SLC cache state, controller caches, btrfs
-   metadata and other host activity are not controlled; the alternating order keeps any drift
-   from always favouring one buffer. Kernel writeback and btrfs compression run in kernel
+   metadata and other host activity are not controlled. Within one cache state the order is
+   fixed, so drift is confounded with the buffer there; the reversed order across states and
+   the overall rule keep it from deciding the verdict, and the idle gap shrinks it. Kernel writeback and btrfs compression run in kernel
    threads, outside the process's CPU. Removal is inside `<seconds>` and process CPU for both
    buffers alike. The example times the copy only, not the coordinator's hard-link install,
    parent fsync or hashes around it.
@@ -83,8 +95,8 @@ constant changes it too. It was never measured.
 ## Success
 
 - Four valid records with every row `copied` and one `hash_set_sha256` across all four.
-- Per cache state, the `compare` table and a verdict for 1 MiB against the 16 KiB baseline, in
-  the README and the decision report.
+- Per cache state, the `compare` table and a verdict for 1 MiB against the 16 KiB baseline,
+  and the overall verdict, in the README and the decision report.
 
 ## Validation
 
@@ -92,7 +104,7 @@ constant changes it too. It was never measured.
 |---|---|---|
 | Seam changes visibility only | focused-test | diff is the attribute, `pub` and doc comment; `just platform-checks` (node-agent tests) green |
 | Variant edits apply once | focused-test | candidates selftest: `copy1m` edit matches current source, `copy16k` empty |
-| Scratch refusals and cleanup check | focused-test | copy selftest: missing, non-empty, inside-corpus, other-device and left-behind scratch refused |
+| Scratch refusals and cleanup check | focused-test | copy selftest: missing, non-empty, inside-corpus, other-device, too-full and left-behind scratch refused |
 | Replay accounting and redaction | focused-test | copy selftest with a stub example: rows, logical bytes, hash set, write counters, `err` row, no path |
 | Record validation | focused-test | copy selftest: missing keys, bad outcome, host path rejected |
 | Compare refusals and verdict rule | focused-test | copy selftest: ids, cache, equal buffers refused; failed row, hash mismatch, regression give no-go; go; inconclusive |

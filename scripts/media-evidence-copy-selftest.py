@@ -142,7 +142,7 @@ class ScratchTests(unittest.TestCase):
                                  (inside, "inside the corpus root")):
             with self.subTest(scratch=scratch.name), \
                     self.assertRaisesRegex(copy.HarnessError, message):
-                copy.check_scratch(scratch, corpus.root)
+                copy.check_scratch(scratch, corpus.root, 3)
 
     def test_a_scratch_directory_on_another_filesystem_is_refused(self):
         corpus = Corpus(self, [("a.mkv", b"abc")])
@@ -158,8 +158,16 @@ class ScratchTests(unittest.TestCase):
 
         with mock.patch.object(Path, "stat", other_device), \
                 self.assertRaisesRegex(copy.HarnessError, "filesystem"):
-            copy.check_scratch(corpus.scratch, corpus.root)
-        copy.check_scratch(corpus.scratch, corpus.root)
+            copy.check_scratch(corpus.scratch, corpus.root, 3)
+        copy.check_scratch(corpus.scratch, corpus.root, 3)
+
+    def test_a_filesystem_without_room_for_two_of_the_largest_file_is_refused(self):
+        corpus = Corpus(self, [("a.mkv", b"abc")])
+        forty_bytes_free = Namespace(f_bavail=10, f_frsize=4)
+        with mock.patch.object(copy.os, "statvfs", return_value=forty_bytes_free):
+            copy.check_scratch(corpus.scratch, corpus.root, 20)
+            with self.assertRaisesRegex(copy.HarnessError, "free space"):
+                copy.check_scratch(corpus.scratch, corpus.root, 21)
 
 
 class ProcessUsageTests(unittest.TestCase):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -92,8 +93,9 @@ def process_usage(pid: int, proc_root: Path = Path("/proc")) -> dict[str, int | 
     return usage
 
 
-def check_scratch(scratch: Path, root: Path) -> None:
-    """Refuse a scratch directory that could mix copies with media or other filesystems."""
+def check_scratch(scratch: Path, root: Path, largest: int) -> None:
+    """Refuse a scratch directory that could mix copies with media, sit on another filesystem,
+    or fill the media's filesystem: free space must hold twice the largest selected file."""
     scratch, root = scratch.resolve(), root.resolve()
     if not scratch.is_dir():
         raise HarnessError("--scratch-dir must be an existing directory")
@@ -102,6 +104,10 @@ def check_scratch(scratch: Path, root: Path) -> None:
     if scratch.stat().st_dev != root.stat().st_dev:
         raise HarnessError("--scratch-dir is not on the corpus root's filesystem")
     check_empty(scratch)
+    usage = os.statvfs(scratch)
+    if usage.f_bavail * usage.f_frsize < 2 * largest:
+        raise HarnessError("--scratch-dir has less free space than twice the largest selected "
+                           "file; free space or select smaller ids")
 
 
 def check_empty(scratch: Path) -> None:
@@ -177,8 +183,8 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
 def capture(args: argparse.Namespace) -> dict[str, Any]:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     root = Path(manifest["root"])
-    check_scratch(args.scratch_dir, root)
     selected = baseline.select_files(manifest, args.ids)
+    check_scratch(args.scratch_dir, root, max(entry["size_bytes"] for entry in selected))
     fs_type = baseline.corpus_filesystem(root, selected)
     example = args.example_dir / "copy-commit"
     build = observe.build_identity(example)
