@@ -3,9 +3,9 @@
 Captured on 2026-11-17 under the frozen [protocol](../../media-evidence-protocol.md), with the
 verdict rule fixed before any real-media cell in
 [the #838 spec](../../workflow/specs/2026-11-17-observe-buffer-evidence-838-design.md). These are
-measurements of one host, not a performance budget, and production source and defaults are
-unchanged. The raw records are the sixteen JSON files beside this summary, schema
-`media-evidence-observe-run/1`. The tables are output of
+measurements of one host, not a performance budget. #838 left production source and defaults
+unchanged; the 1 MiB change landed later in #879 (PR #901). The raw records are the sixteen JSON
+files beside this summary, schema `media-evidence-observe-run/1`. The tables are output of
 `scripts/media-evidence-observe.py compare`, rounded for display.
 
 ## What ran
@@ -97,7 +97,7 @@ the four agreeing verdicts are one result measured four times, not four independ
 - Drive and controller caches, btrfs metadata after per-file eviction, and other host
   activity were not controlled. The host had no other measurement or build running.
 - The network corpus is excluded from #838 and owned by the maintainer.
-- A production buffer change is not made here; it belongs to a separate implementation issue.
+- #838 made no production buffer change; that change landed separately in #879 (PR #901).
 
 ## Control-plane and node-agent hashes (#889)
 
