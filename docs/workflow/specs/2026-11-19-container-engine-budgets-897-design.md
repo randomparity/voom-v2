@@ -40,13 +40,13 @@ the `rm` failure first. Consumers:
 
 - Actors and deployments: a local operator on Linux/macOS Docker or Podman; the GitHub Linux
   amd64 PCM container job.
-- Invariants: each layer exceeds the budgets it encloses; cleanup removes only the owned
+- Invariants: each Scope layer exceeds what it encloses; cleanup removes only the owned
   container; the Rust 90 s equals `HARNESS_COMMAND_TIMEOUT`.
 - Accepted failure classes: setup over 30 s fails with the setup message; an unbounded tool run
   or witness hashing can exhaust a margin; removal after cancellation during create can take
   45 s; command counts drift if worker operations add launcher commands.
 - Covered elsewhere (#907): worker per-command and startup limits below the launcher bounds,
-  and `verify_pcm.py`.
+  `verify_pcm.py`, and the 60 s `voom()` timeout in `acceptance-bootstrap.py`.
 
 ## Success
 1. Constants are pinned and each outer layer exceeds what it wraps.
