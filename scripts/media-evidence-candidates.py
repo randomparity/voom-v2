@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Candidate tooling for the read-efficiency, scheduling (#789), single-read (#801) and
-observe-path buffer (#838) stages.
+"""Candidate tooling for the read-efficiency, scheduling (#789), single-read (#801),
+observe-path buffer (#838) and commit copy loop (#898) stages.
 
 `prepare` builds a bench-only worker variant in a detached worktree of HEAD, so production
 source and defaults never change; the #788 harness in that worktree then records the
@@ -110,6 +110,13 @@ OBSERVE_16K = {name: "    let mut buffer = vec![0_u8; 16 * 1024];\n" for name in
 OBSERVE_16K["ffprobe"] = "    let mut buffer = [0_u8; 16 * 1024];\n"
 OBSERVE_1M = "    let mut buffer = vec![0_u8; 1024 * 1024];\n"
 
+# The node agent's commit copy loop (#898): `stream_copy_with_hash` hashes and writes each
+# chunk of a `READ_BUFFER_BYTES` buffer. The `copy-commit` example calls it; `copy16k` is the
+# current source and `copy1m` edits the shared constant, which the example's loop reads.
+COPY_SOURCE = "crates/voom-node-agent/src/commit.rs"
+COPY_16K = "const READ_BUFFER_BYTES: usize = 16 * 1024;"
+COPY_1M = "const READ_BUFFER_BYTES: usize = 1024 * 1024;"
+
 # Each variant maps a worker source to its (old, new) edits; every old text must occur
 # exactly once, so a drifted source fails rather than building something unmeasured.
 VARIANTS: dict[str, dict[str, list[tuple[str, str]]]] = {
@@ -119,12 +126,16 @@ VARIANTS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "observe16k": {OBSERVE_SOURCES[name]: [(OBSERVE_1M, OBSERVE_16K[name])]
                    for name in OBSERVE_SOURCES},
     "observe1m": {},
+    "copy16k": {},
+    "copy1m": {COPY_SOURCE: [(COPY_16K, COPY_1M)]},
 }
 WORKER_BUILD = (["-p", "voom-hash-worker", "-p", "voom-ffprobe-worker"], "")
 OBSERVE_BUILD = ([argument for name in OBSERVE_SOURCES
                   for argument in ("-p", f"voom-{name}-worker")] + ["--examples"], "examples")
 # Cargo arguments and the built-binary subdirectory of target/release, per variant.
-BUILDS = {"observe16k": OBSERVE_BUILD, "observe1m": OBSERVE_BUILD}
+COPY_BUILD = (["-p", "voom-node-agent", "--examples"], "examples")
+BUILDS = {"observe16k": OBSERVE_BUILD, "observe1m": OBSERVE_BUILD,
+          "copy16k": COPY_BUILD, "copy1m": COPY_BUILD}
 
 # Lower is better for every compared metric. Resource metrics are judged by the protocol's
 # guardrails for selection, not by the speed thresholds.

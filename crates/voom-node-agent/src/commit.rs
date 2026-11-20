@@ -706,7 +706,13 @@ async fn copy_to_temp_no_replace(
     }
 }
 
-async fn stream_copy_with_hash(
+/// Copy `staging_path` to a new `temp_path`, hashing the bytes as they pass, then flush and
+/// fsync the copy. On error the caller removes `temp_path`.
+///
+/// Public only so the bench-only `copy-commit` example (#898) can time this loop; it is not
+/// part of the crate's API.
+#[doc(hidden)]
+pub async fn stream_copy_with_hash(
     staging_path: &Path,
     temp_path: &Path,
 ) -> Result<CommitObservedFacts, VoomError> {
