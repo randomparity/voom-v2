@@ -20,3 +20,7 @@ pub const WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5 * LAUNCHER_
 /// One audio operation runs at most eight launcher commands: input probe, encode, output
 /// probe, compatibility probe, and the copied-audio source/output probes and packet scans.
 pub const AUDIO_OPERATION_TIMEOUT: Duration = Duration::from_secs(8 * LAUNCHER_COMMAND_SECONDS);
+
+#[cfg(test)]
+#[path = "launcher_test.rs"]
+mod tests;

@@ -343,6 +343,22 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(timeout, 3 * runtime.OPERATION_TIMEOUT + runtime.LAUNCH_MARGIN)
         self.assertGreater(timeout, 3 * runtime.OPERATION_TIMEOUT)
 
+    def test_harnesses_default_each_command_to_the_harness_command_timeout(self):
+        repository = Path(__file__).resolve().parents[2]
+        for name, path in [("copied_audio_harness",
+                            "scripts/issue-786-copied-audio-regression.py"),
+                           ("owner_audio_harness",
+                            "crates/voom-cli/tests/support/real_owner_audio.py")]:
+            spec = importlib.util.spec_from_file_location(name, repository / path)
+            harness = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(harness)
+            done = runtime.subprocess.CompletedProcess([], 0, b"", b"")
+            with self.subTest(path=path), \
+                    patch.object(harness.subprocess, "run", return_value=done) as run:
+                harness.run(["true"])
+                self.assertEqual(run.call_args.kwargs["timeout"],
+                                 runtime.HARNESS_COMMAND_TIMEOUT)
+
     def test_harness_command_timeout_is_pinned_and_mirrored_by_rust_test_support(self):
         self.assertEqual(runtime.HARNESS_COMMAND_TIMEOUT, 90)
         self.assertGreater(runtime.HARNESS_COMMAND_TIMEOUT, runtime.OPERATION_TIMEOUT)
