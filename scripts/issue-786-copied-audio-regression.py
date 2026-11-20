@@ -13,12 +13,19 @@ import sys
 import tempfile
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "containers" / "ffmpeg"))
+import install  # noqa: E402  (the container installer owns the launcher budgets)
+import runtime  # noqa: E402
 CODECS = ("aac", "opus", "eac3", "ac3", "flac", "alac")
 
 
-def run(arguments, cwd=None):
+def root_count(configuration):
+    return len(configuration["read_only_roots"]) + len(configuration["read_write_roots"])
+
+
+def run(arguments, cwd=None, timeout=runtime.HARNESS_COMMAND_TIMEOUT):
     result = subprocess.run(list(map(str, arguments)), cwd=cwd, capture_output=True,
-                            timeout=90, env={**os.environ,
+                            timeout=timeout, env={**os.environ,
                             "VOOM_MEDIA_CALLER_PID": str(os.getpid())})
     if result.returncode:
         raise RuntimeError(f"{arguments[0]} failed ({result.returncode}): "
@@ -190,7 +197,8 @@ def regression(args, root):
     config.write_text(json.dumps(configuration))
     tools = json.loads(run([sys.executable, REPO / "containers/ffmpeg/install.py", "--config", config,
                            "--destination", root / "installed", "--source-witness", sources[("aac", False)],
-                           "--source-witness", source], stage))
+                           "--source-witness", source], stage,
+                      timeout=install.validation_timeout(root_count(configuration))))
     spec = importlib.util.spec_from_file_location("bootstrap", REPO / "scripts/acceptance-bootstrap.py")
     bootstrap = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bootstrap)
