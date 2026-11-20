@@ -80,23 +80,23 @@ cache states. CPU improves by 60–68%, wall and summed copy seconds do not regr
 within the guardrail, and the hashes are equal. Both cache states are go, so the spec's
 **overall verdict is go**. Process CPU covers the loop's user and system time in the process.
 It leaves out kernel writeback, btrfs compression and discard, which run in kernel threads and
-which this run did not measure. So the improvement is in the loop's own syscall and blocking-
-pool overhead, not in the copy's total CPU cost on the host.
+which this run did not measure. The figures are the process's CPU, not the copy's total CPU
+cost on the host; whether host-wide CPU changes too is unknown.
 
 ## Observations
 
-- **The copy is write-bound, and the drive sets the wall time.** Both buffers copied at about
-  0.8–1.3 GB/s per repetition. That is slower than the 1.8 GB/s calibration copy, and single
-  files took between 15 and 63 s for the same file across repetitions. That spread follows the
-  drive's write state, not the buffer. It is why the evicted wall CV is above 20%.
+- **Wall time varies with something other than the buffer.** Both buffers copied at about
+  0.8–1.3 GB/s per repetition, slower than the 1.8 GB/s calibration copy. One 29.6 GB file
+  took 15.3 s in one 1 MiB repetition and 63.0 s in another. That spread is consistent with
+  the drive's write state (not recorded) and makes the evicted wall CV exceed 20%.
 - **CPU per byte.** The 16 KiB loop spends about 0.81–0.93 CPU-seconds per GB in the process;
   1 MiB spends about 0.30–0.32. On a 27.5 GB (corpus-mean) artifact that is about 22–26 against
-  8–9 CPU-seconds per commit copy. The 16 KiB loop makes about 8.3 million reads and as many writes
-  per repetition, against about 130,000 of each at 1 MiB, and tokio hands every call to its
-  blocking pool.
-  That handoff is the likely source of the difference, as in #838 (not profiled).
+  8–9 CPU-seconds per commit copy. Derived from bytes over buffer size, the 16 KiB loop makes
+  about 8.3 million reads and as many writes per repetition, against about 130,000 of each at
+  1 MiB, and tokio hands every call to its blocking pool. That handoff is the likely source of
+  the difference, as in #838 (not profiled).
 - **16 KiB CPU is higher as-found than evicted** (126.9 against 110.8 s), while 1 MiB is
-  about the same in both states. The cause was not investigated.
+  slightly lower as-found (41.0 against 44.4 s). The cause was not investigated.
 
 ## Disclosures
 
