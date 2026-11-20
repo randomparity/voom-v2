@@ -155,9 +155,9 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
         for path in paths:
             baseline.evict(path, fs_type)
     residency = [baseline.resident_bytes(path) for path in paths]
-    counters = baseline.host_counters()
+    counters = baseline.host_counters("media-evidence-observe")
     lines, wall, usage = observe_all(example, args.concurrency, paths)
-    counters = baseline.counter_delta(counters, baseline.host_counters())
+    counters = baseline.counter_delta(counters, baseline.host_counters("media-evidence-observe"))
     rows, hashes = parse_rows(lines, files)
     for row, resident in zip(rows, residency):
         row["resident_bytes_before"] = resident

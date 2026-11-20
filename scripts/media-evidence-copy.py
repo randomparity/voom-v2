@@ -165,7 +165,7 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
         for path in paths:
             baseline.evict(path, fs_type)
     residency = [baseline.resident_bytes(path) for path in paths]
-    counters = baseline.host_counters()
+    counters = baseline.host_counters(HARNESS)
     try:
         lines, wall, usage = copy_all(example, args.scratch_dir, paths)
     except BaseException:
@@ -173,7 +173,7 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
             print("media-evidence-copy: the scratch directory still holds a partial copy; "
                   "remove it before the next run", file=sys.stderr)
         raise
-    counters = baseline.counter_delta(counters, baseline.host_counters())
+    counters = baseline.counter_delta(counters, baseline.host_counters(HARNESS))
     check_empty(args.scratch_dir)
     rows, hashes = parse_rows(lines, files)
     for row, resident in zip(rows, residency):

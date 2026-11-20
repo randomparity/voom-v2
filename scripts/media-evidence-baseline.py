@@ -307,25 +307,36 @@ def host_identity() -> dict[str, Any]:
     }
 
 
-def host_counters() -> dict[str, int | str]:
-    """Host-wide counters; on a shared host they include unrelated traffic."""
-    counters: dict[str, int | str] = {
-        "network_rx_bytes": UNAVAILABLE, "cifs_bytes_read": UNAVAILABLE,
-    }
-    try:
-        lines = Path("/proc/net/dev").read_text(encoding="utf-8").splitlines()[2:]
-        counters["network_rx_bytes"] = sum(
-            int(line.split(":", 1)[1].split()[0]) for line in lines
-            if line.split(":", 1)[0].strip() != "lo"
-        )
-    except (OSError, IndexError, ValueError):
-        pass
-    try:
-        text = Path("/proc/fs/cifs/Stats").read_text(encoding="utf-8")
-        reads = re.findall(r"Bytes read: (\d+)", text)
-        counters["cifs_bytes_read"] = sum(int(value) for value in reads)
-    except OSError:
-        pass
+def _network_rx_bytes(text: str) -> int:
+    return sum(int(line.split(":", 1)[1].split()[0]) for line in text.splitlines()[2:]
+               if line.split(":", 1)[0].strip() != "lo")
+
+
+def _cifs_bytes_read(text: str) -> int:
+    return sum(int(value) for value in re.findall(r"Bytes read: (\d+)", text))
+
+
+HOST_SOURCES = {"network_rx_bytes": ("net/dev", _network_rx_bytes),
+                "cifs_bytes_read": ("fs/cifs/Stats", _cifs_bytes_read)}
+
+
+def host_counters(harness: str) -> dict[str, int | str]:
+    """Host-wide counters; on a shared host they include unrelated traffic.
+
+    `cifs_bytes_read` is `unavailable` on a host without the cifs module, and network-corpus
+    consumers read it whatever the mount type, so its absence is reported like any other.
+    A counter the host cannot give stays `unavailable`, and stderr says why under `harness`."""
+    has_proc = PROC_ROOT.is_dir()
+    counters: dict[str, int | str] = dict.fromkeys(HOST_SOURCES, UNAVAILABLE)
+    for counter, (source, parse) in HOST_SOURCES.items():
+        cause = "no /proc on this host"
+        if has_proc:
+            try:
+                counters[counter] = parse((PROC_ROOT / source).read_text(encoding="utf-8"))
+                continue
+            except (OSError, IndexError, ValueError) as error:
+                cause = f"{source}: {type(error).__name__}"
+        print(f"{harness}: host {counter} unavailable: {cause}", file=sys.stderr)
     return counters
 
 
@@ -579,7 +590,7 @@ def run_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, A
         "probe": Worker(args.worker_dir / "voom-ffprobe-worker"),
     }
     try:
-        counters = host_counters()
+        counters = host_counters("media-evidence-baseline")
         started = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             rows = list(pool.map(
@@ -587,7 +598,7 @@ def run_repetition(index: int, manifest: dict[str, Any], files: list[dict[str, A
                 files))
         wall = time.monotonic() - started
         usage = {name: worker.usage() for name, worker in workers.items()}
-        counters = counter_delta(counters, host_counters())
+        counters = counter_delta(counters, host_counters("media-evidence-baseline"))
     finally:
         for worker in workers.values():
             worker.stop()

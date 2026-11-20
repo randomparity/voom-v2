@@ -611,7 +611,8 @@ def run_repetition(index: int, candidate: str, root: Path, files: list[dict[str,
         for path in paths.values():
             baseline.evict(path, fs_type)
     residency = {file_id: baseline.resident_bytes(path) for file_id, path in paths.items()}
-    counters, io_before, cpu_before = baseline.host_counters(), process_io(), cpu_seconds()
+    counters = baseline.host_counters("media-evidence-fingerprint")
+    io_before, cpu_before = process_io(), cpu_seconds()
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         results = list(pool.map(
@@ -619,7 +620,8 @@ def run_repetition(index: int, candidate: str, root: Path, files: list[dict[str,
     wall = time.monotonic() - started
     cpu = cpu_seconds() - cpu_before
     io_delta = baseline.counter_delta(io_before, process_io())
-    counters = baseline.counter_delta(counters, baseline.host_counters())
+    counters = baseline.counter_delta(
+        counters, baseline.host_counters("media-evidence-fingerprint"))
     rows = [row for row, _ in results]
     for row in rows:
         row["resident_bytes_before"] = residency[row["id"]]
