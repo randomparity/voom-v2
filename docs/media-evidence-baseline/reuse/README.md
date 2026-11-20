@@ -331,5 +331,8 @@ filesystem joins the reuse list.
   server does not report a client-sent ChangeTime.
 
 The instrument is the Python oracle's stat model of the guard. #794's production rollout guard
-cases were not run on ext4 or xfs. Adding a filesystem to `reuse_listed` stays a separate change
-with its own ADR amendment.
+cases were then run on native ext4 and xfs (#890), with release workers from a never-merged spike
+build that lists both: **ext4 met, xfs met**. On both, O1 was detected by the guard's
+`pre_probe_guard` and O10 by the hash worker's `hash_drift`, and the unchanged copy was reused
+([rollout records](../rollout/README.md#ext4-and-xfs-guard-cases-890)). Adding a filesystem to
+`reuse_listed` stays a separate change with its own ADR amendment.

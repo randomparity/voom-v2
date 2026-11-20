@@ -304,6 +304,22 @@ class UsageTests(unittest.TestCase):
         delta = rollout.usage_delta(before, dict(before, cpu_seconds=2.0))
         self.assertEqual(delta["cpu_seconds"], "unavailable")
 
+    def test_each_proc_source_is_read_alone_and_an_unavailable_counter_names_its_cause(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            proc = Path(scratch)
+            (proc / "123").mkdir()
+            for name, text in (("stat", "123 (w) S" + " 0" * 10 + " 1 1"),
+                               ("status", "VmHWM:\t 4 kB\n"),
+                               ("io", "rchar: 7\nread_bytes: 3\n")):
+                (proc / "123" / name).write_text(text)
+            stderr = io.StringIO()
+            with patch.object(rollout.baseline, "PROC_ROOT", proc), redirect_stderr(stderr):
+                usage = rollout.process_usage(123)
+        self.assertEqual(usage, {"cpu_seconds": "unavailable", "peak_rss_bytes": 4096,
+                                 "rchar": 7, "read_bytes": 3})
+        self.assertEqual(stderr.getvalue().splitlines(), [
+            "media-evidence-rollout: process cpu_seconds unavailable: stat: field absent"])
+
     @unittest.skipUnless(Path("/proc/self/io").exists(), "needs Linux /proc")
     def test_reads_this_process(self):
         usage = rollout.process_usage(os.getpid())

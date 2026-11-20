@@ -9,8 +9,9 @@ re-scope drafts behind [ADR 0120](adr/0120-phase-specific-media-evidence.md), fo
 active rehearsal. Every figure is copied from the committed records and READMEs named in each
 row. Nothing was re-measured for this report; the concurrency row was amended on 2026-11-17
 with the full-pass records of #839, the observe-buffer row was added on 2026-11-17 from
-#838 and amended on 2026-11-19 when #879 landed, and the per-file publication row was amended
-on 2026-11-17 with the records of #841.
+#838 and amended on 2026-11-19 when #879 landed, the per-file publication row was amended on
+2026-11-17 with the records of #841, and the #889 row was added on 2026-11-19 by extrapolation
+from #838, with no new measurement.
 
 ## Evidence
 
@@ -22,6 +23,7 @@ as-found subset. A constructed miss shows a candidate *can* miss. It is not a ra
 | Current: three full reads, 8 KiB hash, concurrency 4 | #788 [README](media-evidence-baseline/README.md) | Local 2,805.9 GB logical, 2,765.8 GB physical, wall 613.9 s, hash CPU 684.5 s, probe CPU 805.0 s; network 74.0 GB logical | baseline | none in O1–O12 | Kept in every phase except where a row below replaces it |
 | 64 KiB, 1 MiB, 4 MiB hash buffer; batched 8 KiB loop | #789 [stages 1–2](media-evidence-baseline/stages-1-2.md) | Hash CPU 222.9 / 157.1 / 170.5 / 230.4 s; summed hash 805.8 / 798.5 / 803.9 / 818.2 s; hash peak RSS 5.7 / 14.9 / 38.8 / 4.8 MiB | CPU improvement for all four; summed hash improvement except batch8k; wall inconclusive | none (no trust change) | **1 MiB selected** for the owner hash; others rejected |
 | 1 MiB buffer in `observe_file_facts` (transform input, output verification, probe re-hash) against 16 KiB | #838 [observe](media-evidence-baseline/observe/README.md) | Local, 4 in flight, one read per file, evicted and as-found: CPU 333.4–360.6 → 150.4–155.3 s per pass (−54 to −58%); wall 223–225 s and physical 926.5–935.2 GB unchanged; peak RSS about 4 → 21 MiB; identical hashes | CPU improvement on all four paths in both cache states; wall, summed observe seconds and physical inconclusive; no guardrail breach; 1 MiB **go** | none (no trust change) | **1 MiB selected**: landed in #879 for all four paths (heap buffer); the phase table below names it |
+| 1 MiB buffer in the control-plane `observe_regular_file` hash and the node agent's commit hashes, against 16 KiB | #889 [observe](media-evidence-baseline/observe/README.md#control-plane-and-node-agent-hashes-889) | Not measured. The control-plane and node-agent `try_observe_regular_file` loops match the 16 KiB loop #838 measured, per chunk; `stream_copy_with_hash` also writes each chunk and fsyncs | Hash loops: go, extrapolated (CPU direction only; no #838 figure applies; memory at 1 MiB per hash in flight unverified, call-site concurrency unmeasured); copy loop: inconclusive, unmeasured (#898) | none (no trust change) | No production change: these hashes still read 16 KiB after #879 landed 1 MiB on the four observe paths; one `READ_BUFFER_BYTES` change also changes the copy loop, so it splits the constant or waits for #898 |
 | Concurrency 8 (local) | #789 | Wall 642.3 vs 619.2 s; first file 17.1 vs 10.3 s; summed hash 1,814.9 vs 798.5 s | wall inconclusive; first file and summed hash regression | none | Rejected |
 | Concurrency 1, 2 (c1: 6-file local subset; c2: full local pass, network subset) | #789; #839 [concurrency](media-evidence-baseline/concurrency/README.md) (amended 2026-11-17) | Full pass, c2 vs matched c4, reuse on: wall 200.0 vs 225.0 s, first file done 9.3 vs 6.2 s, physical 935.5 GB both; reuse off: wall 603.3 vs 659.4 s, first file done 27.1 vs 10.8 s, physical 2,686.9 vs 2,736.0 GB. Subset (same first file in both cells): c2 first file 7.0 vs 10.8 s; c1 wall 98.6 vs 78.1 s | Reuse on: wall improvement, first file regression; reuse off: wall, first file and physical inconclusive (first-file baseline CV 21.8%); c1 wall regression; network inconclusive (CV above 20%, unmatched cache) | none | Not selected: c2 shortens the read-once pass 11%; its later full-pass first replay completion comes from manifest order (c2's first window holds two large files), and neither metric is first durable observation (#841); concurrency stays 4 |
 | Bounded incremental publication, flush cadence | #789 (modelled) | Under the completion barrier no cadence moves first durable observation | modelled only | none | Not selected |
@@ -29,7 +31,7 @@ as-found subset. A constructed miss shows a candidate *can* miss. It is not a ra
 | Single read: probe trusts owner hash under a size + mtime stat check | #801 [single-read](media-evidence-baseline/single-read/README.md) | Local wall 212.5 s; physical 935.5 GB (1.00× corpus); probe CPU 2.5 s; summed hash +5.1% vs buf1m; network: speed inconclusive, probe CPU 17.5 → 0.24 s | wall, physical, probe CPU improvement locally; summed hash regression | Same-size interior edit with mtime restored between hash and probe (#801 operator-recorded manual check; `meta` misses O1 in the committed #796 oracle) | Rejected with this guard |
 | R1: probe reuses owner hash; re-hashes replaced by a metadata guard | #797 [lazy](media-evidence-baseline/lazy/README.md), #798 [790 report](media-evidence-790-report.md) | Logical bytes −66.7% on both corpora; network wire saving not observed (24.66 GB fetched in repetition 1 under both) | logical improvement | Exactly the guard's misses | **Selected** with the `meta-ctime` guard on btrfs and tmpfs, setting default off |
 | `meta` (size, mtime ns, file key) | #796 [fingerprint](media-evidence-baseline/fingerprint/README.md) | 0 bytes | n/a | O1–O4, O6, O12, O13 missed | Rejected as identity evidence |
-| `meta-ctime` (`meta` + ctime ns) | #798, #840 [reuse](media-evidence-baseline/reuse/README.md) | 0 bytes; stat of 34 files about 1–3 ms | Added after the freeze; no stage-0 verdict claimed | btrfs, tmpfs: no miss in O1–O13 (O10 not applicable). ext4, xfs (#840, kernel 7.3.3): no miss in O1–O13, with O10 constructed as the guard's window, at 20 ms and same-tick. False change on O5, O8. Network: ctime follows mtime, O1 and O13 missed; a client-sent ChangeTime is not reported | Selected only as R1's guard on btrfs and tmpfs; ext4 and xfs meet ADR 0120's O1/O10 bar in the oracle, and listing them is a separate change |
+| `meta-ctime` (`meta` + ctime ns) | #798, #840 [reuse](media-evidence-baseline/reuse/README.md) | 0 bytes; stat of 34 files about 1–3 ms | Added after the freeze; no stage-0 verdict claimed | btrfs, tmpfs: no miss in O1–O13 (O10 not applicable). ext4, xfs (#840, kernel 7.3.3): no miss in O1–O13, with O10 constructed as the guard's window, at 20 ms and same-tick. False change on O5, O8. Network: ctime follows mtime, O1 and O13 missed; a client-sent ChangeTime is not reported. #794's guard cases on native ext4 and xfs (#890, spike build listing both): unchanged reused, O1 and O10 detected | Selected only as R1's guard on btrfs and tmpfs; ext4 and xfs meet ADR 0120's O1/O10 bar in the oracle and in the production guard cases, and listing them is a separate change |
 | `ht64`, `ht1m`, `ht64-i8`, `ht64-i32` | #796 | Local 4.46 / 71.30 / 22.28 / 75.76 MB per pass | n/a | O1, O13 missed | Rejected |
 | `rnd64-i8`, `rnd64-i32` | #798 | As `ht64-i8`/`-i32`, plus a 457 MB block table built by one full read | Detection probability equals the sampled fraction: under 0.04% per check | O1, O13 missed when the seed is known | Rejected |
 | Lazy provisional evidence with deferred full hash | #797 | Eventual logical 935.31 GB local (one full read); provisional within 0.03 s; zero wasted work observed | logical improvement comes from dropping the re-reads, not from deferral | Interior O13 and O15 missed; plan becomes committable | Rejected |
@@ -174,6 +176,8 @@ Carried from the records:
 - Not measured in #838: a whole transform or verification around the hash (outputs observed
   while their write is cached, CPU contention from ffmpeg or mkvmerge), the network corpus, and
   the 16 KiB hashes in `voom-control-plane` artifact promotion and the node agent's commit.
+  #889 extrapolates the direction to both hash loops and leaves the node agent's commit copy
+  loop (`stream_copy_with_hash`) unmeasured (#898).
 - Not measured in #841: per-file publication with probe reuse on, on the network corpus, or on
   roots of many small files; session failure, cancellation, commit-lock conflicts and restarts
   under it; planning while a scan runs.
@@ -181,8 +185,9 @@ Carried from the records:
   ext4 and xfs (#840, kernel 7.3.3 with multigrain timestamps). The ext4 and xfs oracles also
   ran with no wait: the coarse clock stayed in one tick for O1, O10 and O13 on both, and
   `meta-ctime` detected them. **Per ADR 0120's O1/O10 bar:** ext4 met and xfs met in
-  the Python oracle's stat model only, since #794's production rollout guard cases were not
-  run on them; the network scratch share not met. No kernel without fine-grained or
+  the Python oracle's stat model (#840) and in #794's production rollout guard cases (#890,
+  release workers from a never-merged spike build that lists both; one capture each, kernel
+  7.3.3); the network scratch share not met. No kernel without fine-grained or
   multigrain ctime was measured.
 - The `meta-ctime` and `rnd64` candidates were added after the protocol froze, so no verdict
   against stage 0 is claimed for them (#798).

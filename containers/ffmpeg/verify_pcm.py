@@ -10,13 +10,17 @@ import tempfile
 import time
 import uuid
 
+import runtime
+
 LAYOUTS = [("mono", 1, 4), ("stereo", 2, 3), ("5.1", 6, 63),
            ("5.1(side)", 6, 1551), ("7.1", 8, 1599)]
 PCM_GUID = bytes.fromhex("0100000000001000800000aa00389b71")
 
 
 def command(argv, data=None):
-    result = subprocess.run(argv, input=data, capture_output=True, timeout=60,
+    # A direct engine run is one launcher-shaped operation: setup, a short tool, cleanup.
+    result = subprocess.run(argv, input=data, capture_output=True,
+                            timeout=runtime.HARNESS_COMMAND_TIMEOUT,
                             env={**os.environ, "VOOM_MEDIA_CALLER_PID": str(os.getpid())})
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exited {result.returncode}: "
@@ -48,7 +52,8 @@ class Tools:
         except BaseException:
             if self.args.engine:
                 observed = subprocess.run([self.args.engine, "inspect", name],
-                                          capture_output=True, timeout=5)
+                                          capture_output=True,
+                                          timeout=runtime.CLEANUP_BUDGET)
                 if observed.returncode == 0:
                     record = json.loads(observed.stdout)[0]
                     if record["Config"]["Labels"].get("io.voom.proof") == name:

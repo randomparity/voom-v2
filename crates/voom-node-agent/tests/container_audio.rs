@@ -69,17 +69,22 @@ async fn dispatch(
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_mins(1), async {
-        loop {
-            match response.frames.next_frame().await.unwrap() {
-                NdjsonOutcome::Frame(_) => {}
-                NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => break payload,
-                other => panic!("owner child operation failed: {other:?}"),
+    tokio::time::timeout(
+        voom_test_support::launcher::AUDIO_OPERATION_TIMEOUT,
+        async {
+            loop {
+                match response.frames.next_frame().await.unwrap() {
+                    NdjsonOutcome::Frame(_) => {}
+                    NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
+                        break payload;
+                    }
+                    other => panic!("owner child operation failed: {other:?}"),
+                }
             }
-        }
-    })
+        },
+    )
     .await
-    .unwrap()
+    .unwrap_or_else(|_| panic!("owner child operation exceeded AUDIO_OPERATION_TIMEOUT"))
 }
 
 fn write_wave(path: &Path, bits: u16) {

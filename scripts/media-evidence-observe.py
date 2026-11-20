@@ -17,7 +17,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import os
 import re
 import statistics
 import subprocess
@@ -45,8 +44,6 @@ OBSERVE_SOURCES = candidates.OBSERVE_SOURCES
 # Matches the 1 MiB heap sources and the `observe16k` variant's 16 KiB reads alike.
 BUFFER_PATTERN = r"let mut buffer = (?:vec!)?\[0_u8; ([0-9_ *]+)\];"
 MIB = 1024 * 1024
-# Read once at import: POSIX always defines it, and a failure is a harness fault, not a cause.
-CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
 OUTCOMES = {"observed", "observe_failed"}
 NOT_MEASURED = {
     "operation": "the examples call observe_file_facts only; no transform, ffprobe or "
@@ -79,54 +76,9 @@ def build_identity(example: Path) -> dict[str, Any]:
     }
 
 
-def _stat_counters(text: str) -> dict[str, float]:
-    fields = text.rsplit(")", 1)[1].split()
-    if len(fields) < 15:
-        return {}
-    ticks = sum(int(value) for value in fields[11:15])
-    return {"cpu_seconds": round(ticks / CLOCK_TICKS, 3)}
-
-
-def _status_counters(text: str) -> dict[str, int]:
-    return {"peak_rss_bytes": int(line.split()[1]) * 1024
-            for line in text.splitlines() if line.startswith("VmHWM:")}
-
-
-def _io_counters(text: str) -> dict[str, int]:
-    counters = {}
-    for line in text.splitlines():
-        key, value = line.split(":")
-        if key in ("rchar", "read_bytes"):
-            counters[key] = int(value)
-    return counters
-
-
-PROC_SOURCES = (("stat", _stat_counters, ("cpu_seconds",)),
-                ("status", _status_counters, ("peak_rss_bytes",)),
-                ("io", _io_counters, ("rchar", "read_bytes")))
-
-
-def process_usage(pid: int, proc_root: Path = Path("/proc")) -> dict[str, int | float | str]:
-    """CPU and I/O include reaped children; peak memory is this process only.
-
-    A counter the host cannot give stays `unavailable` in the record, and stderr says why."""
-    has_proc = proc_root.is_dir()
-    usage: dict[str, int | float | str] = {}
-    for source, parse, counters in PROC_SOURCES:
-        if not has_proc:
-            found, cause = {}, "no /proc on this host"
-        else:
-            try:
-                found = parse((proc_root / str(pid) / source).read_text())
-                cause = f"{source}: field absent"
-            except (OSError, IndexError, ValueError) as error:
-                found, cause = {}, f"{source}: {type(error).__name__}"
-        for counter in counters:
-            usage[counter] = found.get(counter, UNAVAILABLE)
-            if counter not in found:
-                print(f"media-evidence-observe: process {counter} unavailable: {cause}",
-                      file=sys.stderr)
-    return usage
+def process_usage(pid: int) -> dict[str, int | float | str]:
+    """CPU and I/O include reaped children; peak memory is this process only."""
+    return baseline.proc_usage(pid, "media-evidence-observe")
 
 
 def observe_all(example: Path, concurrency: int,

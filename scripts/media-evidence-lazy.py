@@ -536,21 +536,8 @@ def within_budget(files: list[dict[str, Any]], max_bytes: int) -> tuple[list, li
 def process_usage() -> dict[str, int | float | str]:
     """This process's CPU (all threads), lifetime peak RSS and I/O counters."""
     times = os.times()
-    usage: dict[str, int | float | str] = {
-        "cpu_seconds": round(times.user + times.system, 3), "peak_rss_bytes": UNAVAILABLE,
-        "rchar": UNAVAILABLE, "read_bytes": UNAVAILABLE,
-    }
-    try:
-        for line in Path("/proc/self/status").read_text().splitlines():
-            if line.startswith("VmHWM:"):
-                usage["peak_rss_bytes"] = int(line.split()[1]) * 1024
-        for line in Path("/proc/self/io").read_text().splitlines():
-            key, value = line.split(":")
-            if key in ("rchar", "read_bytes"):
-                usage[key] = int(value)
-    except (OSError, ValueError):
-        pass
-    return usage
+    return {"cpu_seconds": round(times.user + times.system, 3),
+            **baseline.proc_usage("self", "media-evidence-lazy", ("status", "io"))}
 
 
 def usage_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
