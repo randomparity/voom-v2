@@ -41,7 +41,9 @@ async fn copy_once(path: PathBuf, temp: PathBuf) -> observe_runner::Observed {
     Ok((facts.size_bytes, facts.content_hash))
 }
 
-/// The scratch directory must be empty: every file the example removes is one it created.
+/// The scratch directory must be empty, so every `copy-<n>.tmp` name the example removes is
+/// one it chose. A file another writer puts there afterwards under such a name is not
+/// guarded against: the harness is the directory's only writer.
 fn scratch_dir() -> io::Result<PathBuf> {
     let dir = std::env::args()
         .nth(2)
