@@ -3,8 +3,8 @@
 use std::io;
 use std::path::Path;
 use std::process::Output;
-use std::time::Duration;
 
+use crate::launcher::{LAUNCHER_COMMAND_SECONDS, LAUNCHER_COMMAND_TIMEOUT};
 use tokio::process::Command;
 use voom_worker_protocol::{
     AudioSampleFacts, LosslessAudioSettings, ResolvedLosslessAudioSettings,
@@ -106,11 +106,19 @@ pub async fn canonical_decoded_audio(
 async fn command_output(command: &mut Command) -> io::Result<Output> {
     command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let operation = format!("{command:?}");
-    let output = tokio::time::timeout(Duration::from_secs(10), command.kill_on_drop(true).output())
-        .await
-        .map_err(|_| {
-            io::Error::new(io::ErrorKind::TimedOut, format!("{operation}: timed out"))
-        })??;
+    let output = tokio::time::timeout(
+        LAUNCHER_COMMAND_TIMEOUT,
+        command.kill_on_drop(true).output(),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "{operation}: exceeded the {LAUNCHER_COMMAND_SECONDS} s launcher command timeout"
+            ),
+        )
+    })??;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "{operation}: {}: {}",

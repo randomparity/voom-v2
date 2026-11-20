@@ -18,13 +18,20 @@ CODECS = ("aac", "opus", "eac3", "ac3", "flac", "alac", "pcm_s16le", "pcm_s24le"
 ARCHIVAL = {"flac", "alac", "pcm_s16le", "pcm_s24le"}
 REPO = Path(__file__).resolve().parents[4]
 POLICIES = REPO / "crates/voom-control-plane/tests/fixtures/policies/audio-acceptance"
+sys.path.insert(0, str(REPO / "containers" / "ffmpeg"))
+import install  # noqa: E402  (the container installer owns the launcher budgets)
+import runtime  # noqa: E402
 
 
-def run(arguments, cwd=None):
+def root_count(configuration):
+    return len(configuration["read_only_roots"]) + len(configuration["read_write_roots"])
+
+
+def run(arguments, cwd=None, timeout=runtime.HARNESS_COMMAND_TIMEOUT):
     result = subprocess.run(
         list(map(str, arguments)), cwd=cwd,
         env={**os.environ, "VOOM_MEDIA_CALLER_PID": str(os.getpid())},
-        capture_output=True, timeout=90, check=False,
+        capture_output=True, timeout=timeout, check=False,
     )
     if result.returncode:
         raise RuntimeError(f"{arguments[0]} failed ({result.returncode}): "
@@ -341,7 +348,8 @@ def without_flac_encoder(root, executable):
 import os, subprocess, sys
 executable = {executable!r}
 if "-encoders" in sys.argv[1:]:
-    result = subprocess.run([executable, *sys.argv[1:]], capture_output=True, timeout=60,
+    result = subprocess.run([executable, *sys.argv[1:]], capture_output=True,
+                            timeout={runtime.HARNESS_COMMAND_TIMEOUT},
                             env={{**os.environ, "VOOM_MEDIA_CALLER_PID": str(os.getpid())}})
     for line in result.stdout.splitlines(keepends=True):
         fields = line.split()
@@ -403,7 +411,7 @@ def acceptance(args, root):
     tools = json.loads(run([
         sys.executable, REPO / "containers/ffmpeg/install.py", "--config", config,
         "--destination", root / "installed", "--source-witness", sources[0],
-    ], stage))
+    ], stage, timeout=install.validation_timeout(root_count(configuration))))
     spec = importlib.util.spec_from_file_location(
         "bootstrap", REPO / "scripts/acceptance-bootstrap.py")
     bootstrap = importlib.util.module_from_spec(spec)

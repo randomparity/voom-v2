@@ -15,12 +15,22 @@ import uuid
 
 import runtime
 
+# A killed or signalled launcher's pipes stay open until its guardian finishes cleanup.
+REAP_WAIT = runtime.CLEANUP_BUDGET + runtime.LAUNCH_MARGIN
+# Reaching create or the tool's first output spends the setup budget after interpreter start.
+START_WAIT = runtime.SETUP_BUDGET + runtime.LAUNCH_MARGIN
+
+
+def probe():
+    return runtime.Budget.start("probe", runtime.SETUP_BUDGET)
+
 
 def wait_absent(engine, identity):
-    deadline = time.monotonic() + 11
+    # A launcher cancelled during create leaves its guardian both remaining budgets.
+    deadline = time.monotonic() + runtime.SETUP_BUDGET + runtime.CLEANUP_BUDGET + 1
     while time.monotonic() < deadline:
         remaining = runtime.capture(engine.prefix + ["ps", "-a", "--no-trunc", "--filter",
-                                    "id=" + identity, "--format", "{{.ID}}"])
+                                    "id=" + identity, "--format", "{{.ID}}"], probe())
         if not remaining.strip():
             return
         select.select([], [], [], 0.05)
@@ -42,10 +52,10 @@ def launch(script, env, cwd, parent=False):
 
 def finish(process, data=b"", expected=0):
     try:
-        stdout, stderr = process.communicate(data, timeout=20)
+        stdout, stderr = process.communicate(data, timeout=runtime.OPERATION_TIMEOUT)
     except BaseException:
         process.kill()
-        process.communicate(timeout=15)
+        process.communicate(timeout=REAP_WAIT)
         raise
     assert process.returncode == expected, (process.returncode, stderr.decode(errors="replace"))
     return stdout, stderr
@@ -54,7 +64,8 @@ def finish(process, data=b"", expected=0):
 def owned_ids(engine):
     return set(runtime.capture(engine.prefix + ["ps", "-a", "--no-trunc", "--filter",
                        "label=" + runtime.LABEL, "--filter",
-                       "volume=" + engine.config.read_write_roots[0], "--format", "{{.ID}}"])
+                       "volume=" + engine.config.read_write_roots[0], "--format", "{{.ID}}"],
+                       probe())
                .decode().splitlines())
 
 
@@ -71,12 +82,12 @@ def exercise(args, root):
     config_path = root / "configuration.json"
     config_path.write_text(json.dumps(value))
     config = runtime.load_config(str(config_path), cwd=str(stage))
-    engine = runtime.Engine(config)
+    engine = runtime.Engine(config, probe())
     env = {**os.environ, "VOOM_MEDIA_CONTAINER_CONFIG": str(config_path),
            "VOOM_MEDIA_CALLER_PID": str(os.getpid())}
     name = "voom-runtime-sentinel-" + uuid.uuid4().hex
     sentinel = runtime.capture(engine.prefix + ["create", "--name", name, "--pull=never",
-                                "--entrypoint", "/bin/sh", engine.image, "-c", "exit 0"])
+                                "--entrypoint", "/bin/sh", engine.image, "-c", "exit 0"], probe())
     sentinel = sentinel.decode().strip()
     baseline = owned_ids(engine)
     results = []
@@ -84,12 +95,14 @@ def exercise(args, root):
     try:
         setup = subprocess.run([sys.executable, runtime.__file__, "check-config",
                                 "--source-witness", str(witness)], cwd=stage, env=env,
-                               capture_output=True, timeout=30)
+                               capture_output=True,
+                               timeout=runtime.check_config_timeout(config.root_count))
         assert setup.returncode == 0, setup.stderr.decode()
         results.append("source-witness-and-host-ownership")
         for tool in ("ffmpeg", "ffprobe"):
             result = subprocess.run([str(Path(runtime.__file__).with_name(tool + "-container")),
-                                     "-version"], cwd=stage, env=env, capture_output=True, timeout=20)
+                                     "-version"], cwd=stage, env=env, capture_output=True,
+                                    timeout=runtime.OPERATION_TIMEOUT)
             assert result.returncode == 0, result.stderr.decode()
             assert result.stdout.startswith((tool + " version 9.0.2").encode())
             results.append(tool)
@@ -132,26 +145,27 @@ def exercise(args, root):
         wrapper.chmod(0o755)
         process = launch("echo ready; sleep 60", {**env, "PATH": str(intercept) + os.pathsep + env["PATH"]}, stage)
         try:
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + START_WAIT
             while not marker.exists() and time.monotonic() < deadline:
                 select.select([], [], [], 0.02)
             assert marker.exists(), "engine did not create the barrier container"
             identity = marker.read_text().strip()
             process.kill()
             release.touch()
-            process.communicate(timeout=15)
+            process.communicate(timeout=REAP_WAIT)
             wait_absent(engine, identity)
             results.append("launcher-kill-during-create-response")
         finally:
             release.touch()
             if process.poll() is None:
                 process.kill()
-                process.communicate(timeout=15)
+                process.communicate(timeout=REAP_WAIT)
         for parent in (False, True):
             for sig in (signal.SIGTERM, signal.SIGKILL, None):
                 process = launch("echo ready; sleep 60", env, stage, parent)
                 try:
-                    assert select.select([process.stdout], [], [], 10)[0], "operation did not start"
+                    assert select.select([process.stdout], [], [], START_WAIT)[0], \
+                        "operation did not start"
                     assert process.stdout.readline() == b"ready\n"
                     identities = owned_ids(engine) - baseline
                     assert len(identities) == 1, identities
@@ -164,20 +178,21 @@ def exercise(args, root):
                             process.kill()
                     else:
                         process.send_signal(sig)
-                    process.communicate(timeout=15)
+                    process.communicate(timeout=REAP_WAIT)
                     wait_absent(engine, identities.pop())
                     results.append({"cancellation": "caller" if parent else "launcher",
                                     "signal": sig.name if sig else "timeout", "seconds": round(time.monotonic() - before, 3)})
                 finally:
                     if process.poll() is None:
                         process.kill()
-                        process.communicate(timeout=15)
-                assert runtime.json_capture(engine.prefix + ["inspect", sentinel])[0]["Id"] == sentinel
+                        process.communicate(timeout=REAP_WAIT)
+                assert runtime.json_capture(engine.prefix + ["inspect", sentinel],
+                                            probe())[0]["Id"] == sentinel
         assert owned_ids(engine) == baseline, "operation cleanup left containers"
         return {"engine": args.engine, "platform": sys.platform, "cases": results,
                 "seconds": round(time.monotonic() - started, 3)}
     finally:
-        engine.remove(sentinel, time.monotonic() + 5)
+        engine.remove(sentinel, runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
 
 
 def main():
