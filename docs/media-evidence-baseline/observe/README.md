@@ -102,8 +102,8 @@ slice, and nothing else per chunk.
 
 | Loop | Source at `a793d4e0` | Work beyond the measured loop | Decision | Verdict 1 MiB |
 |---|---|---|---|---|
-| control-plane `observe_regular_file` | `crates/voom-control-plane/src/artifact/fs.rs:171-184` | none per chunk; error mapping differs | extrapolated | go (extrapolated) |
-| node-agent `try_observe_regular_file` | `crates/voom-node-agent/src/commit.rs:864-877` | none per chunk; once per file, a plain open without `O_NOFOLLOW` and a size and mtime recheck | extrapolated | go (extrapolated) |
+| control-plane `observe_regular_file` | `crates/voom-control-plane/src/artifact/fs.rs:171-184` | none per chunk; per file, a canonicalize and different error mapping | extrapolated | go (extrapolated) |
+| node-agent `try_observe_regular_file` | `crates/voom-node-agent/src/commit.rs:864-877` | none per chunk; per file, a canonicalize, a plain open without `O_NOFOLLOW` and a size and mtime recheck | extrapolated | go (extrapolated) |
 | node-agent `stream_copy_with_hash` | `crates/voom-node-agent/src/commit.rs:732` | per chunk, `write_all` to a temp file; then `flush` and `sync_all` | not extrapolated, not measured ([#898](https://github.com/randomparity/voom-v2/issues/898)) | inconclusive |
 
 Only the direction carries over. At 1 MiB a large file takes 64 times fewer reads, each handed

@@ -15,9 +15,9 @@ Decision per loop at `a793d4e0`, against the measured loop at `e2c29167`. The te
 slice, and no other statement per chunk.
 
 - **Control-plane `observe_regular_file`: extrapolate.** Its loop matches the measured one
-  statement for statement; it differs only in error mapping.
+  per chunk; it differs per file only (canonicalize, error mapping).
 - **Node-agent `try_observe_regular_file`: extrapolate.** Same loop; per-file differences
-  only (plain `File::open` without `O_NOFOLLOW`, size and mtime recheck).
+  only (canonicalize, `File::open` without `O_NOFOLLOW`, size and mtime recheck).
 - **Node-agent `stream_copy_with_hash`: neither.** Each chunk also runs `write_all` to a temp
   file, and the copy ends with `flush` and `sync_all`, so the measured loop does not stand for
   it. It is private, and timing it needs a production visibility change outside this
