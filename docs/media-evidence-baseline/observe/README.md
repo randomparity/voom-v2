@@ -110,7 +110,9 @@ Only the direction carries over. At 1 MiB a large file takes 64 times fewer read
 to tokio's blocking pool, which is the likely source of the CPU saving measured above. The
 magnitudes do not carry over, and no figure in this README describes these loops: production
 runs tokio's default multi-thread worker count where the examples ran 2 workers at 4 in
-flight, and neither call site's concurrency was measured.
+flight, and neither call site's concurrency was measured. The go covers CPU direction only:
+each hash in flight holds 1 MiB instead of 16 KiB, and with the call sites' concurrency unknown
+the memory guardrail is unverified, so a production change states its concurrency bound.
 
 The hash loops were not measured because neither function is directly callable from a crate
 example: the control-plane one is a `pub fn` in the crate-private `artifact::fs`, reached from
