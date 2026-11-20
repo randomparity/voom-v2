@@ -90,16 +90,18 @@ class VariantEditTests(unittest.TestCase):
         self.assertIn('stat_facts("post_probe", &path, &request.expected)', edited)
         self.assertIn("modified_at != expected.modified_at", edited)
 
-    def test_observe1m_swaps_each_observe_buffer_to_one_heap_mebibyte(self):
-        files = candidates.VARIANTS["observe1m"]
+    def test_observe16k_swaps_each_observe_buffer_back_to_its_16k_read(self):
+        files = candidates.VARIANTS["observe16k"]
         self.assertEqual(sorted(files), sorted(candidates.OBSERVE_SOURCES.values()))
         for name, path in candidates.OBSERVE_SOURCES.items():
             with self.subTest(path=path):
                 edited = candidates.apply_edits(path, current(path), files[path])
-                self.assertNotIn("16 * 1024", edited)
-                self.assertEqual(edited, current(path).replace(candidates.OBSERVE_16K[name],
-                                                               candidates.OBSERVE_1M))
-        self.assertEqual(candidates.VARIANTS["observe16k"], {})
+                self.assertNotIn("1024 * 1024", edited)
+                self.assertEqual(edited, current(path).replace(candidates.OBSERVE_1M,
+                                                               candidates.OBSERVE_16K[name]))
+        self.assertEqual("    let mut buffer = [0_u8; 16 * 1024];\n",
+                         candidates.OBSERVE_16K["ffprobe"])
+        self.assertEqual(candidates.VARIANTS["observe1m"], {})
 
     def test_observe_variants_build_the_four_examples_and_return_their_directory(self):
         for name in ("observe16k", "observe1m"):

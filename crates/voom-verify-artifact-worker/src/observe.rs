@@ -45,7 +45,7 @@ pub async fn observe_file_facts(path: &Path) -> Result<VerifyArtifactObservedFac
     }
 
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0_u8; 16 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

@@ -42,7 +42,7 @@ UNAVAILABLE = baseline.UNAVAILABLE
 HarnessError = baseline.HarnessError
 REPO_ROOT = baseline.REPO_ROOT
 OBSERVE_SOURCES = candidates.OBSERVE_SOURCES
-# Matches the 16 KiB sources and the 1 MiB heap variant alike.
+# Matches the 1 MiB heap sources and the `observe16k` variant's 16 KiB reads alike.
 BUFFER_PATTERN = r"let mut buffer = (?:vec!)?\[0_u8; ([0-9_ *]+)\];"
 MIB = 1024 * 1024
 # Read once at import: POSIX always defines it, and a failure is a harness fault, not a cause.
@@ -64,8 +64,7 @@ def buffer_bytes(path_name: str, repo_root: Path = REPO_ROOT) -> int:
 
 
 def default_concurrency(repo_root: Path = REPO_ROOT) -> int:
-    """The scan's `MAX_IN_FLIGHT` alone: the #788 `read_constants` also reads the ffprobe
-    buffer with a pattern that the 1 MiB heap variant does not match."""
+    """The scan's `MAX_IN_FLIGHT` alone: an observe run needs no other #788 constant."""
     return baseline.read_constant(repo_root, "max_in_flight",
                                   *baseline.SOURCE_CONSTANTS["max_in_flight"])
 
