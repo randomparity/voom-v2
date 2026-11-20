@@ -95,7 +95,8 @@ def exercise(args, root):
     try:
         setup = subprocess.run([sys.executable, runtime.__file__, "check-config",
                                 "--source-witness", str(witness)], cwd=stage, env=env,
-                               capture_output=True, timeout=runtime.check_config_timeout(config))
+                               capture_output=True,
+                               timeout=runtime.check_config_timeout(config.root_count))
         assert setup.returncode == 0, setup.stderr.decode()
         results.append("source-witness-and-host-ownership")
         for tool in ("ffmpeg", "ffprobe"):

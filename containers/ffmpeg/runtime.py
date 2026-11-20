@@ -23,6 +23,9 @@ CLEANUP_BUDGET = 15
 LAUNCH_MARGIN = 15
 # Outer bound for one launcher operation whose tool is short (setup tools, -version).
 OPERATION_TIMEOUT = SETUP_BUDGET + CLEANUP_BUDGET + LAUNCH_MARGIN
+# What a harness gives one launcher operation running a short media command (probe, fixture
+# encode). crates/voom-test-support/src/launcher.rs mirrors it; runtime_test.py pins both.
+HARNESS_COMMAND_TIMEOUT = OPERATION_TIMEOUT + 30
 OPTION_VALUES = ("--host", "--url")
 SUBCOMMAND_GROUPS = ("context", "image", "machine")
 INTERVAL = 0.05
@@ -47,9 +50,8 @@ class Budget:
         return self.expires - time.monotonic()
 
 
-def check_config_timeout(config):
-    """Outer bound for check-config: one setup operation per configured root."""
-    roots = len(config.read_only_roots) + len(config.read_write_roots)
+def check_config_timeout(roots):
+    """Outer bound for check-config over `roots` mount roots: one setup operation each."""
     return roots * OPERATION_TIMEOUT + LAUNCH_MARGIN
 
 
@@ -60,6 +62,10 @@ class Config:
     read_only_roots: tuple
     read_write_roots: tuple
     desktop: str = ""
+
+    @property
+    def root_count(self):
+        return len(self.read_only_roots) + len(self.read_write_roots)
 
 
 def within(path, root):

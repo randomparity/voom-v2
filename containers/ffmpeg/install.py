@@ -13,6 +13,14 @@ import runtime
 
 RUNTIME_PATH = Path(__file__).with_name("runtime.py")
 OPTIONAL_CONTEXT = ("DOCKER_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR")
+TOOLS = ("ffmpeg", "ffprobe")
+
+
+def validation_timeout(roots):
+    """Outer bound for one installer run over `roots` mount roots: check-config, then one
+    -version operation per tool."""
+    return (runtime.check_config_timeout(roots) + len(TOOLS) * runtime.OPERATION_TIMEOUT +
+            runtime.LAUNCH_MARGIN)
 
 
 def absolute(path):
@@ -67,7 +75,7 @@ def validate_install(destination, config, context, witnesses, tools):
     args = [sys.executable, "-I", str(destination / "runtime.py"), "check-config"]
     for witness in witnesses:
         args += ["--source-witness", str(witness)]
-    calls = [(args, env, runtime.check_config_timeout(config))] + [
+    calls = [(args, env, runtime.check_config_timeout(config.root_count))] + [
         ([tool, "-version"], {"VOOM_MEDIA_CALLER_PID": str(os.getpid())},
          runtime.OPERATION_TIMEOUT) for tool in tools.values()]
     for command, environment, timeout in calls:
@@ -108,7 +116,7 @@ def install(config_path, destination, witnesses):
             f"export {name}={shlex.quote(value)}\n" for name, value in exports.items())
         prefix += "".join(f"unset {name}\n" for name in OPTIONAL_CONTEXT if name not in context)
         tools = {}
-        for tool in ("ffmpeg", "ffprobe"):
+        for tool in TOOLS:
             path = destination / tool
             command = [python, "-I", str(destination / "runtime.py"), tool]
             text = prefix + "exec " + shlex.join(command) + ' "$@"\n'

@@ -139,9 +139,11 @@ sys.exit(23)
         done = subprocess.CompletedProcess([], 0, b"", b"")
         with patch.object(install.subprocess, "run", return_value=done) as run:
             install.validate_install(self.destination, config, {}, [], tools)
-        self.assertEqual([call.kwargs["timeout"] for call in run.call_args_list],
-                         [runtime.check_config_timeout(config), runtime.OPERATION_TIMEOUT,
-                          runtime.OPERATION_TIMEOUT])
+        timeouts = [call.kwargs["timeout"] for call in run.call_args_list]
+        self.assertEqual(timeouts, [runtime.check_config_timeout(config.root_count),
+                                    runtime.OPERATION_TIMEOUT, runtime.OPERATION_TIMEOUT])
+        self.assertEqual(install.validation_timeout(config.root_count),
+                         sum(timeouts) + runtime.LAUNCH_MARGIN)
 
     def test_failed_setup_removes_only_new_installation(self):
         with patch.object(install, "validate_install", side_effect=runtime.SetupError("setup")):

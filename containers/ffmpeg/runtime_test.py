@@ -3,11 +3,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import install
 import runtime
 
 
@@ -112,11 +114,12 @@ class ConfigTests(unittest.TestCase):
                 args = SimpleNamespace(engine=engine, image="sha256:" + "1" * 64,
                                        desktop=desktop, bin_dir=root / "unused")
 
-                def external_command(arguments, cwd=None):
+                def external_command(arguments, cwd=None, timeout=None):
                     if Path(arguments[1]).name == "install.py":
                         config = runtime.parse_config((root / "container.json").read_bytes(),
                                                       system=system, cwd=str(root / "staging"))
                         self.assertEqual(config.desktop, desktop)
+                        self.assertEqual(timeout, install.validation_timeout(config.root_count))
                         raise InstallationObserved
                     destination = (arguments[arguments.index("-o") + 1]
                                    if arguments[0] == "mkvmerge" else arguments[-1])
@@ -148,11 +151,12 @@ class ConfigTests(unittest.TestCase):
                 args = SimpleNamespace(engine=engine, image="sha256:" + "1" * 64,
                                        desktop=desktop, bin_dir=root / "unused")
 
-                def external_command(arguments, cwd=None):
+                def external_command(arguments, cwd=None, timeout=None):
                     if Path(arguments[1]).name == "install.py":
                         config = runtime.parse_config((root / "container.json").read_bytes(),
                                                       system=system, cwd=str(root / "staging"))
                         self.assertEqual(config.desktop, desktop)
+                        self.assertEqual(timeout, install.validation_timeout(config.root_count))
                         raise InstallationObserved
                     return b""
 
@@ -334,9 +338,20 @@ class BudgetTests(unittest.TestCase):
         self.assertGreater(runtime.OPERATION_TIMEOUT,
                            runtime.SETUP_BUDGET + runtime.CLEANUP_BUDGET)
         config = runtime.Config("docker", "unused", ("/source",), ("/stage", "/other"))
-        timeout = runtime.check_config_timeout(config)
+        self.assertEqual(config.root_count, 3)
+        timeout = runtime.check_config_timeout(config.root_count)
         self.assertEqual(timeout, 3 * runtime.OPERATION_TIMEOUT + runtime.LAUNCH_MARGIN)
         self.assertGreater(timeout, 3 * runtime.OPERATION_TIMEOUT)
+
+    def test_harness_command_timeout_is_pinned_and_mirrored_by_rust_test_support(self):
+        self.assertEqual(runtime.HARNESS_COMMAND_TIMEOUT, 90)
+        self.assertGreater(runtime.HARNESS_COMMAND_TIMEOUT, runtime.OPERATION_TIMEOUT)
+        launcher = (Path(__file__).resolve().parents[2] / "crates" / "voom-test-support" /
+                    "src" / "launcher.rs").read_text()
+        seconds = re.search(r"^pub const LAUNCHER_COMMAND_SECONDS: u64 = (\d+);$", launcher,
+                            re.MULTILINE)
+        self.assertIsNotNone(seconds, "launcher.rs must declare LAUNCHER_COMMAND_SECONDS")
+        self.assertEqual(int(seconds.group(1)), runtime.HARNESS_COMMAND_TIMEOUT)
 
     def test_engine_timeout_names_command_and_budget_without_endpoint(self):
         cases = [(["docker", "--host", self.ENDPOINT, "create", "--name", "owned"],
