@@ -154,22 +154,7 @@ def worker_pids(agent_pid: int) -> dict[str, int]:
 
 def process_usage(pid: int) -> dict[str, int | float | str]:
     """CPU and I/O include reaped children such as ffprobe; memory is this process only."""
-    usage: dict[str, int | float | str] = dict.fromkeys(baseline.WORKER_KEYS, UNAVAILABLE)
-    proc = Path("/proc", str(pid))
-    try:
-        fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
-        usage["cpu_seconds"] = sum(int(value) for value in fields[11:15]) / os.sysconf(
-            "SC_CLK_TCK")
-        for line in (proc / "status").read_text().splitlines():
-            if line.startswith("VmHWM:"):
-                usage["peak_rss_bytes"] = int(line.split()[1]) * 1024
-        for line in (proc / "io").read_text().splitlines():
-            key, value = line.split(":")
-            if key in ("rchar", "read_bytes"):
-                usage[key] = int(value)
-    except (OSError, IndexError, ValueError):
-        pass
-    return usage
+    return baseline.proc_usage(pid, "media-evidence-rollout")
 
 
 def usage_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
