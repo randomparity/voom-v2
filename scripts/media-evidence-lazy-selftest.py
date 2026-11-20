@@ -175,6 +175,9 @@ class ProcessUsageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             usage, lines = self.usage(Path(scratch) / "absent")
         self.assertIsInstance(usage["cpu_seconds"], float)
+        self.assertEqual({key: value for key, value in usage.items() if key != "cpu_seconds"},
+                         dict.fromkeys(("peak_rss_bytes", "rchar", "read_bytes"),
+                                       lazy.UNAVAILABLE))
         self.assertEqual(lines, [f"media-evidence-lazy: process {counter} unavailable: "
                                  "no /proc on this host"
                                  for counter in ("peak_rss_bytes", "rchar", "read_bytes")])
