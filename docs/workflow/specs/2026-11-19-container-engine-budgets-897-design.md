@@ -10,7 +10,6 @@ test-support 10 s (`ffprobe` expired, run 44653479966), PCM test waits, `verify_
 ## Scope
 
 `runtime.py` owns the budgets; every outer layer derives from them.
-
 - `SETUP_BUDGET = 30` s: one deadline shared by engine selection (context/machine inspect,
   `getconf`, `info`, image inspect) and `create`; a judgment, as logs show only 5 s exceeded.
 - `CLEANUP_BUDGET = 15` s: shared by `rm`/`ps`/`inspect` and reaping the attachment.
@@ -28,32 +27,31 @@ the `rm` failure first. Consumers:
   call, `HARNESS_COMMAND_TIMEOUT` for other commands and the encoder-hiding wrapper;
   `verify_pcm.py` gives each `docker run` that value and its cleanup `inspect` `CLEANUP_BUDGET`.
 - `voom-test-support` exports `LAUNCHER_COMMAND_TIMEOUT` (90 s) for `command_output` and
-  `flac_command`, and that value times the commands enclosed: five for worker preflight, eight for
-  one audio operation (input probe, encode, output probe, compatibility probe, copied-audio
-  probes and packet scans). Expiry messages name the wait and its bound.
+  `flac_command`, and multiples for the commands enclosed: five for worker preflight, eight for
+  an audio operation (probes, encode, copied-audio packet scans). Expiry messages name the wait.
 - `runtime_integration_test.py` startup/reaping waits allow setup/cleanup plus margin. No
   retries. Rejected: a longer per-command deadline (worst case grows with command count).
 
 ### Failure model
 
-- Actors and deployments: a local operator on Linux/macOS Docker or Podman; the GitHub Linux
-  amd64 PCM container job.
+- Actors and deployments: local operators (Linux/macOS, Docker/Podman); the GitHub PCM job.
 - Invariants: each Scope layer exceeds what it encloses; cleanup removes only the owned
   container; the Rust 90 s equals `HARNESS_COMMAND_TIMEOUT`.
 - Accepted failure classes: setup over 30 s fails with the setup message; an unbounded tool or
   witness hash can exhaust a margin; cancelled-create removal can take 45 s; command counts drift.
 - Excluded, owned by #907: worker limits below the launcher bounds (ffprobe `-version` 4 s,
   preflight 15 s per command, ffprobe 30 s, startup 5-10 s) and bootstrap `voom()` 60 s. Setup
-  slower than those still fails there; a timed-out matroska probe silently drops PCM WAVEX.
+  slower than those still fails there; a timed-out matroska probe drops PCM WAVEX (stderr only).
 
 ## Success
 1. Constants are pinned and each outer layer exceeds what it wraps.
 2. Timeouts name the command or wait and its budget.
-3. The `PCM container (Linux amd64)` job passes on the PR head.
+3. The `PCM container (Linux amd64)` job passes on the PR head; no retries or loosened asserts.
 
 ## Validation
 
 - Focused-test: `runtime_test.py` pins values, messages, budget sharing, `verify_pcm.py`
   and the Rust constant.
-- Focused-test: `install_test.py` pins `validate_install` and `validation_timeout`.
+- Focused-test: `install_test.py` pins `validate_install` and `validation_timeout`;
+  `launcher_test.rs` pins the 90 s command and the five and eight multiples.
 - Task-test-not-applicable (harness and PCM tests): they run only in the PCM CI job.
