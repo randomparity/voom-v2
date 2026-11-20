@@ -3,27 +3,34 @@
 Captured on 2026-11-17 under the frozen [protocol](../../media-evidence-protocol.md), with the
 verdict rule fixed before any real-media cell in
 [the #838 spec](../../workflow/specs/2026-11-17-observe-buffer-evidence-838-design.md). These are
-measurements of one host, not a performance budget, and production source and defaults are
-unchanged. The raw records are the sixteen JSON files beside this summary, schema
-`media-evidence-observe-run/1`. The tables are output of
+measurements of one host, not a performance budget. #838 left production source and defaults
+unchanged; the 1 MiB change landed later in #879 (PR #901). The raw records are the sixteen JSON
+files beside this summary, schema `media-evidence-observe-run/1`. The tables are output of
 `scripts/media-evidence-observe.py compare`, rounded for display.
 
 ## What ran
 
-Four full-hash reads use `observe_file_facts` with a 16 KiB buffer: transform input in the
-ffmpeg and mkvtoolnix workers (before and after each operation), output verification in the
-verify-artifact worker, and the ffprobe worker's re-hash when probe reuse is off. Each
+At `e2c29167`, four full-hash reads used `observe_file_facts` with a 16 KiB buffer: transform
+input in the ffmpeg and mkvtoolnix workers (before and after each operation), output verification
+in the verify-artifact worker, and the ffprobe worker's re-hash when probe reuse is off. Each
 `observe-<path>` example calls its crate's production function on the workers' runtime shape
 (multi-thread, 2 worker threads), one process per repetition, 4 files in flight (the protocol's
 stage-0 concurrency). It reads each of the 34 local-corpus files (935.3 GB, NVMe-backed btrfs)
 once. No transform, ffprobe or verification runs.
 
 Both buffers were built by `media-evidence-candidates.py prepare observe16k|observe1m` in
-detached worktrees of `e2c29167`. `observe1m` changes only the buffer line in the four
-`observe.rs` files to `vec![0_u8; 1024 * 1024]`; each 1 MiB record's `git_changed_paths` names
-those four files, and `observe_buffer_bytes` is read from the edited source. Harness SHA-256
-`7c4457e4…` in every record; later commits change only the harness's record validation and
-selftests, not capture. Host: Linux x86_64, 32 CPUs, 124 GiB RAM.
+detached worktrees of `e2c29167`, using that commit's script. There the source read 16 KiB, so
+`observe16k` was a no-op and `observe1m` changed only the buffer line in the four `observe.rs`
+files to `vec![0_u8; 1024 * 1024]`; each 1 MiB record's `git_changed_paths` names those four
+files, and `observe_buffer_bytes` is read from the edited source. Harness SHA-256 `7c4457e4…`
+(`scripts/media-evidence-observe.py` at `e2c29167`) in every record. Host: Linux x86_64,
+32 CPUs, 124 GiB RAM.
+
+#879 (PR #901) later made 1 MiB the source and swapped the variants: from then on `observe1m`
+is a no-op and `observe16k` patches the 16 KiB reads back in, so the 16 KiB build is the edited
+one. The harness has also changed since `e2c29167`. Run with a later commit's scripts, the recipe
+below measures the same two buffers but records a different `git_commit`, `harness_sha256` and
+`git_changed_paths`; with the pinned scripts it reproduces all three.
 
 Cells ran 18:52–21:51 UTC, 670–683 s each (budget 60 minutes), in this order, so neither
 buffer always ran second: evicted ffmpeg 16k, 1m; mkvtoolnix 1m, 16k; verify-artifact 16k, 1m;
@@ -90,7 +97,7 @@ the four agreeing verdicts are one result measured four times, not four independ
 - Drive and controller caches, btrfs metadata after per-file eviction, and other host
   activity were not controlled. The host had no other measurement or build running.
 - The network corpus is excluded from #838 and owned by the maintainer.
-- A production buffer change is not made here; it belongs to a separate implementation issue.
+- #838 made no production buffer change; that change landed separately in #879 (PR #901).
 
 ## Control-plane and node-agent hashes (#889)
 
@@ -129,18 +136,24 @@ this extrapolation.
 
 ## Reproduce
 
-With a private manifest from the #788 `manifest` command:
+With a private manifest from the #788 `manifest` command, from the repository root. `prepare`
+builds from the commit checked out where its script lives, so the scripts come from a detached
+worktree of `e2c29167` (see [What ran](#what-ran) for why):
 
 ```sh
-python3 scripts/media-evidence-candidates.py prepare observe16k <scratch>/observe16k
-python3 scripts/media-evidence-candidates.py prepare observe1m <scratch>/observe1m
+git worktree add --detach <scratch>/pin e2c29167
+python3 <scratch>/pin/scripts/media-evidence-candidates.py prepare observe16k <scratch>/observe16k
+python3 <scratch>/pin/scripts/media-evidence-candidates.py prepare observe1m <scratch>/observe1m
 python3 <scratch>/observe1m/scripts/media-evidence-observe.py run <private-dir>/local-manifest.json \
   --path ffmpeg --example-dir <scratch>/observe1m/target/release/examples \
   --max-bytes 3000000000000 --repetitions 3 --evict \
   --output docs/media-evidence-baseline/observe/<date>-ffmpeg-1m-local-corpus-evicted.json
 python3 scripts/media-evidence-observe.py compare <16k-record.json> <1m-record.json>
 git worktree remove --force <scratch>/observe1m
+git worktree remove --force <scratch>/observe16k
+git worktree remove <scratch>/pin
 ```
 
-As-found cells drop `--evict`; `--path` is `ffmpeg`, `mkvtoolnix`, `verify-artifact` or
-`ffprobe`.
+A 16 KiB cell substitutes `observe16k` for `observe1m` in the script path, `--example-dir` and
+record name. As-found cells drop `--evict`; `--path` is `ffmpeg`, `mkvtoolnix`,
+`verify-artifact` or `ffprobe`.
