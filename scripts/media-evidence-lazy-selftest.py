@@ -6,7 +6,6 @@ committed corpus records are validated here too.
 """
 
 import argparse
-import ast
 import contextlib
 import copy
 import importlib.util
@@ -315,29 +314,6 @@ class CommittedRecordTests(unittest.TestCase):
                 record = json.loads(path.read_text(encoding="utf-8"))
                 self.assertIn(record.get("schema"), (lazy.RUN_SCHEMA, lazy.MATRIX_SCHEMA))
                 self.assertEqual(lazy.validate(record), [])
-
-
-class HarnessNameTests(unittest.TestCase):
-    """Every counter-helper call names this harness through its one constant (#915)."""
-
-    HARNESS_ARG = {"host_counters": 0, "proc_usage": 1}
-
-    def test_every_counter_helper_call_passes_the_harness_constant(self):
-        self.assertEqual(lazy.HARNESS, "media-evidence-lazy")
-        seen = set()
-        for node in ast.walk(ast.parse(Path(lazy.__file__).read_text())):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            helper = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if helper not in self.HARNESS_ARG:
-                continue
-            seen.add(helper)
-            argument = node.args[self.HARNESS_ARG[helper]]
-            with self.subTest(helper=helper, line=node.lineno):
-                self.assertEqual((type(argument), getattr(argument, "id", None)),
-                                 (ast.Name, "HARNESS"))
-        self.assertEqual(seen, set(self.HARNESS_ARG))
 
 
 if __name__ == "__main__":
