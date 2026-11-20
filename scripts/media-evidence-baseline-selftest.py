@@ -508,8 +508,7 @@ class ProcUsageTests(unittest.TestCase):
 
 
 class HostCountersTests(unittest.TestCase):
-    """`unavailable` stays a valid value; stderr names each unavailable counter's cause, except
-    a missing CIFS stats file, which only means the host has no CIFS client to count."""
+    """`unavailable` stays a valid value; stderr names each unavailable counter's cause."""
 
     NET_DEV = ("Inter-|   Receive\n face |bytes    packets\n"
                "    lo: 999 1 0 0 0 0 0 0 999 1\n"
@@ -548,11 +547,11 @@ class HostCountersTests(unittest.TestCase):
         self.assert_causes(lines, [("network_rx_bytes", "no /proc on this host"),
                                    ("cifs_bytes_read", "no /proc on this host")])
 
-    def test_a_host_without_a_cifs_client_stays_quiet_about_cifs(self):
+    def test_a_host_without_a_cifs_client_names_the_missing_file(self):
         counters, lines = self.counters({"net/dev": self.NET_DEV})
         self.assertEqual(counters, {"network_rx_bytes": 1024,
                                     "cifs_bytes_read": harness.UNAVAILABLE})
-        self.assertEqual(lines, [])
+        self.assert_causes(lines, [("cifs_bytes_read", "fs/cifs/Stats: FileNotFoundError")])
 
     def test_an_unreadable_cifs_file_names_its_error(self):
         counters, lines = self.counters({"net/dev": self.NET_DEV, "fs/cifs/Stats/x": ""})
