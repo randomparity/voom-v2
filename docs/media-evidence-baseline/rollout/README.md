@@ -107,7 +107,8 @@ after capture. The instrument ran from this branch at `bc38c96f` with a clean tr
 
 **Setup.** Kernel 7.3.3 (Fedora 44), the same host as #840. Each filesystem was an 8 GiB sparse
 image formatted as the user with default `mkfs.ext4` (root directory owned by the user) or
-default `mkfs.xfs`. The operator loop-mounted both `rw,relatime`. The images sat on tmpfs, so
+default `mkfs.xfs`. The operator loop-mounted both `rw,relatime` and chowned the xfs root
+to the user. The images sat on tmpfs, so
 `--evict` dropped the ext4 or xfs page cache but the backing file stayed in memory. The
 verdict is detection, not timing. Each case copied `f0004` (6.08 GB) into an empty scratch
 directory and removed the copy afterwards.
