@@ -1,6 +1,7 @@
 # Media evidence rollout records (#794)
 
-Captured from 2026-10-30 to 2026-11-01 under the frozen
+Captured from 2026-10-30 to 2026-11-01, plus the two #890 records of 2026-11-19
+([below](#ext4-and-xfs-guard-cases-890)), under the frozen
 [protocol](../../media-evidence-protocol.md), for the
 [rollout gates](../../media-evidence-decision-report.md#rollout-gates) of ADR 0120. The
 verdicts and the recommendation are in the
@@ -24,6 +25,8 @@ SLOs.
   grow, so those cells' scan, guard and transform behavior is the same.
 - G7's mixed-version rerun ran on `0d685231` (#822, the fix for #817). G9 ran on `437ee1f6`
   (#826 and #828, the fixes for #819 and #820).
+- The #890 records' `git_commit` names the instrument's checkout, not the build. Their workers
+  came from a spike branch named in the [#890 section](#ext4-and-xfs-guard-cases-890).
 
 ## Instruments
 
@@ -73,6 +76,7 @@ mtime unchanged. A final listing of both corpora matched the manifests.
 | `…-g7-kill-hash-on-…` / `…-probe-on-…` | subset, on, worker SIGKILLed 3 s / 8 s after the request | 1 + 1 | Hash kill: one session failed with nothing published; 5 published with clean-run hashes. Probe kill: 6/6 published with clean-run hashes. |
 | `…-g7-kill-hash-off-…` / `…-probe-off-…` *(pre-#816)* | subset, off, same kills | 1 + 1 | Hash kill: 6/6 published with clean-run hashes. Probe kill: one session failed with nothing published. |
 | `…-g4-construct-btrfs`, `…-tmpfs` | G4, reflink copy (evicted) and tmpfs copy | 1 | Guard sent each time. Unchanged: reused. (a) `pre_probe_guard`, (b) `hash_drift`, (c) `pre_probe_guard`, all `ARTIFACT_CHECKSUM_MISMATCH`. |
+| `2026-11-19-construct-ext4-spike-890`, `…-xfs-spike-890` | #890: spike build, not G4. Native ext4 and xfs, byte copy (evicted) | 1 + 1 | Guard sent each time. Unchanged: reused. (a) `pre_probe_guard`, (b) `hash_drift`, (c) `pre_probe_guard`, all `ARTIFACT_CHECKSUM_MISMATCH`. |
 | `…-g5-construct-ext4-fuse` | G5, ext4 image mounted with `fuse2fs` | 1 | Guard sent. Unchanged: recomputed, no hash source. (a) and (c) detected at `pre_probe` by the recomputed hash. (b) `hash_drift`. |
 | `…-net-off-…` / `…-net-on-…` *(pre-#816)* | network subset, as-found | 3 + 3 | With the setting on, 0 reused and 3 recomputed in every repetition. Reps 2–3: first durable 9.37 → 8.97 s, complete 38.2 → 37.3 s. |
 
@@ -85,6 +89,48 @@ cells do not exercise turning the setting off on a database that already holds r
 
 The kill timer fires on time after the scan request. The records do not show whether the
 killed worker was mid-operation at that moment.
+
+## ext4 and xfs guard cases (#890)
+
+ADR 0120 requires the O1 and O10 constructions to be detected before a filesystem joins
+`reuse_listed`. #840 found ext4 and xfs meet that bar in the Python oracle only. These records
+run the `construct` cases with the release workers on native ext4 and xfs.
+
+**Build.** On `main` ext4 and xfs are unlisted, so the probe recomputes before it reads the
+guard, as G5 showed. The workers were therefore built `--release` from the clean checkout of
+[`spike/guard-cases-ext4-xfs-890`](https://github.com/randomparity/voom-v2/tree/spike/guard-cases-ext4-xfs-890)
+at `5931da435755070c8bf975f14eb4bdfd1b85eba2`, from `main` at `a793d4e0`. Its only change adds
+ext4 (`0xEF53`) and xfs (`XFS_SUPER_MAGIC`) to `reuse_listed` and its unit test. It is never
+merged; listing stays a separate change with its own ADR 0120 amendment. Hash worker
+`cdc3e819…`, probe worker `7fcd245a…`, as in each record's `binaries_sha256`, re-read unchanged
+after capture. The instrument ran from this branch at `bc38c96f` with a clean tree.
+
+**Setup.** Kernel 7.3.3 (Fedora 44), the same host as #840. Each filesystem was an 8 GiB sparse
+image formatted as the user with default `mkfs.ext4` (root directory owned by the user) or
+default `mkfs.xfs`. The operator loop-mounted both `rw,relatime` and chowned the xfs root
+to the user. The images sat on tmpfs, so
+`--evict` dropped the ext4 or xfs page cache but the backing file stayed in memory. The
+verdict is detection, not timing. Each case copied `f0004` (6.08 GB) into an empty scratch
+directory and removed the copy afterwards.
+
+```sh
+python3 scripts/media-evidence-rollout.py construct <f0004> --label local-corpus-f0004 \
+  --scratch <ext4-mount>/construct --evict --bin-dir <spike-bin> \
+  --output docs/media-evidence-baseline/rollout/2026-11-19-construct-ext4-spike-890.json
+# the same for xfs
+```
+
+| Case | ext4 | xfs |
+|---|---|---|
+| unchanged | reused | reused |
+| (a) restored-mtime edit before the probe (O1) | detected, `pre_probe_guard` | detected, `pre_probe_guard` |
+| (b) restored-mtime edit during the hash read (O10) | detected, `hash_drift` | detected, `hash_drift` |
+| (c) mtime-moving write before the probe | detected, `pre_probe_guard` | detected, `pre_probe_guard` |
+
+**Result: ext4 met, xfs met.** On both, the unchanged copy was reused, so the probe took the
+guard path. The guard's own pre-probe ctime comparison detected O1, and the hash worker's
+stability check detected O10. One capture per filesystem, on one kernel with multigrain
+timestamps. No kernel without fine-grained ctime was measured.
 
 ## G9 on `437ee1f6` (#819 and #820 fixed)
 
