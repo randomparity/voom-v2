@@ -13,8 +13,8 @@ the PCM test waits (readiness 30 s over five launcher commands).
 `runtime.py` owns the budgets; every outer layer derives from them.
 
 - `SETUP_BUDGET = 30` s: one deadline shared by engine selection (context/machine inspect,
-  `getconf`, `info`, image inspect) and `create`. Six times the exceeded 5 s is a judgment;
-  the logs show only that 5 s was exceeded.
+  `getconf`, `info`, image inspect) and `create`. A judgment: logs show only that 5 s was
+  exceeded.
 - `CLEANUP_BUDGET = 15` s: shared by `rm`/`ps`/`inspect` and reaping the attachment.
 - `OPERATION_TIMEOUT` (60 s) = both budgets + `LAUNCH_MARGIN` (15 s: interpreter, `start -a`,
   a short tool). `HARNESS_COMMAND_TIMEOUT` (90 s) adds 30 s for a short media command.
@@ -45,7 +45,8 @@ the `rm` failure first. Consumers:
 - Accepted failure classes: setup over 30 s fails with the setup message; an unbounded tool run
   or witness hashing can exhaust a margin; removal after cancellation during create can take
   45 s; command counts drift if worker operations add launcher commands.
-- Covered elsewhere: production worker startup deadlines (reported to the orchestrator).
+- Covered elsewhere (#907): worker per-command and startup limits below the launcher bounds,
+  and `verify_pcm.py`.
 
 ## Success
 1. Constants are pinned and each outer layer exceeds what it wraps.
