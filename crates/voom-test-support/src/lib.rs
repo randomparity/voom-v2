@@ -15,3 +15,4 @@ pub mod worker;
 pub mod executable;
 
 pub mod audio_samples;
+pub mod launcher;
