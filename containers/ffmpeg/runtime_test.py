@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import install
 import runtime
+import verify_pcm
 
 
 class ConfigTests(unittest.TestCase):
@@ -358,6 +359,17 @@ class BudgetTests(unittest.TestCase):
                 harness.run(["true"])
                 self.assertEqual(run.call_args.kwargs["timeout"],
                                  runtime.HARNESS_COMMAND_TIMEOUT)
+
+    def test_pcm_proof_bounds_engine_runs_and_cleanup_by_runtime_budgets(self):
+        tools = verify_pcm.Tools(SimpleNamespace(engine="docker", image="sha256:" + "1" * 64,
+                                                 ffprobe="unused"))
+        expired = runtime.subprocess.TimeoutExpired(["docker", "run"], 90)
+        absent = runtime.subprocess.CompletedProcess([], 1, b"", b"no such container")
+        with patch.object(verify_pcm.subprocess, "run", side_effect=[expired, absent]) as run:
+            with self.assertRaises(runtime.subprocess.TimeoutExpired):
+                tools.run("ffprobe", ["-version"])
+        self.assertEqual([call.kwargs["timeout"] for call in run.call_args_list],
+                         [runtime.HARNESS_COMMAND_TIMEOUT, runtime.CLEANUP_BUDGET])
 
     def test_harness_command_timeout_is_pinned_and_mirrored_by_rust_test_support(self):
         self.assertEqual(runtime.HARNESS_COMMAND_TIMEOUT, 90)
