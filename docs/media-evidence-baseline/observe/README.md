@@ -112,7 +112,7 @@ three loops below still read 16 KiB.
 |---|---|---|---|---|
 | control-plane `observe_regular_file` | `crates/voom-control-plane/src/artifact/fs.rs:171-184` | none per chunk; per file, a canonicalize and different error mapping | extrapolated | go (extrapolated) |
 | node-agent `try_observe_regular_file` | `crates/voom-node-agent/src/commit.rs:864-877` | none per chunk; per file, a canonicalize, a plain open without `O_NOFOLLOW` and a size and mtime recheck | extrapolated | go (extrapolated) |
-| node-agent `stream_copy_with_hash` | `crates/voom-node-agent/src/commit.rs:732` | per chunk, `write_all` to a temp file; then `flush` and `sync_all` | not extrapolated, not measured ([#898](https://github.com/randomparity/voom-v2/issues/898)) | inconclusive |
+| node-agent `stream_copy_with_hash` | `crates/voom-node-agent/src/commit.rs:732` | per chunk, `write_all` to a temp file; then `flush` and `sync_all` | not extrapolated; measured in [#898](../copy/README.md) | go (measured: CPU −60 to −68%, wall inconclusive) |
 
 Only the direction carries over. At 1 MiB a large file takes 64 times fewer reads, each handed
 to tokio's blocking pool, which is the likely source of the CPU saving measured above. The
@@ -126,11 +126,12 @@ The hash loops were not measured because neither function is directly callable f
 example: the control-plane one is a `pub fn` in the crate-private `artifact::fs`, reached from
 outside the crate only through the store-backed `show_artifact`, and the node-agent one is
 `pub(crate)`. A replica of
-an identical loop would measure this README's loop again. `stream_copy_with_hash` is private,
-and timing it needs a production visibility change; #898 tracks that.
+an identical loop would measure this README's loop again. `stream_copy_with_hash` was private;
+#898 made it callable through a bench-only visibility seam and measured it in
+[copy](../copy/README.md).
 
 `READ_BUFFER_BYTES` sizes both node-agent loops, so changing that one constant also changes the
-unmeasured copy loop. A production change either splits the constant or waits for #898. If
+copy loop, which #898 measured go at 1 MiB on process CPU, with wall inconclusive. If
 either hash loop changes after `a793d4e0`, re-check it against the rule above before relying on
 this extrapolation.
 

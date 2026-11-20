@@ -275,6 +275,20 @@ measures one `observe_file_facts` path (`parameters.path`: `ffmpeg`, `mkvtoolnix
   `observe_seconds`, `outcome` (`observed` or `observe_failed`) and `failure`: `null`, the
   error variant name, or `size_changed` when the observed size is not the manifest's.
 
+Schema `media-evidence-copy-run/1` (#898) is written by `media-evidence-copy.py run`. It
+measures the node agent's commit copy loop (`parameters.path`: `node-agent-copy`) at
+`parameters.copy_buffer_bytes`, read from `READ_BUFFER_BYTES` in the node agent's `commit.rs`:
+one copy per file, one file at a time, into a scratch directory on the corpus's filesystem,
+each copy removed before the next. It is `media-evidence-observe-run/1` with these changes:
+
+- `parameters`: `path`, `copy_buffer_bytes`, `concurrency` (always 1),
+  `max_bytes_per_repetition`, `repetitions` and `evict`.
+- `repetitions[].process` adds `wchar` and `write_bytes`.
+- `files[]`: `copy_seconds` (copy, flush, fsync and removal) in place of `observe_seconds`;
+  `outcome` is `copied` or `copy_failed`; `failure` is `null`, `artifact_unavailable`,
+  `commit_failure`, `other`, `remove_failed` (copied, but the copy was not removed) or
+  `size_changed`.
+
 Oracle schema `media-evidence-fingerprint-oracle/3` and ctime-probe schema
 `media-evidence-reuse-ctime-probe/3` (#891) each add one required field to their `/2`
 (described in `docs/media-evidence-baseline/reuse/README.md`, #840):
