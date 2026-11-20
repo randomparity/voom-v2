@@ -99,6 +99,41 @@ the four agreeing verdicts are one result measured four times, not four independ
 - The network corpus is excluded from #838 and owned by the maintainer.
 - A production buffer change is not made here; it belongs to a separate implementation issue.
 
+## Control-plane and node-agent hashes (#889)
+
+Decided on 2026-11-19 from source at `a793d4e0`, with no new measurement, under the rule in
+[the #889 spec](../../workflow/specs/2026-11-19-observe-hash-cp-na-889-design.md). A loop is
+extrapolated only if it matches the loop measured here (ffmpeg `observe.rs` at `e2c29167`):
+`tokio::fs::File::read` into a 16 KiB heap `Vec<u8>`, `blake3::Hasher::update` on the filled
+slice, and nothing else per chunk. #879 has since landed 1 MiB on the four observe paths; the
+three loops below still read 16 KiB.
+
+| Loop | Source at `a793d4e0` | Work beyond the measured loop | Decision | Verdict 1 MiB |
+|---|---|---|---|---|
+| control-plane `observe_regular_file` | `crates/voom-control-plane/src/artifact/fs.rs:171-184` | none per chunk; per file, a canonicalize and different error mapping | extrapolated | go (extrapolated) |
+| node-agent `try_observe_regular_file` | `crates/voom-node-agent/src/commit.rs:864-877` | none per chunk; per file, a canonicalize, a plain open without `O_NOFOLLOW` and a size and mtime recheck | extrapolated | go (extrapolated) |
+| node-agent `stream_copy_with_hash` | `crates/voom-node-agent/src/commit.rs:732` | per chunk, `write_all` to a temp file; then `flush` and `sync_all` | not extrapolated, not measured ([#898](https://github.com/randomparity/voom-v2/issues/898)) | inconclusive |
+
+Only the direction carries over. At 1 MiB a large file takes 64 times fewer reads, each handed
+to tokio's blocking pool, which is the likely source of the CPU saving measured above. The
+magnitudes do not carry over, and no figure in this README describes these loops: production
+runs tokio's default multi-thread worker count where the examples ran 2 workers at 4 in
+flight, and neither call site's concurrency was measured. The go covers CPU direction only:
+each hash in flight holds 1 MiB instead of 16 KiB, and with the call sites' concurrency unknown
+the memory guardrail is unverified, so a production change states its concurrency bound.
+
+The hash loops were not measured because neither function is directly callable from a crate
+example: the control-plane one is a `pub fn` in the crate-private `artifact::fs`, reached from
+outside the crate only through the store-backed `show_artifact`, and the node-agent one is
+`pub(crate)`. A replica of
+an identical loop would measure this README's loop again. `stream_copy_with_hash` is private,
+and timing it needs a production visibility change; #898 tracks that.
+
+`READ_BUFFER_BYTES` sizes both node-agent loops, so changing that one constant also changes the
+unmeasured copy loop. A production change either splits the constant or waits for #898. If
+either hash loop changes after `a793d4e0`, re-check it against the rule above before relying on
+this extrapolation.
+
 ## Reproduce
 
 With a private manifest from the #788 `manifest` command, from the repository root. `prepare`
