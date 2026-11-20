@@ -45,9 +45,10 @@ constant changes it too. It was never measured.
   `copy_failed`. The same redaction applies: corpus label, ordinal ids, one `hash_set_sha256`,
   no path and no per-file hash.
 - **Compare.** `media-evidence-copy.py compare <16k.json> <1m.json>` refuses cells that differ in
-  corpus, ids or cache state, or have equal buffers. It judges wall, summed copy seconds, CPU,
-  physical read and write bytes and peak RSS with `candidates.classify` (as-found: repetitions
-  2+, repetition 1 reported apart) and observe's resource guardrails.
+  corpus, ids or cache state, or have equal buffers. It classifies wall, summed copy seconds,
+  CPU, physical read and write bytes and peak RSS with `candidates.classify` (as-found:
+  repetitions 2+, repetition 1 reported apart) and applies observe's resource guardrails. The
+  verdict rule below judges only CPU, wall and copy seconds; the other rows are reported.
 - **Verdict rule** (fixed before any real-media cell; #838's rule). 16 KiB is the baseline. 1 MiB
   is **go** when CPU improves, wall and summed copy seconds do not regress, no guardrail is
   breached, no row failed and the hash sets are equal; **no-go** when a row failed, the hash
@@ -70,11 +71,19 @@ constant changes it too. It was never measured.
   575 GB, past the SLC cache too: the subset bounds wear and time, not cache exposure. Four
   cells, 10 minutes idle before each: evicted 16k, 1m; then as-found 1m, 16k. The scratch
   directory is a new sibling of the corpus on the same btrfs subvolume, removed at the end.
-  Media is opened read-only. A cell over the 60-minute budget is recorded, never dropped.
+  Media is opened read-only. The subset rule stands in for the protocol's operator choice in
+  this unattended run, and the orchestrator sees it before capture. Budget: before the first
+  cell, one unrecorded copy of the largest subset file measures the copy rate; if three
+  repetitions of the subset would take over 50 minutes at that rate, the rule is applied with
+  fewer files (6, 5, …) until they fit, and the README records the calibration and the final
+  ids. A cell that still overruns 60 minutes is recorded as over budget, not dropped.
 - **Report.** `docs/media-evidence-baseline/copy/README.md` (compare tables, verdicts,
   disclosures, reproduce) beside the four records; the decision report's note that this loop is
-  unmeasured (#889) becomes the measured verdict. The protocol's record-format section gains the
-  schema; `just media-evidence-copy-selftest` joins `source-checks`.
+  unmeasured (#889, PR #899) becomes the measured verdict. That note reaches main only when
+  PR #899 merges: if it has, the edit replaces it; if not, the edit adds this loop's row and is
+  reconciled with #899's text after it merges, before hand-off. The protocol's record-format
+  section gains the schema; the `justfile` gains `media-evidence-copy-selftest`, joined to
+  `source-checks`.
 
 ### Failure model
 
@@ -85,8 +94,8 @@ constant changes it too. It was never measured.
 3. Accepted failure classes, disclosed: the drive's SLC cache state, controller caches, btrfs
    metadata and other host activity are not controlled. Within one cache state the order is
    fixed, so drift is confounded with the buffer there; the reversed order across states and
-   the overall rule keep it from deciding the verdict, and the idle gap shrinks it. Kernel writeback and btrfs compression run in kernel
-   threads, outside the process's CPU. Removal is inside `<seconds>` and process CPU for both
+   the overall rule keep it from deciding the verdict, and the idle gap shrinks it. Kernel
+   writeback and btrfs compression run in kernel threads, outside the process's CPU. Removal is inside `<seconds>` and process CPU for both
    buffers alike. The example times the copy only, not the coordinator's hard-link install,
    parent fsync or hashes around it.
 4. Covered elsewhere: the hash-only loop (#889); a production buffer change or constant split
