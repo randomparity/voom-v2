@@ -18,8 +18,8 @@ the PCM test waits (readiness 30 s over five launcher commands).
 - `CLEANUP_BUDGET = 15` s: shared by `rm`/`ps`/`inspect` and reaping the attachment.
 - `OPERATION_TIMEOUT` (60 s) = both budgets + `LAUNCH_MARGIN` (15 s: interpreter, `start -a`,
   a short tool). `HARNESS_COMMAND_TIMEOUT` (90 s) adds 30 s for a short media command.
-- `check_config_timeout(config)`: one operation per root plus the margin; install.py's
-  `validation_timeout(config)` adds one operation per installed tool and the margin.
+- `check_config_timeout(roots)`: one operation per root plus the margin; install.py's
+  `validation_timeout(roots)` adds one operation per installed tool and the margin.
 
 A `Budget` (name, seconds, expiry) reaches `capture`, `Engine`, `remove` and `reconcile`.
 Timeouts read `engine command '<engine> <subcommand>' exceeded the <name> budget of <n> s`;
