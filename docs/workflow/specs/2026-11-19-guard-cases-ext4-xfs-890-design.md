@@ -29,7 +29,7 @@ recomputed hash at `pre_probe`).
   ```sh
   python3 scripts/media-evidence-rollout.py construct <f0004> --label local-corpus-f0004 \
     --scratch <mount>/construct --evict --bin-dir <spike-bin> \
-    --output docs/media-evidence-baseline/rollout/<date>-g4-construct-<fs>.json
+    --output docs/media-evidence-baseline/rollout/<date>-construct-<fs>-spike-890.json
   ```
 
   `f0004` (6.08 GB) is the source #794's G4/G5 records used; each case copies it, so the
@@ -40,8 +40,11 @@ recomputed hash at `pre_probe`).
   `detected`, and the binaries' SHA-256s. The kernel release and mount options are not in the
   schema; the README states them (kernel 7.3.3, the same host as #840).
 - **Records and docs.** Records go beside #794's construct records in
-  `docs/media-evidence-baseline/rollout/`. That README gets a #890 section (spike provenance,
-  setup, command, per-filesystem table). `docs/media-evidence-baseline/reuse/README.md`'s #840
+  `docs/media-evidence-baseline/rollout/`, named for the issue, not gate G4 (whose production
+  build and filesystems they are not). That README gets a #890 section (spike provenance,
+  setup, command, per-filesystem table), and its header date range and Builds list say the
+  #890 records' `git_commit` names the instrument checkout while the spike build is named in
+  that section. `docs/media-evidence-baseline/reuse/README.md`'s #840
   verdict and `docs/media-evidence-decision-report.md` (the `meta-ctime` row and the ctime
   disclosure) replace "production guard cases were not run on ext4 or xfs" with the result per
   filesystem. Listing stays a separate maintainer change.
@@ -88,7 +91,7 @@ guard result, and the cause is investigated (wrong bin dir, wrong mount) before 
 | Contract | Mode | Evidence |
 |---|---|---|
 | Records are valid `construct` records | focused-test | the instrument's own `validate_construct` runs before `write_new`; a failing record is not written |
-| Records exercise the guard | focused-test | `unchanged.hash_source == "reused"` and case (a) marker `pre_probe_guard` read from each committed record |
+| Records exercise the guard | focused-test | `unchanged.hash_source == "reused"` read from each committed record (case (a)'s marker is the O1 verdict, not this gate) |
 | Docs state the per-filesystem result | task-test-not-applicable | prose read against the records; no executable consumer validates README text |
 | PR leaves `guard.rs` unchanged | focused-test | `git diff origin/main -- crates/` is empty |
 | Guardrails | focused-test | `just source-checks` exits 0 |
