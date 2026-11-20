@@ -197,15 +197,19 @@ class ProcessUsageTests(unittest.TestCase):
     STATUS = "Name:\tcopy-commit\nVmHWM:\t    2048 kB\n"
     IO = "rchar: 5000\nwchar: 6000\nread_bytes: 4096\nwrite_bytes: 8192\n"
 
-    def usage(self, io_text):
+    def usage(self, io_text, make_root=True):
+        """`process_usage` over a scratch /proc holding pid 123's sources."""
         with tempfile.TemporaryDirectory() as scratch:
-            proc = Path(scratch) / "123"
-            proc.mkdir()
-            for name, text in (("stat", self.STAT), ("status", self.STATUS), ("io", io_text)):
-                (proc / name).write_text(text)
+            root = Path(scratch) / "proc"
+            if make_root:
+                (root / "123").mkdir(parents=True)
+                for name, text in (("stat", self.STAT), ("status", self.STATUS),
+                                   ("io", io_text)):
+                    (root / "123" / name).write_text(text)
             stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr):
-                usage = copy.process_usage(123, Path(scratch))
+            with mock.patch.object(copy.baseline, "PROC_ROOT", root), \
+                    contextlib.redirect_stderr(stderr):
+                usage = copy.process_usage(123)
         return usage, stderr.getvalue().splitlines()
 
     def test_write_counters_join_observe_counters(self):
@@ -220,6 +224,22 @@ class ProcessUsageTests(unittest.TestCase):
         self.assertEqual(usage["write_bytes"], copy.UNAVAILABLE)
         self.assertEqual(lines, ["media-evidence-copy: process write_bytes unavailable: "
                                  "io: field absent"])
+
+
+    def test_a_bad_io_line_leaves_every_io_counter_unavailable(self):
+        usage, lines = self.usage("rchar 5000\n")
+        self.assertEqual([usage[key] for key in copy.IO_COUNTERS],
+                         [copy.UNAVAILABLE] * 4)
+        self.assertEqual(usage["peak_rss_bytes"], 2048 * 1024)
+        self.assertEqual(lines, [f"media-evidence-copy: process {key} unavailable: "
+                                 "io: ValueError" for key in copy.IO_COUNTERS])
+
+    def test_a_host_without_proc_says_so_for_every_counter(self):
+        usage, lines = self.usage("", make_root=False)
+        self.assertEqual(set(usage.values()), {copy.UNAVAILABLE})
+        self.assertEqual(len(usage), 6)
+        self.assertTrue(all(line.endswith("no /proc on this host") for line in lines))
+        self.assertEqual(len(lines), 6)
 
 
 class BufferTests(unittest.TestCase):

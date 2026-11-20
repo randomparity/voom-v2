@@ -38,6 +38,7 @@ candidates = observe.candidates
 
 SCHEMA = "media-evidence-copy-run/1"
 PATH = "node-agent-copy"
+HARNESS = "media-evidence-copy"
 UNAVAILABLE = baseline.UNAVAILABLE
 HarnessError = baseline.HarnessError
 REPO_ROOT = baseline.REPO_ROOT
@@ -61,7 +62,11 @@ def buffer_bytes(repo_root: Path = REPO_ROOT) -> int:
     return baseline.read_constant(repo_root, "copy_buffer_bytes", COPY_SOURCE, BUFFER_PATTERN)
 
 
+IO_COUNTERS = ("rchar", "read_bytes", "wchar", "write_bytes")
+
+
 def _io_counters(text: str) -> dict[str, int]:
+    """Baseline's `io` parser reads only the read counters; a copy also writes."""
     counters = {}
     for line in text.splitlines():
         key, value = line.split(":")
@@ -70,26 +75,22 @@ def _io_counters(text: str) -> dict[str, int]:
     return counters
 
 
-IO_COUNTERS = ("rchar", "read_bytes", "wchar", "write_bytes")
-PROC_SOURCES = (("stat", observe._stat_counters, ("cpu_seconds",)),
-                ("status", observe._status_counters, ("peak_rss_bytes",)),
-                ("io", _io_counters, IO_COUNTERS))
-
-
-def process_usage(pid: int, proc_root: Path = Path("/proc")) -> dict[str, int | float | str]:
-    """Observe's counters plus the process's write counters; a missing one is `unavailable`."""
-    usage: dict[str, int | float | str] = {}
-    for source, parse, counters in PROC_SOURCES:
+def process_usage(pid: int) -> dict[str, int | float | str]:
+    """Baseline's CPU and peak memory plus all four `io` counters, each `unavailable` with
+    its cause on stderr when the host cannot give it, as `baseline.proc_usage` reports."""
+    usage = baseline.proc_usage(pid, HARNESS, ("stat", "status"))
+    if not baseline.PROC_ROOT.is_dir():
+        found, cause = {}, "no /proc on this host"
+    else:
         try:
-            found = parse((proc_root / str(pid) / source).read_text())
-            cause = f"{source}: field absent"
-        except (OSError, IndexError, ValueError) as error:
-            found, cause = {}, f"{source}: {type(error).__name__}"
-        for counter in counters:
-            usage[counter] = found.get(counter, UNAVAILABLE)
-            if counter not in found:
-                print(f"media-evidence-copy: process {counter} unavailable: {cause}",
-                      file=sys.stderr)
+            found = _io_counters((baseline.PROC_ROOT / str(pid) / "io").read_text())
+            cause = "io: field absent"
+        except (OSError, ValueError) as error:
+            found, cause = {}, f"io: {type(error).__name__}"
+    for counter in IO_COUNTERS:
+        usage[counter] = found.get(counter, UNAVAILABLE)
+        if counter not in found:
+            print(f"{HARNESS}: process {counter} unavailable: {cause}", file=sys.stderr)
     return usage
 
 
