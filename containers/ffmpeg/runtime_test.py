@@ -266,13 +266,25 @@ class CleanupTests(unittest.TestCase):
     def test_failed_remove_requires_successful_exact_absence_inventory(self):
         engine = self.engine()
         identity = "a" * 64
+        budget = runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET)
         with patch.object(runtime, "capture", side_effect=[runtime.SetupError("gone"), b""]) as run:
-            engine.remove(identity, runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
+            engine.remove(identity, budget)
         self.assertIn("id=" + identity, run.call_args.args[0])
+        self.assertEqual([call.args[1] for call in run.call_args_list], [budget, budget])
         for result in [runtime.SetupError("engine unavailable"), identity.encode()]:
             with patch.object(runtime, "capture", side_effect=[runtime.SetupError("rm failed"), result]):
                 with self.assertRaises(runtime.SetupError):
                     engine.remove(identity, runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
+
+    def test_failed_absence_check_reports_the_failed_removal_first(self):
+        engine = self.engine()
+        errors = [runtime.SetupError("engine command 'engine rm' exceeded the cleanup budget"),
+                  runtime.SetupError("engine command 'engine ps' exceeded the cleanup budget")]
+        with patch.object(runtime, "capture", side_effect=errors):
+            with self.assertRaises(runtime.SetupError) as raised:
+                engine.remove("a" * 64, runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
+        self.assertTrue(str(raised.exception).startswith("engine command 'engine rm' exceeded"))
+        self.assertIn("'engine ps'", str(raised.exception))
 
     def test_interrupted_create_never_removes_a_foreign_name_or_label(self):
         engine = self.engine()
@@ -291,8 +303,9 @@ class CleanupTests(unittest.TestCase):
                 patch.object(runtime, "json_capture", return_value=[
                     {"Name": "/owned", "Config": {"Labels": {runtime.LABEL: "owned"}}}]), \
                 patch.object(engine, "remove") as remove:
-            engine.reconcile("owned", runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET))
-            self.assertEqual(remove.call_args.args[0], identity)
+            budget = runtime.Budget.start("cleanup", runtime.CLEANUP_BUDGET)
+            engine.reconcile("owned", budget)
+            self.assertEqual(remove.call_args.args, (identity, budget))
 
     def test_podman_maps_server_identity_to_nonroot_image_user_without_host_uid_guess(self):
         engine = self.engine()
@@ -392,6 +405,37 @@ class BudgetTests(unittest.TestCase):
                          ("cleanup", runtime.CLEANUP_BUDGET))
         self.assertGreaterEqual(engine.cleanup.expires, engine.setup.expires - runtime.SETUP_BUDGET
                                 + runtime.CLEANUP_BUDGET)
+
+
+    def test_guardian_bounds_reaping_a_running_attachment_by_the_cleanup_budget(self):
+        waits = []
+        read_fd, write_fd = os.pipe()
+
+        class Running:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                waits.append(timeout)
+
+        def started(*args, **kwargs):
+            os.close(write_fd)
+            return Running()
+
+        engine = SimpleNamespace(prefix=["docker"], create_args=lambda *args: ["create"],
+                                 remove=lambda identity, budget: None)
+        with patch.object(runtime, "Engine", return_value=engine), \
+                patch.object(runtime, "capture", return_value=b"a" * 64), \
+                patch.object(runtime.subprocess, "Popen", side_effect=started):
+            runtime.guardian(None, "/bin/sh", [], read_fd)
+        timeout, = waits
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, runtime.CLEANUP_BUDGET)
 
 
 if __name__ == "__main__":

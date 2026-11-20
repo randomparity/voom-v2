@@ -294,12 +294,15 @@ class Engine:
         args = ["rm", "-f"] + (["--time", "0"] if self.config.engine == "podman" else [])
         try:
             capture(self.prefix + args + [identity], budget)
-        except SetupError:
+        except SetupError as removal:
             # Only a successful exact-ID inventory can prove absence after a failed rm.
-            remaining = capture(self.prefix + ["ps", "-a", "--no-trunc", "--filter",
-                                "id=" + identity, "--format", "{{.ID}}"], budget)
+            try:
+                remaining = capture(self.prefix + ["ps", "-a", "--no-trunc", "--filter",
+                                    "id=" + identity, "--format", "{{.ID}}"], budget)
+            except SetupError as inventory:
+                raise SetupError(f"{removal}; absence check failed: {inventory}") from inventory
             if remaining.strip():
-                raise SetupError(f"cleanup failed; remove owned container {identity}")
+                raise SetupError(f"cleanup failed ({removal}); remove owned container {identity}")
 
     def reconcile(self, name, budget):
         records = capture(self.prefix + ["ps", "-a", "--no-trunc", "--filter", "name=" + name,
