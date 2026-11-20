@@ -116,7 +116,9 @@ fn assert_guard_failure(
 fn reuse_list_is_btrfs_and_tmpfs_only() {
     assert!(reuse_listed(0x9123_683E), "btrfs");
     assert!(reuse_listed(0x0102_1994), "tmpfs");
-    for unlisted in [0xEF53, 0x6969, 0xFE53_4D42, 0xFF53_4D42, 0x6573_5546, 0] {
+    assert!(reuse_listed(0xEF53), "ext4 (spike)");
+    assert!(reuse_listed(0x5846_5342), "xfs (spike)");
+    for unlisted in [0x6969, 0xFE53_4D42, 0xFF53_4D42, 0x6573_5546, 0] {
         assert!(!reuse_listed(unlisted), "{unlisted:#x}");
     }
 }
