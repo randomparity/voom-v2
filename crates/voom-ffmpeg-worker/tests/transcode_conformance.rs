@@ -1171,11 +1171,14 @@ async fn synthesize_through_worker(request: &TranscodeAudioRequest) -> Transcode
         .spawn()
         .unwrap();
     let mut lines = BufReader::new(worker.stdout.take().unwrap()).lines();
-    let ready = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let ready = tokio::time::timeout(
+        voom_test_support::launcher::WORKER_PREFLIGHT_TIMEOUT,
+        lines.next_line(),
+    )
+    .await
+    .expect("worker readiness exceeded WORKER_PREFLIGHT_TIMEOUT")
+    .unwrap()
+    .unwrap();
     let bound = ready
         .strip_prefix("BOUND addr=")
         .expect("worker readiness")
@@ -1200,19 +1203,22 @@ async fn synthesize_through_worker(request: &TranscodeAudioRequest) -> Transcode
         )
         .await
         .unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            match dispatch.frames.next_frame().await.unwrap() {
-                NdjsonOutcome::Frame(_) => {}
-                NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
-                    break serde_json::from_value(payload).unwrap();
+    let result = tokio::time::timeout(
+        voom_test_support::launcher::AUDIO_OPERATION_TIMEOUT,
+        async {
+            loop {
+                match dispatch.frames.next_frame().await.unwrap() {
+                    NdjsonOutcome::Frame(_) => {}
+                    NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
+                        break serde_json::from_value(payload).unwrap();
+                    }
+                    other => panic!("synthesis failed: {other:?}"),
                 }
-                other => panic!("synthesis failed: {other:?}"),
             }
-        }
-    })
+        },
+    )
     .await
-    .unwrap();
+    .expect("worker operation exceeded AUDIO_OPERATION_TIMEOUT");
     drop(worker.stdin.take());
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(5), worker.wait())
@@ -1481,11 +1487,11 @@ async fn dolby_real_worker_preserves_channels_and_synthesizes_surround() {
 async fn flac_command(command: &mut tokio::process::Command) -> std::process::Output {
     command.env("VOOM_MEDIA_CALLER_PID", std::process::id().to_string());
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        voom_test_support::launcher::LAUNCHER_COMMAND_TIMEOUT,
         command.kill_on_drop(true).output(),
     )
     .await
-    .expect("generated FLAC command timed out")
+    .expect("generated FLAC command exceeded LAUNCHER_COMMAND_TIMEOUT")
     .expect("required media tool missing");
     assert!(
         output.status.success(),
