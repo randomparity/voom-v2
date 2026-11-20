@@ -42,7 +42,9 @@ baseline = fingerprint.baseline
 PROBABILITY_SCHEMA = "media-evidence-reuse-probability/1"
 PROBE_SCHEMA_V1 = "media-evidence-reuse-ctime-probe/1"
 # /2 (#840): each filesystem carries `client_change_time`.
-PROBE_SCHEMA = "media-evidence-reuse-ctime-probe/2"
+PROBE_SCHEMA_V2 = "media-evidence-reuse-ctime-probe/2"
+# /3 (#891): `parameters.kernel_release`, as in oracle /3.
+PROBE_SCHEMA = "media-evidence-reuse-ctime-probe/3"
 RECORD_DIR = baseline.REPO_ROOT / "docs" / "media-evidence-baseline" / "reuse"
 KIB = 1024
 MIB = 1024 * KIB
@@ -309,7 +311,7 @@ def run_ctime_probe(parents: list[Path], manifests: list[Path],
         "build": build_identity(),
         "host": baseline.host_identity(),
         "parameters": {"probe_bytes": PROBE_BYTES, "settle_seconds": settle,
-                       "steps": list(STEPS)},
+                       "steps": list(STEPS), "kernel_release": fingerprint.kernel_release()},
         "filesystems": [probe_filesystem(parent, settle) for parent in parents],
         "not_measured": NOT_MEASURED,
     }
@@ -374,11 +376,13 @@ def client_change_time_problems(filesystem: dict[str, Any]) -> list[str]:
 
 
 def validate_probe(record: dict[str, Any]) -> list[str]:
-    v2 = record.get("schema") == PROBE_SCHEMA
-    problems = common_problems(record, PROBE_SCHEMA if v2 else PROBE_SCHEMA_V1,
+    schema = record.get("schema")
+    v2 = schema in (PROBE_SCHEMA_V2, PROBE_SCHEMA)
+    problems = common_problems(record, schema if v2 else PROBE_SCHEMA_V1,
                                ("build", "host", "parameters", "filesystems", "not_measured"))
     if problems:
         return problems
+    problems += fingerprint.kernel_release_problems(record["parameters"], schema == PROBE_SCHEMA)
     if set(record["not_measured"]) != set(NOT_MEASURED if v2 else NOT_MEASURED_V1):
         problems.append("not_measured")
     if not record["filesystems"]:

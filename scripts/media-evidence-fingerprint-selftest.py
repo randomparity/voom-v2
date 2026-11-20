@@ -216,9 +216,40 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(rows["O1", "meta"]["outcome"], "missed")
         self.assertNotIn("invalid", {row["outcome"] for row in rows.values()})
 
+    def test_v3_records_carry_the_kernel_release(self):
+        self.assertEqual(self.record["schema"], experiment.ORACLE_SCHEMA)
+        self.assertEqual(self.record["parameters"]["kernel_release"],
+                         experiment.platform.release())
+        original = experiment.platform.release
+        experiment.platform.release = lambda: ""
+        try:
+            self.assertEqual(experiment.kernel_release(), experiment.UNAVAILABLE)
+        finally:
+            experiment.platform.release = original
+
+    def test_validator_requires_the_kernel_release_from_v3_only(self):
+        for value in (None, "", 7):
+            record = json.loads(json.dumps(self.record))
+            record["parameters"]["kernel_release"] = value
+            self.assertIn("kernel_release", experiment.validate_oracle(record))
+        record = json.loads(json.dumps(self.record))
+        del record["parameters"]["kernel_release"]
+        self.assertIn("kernel_release", experiment.validate_oracle(record))
+        record["schema"] = experiment.ORACLE_SCHEMA_V2
+        self.assertEqual(experiment.validate_oracle(record), [])
+        # /3 keeps every /2 check.
+        record["schema"] = experiment.ORACLE_SCHEMA
+        record["parameters"]["kernel_release"] = "6.1.0"
+        record["parameters"]["tick_wait_seconds"] = -1
+        record["cases"][0].pop("same_coarse_tick")
+        problems = experiment.validate_oracle(record)
+        self.assertIn("tick_wait_seconds", problems)
+        self.assertIn("case same_coarse_tick", problems)
+
     def test_validator_accepts_v1_and_checks_the_v2_fields(self):
         v1 = json.loads(json.dumps(self.record))
         v1["schema"] = experiment.ORACLE_SCHEMA_V1
+        del v1["parameters"]["kernel_release"]
         del v1["parameters"]["tick_wait_seconds"]
         for row in v1["cases"]:
             del row["same_coarse_tick"]
