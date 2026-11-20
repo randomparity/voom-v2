@@ -28,8 +28,8 @@ the `rm` failure first. Consumers:
 - install.py and `setup_capture` use the derived values; `issue-786-copied-audio-regression.py`
   and `real_owner_audio.py` import `runtime`/`install`: `validation_timeout` for the install
   call, `HARNESS_COMMAND_TIMEOUT` for other commands and the encoder-hiding wrapper.
-- `voom-test-support` exports `LAUNCHER_COMMAND_TIMEOUT` (90 s) for `command_output`, and
-  `LAUNCHER_COMMAND_TIMEOUT` times the commands enclosed: five for worker preflight, eight for
+- `voom-test-support` exports `LAUNCHER_COMMAND_TIMEOUT` (90 s) for `command_output` and
+  `flac_command`, and that value times the commands enclosed: five for worker preflight, eight for
   one audio operation (input probe, encode, output probe, compatibility probe, copied-audio
   probes and packet scans). Expiry messages name the command or wait and its bound.
 - `runtime_integration_test.py` startup waits allow setup plus margin; reaping waits allow
