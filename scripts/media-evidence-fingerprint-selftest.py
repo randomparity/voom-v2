@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "media_evidence_fingerprint", Path(__file__).with_name("media-evidence-fingerprint.py")
@@ -360,6 +361,40 @@ class CorpusBoundTests(unittest.TestCase):
                 experiment.check_corpus_bounds(storage, 3, evict=True)
             experiment.check_corpus_bounds(storage, 3, evict=False)
         experiment.check_corpus_bounds("local", 34, evict=True)
+
+
+class ProcessIoTests(unittest.TestCase):
+    def process_io(self, proc):
+        stderr = io.StringIO()
+        with mock.patch.object(experiment.baseline, "PROC_ROOT", proc), \
+                contextlib.redirect_stderr(stderr):
+            counters = experiment.process_io()
+        return counters, stderr.getvalue().splitlines()
+
+    def test_readable_io_keeps_only_the_recorded_counters(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            proc = Path(scratch)
+            (proc / "self").mkdir()
+            (proc / "self" / "io").write_text("rchar: 7\nwchar: 3\nread_bytes: 4096\n")
+            counters, lines = self.process_io(proc)
+        self.assertEqual(counters, {"rchar": 7, "read_bytes": 4096})
+        self.assertEqual(lines, [])
+
+    def test_unreadable_io_is_unavailable_and_stderr_names_the_cause(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            proc = Path(scratch)
+            (proc / "self" / "io").mkdir(parents=True)
+            counters, lines = self.process_io(proc)
+        self.assertEqual(counters, dict.fromkeys(("rchar", "read_bytes"), experiment.UNAVAILABLE))
+        self.assertEqual(lines, [f"media-evidence-fingerprint: process {counter} unavailable: "
+                                 "io: IsADirectoryError" for counter in ("rchar", "read_bytes")])
+
+    def test_a_host_without_proc_says_why_the_counters_are_missing(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            counters, lines = self.process_io(Path(scratch) / "absent")
+        self.assertEqual(counters, dict.fromkeys(("rchar", "read_bytes"), experiment.UNAVAILABLE))
+        self.assertEqual(lines, [f"media-evidence-fingerprint: process {counter} unavailable: "
+                                 "no /proc on this host" for counter in ("rchar", "read_bytes")])
 
 
 class CommittedRecordTests(unittest.TestCase):

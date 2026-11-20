@@ -574,16 +574,8 @@ def check_corpus_bounds(storage: str, file_count: int, evict: bool) -> None:
         )
 
 
-def process_io() -> dict[str, int | str]:
-    counters: dict[str, int | str] = {"rchar": UNAVAILABLE, "read_bytes": UNAVAILABLE}
-    try:
-        for line in Path("/proc/self/io").read_text(encoding="utf-8").splitlines():
-            key, value = line.split(":")
-            if key in counters:
-                counters[key] = int(value)
-    except (OSError, ValueError):
-        pass
-    return counters
+def process_io() -> dict[str, int | float | str]:
+    return baseline.proc_usage("self", "media-evidence-fingerprint", ("io",))
 
 
 def cpu_seconds() -> float:
