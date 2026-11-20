@@ -21,7 +21,7 @@ slice, and no other statement per chunk.
 - **Node-agent `stream_copy_with_hash`: neither.** Each chunk also runs `write_all` to a temp
   file, and the copy ends with `flush` and `sync_all`, so the measured loop does not stand for
   it. It is private, and timing it needs a production visibility change outside this
-  surface. Recorded as unmeasured; follow-up candidate to measure it before any change to the
+  surface. Recorded as unmeasured; deferred to #898, to measure it before any change to the
   shared constant.
 - The hash loops are not measured either: neither is directly callable from an example (a
   `pub fn` in `pub(crate) mod fs`, reached only via store-backed `show_artifact`; a
@@ -40,7 +40,7 @@ slice, and no other statement per chunk.
    changes; committed #838 records are untouched.
 3. Accepted: production loop drift after `a793d4e0` voids the claim; the README names the
    commit and loops, and a buffer change re-checks them.
-4. Covered elsewhere: the copy-loop measurement (follow-up candidate); the production buffer
+4. Covered elsewhere: the copy-loop measurement (#898); the production buffer
    change and the network corpus (maintainer).
 
 ## Success
