@@ -285,7 +285,9 @@ each copy removed before the next. It is `media-evidence-observe-run/1` with the
   `max_bytes_per_repetition`, `repetitions` and `evict`.
 - `repetitions[].process` adds `wchar` and `write_bytes`.
 - `files[]`: `copy_seconds` (copy, flush, fsync and removal) in place of `observe_seconds`;
-  `outcome` is `copied` or `copy_failed`.
+  `outcome` is `copied` or `copy_failed`; `failure` is `null`, `artifact_unavailable`,
+  `commit_failure`, `other`, `remove_failed` (copied, but the copy was not removed) or
+  `size_changed`.
 
 Oracle schema `media-evidence-fingerprint-oracle/3` and ctime-probe schema
 `media-evidence-reuse-ctime-probe/3` (#891) each add one required field to their `/2`

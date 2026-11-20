@@ -3,8 +3,8 @@
 //! `<seconds>` here covers one copy, flush, fsync and removal of the copy.
 //!
 //! Usage: `copy-commit <concurrency> <scratch-dir>`. Each copy is written to a new file in
-//! `<scratch-dir>`, which must be on the source's filesystem, and removed before the file's
-//! line is written. An `err` line names the failure; the harness refuses a run that leaves
+//! `<scratch-dir>`, which must be empty and on the source's filesystem, and removed before the
+//! file's line is written. An `err` line names the failure; the harness refuses a run that leaves
 //! anything in `<scratch-dir>`.
 
 #[path = "../../voom-ffprobe-worker/examples/support/observe_runner.rs"]
@@ -41,10 +41,14 @@ async fn copy_once(path: PathBuf, temp: PathBuf) -> observe_runner::Observed {
     Ok((facts.size_bytes, facts.content_hash))
 }
 
+/// The scratch directory must be empty: every file the example removes is one it created.
 fn scratch_dir() -> io::Result<PathBuf> {
-    std::env::args()
+    let dir = std::env::args()
         .nth(2)
         .map(PathBuf::from)
-        .filter(|dir| dir.is_dir())
-        .ok_or_else(|| io::Error::other("usage: copy-commit <concurrency> <scratch-dir>"))
+        .ok_or_else(|| io::Error::other("usage: copy-commit <concurrency> <scratch-dir>"))?;
+    if std::fs::read_dir(&dir)?.next().is_some() {
+        return Err(io::Error::other("scratch directory is not empty"));
+    }
+    Ok(dir)
 }

@@ -66,17 +66,20 @@ constant changes it too. It was never measured.
   NVMe with a dynamic SLC write cache and btrfs `compress=zstd:1`; a full-corpus copy writes
   935 GB per repetition, past any SLC cache, and wear grows with every cell. The run therefore
   uses a subset fixed here: sort the manifest by size (ties by id) and take ranks
-  `round(i × (n − 1) / 6)` for i = 0…6, so the smallest, the largest and five evenly spaced
-  files (7 ids, about 192 GB; the README lists them). Three repetitions per cell write about
-  575 GB, past the SLC cache too: the subset bounds wear and time, not cache exposure. Four
-  cells, 10 minutes idle before each: evicted 16k, 1m; then as-found 1m, 16k. The scratch
+  `round(i × (n − 1) / (k − 1))` for i = 0…k−1 with k = 5, so the smallest, the largest and
+  three evenly spaced files (about 137 GB; the README lists them). k = 5 is the largest k whose
+  four cells stay inside the write volume the operator approved (operator confirmation
+  2026-11-20 (write volume): about 1.8 TB for 4 cells × 3 repetitions, one copy at a time);
+  k = 7 would write about 2.3 TB. Three repetitions per cell write about 410 GB, past the SLC
+  cache too: the subset bounds wear and time, not cache exposure. Four cells, 10 minutes idle
+  before each: evicted 16k, 1m; then as-found 1m, 16k. The scratch
   directory is a new sibling of the corpus on the same btrfs subvolume, removed at the end.
   Media is opened read-only. The subset rule stands in for the protocol's operator choice in
   this unattended run, and the orchestrator sees it before capture. Budget: before the first
   cell, one unrecorded copy of the largest subset file measures the copy rate; if three
   repetitions of the subset would take over 50 minutes at that rate, the rule is applied with
-  fewer files (6, 5, …) until they fit, and the README records the calibration and the final
-  ids. A cell that still overruns 60 minutes is recorded as over budget, not dropped.
+  fewer files (k = 4, 3, …) until they fit, and the README records the calibration and the
+  final ids. A cell that still overruns 60 minutes is recorded as over budget, not dropped.
 - **Report.** `docs/media-evidence-baseline/copy/README.md` (compare tables, verdicts,
   disclosures, reproduce) beside the four records; the decision report's note that this loop is
   unmeasured (#889, PR #899) becomes the measured verdict. That note reaches main only when

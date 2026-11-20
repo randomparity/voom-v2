@@ -86,12 +86,14 @@ class Corpus:
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
 
     def capture(self, **overrides):
+        """Capture as the harness of a checkout that holds this corpus's stub example."""
         args = Namespace(manifest=self.manifest, scratch_dir=self.scratch,
                          example_dir=self.examples, ids=None, max_bytes=10**12, repetitions=2,
                          evict=False)
         for key, value in overrides.items():
             setattr(args, key, value)
-        return copy.capture(args)
+        with mock.patch.object(copy, "REPO_ROOT", self.dir.resolve()):
+            return copy.capture(args)
 
 
 class RunTests(unittest.TestCase):
@@ -128,6 +130,26 @@ class RunTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"STUB_LEAVE_COPY": "1"}), \
                 self.assertRaisesRegex(copy.HarnessError, "not empty"):
             corpus.capture(repetitions=1)
+
+
+    def test_an_example_built_outside_this_checkout_is_refused(self):
+        corpus = Corpus(self, [("a.mkv", b"abc")])
+        args = Namespace(manifest=corpus.manifest, scratch_dir=corpus.scratch,
+                         example_dir=corpus.examples, ids=None, max_bytes=10**12,
+                         repetitions=1, evict=False)
+        with self.assertRaisesRegex(copy.HarnessError, "outside this checkout"):
+            copy.capture(args)
+
+    def test_a_failed_run_that_leaves_a_partial_copy_says_so(self):
+        corpus = Corpus(self, [("a.mkv", b"abc")])
+        stub = corpus.examples / "copy-commit"
+        stub.write_text(f"#!{sys.executable}\nimport sys\n"
+                        "open(sys.argv[2] + '/copy-0.tmp', 'wb').write(b'ab')\n")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), \
+                self.assertRaisesRegex(copy.HarnessError, "exited before reporting done"):
+            corpus.capture(repetitions=1)
+        self.assertIn("still holds a partial copy", stderr.getvalue())
 
 
 class ScratchTests(unittest.TestCase):

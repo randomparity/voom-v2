@@ -165,7 +165,13 @@ def run_repetition(index: int, root: Path, files: list[dict[str, Any]],
             baseline.evict(path, fs_type)
     residency = [baseline.resident_bytes(path) for path in paths]
     counters = baseline.host_counters()
-    lines, wall, usage = copy_all(example, args.scratch_dir, paths)
+    try:
+        lines, wall, usage = copy_all(example, args.scratch_dir, paths)
+    except BaseException:
+        if any(args.scratch_dir.iterdir()):
+            print("media-evidence-copy: the scratch directory still holds a partial copy; "
+                  "remove it before the next run", file=sys.stderr)
+        raise
     counters = baseline.counter_delta(counters, baseline.host_counters())
     check_empty(args.scratch_dir)
     rows, hashes = parse_rows(lines, files)
@@ -187,6 +193,10 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
     check_scratch(args.scratch_dir, root, max(entry["size_bytes"] for entry in selected))
     fs_type = baseline.corpus_filesystem(root, selected)
     example = args.example_dir / "copy-commit"
+    if not example.resolve().is_relative_to(REPO_ROOT):
+        # The buffer is read from this checkout's source, so the example must be built here.
+        raise HarnessError("--example-dir is outside this checkout; run the harness of the "
+                           "worktree that built the example")
     build = observe.build_identity(example)
     build["harness_sha256"] = baseline.sha256_file(Path(__file__).resolve())
     files, skipped = observe.within_budget(selected, args.max_bytes)
