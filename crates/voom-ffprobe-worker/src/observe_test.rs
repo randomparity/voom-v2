@@ -130,3 +130,61 @@ fn error_message<T>(result: &Result<T, WorkerError>) -> String {
         Err(err) => err.to_string(),
     }
 }
+
+const MIB: usize = 1024 * 1024;
+/// BLAKE3 of `patterned(2 * MIB + 1)`. Content hashes are a persisted contract, so the
+/// read buffer size must never change them.
+const PINNED_MULTI_CHUNK_HASH: &str =
+    "blake3:52dc212cb4cc61cb94d25bd7b1d47b256e4c3a6d68956df50c235c37a2aeacd7";
+
+fn patterned(len: usize) -> Vec<u8> {
+    (0..=250_u8).cycle().take(len).collect()
+}
+
+async fn observe_written(dir: &Path, bytes: &[u8]) -> Option<ObservedFileFacts> {
+    let path = dir.join(format!("{}.bin", bytes.len()));
+    let write_result = std::fs::write(&path, bytes);
+    assert!(write_result.is_ok());
+    let observed_result = Box::pin(observe_file_facts(&path)).await;
+    assert!(observed_result.is_ok());
+    observed_result.ok()
+}
+
+#[tokio::test]
+async fn observe_file_facts_hash_matches_one_shot_blake3_at_buffer_boundaries() {
+    let dir_result = tempfile::tempdir();
+    assert!(dir_result.is_ok());
+    let Ok(dir) = dir_result else {
+        return;
+    };
+    for len in [MIB, 2 * MIB, 2 * MIB + 1] {
+        let bytes = patterned(len);
+
+        let observed = Box::pin(observe_written(dir.path(), &bytes)).await;
+
+        assert_eq!(
+            observed.map(|facts| (facts.size_bytes, facts.content_hash)),
+            Some((
+                u64::try_from(len).unwrap_or(u64::MAX),
+                format!("blake3:{}", blake3::hash(&bytes).to_hex())
+            )),
+            "length {len}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn observe_file_facts_pins_the_multi_chunk_content_hash() {
+    let dir_result = tempfile::tempdir();
+    assert!(dir_result.is_ok());
+    let Ok(dir) = dir_result else {
+        return;
+    };
+
+    let observed = Box::pin(observe_written(dir.path(), &patterned(2 * MIB + 1))).await;
+
+    assert_eq!(
+        observed.map(|facts| facts.content_hash).as_deref(),
+        Some(PINNED_MULTI_CHUNK_HASH)
+    );
+}
