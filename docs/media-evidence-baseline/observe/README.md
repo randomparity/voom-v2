@@ -10,9 +10,9 @@ unchanged. The raw records are the sixteen JSON files beside this summary, schem
 
 ## What ran
 
-Four full-hash reads use `observe_file_facts` with a 16 KiB buffer: transform input in the
-ffmpeg and mkvtoolnix workers (before and after each operation), output verification in the
-verify-artifact worker, and the ffprobe worker's re-hash when probe reuse is off. Each
+At `e2c29167`, four full-hash reads used `observe_file_facts` with a 16 KiB buffer: transform
+input in the ffmpeg and mkvtoolnix workers (before and after each operation), output verification
+in the verify-artifact worker, and the ffprobe worker's re-hash when probe reuse is off. Each
 `observe-<path>` example calls its crate's production function on the workers' runtime shape
 (multi-thread, 2 worker threads), one process per repetition, 4 files in flight (the protocol's
 stage-0 concurrency). It reads each of the 34 local-corpus files (935.3 GB, NVMe-backed btrfs)
@@ -28,10 +28,9 @@ files, and `observe_buffer_bytes` is read from the edited source. Harness SHA-25
 
 #879 (PR #901) later made 1 MiB the source and swapped the variants: from then on `observe1m`
 is a no-op and `observe16k` patches the 16 KiB reads back in, so the 16 KiB build is the edited
-one. The harness has also changed since `e2c29167`. Run from a later commit, the recipe below
-measures the same two buffers but records a different `git_commit`, `harness_sha256` and
-`git_changed_paths`. The recipe below reproduces these records' builds and harness only because
-its scripts come from `e2c29167`.
+one. The harness has also changed since `e2c29167`. Run with a later commit's scripts, the recipe
+below measures the same two buffers but records a different `git_commit`, `harness_sha256` and
+`git_changed_paths`; with the pinned scripts it reproduces all three.
 
 Cells ran 18:52–21:51 UTC, 670–683 s each (budget 60 minutes), in this order, so neither
 buffer always ran second: evicted ffmpeg 16k, 1m; mkvtoolnix 1m, 16k; verify-artifact 16k, 1m;
@@ -120,5 +119,6 @@ git worktree remove --force <scratch>/observe16k
 git worktree remove <scratch>/pin
 ```
 
-A 16 KiB cell runs the same command from `<scratch>/observe16k`. As-found cells drop `--evict`;
-`--path` is `ffmpeg`, `mkvtoolnix`, `verify-artifact` or `ffprobe`.
+A 16 KiB cell substitutes `observe16k` for `observe1m` in the script path, `--example-dir` and
+record name. As-found cells drop `--evict`; `--path` is `ffmpeg`, `mkvtoolnix`,
+`verify-artifact` or `ffprobe`.
