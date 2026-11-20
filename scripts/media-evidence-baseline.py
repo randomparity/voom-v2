@@ -35,6 +35,10 @@ SCHEMA_V2 = "media-evidence-baseline-run/2"
 HASH_SOURCES = {"reused", "recomputed"}
 UNAVAILABLE = "unavailable"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Read at call time, so a selftest can point it at a scratch tree.
+PROC_ROOT = Path("/proc")
+# Read once at import: POSIX always defines it, and a failure is a harness fault, not a cause.
+CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
 PROGRESS_IDLE_DEADLINE_MS = 600_000
 # The socket waits this long past the deadline the worker was told, so a worker
 # that honours its own idle deadline reports it before the client gives up.
@@ -333,6 +337,58 @@ def counter_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, in
     }
 
 
+def _stat_counters(text: str) -> dict[str, float]:
+    fields = text.rsplit(")", 1)[1].split()
+    if len(fields) < 15:
+        return {}
+    ticks = sum(int(value) for value in fields[11:15])
+    return {"cpu_seconds": round(ticks / CLOCK_TICKS, 3)}
+
+
+def _status_counters(text: str) -> dict[str, int]:
+    return {"peak_rss_bytes": int(line.split()[1]) * 1024
+            for line in text.splitlines() if line.startswith("VmHWM:")}
+
+
+def _io_counters(text: str) -> dict[str, int]:
+    counters = {}
+    for line in text.splitlines():
+        key, value = line.split(":")
+        if key in ("rchar", "read_bytes"):
+            counters[key] = int(value)
+    return counters
+
+
+PROC_SOURCES = {"stat": (_stat_counters, ("cpu_seconds",)),
+                "status": (_status_counters, ("peak_rss_bytes",)),
+                "io": (_io_counters, ("rchar", "read_bytes"))}
+
+
+def proc_usage(process: int | str, harness: str,
+               sources: tuple[str, ...] = ("stat", "status", "io")) -> dict[str, int | float | str]:
+    """Counters from `/proc/<process>`; each source is read on its own.
+
+    `stat` CPU and `io` include reaped children; `status` peak memory is this process only.
+    A counter the host cannot give stays `unavailable`, and stderr says why under `harness`."""
+    has_proc = PROC_ROOT.is_dir()
+    usage: dict[str, int | float | str] = {}
+    for source in sources:
+        parse, counters = PROC_SOURCES[source]
+        if not has_proc:
+            found, cause = {}, "no /proc on this host"
+        else:
+            try:
+                found = parse((PROC_ROOT / str(process) / source).read_text())
+                cause = f"{source}: field absent"
+            except (OSError, IndexError, ValueError) as error:
+                found, cause = {}, f"{source}: {type(error).__name__}"
+        for counter in counters:
+            usage[counter] = found.get(counter, UNAVAILABLE)
+            if counter not in found:
+                print(f"{harness}: process {counter} unavailable: {cause}", file=sys.stderr)
+    return usage
+
+
 class Worker:
     """One built worker process driven over its authenticated HTTP protocol."""
 
@@ -392,28 +448,10 @@ class Worker:
 
     def usage(self) -> dict[str, int | float | str]:
         """CPU and I/O include reaped children; peak memory is this process only."""
-        proc = Path("/proc", str(self.process.pid))
-        usage: dict[str, int | float | str] = {
-            "cpu_seconds": UNAVAILABLE, "peak_rss_bytes": UNAVAILABLE,
-            "rchar": UNAVAILABLE, "read_bytes": UNAVAILABLE,
-        }
         with self.lock:
             if self.abandoned:
-                return usage
-        try:
-            fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
-            ticks = sum(int(value) for value in fields[11:15])
-            usage["cpu_seconds"] = round(ticks / os.sysconf("SC_CLK_TCK"), 3)
-            for line in (proc / "status").read_text().splitlines():
-                if line.startswith("VmHWM:"):
-                    usage["peak_rss_bytes"] = int(line.split()[1]) * 1024
-            for line in (proc / "io").read_text().splitlines():
-                key, value = line.split(":")
-                if key in ("rchar", "read_bytes"):
-                    usage[key] = int(value)
-        except (OSError, IndexError, ValueError):
-            pass
-        return usage
+                return dict.fromkeys(WORKER_KEYS, UNAVAILABLE)
+        return proc_usage(self.process.pid, "media-evidence-baseline")
 
     def stop(self) -> None:
         if self.process.stdin and not self.process.stdin.closed:

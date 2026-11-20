@@ -6,12 +6,15 @@ committed corpus records are validated here too.
 """
 
 import argparse
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "media_evidence_lazy", Path(__file__).with_name("media-evidence-lazy.py")
@@ -143,6 +146,38 @@ class LifecycleTests(unittest.TestCase):
                 fingerprint, _ = lazy.read_fingerprint(self.path)
                 _, window, read = lazy.full_pass(self.path, size, lazy.Hooks())
                 self.assertEqual((window, read), (fingerprint["window"], size))
+
+
+class ProcessUsageTests(unittest.TestCase):
+    """CPU comes from `os.times()` on every host; only memory and I/O need /proc."""
+
+    def usage(self, proc):
+        stderr = io.StringIO()
+        with mock.patch.object(lazy.baseline, "PROC_ROOT", proc), \
+                contextlib.redirect_stderr(stderr):
+            usage = lazy.process_usage()
+        return usage, stderr.getvalue().splitlines()
+
+    def test_a_bad_io_leaves_cpu_and_peak_memory_and_names_its_cause(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            proc = Path(scratch)
+            (proc / "self").mkdir()
+            (proc / "self" / "status").write_text("VmHWM:\t 4 kB\n")
+            (proc / "self" / "io").write_text("rchar 7\n")
+            usage, lines = self.usage(proc)
+        self.assertIsInstance(usage["cpu_seconds"], float)
+        self.assertEqual((usage["peak_rss_bytes"], usage["rchar"], usage["read_bytes"]),
+                         (4096, lazy.UNAVAILABLE, lazy.UNAVAILABLE))
+        self.assertEqual(lines, [f"media-evidence-lazy: process {counter} unavailable: "
+                                 "io: ValueError" for counter in ("rchar", "read_bytes")])
+
+    def test_a_host_without_proc_keeps_cpu_and_says_why_the_rest_is_missing(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            usage, lines = self.usage(Path(scratch) / "absent")
+        self.assertIsInstance(usage["cpu_seconds"], float)
+        self.assertEqual(lines, [f"media-evidence-lazy: process {counter} unavailable: "
+                                 "no /proc on this host"
+                                 for counter in ("peak_rss_bytes", "rchar", "read_bytes")])
 
 
 class RunTests(unittest.TestCase):
