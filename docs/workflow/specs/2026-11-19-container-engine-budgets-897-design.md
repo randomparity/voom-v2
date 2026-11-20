@@ -2,59 +2,58 @@
 
 ## Problem
 
-`containers/ffmpeg/runtime.py` gives every engine command a 5 s `DEADLINE`. On a loaded
-GitHub runner `docker create` (run 44615350533) and `docker info` (run 44609059355) exceeded it.
-Enclosing layers are inconsistent too: one setup-tool child makes at least four serial
-setup commands and a cleanup command (25 s) under `setup_capture`'s 20 s, and `install.py`
-gives `check-config`, which runs one setup tool per root, a fixed 60 s.
+`containers/ffmpeg/runtime.py` gave every engine command 5 s; loaded runners exceeded it on
+`docker create` (run 44615350533) and `docker info` (run 44609059355). The layers above are
+fixed numbers below what they wrap: `setup_capture` 20 s, install validation 60 s, harness
+scripts 90 s, the test-support command timeout 10 s (`ffprobe` expired, run 44653479966) and
+the PCM test waits (readiness 30 s over five launcher commands).
 
 ## Scope
 
-`runtime.py` replaces `DEADLINE` with two budgets, following the existing total cleanup budget:
+`runtime.py` owns the budgets; every outer layer derives from them.
 
 - `SETUP_BUDGET = 30` s: one deadline shared by engine selection (context/machine inspect,
-  `getconf`, `info`, image inspect) and `create`. Thirty seconds (six times the exceeded
-  deadline) is a judgment: the logs show only that 5 s was exceeded.
-- `CLEANUP_BUDGET = 15` s: one deadline shared by `rm`/`ps`/`inspect` reconciliation and
-  reaping the attachment (was 5 s).
-- `OPERATION_TIMEOUT = SETUP_BUDGET + CLEANUP_BUDGET + LAUNCH_MARGIN` (15 s for interpreter
-  start, `start -a` and a short tool) bounds one launcher operation from outside, replacing
-  `setup_capture`'s 20 s; `check_config_timeout(config)` allows one per root plus the margin.
+  `getconf`, `info`, image inspect) and `create`. Six times the exceeded 5 s is a judgment;
+  the logs show only that 5 s was exceeded.
+- `CLEANUP_BUDGET = 15` s: shared by `rm`/`ps`/`inspect` and reaping the attachment.
+- `OPERATION_TIMEOUT` (60 s) = both budgets + `LAUNCH_MARGIN` (15 s: interpreter, `start -a`,
+  a short tool). `HARNESS_COMMAND_TIMEOUT` (90 s) adds 30 s for a short media command.
+- `check_config_timeout(config)`: one operation per root plus the margin; install.py's
+  `validation_timeout(config)` adds one operation per installed tool and the margin.
 
-A small `Budget` (name, seconds, monotonic expiry) is passed to `capture`, `json_capture`,
-`Engine`, `remove` and `reconcile`. A timeout raises `engine command '<engine> <subcommand>'
-exceeded the <name> budget of <n> s`. The nonzero-exit message names the command the same way
-instead of printing `argv[1:3]` (`--host` and its endpoint). `install.py` passes
-`check_config_timeout` to `check-config` and `OPERATION_TIMEOUT` to each `-version` check.
-`runtime_integration_test.py` adopts the signatures; each wait enclosing a launcher step
-(absence, check-config, `-version`, finish, barriers, sentinel cleanup) derives from the
-constants. The README states the budgets. Media operations stay unbounded (the worker's lease
-owns them). The 90 s wrappers in `scripts/issue-786-copied-audio-regression.py` and
-`crates/voom-cli/tests/support/real_owner_audio.py` go to a follow-up issue. No retries.
-Rejected: a longer per-command deadline, whose worst case grows with the command count.
+A `Budget` (name, seconds, expiry) reaches `capture`, `Engine`, `remove` and `reconcile`.
+Timeouts read `engine command '<engine> <subcommand>' exceeded the <name> budget of <n> s`;
+command failures name the command without the `--host` endpoint; a failed absence check keeps
+the `rm` failure first. Consumers:
+- install.py and `setup_capture` use the derived values; `issue-786-copied-audio-regression.py`
+  and `real_owner_audio.py` import `runtime`/`install`: `validation_timeout` for the install
+  call, `HARNESS_COMMAND_TIMEOUT` for other commands and the encoder-hiding wrapper.
+- `voom-test-support` exports `LAUNCHER_COMMAND_TIMEOUT` (90 s) for `command_output`, and
+  `LAUNCHER_COMMAND_TIMEOUT` times the commands enclosed: five for worker preflight, eight for
+  one audio operation (input probe, encode, output probe, compatibility probe, copied-audio
+  probes and packet scans). Expiry messages name the command or wait and its bound.
+- `runtime_integration_test.py` startup waits allow setup plus margin; reaping waits allow
+  cleanup plus margin. README states the budgets. No retries. Rejected: a longer per-command
+  deadline, whose worst case grows with command count.
 
 ### Failure model
 
-- Actors and deployments: a local operator on Linux/macOS Docker or Podman; GitHub's Linux
-  amd64 runner in the PCM container job.
-- Invariants: each enclosing timeout exceeds the budgets it wraps plus `LAUNCH_MARGIN`;
-  cleanup removes only the exact owned container.
-- Accepted failure classes: setup slower than 30 s fails with the setup message; unbounded
-  `start -a`, tool run or witness hashing can exhaust the margin; removal after cancellation
-  during create can take 45 s.
-- Covered elsewhere: the script wrappers (follow-up issue).
+- Actors and deployments: a local operator on Linux/macOS Docker or Podman; the GitHub Linux
+  amd64 PCM container job.
+- Invariants: each layer exceeds the budgets it encloses; cleanup removes only the owned
+  container; the Rust 90 s equals `HARNESS_COMMAND_TIMEOUT`.
+- Accepted failure classes: setup over 30 s fails with the setup message; an unbounded tool run
+  or witness hashing can exhaust a margin; removal after cancellation during create can take
+  45 s; command counts drift if worker operations add launcher commands.
+- Covered elsewhere: production worker startup deadlines (reported to the orchestrator).
 
 ## Success
-
-1. The constants are pinned, and each outer timeout exceeds the budgets it wraps.
-2. A timeout in `create` or `info` names the command and budget.
-3. Engine selection and `create` draw from one setup budget; cleanup gets a fresh budget.
-4. The `PCM container (Linux amd64)` job passes on the PR head.
+1. Constants are pinned and each outer layer exceeds what it wraps.
+2. Timeouts name the command or wait and its budget.
+3. The `PCM container (Linux amd64)` job passes on the PR head.
 
 ## Validation
 
-- Focused-test: `runtime_test.py` pins the constants and the timeout relationship, checks the
-  timeout and exit messages, and checks `setup_capture`'s timeout and that the guardian shares
-  one setup budget.
-- Focused-test: `install_test.py` checks the per-call timeouts `validate_install` passes.
-- Task-test-not-applicable (runner load): the PCM container CI job on the PR head is the proof.
+- Focused-test: `runtime_test.py` pins values, messages, budget sharing and the Rust constant.
+- Focused-test: `install_test.py` pins `validate_install` and `validation_timeout`.
+- Task-test-not-applicable (harness and PCM tests): they run only in the PCM CI job.
