@@ -1582,8 +1582,7 @@ async fn compatibility_remux_checks_actual_order_and_defaults() {
 async fn option_like_remux_paths_are_rejected_before_file_access_or_identify() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let input = root.join("input.mkv");
-    std::fs::write(&input, b"benign fixture").unwrap();
+    let input = root.join("missing-input.mkv");
     let stage = root.join("stage");
     let output = stage.join("out.mkv");
     let config = MkvmergeConfig::new(

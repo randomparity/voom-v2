@@ -848,12 +848,16 @@ async fn option_like_remux_paths_are_rejected_before_spawn() {
 #[test]
 fn non_option_like_remux_paths_preserve_arguments() {
     let mapping = MkvmergeTrackMapping::from_pairs([(0, 0)]);
-    for path in ["clip.mkv", "./-clip.mkv", "/media/-clip.mkv"] {
+    for (input, output) in [
+        ("input.mkv", "output.mkv"),
+        ("./-input.mkv", "./-output.mkv"),
+        ("/media/-input.mkv", "/media/-output.mkv"),
+    ] {
         let mut request = remux_request(base_selection(vec![stream(0)]));
-        request.input.path = path.to_owned();
-        request.output.path = path.to_owned();
+        request.input.path = input.to_owned();
+        request.output.path = output.to_owned();
         let args = build_mkvmerge_args(&request, &mapping).unwrap();
-        assert_eq!(args.last().map(String::as_str), Some(path));
-        assert_eq!(args[1], path);
+        assert_eq!(args.last().map(String::as_str), Some(input));
+        assert_eq!(args[1], output);
     }
 }

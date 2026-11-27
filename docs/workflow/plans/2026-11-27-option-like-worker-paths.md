@@ -40,7 +40,7 @@ Sibling unit tests follow AGENTS.md. No merge or cleanup authority.
 - Interface: crate-local `reject_option_like_path(&str, &Path) -> Result<(), MkvtoolnixError>`; public signatures unchanged.
 - Expected red: identify/remux reports a spawn error; handler reports a filesystem
   error before the malformed output is rejected.
-- Contract: identify/remux path values cannot become options; handler error class
+- Contract: identify/remux reject first-byte-dash paths; handler error class
   is MalformedWorkerResult with ConfigInvalid code, preserving existing mapping.
 
 ## Verification and review

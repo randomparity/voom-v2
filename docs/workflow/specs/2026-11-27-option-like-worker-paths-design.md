@@ -51,8 +51,9 @@ helper would widen ownership without improving the required rejection.
 
 - Actors and deployments: authenticated local control-plane requests received by
   standalone workers; CI exercising worker unit tests.
-- Invariants and assets: path data must not become subprocess options; rejected
-  inputs must not launch a child; existing error envelopes retain their shape.
+- Invariants and assets: paths beginning with a dash must be rejected before
+  subprocess invocation; rejected inputs must not launch a child; existing error
+  envelopes retain their shape.
 - Accepted failure classes: tool failures and unsupported media for ordinary
   paths retain existing handling. This change does not claim filesystem path
   confinement or reject internal dash-prefixed components.
@@ -65,7 +66,7 @@ helper would widen ownership without improving the required rejection.
 - Boundary inventory: request-controlled path enters an external media tool's
   argument parser. No boundary is added or widened.
 - Actor model: local operator/control plane provides paths; defensive validation
-  prevents malformed or crafted path data becoming tool options.
+  rejects first-byte-dash paths before they can become tool options.
 - Control per boundary: byte-preserving first-byte validation before command
   execution; rejection discloses only a field name and constant restriction.
 - Explicitly out of scope threats: authentication bypass and arbitrary executable
