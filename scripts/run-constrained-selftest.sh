@@ -102,8 +102,8 @@ expect_stderr "missing command says how" "separate it with --" --print-plan --
 expect_status "help exits 0" 0 --help
 
 # Exercise the execution path without depending on Linux, a block device, or
-# cgroup delegation. Only the platform/device probes are doubled; systemd-run
-# captures arguments instead of launching anything. BASH_ENV confines these
+# cgroup delegation. The platform/device probes and final exec are doubled;
+# exec captures arguments instead of launching anything. BASH_ENV confines these
 # functions to the child Bash, including the one block-file predicate.
 fixtures=$(mktemp -d) || exit 1
 trap 'rm -rf "$fixtures"' EXIT
@@ -111,7 +111,11 @@ cat > "$fixtures/environment" <<'MOCKS' || exit 1
 uname() { echo Linux; }
 stat() { echo cgroup2fs; }
 cat() { echo 'memory io'; }
-findmnt() { echo findmnt >> "$MOCK_CALLS"; printf '%s\n' "$MOCK_SOURCE"; }
+findmnt() {
+	echo findmnt >> "$MOCK_CALLS"
+	printf '%s\n' "$MOCK_SOURCE"
+	return "${MOCK_SOURCE_FAIL:-0}"
+}
 lsblk() {
 	printf '%s\n' "$*" >> "$MOCK_CALLS"
 	[ "${MOCK_LOOKUP_FAIL:-0}" -eq 0 ] || return 1
@@ -130,21 +134,17 @@ lsblk() {
 		builtin [ "$@"
 	fi
 }
+systemd-run() { :; }
+taskset() { :; }
+exec() { printf '%s\n' "$@"; }
 MOCKS
-mkdir -p "$fixtures/bin" || exit 1
-cat > "$fixtures/bin/systemd-run" <<'MOCK_RUN' || exit 1
-#!/usr/bin/env bash
-printf '%s\n' "$@"
-MOCK_RUN
-cp "$fixtures/bin/systemd-run" "$fixtures/bin/taskset" || exit 1
-chmod +x "$fixtures/bin/systemd-run" "$fixtures/bin/taskset" || exit 1
 
 device_case() {
 	local label=$1 source=$2 parent=$3 want_status=$4 want_device=$5
 	shift 5
 	local output status
 	: > "$fixtures/calls" || exit 1
-	output=$(PATH="$fixtures/bin:$PATH" BASH_ENV="$fixtures/environment" MOCK_SOURCE="$source" \
+	output=$(BASH_ENV="$fixtures/environment" MOCK_SOURCE="$source" \
 		MOCK_CALLS="$fixtures/calls" MOCK_PARENT="$parent" MOCK_CHILD_PARENT=wrong-child \
 		MOCK_OPERAND="${MOCK_EXPECT_OPERAND:-$source}" \
 		bounded "$script" --write-bps 40M "$@" -- echo constrained 2>"$fixtures/error")
@@ -169,18 +169,22 @@ device_case() {
 
 device_case 'whole disk without parent' /dev/fixture-disk '' 0 /dev/fixture-disk
 device_case 'partition selects parent' /dev/fixture-part fixture-disk 0 /dev/fixture-disk
-MOCK_EXPECT_OPERAND=/dev/fixture-part device_case 'subvolume selects parent' '/dev/fixture-part[/home]' fixture-disk 0 /dev/fixture-disk
-device_case 'explicit device skips discovery' '' '' 0 /dev/fixture-override --device /dev/fixture-override
+MOCK_EXPECT_OPERAND=/dev/fixture-part device_case 'subvolume selects parent' \
+	'/dev/fixture-part[/home]' fixture-disk 0 /dev/fixture-disk
+device_case 'explicit device skips discovery' '' '' 0 /dev/fixture-override \
+	--device /dev/fixture-override
 device_case 'unresolved source is rejected' '' '' 2 ''
 device_case 'non-block source is rejected' overlay '' 2 ''
 device_case 'non-block override is rejected' '' '' 2 '' --device /dev/missing
 MOCK_LOOKUP_FAIL=1 device_case 'failed parent probe is rejected' /dev/fixture-part '' 2 ''
+MOCK_SOURCE_FAIL=1 device_case 'failed source probe is rejected' /dev/fixture-disk '' 2 ''
 
 # A failed allocator must stop before constructing fixture paths. The double
 # supplies a contained path even on failure, so this probe remains safe if the
 # guard is removed during mutation testing.
 cat > "$fixtures/fail-mktemp" <<'MOCK_TEMP' || exit 1
 mktemp() { printf '%s\n' "$FAILED_TEMP_ROOT"; return 1; }
+trap() { exit 97; }
 MOCK_TEMP
 BASH_ENV="$fixtures/fail-mktemp" FAILED_TEMP_ROOT="$fixtures/failed-setup" \
 	bounded "$0" > "$fixtures/setup-output" 2>&1
