@@ -165,7 +165,8 @@ if [ -n "$WRITE_BPS" ]; then
 		# io.max keys on the whole device. Partitions have a parent, but
 		# a filesystem mounted directly on a disk already names that device.
 		source_device=$(findmnt -no SOURCE --target . 2>/dev/null | sed 's/\[.*//')
-		parent_device=$(lsblk -dno PKNAME "$source_device" 2>/dev/null)
+		parent_device=$(lsblk -dno PKNAME "$source_device" 2>/dev/null) ||
+			die "could not resolve a block device for $source_device; pass --device"
 		if [ -n "$parent_device" ]; then
 			DEVICE=/dev/$parent_device
 		else

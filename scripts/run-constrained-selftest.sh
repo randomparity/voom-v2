@@ -105,14 +105,17 @@ expect_status "help exits 0" 0 --help
 # cgroup delegation. Only the platform/device probes are doubled; systemd-run
 # captures arguments instead of launching anything. BASH_ENV confines these
 # functions to the child Bash, including the one block-file predicate.
-fixtures=$(mktemp -d)
+fixtures=$(mktemp -d) || exit 1
 trap 'rm -rf "$fixtures"' EXIT
-cat > "$fixtures/environment" <<'MOCKS'
+cat > "$fixtures/environment" <<'MOCKS' || exit 1
 uname() { echo Linux; }
 stat() { echo cgroup2fs; }
 cat() { echo 'memory io'; }
-findmnt() { printf '%s\n' "$MOCK_SOURCE"; }
+findmnt() { echo findmnt >> "$MOCK_CALLS"; printf '%s\n' "$MOCK_SOURCE"; }
 lsblk() {
+	printf '%s\n' "$*" >> "$MOCK_CALLS"
+	[ "${MOCK_LOOKUP_FAIL:-0}" -eq 0 ] || return 1
+	[ "$3" = "$MOCK_OPERAND" ] || return 1
 	# A whole disk can have children: omitting -d must not select a child's
 	# PKNAME as if it were the source's own parent.
 	case $* in
@@ -122,28 +125,33 @@ lsblk() {
 }
 [() {
 	if [[ ${1:-} == -b ]]; then
-		[[ $2 == /dev/fixture-disk || $2 == /dev/fixture-override ]]
+		[[ $2 == /dev/fixture-disk || $2 == /dev/fixture-part || $2 == /dev/fixture-override ]]
 	else
 		builtin [ "$@"
 	fi
 }
 MOCKS
-mkdir -p "$fixtures/bin"
-cat > "$fixtures/bin/systemd-run" <<'MOCK_RUN'
+mkdir -p "$fixtures/bin" || exit 1
+cat > "$fixtures/bin/systemd-run" <<'MOCK_RUN' || exit 1
 #!/usr/bin/env bash
 printf '%s\n' "$@"
 MOCK_RUN
-cp "$fixtures/bin/systemd-run" "$fixtures/bin/taskset"
-chmod +x "$fixtures/bin/systemd-run" "$fixtures/bin/taskset"
+cp "$fixtures/bin/systemd-run" "$fixtures/bin/taskset" || exit 1
+chmod +x "$fixtures/bin/systemd-run" "$fixtures/bin/taskset" || exit 1
 
 device_case() {
 	local label=$1 source=$2 parent=$3 want_status=$4 want_device=$5
 	shift 5
 	local output status
+	: > "$fixtures/calls" || exit 1
 	output=$(PATH="$fixtures/bin:$PATH" BASH_ENV="$fixtures/environment" MOCK_SOURCE="$source" \
-		MOCK_PARENT="$parent" MOCK_CHILD_PARENT=wrong-child \
+		MOCK_CALLS="$fixtures/calls" MOCK_PARENT="$parent" MOCK_CHILD_PARENT=wrong-child \
+		MOCK_OPERAND="${MOCK_EXPECT_OPERAND:-$source}" \
 		bounded "$script" --write-bps 40M "$@" -- echo constrained 2>"$fixtures/error")
 	status=$?
+	if [ "${1:-}" = --device ]; then
+		[ ! -s "$fixtures/calls" ] || fail "$label: override performed discovery"
+	fi
 	[ "$status" -eq "$want_status" ] || fail "$label: expected exit $want_status, got $status"
 	if [ "$want_status" -eq 0 ]; then
 		printf '%s\n' "$output" | grep -Fx "IOWriteBandwidthMax=$want_device 40M" >/dev/null ||
@@ -161,11 +169,23 @@ device_case() {
 
 device_case 'whole disk without parent' /dev/fixture-disk '' 0 /dev/fixture-disk
 device_case 'partition selects parent' /dev/fixture-part fixture-disk 0 /dev/fixture-disk
-device_case 'subvolume selects parent' '/dev/fixture-part[/home]' fixture-disk 0 /dev/fixture-disk
+MOCK_EXPECT_OPERAND=/dev/fixture-part device_case 'subvolume selects parent' '/dev/fixture-part[/home]' fixture-disk 0 /dev/fixture-disk
 device_case 'explicit device skips discovery' '' '' 0 /dev/fixture-override --device /dev/fixture-override
 device_case 'unresolved source is rejected' '' '' 2 ''
 device_case 'non-block source is rejected' overlay '' 2 ''
 device_case 'non-block override is rejected' '' '' 2 '' --device /dev/missing
+MOCK_LOOKUP_FAIL=1 device_case 'failed parent probe is rejected' /dev/fixture-part '' 2 ''
+
+# A failed allocator must stop before constructing fixture paths. The double
+# supplies a contained path even on failure, so this probe remains safe if the
+# guard is removed during mutation testing.
+cat > "$fixtures/fail-mktemp" <<'MOCK_TEMP' || exit 1
+mktemp() { printf '%s\n' "$FAILED_TEMP_ROOT"; return 1; }
+MOCK_TEMP
+BASH_ENV="$fixtures/fail-mktemp" FAILED_TEMP_ROOT="$fixtures/failed-setup" \
+	bounded "$0" > "$fixtures/setup-output" 2>&1
+[ "$?" -eq 1 ] || fail "failed fixture allocation was not rejected"
+[ ! -e "$fixtures/failed-setup" ] || fail "failed allocation reached fixture writes"
 
 if [ "$failures" -gt 0 ]; then
 	echo "run-constrained-selftest: $failures failure(s)" >&2
