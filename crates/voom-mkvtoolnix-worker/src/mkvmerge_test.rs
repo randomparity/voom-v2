@@ -802,3 +802,58 @@ async fn remux_runs_mkvmerge_with_utf8_locale() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn option_like_identify_path_is_rejected_before_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = MkvmergeConfig::new(
+        temp.path().join("missing-mkvmerge"),
+        "test".to_owned(),
+        Duration::from_secs(5),
+    );
+    for path in ["-clip.mkv", "-"] {
+        let err = identify_tracks(&config, Path::new(path)).await.unwrap_err();
+        assert!(matches!(err, MkvtoolnixError::ConfigInvalid(_)), "{err}");
+    }
+    for path in ["clip.mkv", "./-clip.mkv", "/media/-clip.mkv"] {
+        let err = identify_tracks(&config, Path::new(path)).await.unwrap_err();
+        assert!(matches!(err, MkvtoolnixError::IdentifyFailed(_)), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn option_like_remux_paths_are_rejected_before_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = MkvmergeConfig::new(
+        temp.path().join("missing-mkvmerge"),
+        "test".to_owned(),
+        Duration::from_secs(5),
+    );
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 0)]);
+    for field in ["input_path", "output_path"] {
+        let mut request = remux_request(base_selection(vec![stream(0)]));
+        if field == "input_path" {
+            request.input.path = "-clip.mkv".to_owned();
+        } else {
+            request.output.path = "-clip.mkv".to_owned();
+        }
+        let err = run_mkvmerge_remux(&config, &request, &mapping)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MkvtoolnixError::ConfigInvalid(_)), "{err}");
+        assert!(err.to_string().contains(field), "{err}");
+    }
+}
+
+#[test]
+fn non_option_like_remux_paths_preserve_arguments() {
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 0)]);
+    for path in ["clip.mkv", "./-clip.mkv", "/media/-clip.mkv"] {
+        let mut request = remux_request(base_selection(vec![stream(0)]));
+        request.input.path = path.to_owned();
+        request.output.path = path.to_owned();
+        let args = build_mkvmerge_args(&request, &mapping).unwrap();
+        assert_eq!(args.last().map(String::as_str), Some(path));
+        assert_eq!(args[1], path);
+    }
+}

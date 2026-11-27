@@ -1577,3 +1577,31 @@ async fn compatibility_remux_checks_actual_order_and_defaults() {
         assert_eq!(error.error_code(), ErrorCode::MalformedWorkerResult);
     }
 }
+
+#[tokio::test]
+async fn option_like_remux_paths_are_rejected_before_file_access_or_identify() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let input = root.join("input.mkv");
+    std::fs::write(&input, b"benign fixture").unwrap();
+    let stage = root.join("stage");
+    let output = stage.join("out.mkv");
+    let config = MkvmergeConfig::new(
+        root.join("missing-mkvmerge"),
+        "test".to_owned(),
+        Duration::from_secs(5),
+    );
+    for field in ["input_path", "output_path"] {
+        let mut request = request_for_paths(&input, &stage, &output).await;
+        if field == "input_path" {
+            request.input.path = "-clip.mkv".to_owned();
+        } else {
+            request.output.path = "-clip.mkv".to_owned();
+        }
+        let err = handle_remux(&request, &config).await.unwrap_err();
+        assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
+        assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+        assert!(err.to_string().contains(field), "{err}");
+        assert!(err.to_string().contains("must not begin with '-'"), "{err}");
+    }
+}
