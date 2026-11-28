@@ -10,3 +10,5 @@ Verification: focused-test — heartbeat_failure_durably_fails_leased_ticket in 
 Documentation: task-test-not-applicable — spec/plan are human-readable decisions without executable consumers.
 
 No ADR, migration, manifest, shared index, dispatch.rs or executor/mod_test.rs changes. No deferrals or adjacent candidates currently identified. Landing follows #492.
+
+Diagnostic limitation: if heartbeat tick delivery regresses, both futures can remain pending. A focused run or repetition then needs runner interruption or an external diagnostic watchdog; elapsed time remains outside the regression assertions.
