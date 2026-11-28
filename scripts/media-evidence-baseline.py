@@ -16,6 +16,7 @@ import functools
 import hashlib
 import http.client
 import json
+import math
 import os
 import platform
 import re
@@ -214,6 +215,26 @@ def storage_class(fs_type: str) -> str:
     return "network" if fs_type in NETWORK_FILESYSTEMS else "unknown"
 
 
+def physical_read_bytes(corpus: dict[str, Any], local_bytes: int | str,
+                        counters: dict[str, Any] | None) -> int | str:
+    """Select corpus physical reads without attributing unrelated network traffic."""
+    fs_type = corpus.get("filesystem_type")
+    if isinstance(fs_type, str) and fs_type in LOCAL_FILESYSTEMS:
+        return local_bytes
+    if isinstance(fs_type, str) and fs_type in {"cifs", "smb3"}:
+        value = counters.get("cifs_bytes_read", UNAVAILABLE) if isinstance(counters, dict) else None
+        if value == UNAVAILABLE or (type(value) is int and value >= 0):
+            return value
+        if isinstance(value, float) and math.isfinite(value) and value >= 0 and value.is_integer():
+            return int(value)
+        print("media-evidence: physical read bytes unavailable: invalid CIFS byte counter",
+              file=sys.stderr)
+        return UNAVAILABLE
+    print("media-evidence: physical read bytes unavailable: "
+          "no supported counter for the corpus filesystem", file=sys.stderr)
+    return UNAVAILABLE
+
+
 def resident_bytes(path: Path) -> int | str:
     if shutil.which("fincore") is None:
         return UNAVAILABLE
@@ -324,8 +345,8 @@ HOST_SOURCES = {"network_rx_bytes": ("net/dev", _network_rx_bytes),
 def host_counters(harness: str) -> dict[str, int | str]:
     """Host-wide counters; on a shared host they include unrelated traffic.
 
-    `cifs_bytes_read` is `unavailable` on a host without the cifs module, and network-corpus
-    consumers read it whatever the mount type, so its absence is reported like any other.
+    `cifs_bytes_read` is `unavailable` on a host without the cifs module. These raw
+    diagnostics are retained independently of the corpus physical-read counter selection.
     A counter the host cannot give stays `unavailable`, and stderr says why under `harness`."""
     has_proc = PROC_ROOT.is_dir()
     counters: dict[str, int | str] = dict.fromkeys(HOST_SOURCES, UNAVAILABLE)

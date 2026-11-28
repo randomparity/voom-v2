@@ -570,13 +570,14 @@ def host_path_problems(record: dict[str, Any]) -> list[str]:
 
 def scan_metrics(record: dict[str, Any], repetition: dict[str, Any]) -> dict[str, Any]:
     workers = repetition["workers"]
-    physical = [worker["read_bytes"] for worker in workers.values()]
-    if record["corpus"]["storage_class"] == "network":
-        physical = [repetition["host_counters"]["cifs_bytes_read"]]
+    physical = [worker.get("read_bytes", UNAVAILABLE) for worker in workers.values()]
+    local_bytes = (sum(physical) if all(isinstance(value, (int, float)) for value in physical)
+                   else UNAVAILABLE)
     return {
         "first_durable_observation": repetition["first_durable_observation_seconds"],
         "complete": repetition["complete_seconds"],
-        "physical_bytes": UNAVAILABLE if UNAVAILABLE in physical else sum(physical),
+        "physical_bytes": baseline.physical_read_bytes(
+            record["corpus"], local_bytes, repetition.get("host_counters")),
         "probe_rchar": workers["probe"]["rchar"],
         "hash_cpu": workers["hash"]["cpu_seconds"],
         "probe_cpu": workers["probe"]["cpu_seconds"],

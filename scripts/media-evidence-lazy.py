@@ -807,17 +807,22 @@ def comparable(lazy: dict[str, Any], base: dict[str, Any]) -> None:
         raise HarnessError("records do not compare: cache state differs")
 
 
-def baseline_physical(repetition: dict[str, Any], network: bool) -> int | str:
-    if network:
-        return repetition["host_counters"]["cifs_bytes_read"]
-    values = [worker["read_bytes"] for worker in repetition["workers"].values()]
-    return sum(values) if all(isinstance(value, int) for value in values) else UNAVAILABLE
+def baseline_physical(repetition: dict[str, Any], corpus: dict[str, Any]) -> int | str:
+    workers = repetition.get("workers")
+    if not isinstance(workers, dict) or not workers:
+        return baseline.physical_read_bytes(corpus, UNAVAILABLE, repetition.get("host_counters"))
+    values = [worker.get("read_bytes", UNAVAILABLE) if isinstance(worker, dict) else UNAVAILABLE
+              for worker in workers.values()]
+    return baseline.physical_read_bytes(
+        corpus, sum(values) if all(isinstance(value, int) for value in values) else UNAVAILABLE,
+        repetition.get("host_counters"))
 
 
-def lazy_physical(repetition: dict[str, Any], network: bool) -> int | str:
-    if network:
-        return repetition["host_counters"]["cifs_bytes_read"]
-    return repetition["process"]["read_bytes"]
+def lazy_physical(repetition: dict[str, Any], corpus: dict[str, Any]) -> int | str:
+    process = repetition.get("process")
+    local_bytes = (process.get("read_bytes", UNAVAILABLE) if isinstance(process, dict)
+                   else UNAVAILABLE)
+    return baseline.physical_read_bytes(corpus, local_bytes, repetition.get("host_counters"))
 
 
 def verdict(candidate: list[float], reference: list[float]) -> dict[str, Any]:
@@ -841,22 +846,22 @@ def verdict(candidate: list[float], reference: list[float]) -> dict[str, Any]:
 
 def compare(lazy: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
     comparable(lazy, base)
-    network = lazy["corpus"]["storage_class"] == "network"
     first = 0 if lazy["parameters"]["evict"] else 1
     lazy_reps, base_reps = lazy["repetitions"][first:], base["repetitions"][first:]
     series = {
         "logical_bytes": ([rep["logical_bytes"]["total"] for rep in lazy_reps],
                           [rep["logical_bytes_read"] for rep in base_reps]),
-        "physical_bytes": ([lazy_physical(rep, network) for rep in lazy_reps],
-                           [baseline_physical(rep, network) for rep in base_reps]),
+        "physical_bytes": ([lazy_physical(rep, lazy["corpus"]) for rep in lazy_reps],
+                           [baseline_physical(rep, base["corpus"]) for rep in base_reps]),
     }
     metrics, repetition_1 = {}, {}
     if first == 1:
         repetition_1 = {
             "logical_bytes": {"candidate": lazy["repetitions"][0]["logical_bytes"]["total"],
                               "baseline": base["repetitions"][0]["logical_bytes_read"]},
-            "physical_bytes": {"candidate": lazy_physical(lazy["repetitions"][0], network),
-                               "baseline": baseline_physical(base["repetitions"][0], network)},
+            "physical_bytes": {"candidate": lazy_physical(lazy["repetitions"][0], lazy["corpus"]),
+                               "baseline": baseline_physical(base["repetitions"][0],
+                                                             base["corpus"])},
         }
     for name, (candidate, reference) in series.items():
         if UNAVAILABLE in candidate or UNAVAILABLE in reference or not candidate:

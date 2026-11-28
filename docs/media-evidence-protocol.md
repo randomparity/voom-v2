@@ -56,12 +56,25 @@ Per-stage metrics (a stage is one worker operation kind or one harness phase):
 | Peak memory | `VmHWM` of each worker process; children excluded | `/proc/<pid>/status` |
 | Retries | Count of retried operations per file | harness |
 | Logical bytes | Size × whole-file reads completed: 3 for `observed` or `disagree`, 1 for `probe_failed`, 0 for `hash_failed`. Partial reads of a failed operation are excluded; `rchar` cross-checks the total. | harness, `/proc/<pid>/io` |
-| Physical bytes | Bytes fetched from the storage layer by the worker and its reaped children, including ffprobe (`read_bytes`). On network storage, host-wide interface and CIFS counters. | `/proc/<pid>/io`, `/proc/net/dev`, `/proc/fs/cifs/Stats` |
+| Physical bytes | Local filesystem: worker/process `read_bytes`, including reaped children such as ffprobe. CIFS/SMB (`cifs`, `smb3`): host CIFS read delta. Other network filesystems: `unavailable` because no supported corpus physical-read counter is collected. | `/proc/<pid>/io` (local), `/proc/fs/cifs/Stats` (CIFS/SMB) |
 | Outcome | `observed`, `disagree`, `hash_failed`, or `probe_failed`, with failure class and code only | harness |
 
 A metric a host cannot provide is recorded as `unavailable`, never zero or omitted. Worker
 messages are never recorded because they can contain host paths. Host-wide counters on a
 shared host include unrelated traffic. Each result states that.
+
+Physical-read selection uses each record's `corpus.filesystem_type`. The supported
+network types `cifs` and `smb3` use `cifs_bytes_read`; `9p`, `afs`, `ceph`, `fuse.sshfs`,
+`glusterfs`, `ncpfs`, `nfs`, `nfs4`, and legacy `smbfs` have no supported counter and
+report `unavailable`. Unknown types also report `unavailable`. For inputs admitted to
+comparison, a missing filesystem type selects `unavailable`; rollout rejects a record
+missing its required `filesystem_type` key before comparison.
+The comparison writes the unsupported-counter cause to stderr. Raw `network_rx_bytes`,
+`cifs_bytes_read`, and process/worker I/O remain diagnostic measurements in records,
+including historical records. Interface traffic is never substituted for corpus physical
+reads; a positive CIFS delta on a non-CIFS corpus does not measure that corpus.
+Observe and copy comparisons follow this same physical-read selection. Copy's
+`physical_write_bytes` remains the process destination-write counter.
 
 Linux documents the worker counter boundaries in
 [`proc_pid_stat(5)`](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html),
@@ -116,6 +129,9 @@ Frozen before any candidate result:
 | Network physical reads per candidate cell | ≤ 100 GB |
 | Wall time per cell | ≤ 60 minutes local, ≤ 45 minutes network |
 | Retries | none inside a measured run; a failure is a recorded row |
+
+An `unavailable` physical-read measurement leaves this physical budget unverified;
+logical-read scheduling limits do not establish physical-budget compliance.
 
 A cell is one candidate configuration × one corpus × one cache state. A run that would exceed
 a budget is not started: the harness stops scheduling files past `--max-bytes`, and the
