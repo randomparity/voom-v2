@@ -99,6 +99,11 @@ pub enum FfprobeConfigError {
 
 #[derive(Debug, Error)]
 pub enum FfprobeError {
+    #[error("config invalid: {message}")]
+    ConfigInvalid {
+        message: String,
+        payload: serde_json::Value,
+    },
     #[error("artifact unavailable: {message}")]
     ArtifactUnavailable {
         message: String,
@@ -134,19 +139,25 @@ impl FfprobeError {
             Self::ArtifactChecksumMismatch { .. } => FailureClass::ArtifactChecksumMismatch,
             Self::ExternalSystemUnavailable { .. } => FailureClass::ExternalSystemUnavailable,
             Self::MalformedMedia { .. } => FailureClass::MalformedMedia,
-            Self::MalformedWorkerResult { .. } => FailureClass::MalformedWorkerResult,
+            Self::ConfigInvalid { .. } | Self::MalformedWorkerResult { .. } => {
+                FailureClass::MalformedWorkerResult
+            }
         }
     }
 
     #[must_use]
     pub const fn error_code(&self) -> ErrorCode {
-        self.failure_class().into_error_code()
+        match self {
+            Self::ConfigInvalid { .. } => ErrorCode::ConfigInvalid,
+            _ => self.failure_class().into_error_code(),
+        }
     }
 
     #[must_use]
     pub fn payload(&self) -> serde_json::Value {
         match self {
-            Self::ArtifactUnavailable { payload, .. }
+            Self::ConfigInvalid { payload, .. }
+            | Self::ArtifactUnavailable { payload, .. }
             | Self::ArtifactChecksumMismatch { payload, .. }
             | Self::ExternalSystemUnavailable { payload, .. }
             | Self::MalformedMedia { payload, .. }
@@ -177,6 +188,7 @@ pub(crate) fn is_malformed_media_stderr(stderr: &str) -> bool {
 }
 
 pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Value, FfprobeError> {
+    reject_option_like_path(path)?;
     let mut command = Command::new(config.ffprobe_bin());
     command
         .arg("-v")
@@ -226,6 +238,17 @@ pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Val
             format!("ffprobe returned invalid JSON: {err}"),
         )
     })
+}
+
+fn reject_option_like_path(path: &Path) -> Result<(), FfprobeError> {
+    if path.as_os_str().as_encoded_bytes().first() == Some(&b'-') {
+        let message = "path must not begin with '-' (parsed as an option by ffprobe)".to_owned();
+        return Err(FfprobeError::ConfigInvalid {
+            payload: serde_json::json!({"stage": "input_path", "message": message}),
+            message,
+        });
+    }
+    Ok(())
 }
 
 fn detect_ffprobe_version(

@@ -442,3 +442,36 @@ async fn probe_spawn_seams_stamp_actual_caller_identity() {
             .success()
     );
 }
+
+#[tokio::test]
+async fn option_like_probe_path_is_rejected_before_spawn() {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let config = FfprobeConfig {
+        ffprobe_bin: dir.path().join("missing-ffprobe").into_os_string(),
+        provider_version: "test".to_owned(),
+    };
+    for path in ["-clip.mkv", "-"] {
+        let err = run_ffprobe_json(Path::new(path), &config)
+            .await
+            .expect_err("option-like path must be rejected without spawning the missing binary");
+        assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
+        assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+        assert_eq!(err.payload()["stage"], "input_path");
+    }
+}
+
+#[tokio::test]
+async fn non_option_like_probe_paths_reach_the_spawn_boundary() {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let config = FfprobeConfig {
+        ffprobe_bin: dir.path().join("missing-ffprobe").into_os_string(),
+        provider_version: "test".to_owned(),
+    };
+    for path in ["clip.mkv", "./-clip.mkv", "/media/-clip.mkv"] {
+        let err = run_ffprobe_json(Path::new(path), &config)
+            .await
+            .expect_err("ordinary paths must reach the missing binary");
+        assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+        assert_eq!(err.payload()["stage"], "spawn");
+    }
+}
