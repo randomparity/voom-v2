@@ -101,6 +101,9 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
     /// Calls after `Terminated` return
     /// `ProtocolError::UnexpectedFrameAfterTerminal`.
     ///
+    /// Cancellation-safe: dropping this future preserves any consumed partial
+    /// line. The next call on this reader resumes that same frame.
+    ///
     /// On any contract violation, returns `Err(ProtocolError)` and the
     /// stream is considered aborted.
     pub async fn next_frame(&mut self) -> Result<NdjsonOutcome, ProtocolError> {
@@ -113,7 +116,6 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
         // reads resolve synchronously, so a long run of duplicates would
         // exhaust the stack and abort the task.
         loop {
-            self.line_buf.clear();
             let had_newline = self.read_capped_line().await?;
 
             if self.line_buf.is_empty() {
@@ -153,6 +155,9 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
                 serde_json::from_slice(json_slice).map_err(|e| ProtocolError::MalformedFrame {
                     detail: format!("json decode: {e}"),
                 })?;
+            // Clear only a complete line. A cancelled read must retain bytes
+            // already consumed from the transport, including after duplicates.
+            self.line_buf.clear();
 
             // Lease boundary BEFORE seq / terminal logic.
             if frame.lease_id() != self.expected_lease_id {
