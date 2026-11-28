@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Self-test for run-constrained.sh.
 #
-# Exercises argument handling through --print-plan, which resolves the
-# configuration and runs nothing, so this needs no systemd, no cgroup
-# delegation and no privileges and is safe in any CI job.
+# Exercises argument handling through --print-plan and device discovery with
+# command doubles. Needs no systemd, cgroup delegation, or privileges.
 #
 # The platform gate itself is deliberately not asserted here: it depends on the
 # host, and a test that only passes on one OS would be a false guard on the
@@ -101,6 +100,96 @@ expect_stderr "missing command says how" "separate it with --" --print-plan --
 
 # --help is not an error.
 expect_status "help exits 0" 0 --help
+
+# Exercise the execution path without depending on Linux, a block device, or
+# cgroup delegation. The platform/device probes and final exec are doubled;
+# exec captures arguments instead of launching anything. BASH_ENV confines these
+# functions to the child Bash, including the one block-file predicate.
+fixtures=$(mktemp -d) || exit 1
+trap 'rm -rf "$fixtures"' EXIT
+cat > "$fixtures/environment" <<'MOCKS' || exit 1
+uname() { echo Linux; }
+stat() { echo cgroup2fs; }
+cat() { echo 'memory io'; }
+findmnt() {
+	echo findmnt >> "$MOCK_CALLS"
+	printf '%s\n' "$MOCK_SOURCE"
+	return "${MOCK_SOURCE_FAIL:-0}"
+}
+lsblk() {
+	printf '%s\n' "$*" >> "$MOCK_CALLS"
+	[ "${MOCK_LOOKUP_FAIL:-0}" -eq 0 ] || return 1
+	[ "$3" = "$MOCK_OPERAND" ] || return 1
+	# A whole disk can have children: omitting -d must not select a child's
+	# PKNAME as if it were the source's own parent.
+	case $* in
+	'-dno PKNAME '*) printf '%s\n' "$MOCK_PARENT" ;;
+	*) printf '%s\n' "$MOCK_PARENT" "$MOCK_CHILD_PARENT" ;;
+	esac
+}
+[() {
+	if [[ ${1:-} == -b ]]; then
+		[[ $2 == /dev/fixture-disk || $2 == /dev/fixture-part || $2 == /dev/fixture-override ]]
+	else
+		builtin [ "$@"
+	fi
+}
+systemd-run() { :; }
+taskset() { :; }
+exec() { printf '%s\n' "$@"; }
+MOCKS
+
+device_case() {
+	local label=$1 source=$2 parent=$3 want_status=$4 want_device=$5
+	shift 5
+	local output status
+	: > "$fixtures/calls" || exit 1
+	output=$(BASH_ENV="$fixtures/environment" MOCK_SOURCE="$source" \
+		MOCK_CALLS="$fixtures/calls" MOCK_PARENT="$parent" MOCK_CHILD_PARENT=wrong-child \
+		MOCK_OPERAND="${MOCK_EXPECT_OPERAND:-$source}" \
+		bounded "$script" --write-bps 40M "$@" -- echo constrained 2>"$fixtures/error")
+	status=$?
+	if [ "${1:-}" = --device ]; then
+		[ ! -s "$fixtures/calls" ] || fail "$label: override performed discovery"
+	fi
+	[ "$status" -eq "$want_status" ] || fail "$label: expected exit $want_status, got $status"
+	if [ "$want_status" -eq 0 ]; then
+		printf '%s\n' "$output" | grep -Fx "IOWriteBandwidthMax=$want_device 40M" >/dev/null ||
+			fail "$label: write cap did not reach the selected device"
+		printf '%s\n' "$output" | grep -Fx 'MemoryMax=16G' >/dev/null ||
+			fail "$label: memory cap lost"
+		printf '%s\n' "$output" | grep -Fx '0-3' >/dev/null ||
+			fail "$label: cpu affinity lost"
+		printf '%s\n' "$output" | grep -Fx 'constrained' >/dev/null ||
+			fail "$label: command lost"
+	else
+		[ -z "$output" ] || fail "$label: rejected device reached systemd-run"
+	fi
+}
+
+device_case 'whole disk without parent' /dev/fixture-disk '' 0 /dev/fixture-disk
+device_case 'partition selects parent' /dev/fixture-part fixture-disk 0 /dev/fixture-disk
+MOCK_EXPECT_OPERAND=/dev/fixture-part device_case 'subvolume selects parent' \
+	'/dev/fixture-part[/home]' fixture-disk 0 /dev/fixture-disk
+device_case 'explicit device skips discovery' '' '' 0 /dev/fixture-override \
+	--device /dev/fixture-override
+device_case 'unresolved source is rejected' '' '' 2 ''
+device_case 'non-block source is rejected' overlay '' 2 ''
+device_case 'non-block override is rejected' '' '' 2 '' --device /dev/missing
+MOCK_LOOKUP_FAIL=1 device_case 'failed parent probe is rejected' /dev/fixture-part '' 2 ''
+MOCK_SOURCE_FAIL=1 device_case 'failed source probe is rejected' /dev/fixture-disk '' 2 ''
+
+# A failed allocator must stop before constructing fixture paths. The double
+# supplies a contained path even on failure, so this probe remains safe if the
+# guard is removed during mutation testing.
+cat > "$fixtures/fail-mktemp" <<'MOCK_TEMP' || exit 1
+mktemp() { printf '%s\n' "$FAILED_TEMP_ROOT"; return 1; }
+trap() { exit 97; }
+MOCK_TEMP
+BASH_ENV="$fixtures/fail-mktemp" FAILED_TEMP_ROOT="$fixtures/failed-setup" \
+	bounded "$0" > "$fixtures/setup-output" 2>&1
+[ "$?" -eq 1 ] || fail "failed fixture allocation was not rejected"
+[ ! -e "$fixtures/failed-setup" ] || fail "failed allocation reached fixture writes"
 
 if [ "$failures" -gt 0 ]; then
 	echo "run-constrained-selftest: $failures failure(s)" >&2

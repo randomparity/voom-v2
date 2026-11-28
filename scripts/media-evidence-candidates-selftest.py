@@ -48,7 +48,8 @@ def record(walls, hash_seconds=None, cpu=10.0, rss=5 * MIB, evict=True, ids=("f0
             "host_counters": {"network_rx_bytes": 0, "cifs_bytes_read": "unavailable"},
         })
     return {
-        "corpus": {"label": "local-corpus", "selected_ids": list(ids), "storage_class": "local"},
+        "corpus": {"label": "local-corpus", "selected_ids": list(ids), "storage_class": "local",
+                   "filesystem_type": "ext4"},
         "parameters": {"evict": evict, "concurrency": 4},
         "repetitions": repetitions,
     }
@@ -139,6 +140,40 @@ class VariantEditTests(unittest.TestCase):
 
 
 class CompareTests(unittest.TestCase):
+    def test_unused_network_worker_diagnostics_cannot_break_timing_comparison(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                base = record([100.0] * 3, evict=False)
+                cand = record([50.0] * 3, evict=False)
+                for run in (base, cand):
+                    run["corpus"].update(storage_class="network", filesystem_type="nfs")
+                    for rep in run["repetitions"]:
+                        rep["workers"]["hash"]["read_bytes"] = None
+                        if missing:
+                            rep["workers"]["probe"].pop("read_bytes")
+                        rep["host_counters"]["cifs_bytes_read"] = 777
+                result = candidates.compare(base, cand)["metrics"]
+                self.assertEqual(result["physical_bytes"]["verdict"], "unavailable")
+                self.assertEqual(result["wall"]["verdict"], "improvement")
+
+    def test_network_physical_reads_use_the_filesystem_even_for_first_repetition(self):
+        for fs_type, expected in (("nfs", "unavailable"), ("ceph", "unavailable"),
+                                  ("9p", "unavailable"), ("cifs", 777), ("smb3", 777)):
+            with self.subTest(filesystem=fs_type):
+                base = record([100.0] * 3, evict=False)
+                cand = record([50.0] * 3, evict=False)
+                for run in (base, cand):
+                    run["corpus"].update(storage_class="network", filesystem_type=fs_type)
+                    for rep in run["repetitions"]:
+                        # Saved JSON numbers may use decimal spelling for whole bytes.
+                        rep["host_counters"]["cifs_bytes_read"] = 777.0
+                result = candidates.compare(base, cand)["metrics"]
+                self.assertEqual(result["physical_bytes"]["baseline_first"], expected)
+                self.assertEqual(result["physical_bytes"]["candidate_first"], expected)
+                self.assertEqual(result["physical_bytes"]["verdict"],
+                                 "unavailable" if expected == "unavailable" else "inconclusive")
+                self.assertEqual(result["wall"]["verdict"], "improvement")
+
     def verdict(self, baseline, candidate, metric):
         return candidates.compare(baseline, candidate)["metrics"][metric]["verdict"]
 

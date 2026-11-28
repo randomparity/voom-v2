@@ -734,5 +734,50 @@ class HarnessNameTests(unittest.TestCase):
         return arguments
 
 
+class PhysicalReadTests(unittest.TestCase):
+    def test_only_supported_filesystems_select_a_physical_read_counter(self):
+        counters = {"network_rx_bytes": 999, "cifs_bytes_read": 777}
+        for fs_type in sorted(harness.NETWORK_FILESYSTEMS) + ["ext4", "mystery", None, []]:
+            with self.subTest(filesystem=fs_type), contextlib.redirect_stderr(io.StringIO()) as err:
+                corpus = {"filesystem_type": fs_type, "storage_class": "network"}
+                actual = harness.physical_read_bytes(corpus, 123, counters)
+                expected = 777 if fs_type in ("cifs", "smb3") else (
+                    123 if fs_type == "ext4" else harness.UNAVAILABLE)
+                self.assertEqual(actual, expected)
+                if expected == harness.UNAVAILABLE:
+                    self.assertIn("no supported counter for the corpus filesystem", err.getvalue())
+                else:
+                    self.assertEqual(err.getvalue(), "")
+                self.assertEqual(corpus["filesystem_type"], fs_type)
+                self.assertEqual(counters, {"network_rx_bytes": 999, "cifs_bytes_read": 777})
+
+    def test_malformed_cifs_counts_cannot_enter_generated_measurements(self):
+        for value in (-1, True, 3.5, "injected\n| report |", None, [], {}):
+            counters = {"cifs_bytes_read": value}
+            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(harness.physical_read_bytes({"filesystem_type": "cifs"},
+                                                            123, counters), harness.UNAVAILABLE)
+                self.assertIn("invalid CIFS byte counter", err.getvalue())
+                self.assertEqual(counters["cifs_bytes_read"], value)
+
+    def test_a_null_cifs_source_is_unavailable_without_changing_other_metrics(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(harness.physical_read_bytes({"filesystem_type": "cifs"}, 123, None),
+                             harness.UNAVAILABLE)
+            self.assertIn("invalid CIFS byte counter", err.getvalue())
+
+    def test_missing_and_zero_selected_counters_remain_distinct(self):
+        for value in (0, 0.0, 777.0, harness.UNAVAILABLE):
+            self.assertEqual(harness.physical_read_bytes({"filesystem_type": "ext4"}, value,
+                                                        {"cifs_bytes_read": 777}), value)
+            self.assertEqual(harness.physical_read_bytes({"filesystem_type": "cifs"}, 123,
+                                                        {"cifs_bytes_read": value}), value)
+        self.assertEqual(harness.physical_read_bytes({"filesystem_type": "smb3"}, 123, {}),
+                         harness.UNAVAILABLE)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(harness.physical_read_bytes({}, 123, {"cifs_bytes_read": 777}),
+                             harness.UNAVAILABLE)
+
+
 if __name__ == "__main__":
     unittest.main()

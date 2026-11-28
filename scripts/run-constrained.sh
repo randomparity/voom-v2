@@ -162,12 +162,19 @@ fi
 properties=(-p "MemoryMax=$MEMORY")
 if [ -n "$WRITE_BPS" ]; then
 	if [ -z "$DEVICE" ]; then
-		# io.max keys on the whole block device, not the partition, so strip a
-		# trailing partition suffix from whatever backs the working directory.
-		source_device=$(findmnt -no SOURCE --target . 2>/dev/null | sed 's/\[.*//')
-		DEVICE=$(lsblk -no PKNAME "$source_device" 2>/dev/null | head -n1)
+		# io.max keys on the whole device. Partitions have a parent, but
+		# a filesystem mounted directly on a disk already names that device.
+		source_device=$(findmnt -no SOURCE --target . 2>/dev/null | sed 's/\[.*//') ||
+			die "could not resolve a block device for $PWD; pass --device"
+		parent_device=$(lsblk -dno PKNAME "$source_device" 2>/dev/null) ||
+			die "could not resolve a block device for $source_device; pass --device"
+		if [ -n "$parent_device" ]; then
+			DEVICE=/dev/$parent_device
+		else
+			DEVICE=$source_device
+		fi
+		echo "run-constrained: source=${source_device:-<unresolved>} device=${DEVICE:-<unresolved>}" >&2
 		[ -n "$DEVICE" ] || die "could not resolve a block device for $PWD; pass --device"
-		DEVICE=/dev/$DEVICE
 	fi
 	[ -b "$DEVICE" ] || die "not a block device: $DEVICE"
 	properties+=(-p "IOWriteBandwidthMax=$DEVICE $WRITE_BPS")
