@@ -363,13 +363,15 @@ async fn cancelled_partial_frame_survives_reentry() {
     let expected = progress(lease, 0);
     let bytes = line_for(&expected);
     // Include splits within JSON tokens and immediately before the newline.
-    for split in 1..bytes.len() {
+    for split in 1..bytes.len() - 1 {
         let (input, mut output) = tokio::io::duplex(4096);
         let mut reader = NdjsonReader::new(input, lease);
         output.write_all(&bytes[..split]).await.unwrap();
         cancel_partial_read(&mut reader).await;
+        let middle = split + 1;
+        output.write_all(&bytes[split..middle]).await.unwrap();
         cancel_partial_read(&mut reader).await;
-        output.write_all(&bytes[split..]).await.unwrap();
+        output.write_all(&bytes[middle..]).await.unwrap();
         assert_eq!(
             reader.next_frame().await.unwrap(),
             NdjsonOutcome::Frame(expected.clone())
