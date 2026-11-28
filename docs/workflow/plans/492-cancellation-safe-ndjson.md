@@ -16,7 +16,7 @@ write a prefix, and poll next_frame with biased select against ready(()). The re
 branch must remain pending. Write remaining bytes and assert exact frame equality.
 Cover repeated partial delivery, duplicate followed by fragmented terminal,
 coalescing and size/lease/gap/EOF outcomes. Existing protocol tests cover the
-unchanged complete-line validations. Then replace the loop-entry clear with a
+unchanged complete-line validations. Only after both tasks' regressions have been staged and recorded red, replace the loop-entry clear with a
 clear immediately after successful serde_json decoding:
 ```rust
 let frame: ProgressFrame =
@@ -31,22 +31,25 @@ size accounting; duplicates are consumed once. Run `cargo test -p voom-worker-pr
 (expected all pass), `just fmt-check` and `just check-test-layout` (exit 0).
 
 ## Task 2 — workflow consumer
-File: crates/voom-control-plane/src/workflow/execution/executor/mod_test.rs.
+Files: crates/voom-control-plane/src/workflow/execution/executor/mod_test.rs and
+crates/voom-control-plane/src/workflow/execution/dispatch.rs.
 Interfaces: existing ExecutorFixture::create_heartbeat_test_lease(worker_id),
 DispatchStream { response: OperationResponse, frames: NdjsonStream }, and real
-consume_dispatch_stream; expose its existing function only to its parent module
-if required for sibling tests. Test-only fixture implements AsyncRead::poll_read.
+consume_dispatch_stream; change its existing visibility from private to `pub(super)` for sibling tests.
+The only production consumer edit is this visibility change.
 Verification (Mode: focused-test): heartbeat_cancellation_preserves_partial_frame;
 red is MalformedWorkerResult from dropped prefix; green command
 `cargo test -p voom-control-plane heartbeat_cancellation_preserves_partial_frame`.
 Create an ordinary fixture and held lease using existing helpers. Invoke the real
-consumer with a serialized benign progress/result sequence. The fixture's first
-poll supplies a strict prefix, second poll returns Pending and wakes the task,
-and subsequent polls supply remaining bytes. The consumer's initial interval tick
-is ready at the cancellation boundary. Assert success and released lease/ticket
+consumer with a serialized benign progress/result sequence. Use an in-memory duplex, preloaded with a strict prefix. An AsyncRead wrapper
+notifies when that prefix was consumed. Keep the suffix unavailable until the
+existing wait_for_lease_heartbeat observes a persisted heartbeat after advancing
+ManualClock beyond acquisition. With no complete frame, this proves the timer
+branch won and dropped the pending read. Then write the suffix plus terminal. Assert success and released lease/ticket
 completion. No paused Tokio time with the real database. Bound the consumer await
 with a test timeout to diagnose hangs. All input remains in memory.
-Acceptance: regression fails before the reader repair and passes after it; no
+Execution order: stage both tasks' regressions before repairing the reader, run
+both focused commands and record expected red. Acceptance: regression fails before the reader repair and passes after it; no
 production timing policy or SQL changes. Run the focused command and existing
 workflow executor tests (all pass), then `just ci` (exit 0).
 

@@ -16,7 +16,8 @@ completed line acquisition, decode, validation, and outcome. Duplicate frames
 must clear their complete line before continuing to the next line. No public
 signature, wire shape, allocation bound, timeout, or validation ordering changes.
 Document that cancellation preserves partial bytes when the same reader is reused;
-errors still abort the stream. The workflow consumer requires no production edit.
+errors still abort the stream. The workflow consumer has one visibility-only edit to `pub(super)` so its sibling
+executor tests can call it; production behavior stays identical.
 Holding a pinned future in the dispatcher alone would leave other shared-reader
 consumers exposed and complicate ownership; repair the existing state owner.
 
@@ -25,8 +26,9 @@ A deterministic partial-frame cancellation completes the original frame on reent
 Repeated cancellations, duplicate delivery, coalesced frames, fragmented terminal
 frames, wrong leases, sequence gaps, frame limits and mid-frame EOF preserve their
 existing outcomes. A workflow test drives its real heartbeat-select consumer using
-a benign in-memory reader that yields a prefix, Pending, then the remaining bytes;
-the immediate interval tick cancels the first read before terminal completion.
+a benign in-memory duplex stream. Hold its suffix until the prefix was consumed
+and a persisted lease heartbeat advances; that heartbeat proves cancellation
+before terminal completion.
 No timing sleeps, relaxed assertions, or external worker process are required.
 
 ## Failure model
@@ -43,3 +45,9 @@ Focused regressions fail with malformed/truncated frames before the fix and pass
 after it. Run protocol tests, workflow regression, repository layout/fmt/lint,
 then `just ci`, mandatory commit hooks and hosted exact-head checks. Reverse this
 single reader change and its tests to roll back; no migration or data repair exists.
+
+## Threat model
+Workers supply untrusted frame bytes. The existing reader caps allocation, parses
+JSON, checks lease identity before sequence/terminal rules and aborts on violations.
+Retaining bytes across cancellation must retain the cumulative size bound. No new
+entry point, credential, permission, persistence, or transport is introduced.
