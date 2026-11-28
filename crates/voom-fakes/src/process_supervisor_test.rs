@@ -46,7 +46,6 @@ fn process_supervisor_test_helper() {
     match mode {
         READY_EXIT => {
             write_readiness();
-            std::thread::sleep(Duration::from_millis(25));
             std::process::exit(17);
         }
         OVERSIZED_READINESS => {
@@ -365,6 +364,114 @@ async fn readiness_success_reports_child_identity_and_loopback_bound_address() {
     assert!(supervisor.shutdown().await.unwrap().is_empty());
 }
 
+struct PendingOnceReadiness {
+    reader: ReadinessReader,
+    pending: bool,
+}
+
+impl AsyncRead for PendingOnceReadiness {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.pending {
+            this.pending = false;
+            context.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
+        this.reader.as_mut().poll_read(context, buffer)
+    }
+}
+
+#[tokio::test]
+async fn exited_child_readiness_is_acknowledged_before_its_status_is_delivered() {
+    let child_id = ChildId(95);
+    let (mut command, helper_readiness) =
+        child_command(&test_binary(), &credentials(READY_EXIT), None);
+    let mut child = command.spawn().unwrap();
+    let reader = take_readiness_reader(&mut child, helper_readiness).unwrap();
+    let status = tokio::time::timeout(CHILD_TIMEOUT, child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.code(), Some(17));
+    // Exit is already observable, while the first readiness poll must be pending.
+    let reader = Box::pin(PendingOnceReadiness {
+        reader,
+        pending: true,
+    });
+    let (_shutdown_tx, shutdown) = oneshot::channel();
+    let (spawn_reply, spawn_response) = oneshot::channel();
+
+    let completion = watch_child(
+        child_id,
+        child,
+        Some(reader),
+        false,
+        shutdown,
+        spawn_reply,
+        TestMilestones::default(),
+    )
+    .await;
+
+    assert!(
+        completion.ready,
+        "a complete announcement survives natural exit"
+    );
+    assert!(completion.spawn_failure.is_none());
+    let ready = spawn_response.await.unwrap().unwrap();
+    assert_eq!(ready.child_id, child_id);
+    assert_eq!(ready.bound, "127.0.0.1:43123".parse().unwrap());
+    let exit = completion.exit.unwrap();
+    assert_eq!(exit.child_id, child_id);
+    assert_eq!(exit.code, Some(17));
+    assert!(!exit.success);
+}
+
+#[tokio::test]
+async fn shutdown_interrupts_pending_readiness_without_waiting_for_its_deadline() {
+    let child_id = ChildId(96);
+    let (_writer, reader) = tokio::io::duplex(64);
+    let (shutdown_tx, mut shutdown) = oneshot::channel();
+    let milestones = TestMilestones::default();
+    let readiness = await_readiness(child_id, Some(Box::pin(reader)), &mut shutdown, &milestones);
+    tokio::pin!(readiness);
+    assert!(
+        std::future::poll_fn(|context| {
+            std::task::Poll::Ready(readiness.as_mut().poll(context).is_pending())
+        })
+        .await
+    );
+
+    shutdown_tx.send(()).unwrap();
+    let outcome =
+        std::future::poll_fn(|context| std::task::Poll::Ready(readiness.as_mut().poll(context)))
+            .await;
+    assert!(matches!(
+        outcome,
+        std::task::Poll::Ready(Ok(ReadinessOutcome::Shutdown))
+    ));
+}
+
+#[tokio::test]
+async fn invalid_readiness_frames_remain_rejected() {
+    for (frame, detail) in [
+        (b"not a readiness frame\n".as_slice(), "expected `BOUND"),
+        (
+            b"BOUND addr=not-an-address\n".as_slice(),
+            "invalid bound address",
+        ),
+        (b"BOUND addr=192.0.2.1:43123\n".as_slice(), "not loopback"),
+    ] {
+        let error = read_readiness(ChildId(97), Box::pin(frame))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(detail));
+    }
+}
+
 #[tokio::test]
 async fn readiness_above_four_kib_without_newline_is_rejected_after_reap() {
     let supervisor = ProcessSupervisor::start();
@@ -387,7 +494,11 @@ async fn child_exit_before_readiness_is_reported_after_reap() {
         .unwrap_err();
 
     assert!(matches!(error, ProcessSupervisorError::Readiness { .. }));
-    assert!(error.to_string().contains("before readiness"));
+    assert!(
+        error
+            .to_string()
+            .contains("closed before readiness newline")
+    );
     assert!(supervisor.shutdown().await.unwrap().is_empty());
 }
 

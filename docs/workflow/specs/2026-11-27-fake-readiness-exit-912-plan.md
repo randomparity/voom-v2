@@ -1,6 +1,8 @@
 # Fake readiness/exit implementation plan (#912)
 
-Expected implementation size: 60–120 changed lines in two sibling Rust files.
+Expected implementation size: 100–170 changed lines in two sibling Rust files.
+Estimate basis: the same-child watcher regression needs a one-poll reader wrapper and explicit pipe extraction; the direct shutdown outcome and unchanged-validation checks bring the observed Task 1 diff to 134 changed lines. The original forecast undercounted these required test oracles; scope and fixed denominator remain unchanged.
+
 Scope: q912-ff4ab7a9; full-spec; M denominator 250 from live #912 bounded lifecycle assessment. No ADR/migration/shared-file changes.
 
 ## Task 1 — Restore readiness-before-exit ordering
