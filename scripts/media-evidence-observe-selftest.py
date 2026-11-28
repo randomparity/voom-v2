@@ -268,6 +268,37 @@ BASE = dict(buffer=16384, walls=[100.0, 100.0, 100.0], cpu=[50.0, 51.0, 49.0])
 
 
 class CompareTests(unittest.TestCase):
+    def test_a_null_cifs_source_does_not_discard_timing_metrics(self):
+        base, cand = cell(**BASE), cell(MIB, [50.0] * 3, [20.0] * 3)
+        for run in (base, cand):
+            run["corpus"].update(filesystem_type="cifs", storage_class="network")
+            for rep in run["repetitions"]:
+                rep["host_counters"] = None
+        result = observe.compare(base, cand)["metrics"]
+        self.assertEqual(result["physical_bytes"]["verdict"], "unavailable")
+        self.assertEqual(result["wall"]["verdict"], "improvement")
+
+    def test_physical_reads_select_corpus_counter_and_preserve_raw_io(self):
+        for fs_type, expected in (("nfs", "unavailable"), ("ceph", "unavailable"),
+                                  ("9p", "unavailable"), ("cifs", 777), ("smb3", 777)):
+            with self.subTest(filesystem=fs_type):
+                base = cell(16384, [100.0] * 3, [50.0] * 3, evict=False)
+                cand = cell(MIB, [50.0] * 3, [20.0] * 3, evict=False)
+                for run in (base, cand):
+                    run["corpus"].update(storage_class="network", filesystem_type=fs_type)
+                    for rep in run["repetitions"]:
+                        rep["host_counters"]["cifs_bytes_read"] = 777
+                # The network source does not need this local-only read diagnostic.
+                base["repetitions"][0]["process"].pop("read_bytes")
+                original = json.dumps(base, sort_keys=True)
+                result = observe.compare(base, cand)["metrics"]
+                self.assertEqual(result["physical_bytes"]["baseline_first"], expected)
+                self.assertEqual(result["physical_bytes"]["candidate_first"], expected)
+                self.assertEqual(result["physical_bytes"]["verdict"],
+                                 "unavailable" if expected == "unavailable" else "inconclusive")
+                self.assertEqual(result["wall"]["verdict"], "improvement")
+                self.assertEqual(json.dumps(base, sort_keys=True), original)
+
     def test_cpu_improvement_without_regression_is_go(self):
         result = observe.compare(cell(**BASE), cell(MIB, [99.0, 100.0, 100.0], [20.0] * 3))
         self.assertEqual(result["metrics"]["cpu"]["verdict"], "improvement")

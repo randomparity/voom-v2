@@ -341,13 +341,26 @@ def cell(first_durable, evict=True, storage="local", ids=("f0001",), reuse=False
         repetitions.append({"first_durable_observation_seconds": value,
                             "complete_seconds": value, "workers": workers,
                             "host_counters": {"cifs_bytes_read": 7}})
-    return {"corpus": {"label": "c", "selected_ids": list(ids), "storage_class": storage},
+    return {"corpus": {"label": "c", "selected_ids": list(ids), "storage_class": storage,
+                       "filesystem_type": "ext4" if storage == "local" else "cifs"},
             "cell": {"evict": evict, "probe_hash_reuse": reuse, "kill": kill,
                      "publication": publication},
             "build": {"binaries_sha256": {"voom": "1"}}, "repetitions": repetitions}
 
 
 class CompareTests(unittest.TestCase):
+    def test_unsupported_network_reads_keep_timings_but_cannot_use_cifs_traffic(self):
+        for fs_type in ("nfs", "ceph", "9p"):
+            with self.subTest(filesystem=fs_type):
+                base = cell([100.0, 10.0, 10.0], evict=False, storage="network")
+                cand = cell([1.0, 2.0, 2.0], evict=False, storage="network", reuse=True)
+                for run in (base, cand):
+                    run["corpus"]["filesystem_type"] = fs_type
+                result = rollout.compare_scans(base, cand)
+                self.assertEqual(result["physical_bytes"], {"verdict": "unavailable"})
+                self.assertEqual(result["first_durable_observation"]["verdict"], "improvement")
+                self.assertEqual(base["repetitions"][0]["host_counters"]["cifs_bytes_read"], 7)
+
     def test_a_clearly_faster_cell_improves(self):
         result = rollout.compare_scans(cell([10.0, 10.1, 9.9]),
                                        cell([2.0, 2.1, 2.0], reuse=True))

@@ -13,12 +13,19 @@ completion times; its output is modelled, never measured.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import statistics
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+_spec = importlib.util.spec_from_file_location(
+    "media_evidence_baseline", Path(__file__).with_name("media-evidence-baseline.py")
+)
+baseline = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(baseline)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HASH_SOURCE = "crates/voom-hash-worker/src/hash.rs"
@@ -194,10 +201,11 @@ def completion(row: dict[str, Any]) -> float:
 
 
 def physical_bytes(record: dict[str, Any], repetition: dict[str, Any]) -> int | str:
-    if record["corpus"]["storage_class"] == "network":
-        return repetition["host_counters"]["cifs_bytes_read"]
-    values = [worker["read_bytes"] for worker in repetition["workers"].values()]
-    return UNAVAILABLE if UNAVAILABLE in values else sum(values)
+    values = [worker.get("read_bytes", UNAVAILABLE) for worker in repetition["workers"].values()]
+    local_bytes = (sum(values) if all(isinstance(value, (int, float)) for value in values)
+                   else UNAVAILABLE)
+    return baseline.physical_read_bytes(record["corpus"], local_bytes,
+                                        repetition.get("host_counters"))
 
 
 def repetition_metrics(record: dict[str, Any], repetition: dict[str, Any]) -> dict[str, Any]:

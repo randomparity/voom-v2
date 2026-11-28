@@ -300,13 +300,15 @@ def validate_run(record: dict[str, Any]) -> list[str]:
 # ---- comparison ------------------------------------------------------------------------
 
 
-def repetition_metrics(repetition: dict[str, Any]) -> dict[str, Any]:
+def repetition_metrics(record: dict[str, Any], repetition: dict[str, Any]) -> dict[str, Any]:
     process = repetition["process"]
     return {
         "wall": repetition["wall_seconds"],
         "observe_seconds": sum(row["observe_seconds"] for row in repetition["files"]),
         "cpu": process["cpu_seconds"],
-        "physical_bytes": process["read_bytes"],
+        "physical_bytes": baseline.physical_read_bytes(
+            record["corpus"], process.get("read_bytes", UNAVAILABLE),
+            repetition.get("host_counters")),
         "peak_rss": process["peak_rss_bytes"],
         "logical_bytes": repetition["logical_bytes_read"],
     }
@@ -316,10 +318,10 @@ def series(record: dict[str, Any]) -> tuple[dict[str, list], dict[str, Any] | No
     """Values over the compared repetitions; `as-found` repetition 1 is reported apart."""
     repetitions, first = record["repetitions"], None
     if not record["parameters"]["evict"]:
-        first, repetitions = repetition_metrics(repetitions[0]), repetitions[1:]
+        first, repetitions = repetition_metrics(record, repetitions[0]), repetitions[1:]
     values: dict[str, list] = {}
     for repetition in repetitions:
-        for name, value in repetition_metrics(repetition).items():
+        for name, value in repetition_metrics(record, repetition).items():
             values.setdefault(name, []).append(value)
     return values, first
 

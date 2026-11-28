@@ -250,7 +250,7 @@ class RunTests(unittest.TestCase):
 def reference(total, physical, label="c", ids=("f0001",), evict=True):
     return {
         "corpus": {"label": label, "manifest_files": 1, "selected_ids": list(ids),
-                   "storage_class": "local"},
+                   "storage_class": "local", "filesystem_type": "ext4"},
         "parameters": {"evict": evict},
         "repetitions": [{"logical_bytes_read": total, "host_counters": {},
                          "workers": {"hash": {"read_bytes": physical},
@@ -261,7 +261,7 @@ def reference(total, physical, label="c", ids=("f0001",), evict=True):
 def candidate(totals, physical, ids=("f0001",)):
     return {
         "corpus": {"label": "c", "manifest_files": 1, "selected_ids": list(ids),
-                   "storage_class": "local"},
+                   "storage_class": "local", "filesystem_type": "ext4"},
         "parameters": {"evict": True},
         "repetitions": [{"logical_bytes": {"total": total}, "host_counters": {},
                          "process": {"read_bytes": physical}} for total in totals],
@@ -269,6 +269,28 @@ def candidate(totals, physical, ids=("f0001",)):
 
 
 class CompareTests(unittest.TestCase):
+    def test_each_side_selects_its_own_filesystem_counter(self):
+        for base_fs, cand_fs in (("nfs", "cifs"), ("cifs", "nfs")):
+            with self.subTest(baseline=base_fs, candidate=cand_fs):
+                base, cand = reference(300, 300, evict=False), candidate([100] * 3, 100)
+                cand["parameters"]["evict"] = False
+                base["corpus"].update(storage_class="network", filesystem_type=base_fs)
+                cand["corpus"].update(storage_class="network", filesystem_type=cand_fs)
+                for run in (base, cand):
+                    for rep in run["repetitions"]:
+                        rep["host_counters"]["cifs_bytes_read"] = 777
+                # Network selection must not need the unused process read counter.
+                cand["repetitions"][0]["process"].pop("read_bytes")
+                base["repetitions"][0].pop("workers")
+                result = lazy.compare(cand, base)
+                self.assertEqual(result["repetition_1"]["physical_bytes"], {
+                    "candidate": 777 if cand_fs == "cifs" else "unavailable",
+                    "baseline": 777 if base_fs == "cifs" else "unavailable",
+                })
+                self.assertEqual(result["metrics"]["physical_bytes"],
+                                 {"verdict": "inconclusive", "reason": "unavailable"})
+                self.assertEqual(result["metrics"]["logical_bytes"]["verdict"], "improvement")
+
     def test_a_large_saving_is_an_improvement_and_a_large_increase_a_regression(self):
         result = lazy.compare(candidate([100, 101, 99], 100), reference(300, 300))
         self.assertEqual(result["metrics"]["logical_bytes"]["verdict"], "improvement")
