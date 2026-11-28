@@ -2,7 +2,6 @@ use std::fs;
 use std::io::{self, BufRead, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use voom_control_plane::ControlPlane;
@@ -13,7 +12,7 @@ use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 const FFPROBE_SIBLING_LOCK_FILE: &str = ".voom-ffprobe-sibling.lock-owner";
 const FFPROBE_TEST_HELPER_MARKER: &[u8] = b"ffprobe version test-helper";
 const PREBUILT_WORKERS_ENV: &str = "VOOM_TEST_PREBUILT_WORKERS";
-static NEXT_FFPROBE_GUARD_ID: AtomicU64 = AtomicU64::new(1);
+const FFPROBE_FIXTURE_DIR: &str = ".voom-ffprobe-sibling.fixture";
 
 #[derive(Debug, Clone)]
 pub struct TestWorkerConfig {
@@ -177,10 +176,6 @@ struct TargetDebugLock {
 }
 
 impl TargetDebugLock {
-    fn acquire() -> io::Result<Self> {
-        Self::acquire_at(&target_debug_dir(), Duration::from_mins(2))
-    }
-
     #[expect(
         clippy::unnecessary_debug_formatting,
         reason = "diagnostics must preserve path bytes and escape control characters"
@@ -230,63 +225,206 @@ impl TargetDebugLock {
 #[derive(Debug)]
 pub struct FfprobeSiblingGuard {
     path: PathBuf,
-    hidden: Option<PathBuf>,
+    // Only non-Unix live guards need this fallback; abandoned guards cannot prove ownership.
     installed_copy: bool,
     _lock: TargetDebugLock,
 }
 
 impl Drop for FfprobeSiblingGuard {
+    #[expect(
+        clippy::print_stderr,
+        reason = "Drop cannot return fixture recovery failures"
+    )]
     fn drop(&mut self) {
-        if self.installed_copy {
-            let _ = fs::remove_file(&self.path);
-        }
-        if let Some(hidden) = &self.hidden
-            && hidden.exists()
-            && !self.path.exists()
-        {
-            let _ = fs::rename(hidden, &self.path);
+        if let Err(err) = recover_ffprobe_fixture(&self.path, self.installed_copy) {
+            eprintln!("ffprobe fixture cleanup failed: {err}");
         }
     }
 }
 
-pub fn hide_stale_fake_ffprobe_sibling(label: &str) -> io::Result<FfprobeSiblingGuard> {
-    let lock = TargetDebugLock::acquire()?;
-    let path = target_debug_binary("ffprobe");
-    let hidden = if ffprobe_sibling_is_test_helper(&path) {
-        let hidden = hidden_ffprobe_path(&path, label);
-        fs::rename(&path, &hidden)?;
-        Some(hidden)
-    } else {
-        None
-    };
+pub fn hide_stale_fake_ffprobe_sibling(_label: &str) -> io::Result<FfprobeSiblingGuard> {
+    ffprobe_fixture_at(None, &target_debug_dir())
+}
+
+pub fn install_fake_ffprobe_sibling(
+    source: &Path,
+    _label: &str,
+) -> io::Result<FfprobeSiblingGuard> {
+    install_fake_ffprobe_sibling_at(source, &target_debug_dir())
+}
+
+fn install_fake_ffprobe_sibling_at(
+    source: &Path,
+    profile: &Path,
+) -> io::Result<FfprobeSiblingGuard> {
+    ffprobe_fixture_at(Some(source), profile)
+}
+
+fn ffprobe_fixture_at(source: Option<&Path>, profile: &Path) -> io::Result<FfprobeSiblingGuard> {
+    let lock = TargetDebugLock::acquire_at(profile, Duration::from_mins(2))?;
+    let path = profile.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
+    for entry in fs::read_dir(profile)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("ffprobe.") && name.contains(".hidden.") {
+            return Err(fixture_recovery_error(
+                &entry.path(),
+                "legacy backup has ambiguous ownership",
+            ));
+        }
+    }
+    recover_ffprobe_fixture(&path, false)?;
+    let installed_copy = source.is_some();
+    if source.is_some() || ffprobe_sibling_is_test_helper(&path) {
+        let journal = profile.join(FFPROBE_FIXTURE_DIR);
+        let result = (|| {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(&journal)?;
+            if entry_exists(&path)? {
+                if fs::symlink_metadata(&path)?.is_dir() {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "ffprobe sibling is a directory",
+                    ));
+                }
+                fs::rename(&path, journal.join("original"))?;
+            }
+            if let Some(source) = source {
+                // A writer may outlive this owner. Retries must never reuse its pathname.
+                let staging = ffprobe_staging_dir(profile)?;
+                let staged = staging.path().join("replacement");
+                copy_executable(source, &staged)?;
+                #[cfg(unix)]
+                {
+                    fs::rename(&staged, journal.join("replacement"))?;
+                    fs::hard_link(journal.join("replacement"), &path)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    fs::File::create_new(journal.join("replacement"))?;
+                    fs::rename(&staged, &path)?;
+                }
+            }
+            Ok(())
+        })();
+        fixture_setup_result(result, &path)?;
+    }
     Ok(FfprobeSiblingGuard {
         path,
-        hidden,
-        installed_copy: false,
+        installed_copy,
         _lock: lock,
     })
 }
 
-pub fn install_fake_ffprobe_sibling(source: &Path, label: &str) -> io::Result<FfprobeSiblingGuard> {
-    let lock = TargetDebugLock::acquire()?;
-    let path = target_debug_binary("ffprobe");
-    let hidden = if path.exists() {
-        let hidden = hidden_ffprobe_path(&path, label);
-        fs::rename(&path, &hidden)?;
-        Some(hidden)
-    } else {
-        None
-    };
-    if let Err(err) = copy_executable(source, &path) {
-        restore_hidden_ffprobe(&path, hidden.as_ref());
+fn ffprobe_staging_dir(profile: &Path) -> io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".voom-ffprobe-write-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir_in(profile)
+}
+
+fn fixture_setup_result(result: io::Result<()>, path: &Path) -> io::Result<()> {
+    if let Err(err) = result {
+        if let Err(recovery) = recover_ffprobe_fixture(path, false) {
+            return Err(io::Error::new(
+                err.kind(),
+                format!("fixture setup failed: {err}; rollback failed: {recovery}"),
+            ));
+        }
         return Err(err);
     }
-    Ok(FfprobeSiblingGuard {
-        path,
-        hidden,
-        installed_copy: true,
-        _lock: lock,
+    Ok(())
+}
+
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "escape path bytes in recovery diagnostics"
+)]
+fn fixture_recovery_error(path: &Path, reason: &str) -> io::Error {
+    io::Error::other(format!(
+        "ffprobe fixture recovery at {:?}: {reason}; stop all test processes, inspect the sibling and retained backup, then manually restore the original before removing the fixture recovery directory",
+        path.as_os_str()
+    ))
+}
+
+fn recover_ffprobe_fixture(path: &Path, live_installed: bool) -> io::Result<()> {
+    let journal = path.with_file_name(FFPROBE_FIXTURE_DIR);
+    let result = (|| {
+        let metadata = match fs::symlink_metadata(&journal) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if !metadata.is_dir() {
+            return Err(io::Error::other("expected a private directory"));
+        }
+        for entry in fs::read_dir(&journal)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let kind = entry.file_type()?;
+            if !matches!(name.to_str(), Some("original" | "replacement"))
+                || kind.is_dir()
+                || (name == "replacement" && !kind.is_file())
+            {
+                return Err(io::Error::other("unexpected recovery entry"));
+            }
+        }
+        let original = journal.join("original");
+        let replacement = journal.join("replacement");
+        let original_exists = entry_exists(&original)?;
+        let replacement_exists = entry_exists(&replacement)?;
+        if entry_exists(path)? && (original_exists || replacement_exists) {
+            #[cfg(unix)]
+            let owned = {
+                use std::os::unix::fs::MetadataExt;
+                let _ = live_installed;
+                let sibling = fs::symlink_metadata(path)?;
+                replacement_exists
+                    && fs::symlink_metadata(&replacement).is_ok_and(|witness| {
+                        sibling.dev() == witness.dev() && sibling.ino() == witness.ino()
+                    })
+            };
+            #[cfg(not(unix))]
+            let owned = live_installed && replacement_exists;
+            if !owned {
+                return Err(io::Error::other("occupied sibling has unproven ownership"));
+            }
+            fs::remove_file(path)?;
+        }
+        // Retire the replacement witness before restoring the original. After restoration
+        // a crash leaves an empty journal, never a foreign-looking original beside a witness.
+        if replacement_exists {
+            fs::remove_file(replacement)?;
+        }
+        if original_exists {
+            fs::rename(original, path)?;
+        }
+        fs::remove_dir(&journal)
+    })();
+    result.map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            fixture_recovery_error(&journal, &err.to_string()),
+        )
     })
+}
+
+fn entry_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 fn copy_executable(source: &Path, destination: &Path) -> io::Result<()> {
@@ -299,26 +437,6 @@ fn ffprobe_sibling_is_test_helper(path: &Path) -> bool {
             .windows(FFPROBE_TEST_HELPER_MARKER.len())
             .any(|window| window == FFPROBE_TEST_HELPER_MARKER)
     })
-}
-
-fn hidden_ffprobe_path(path: &Path, label: &str) -> PathBuf {
-    let id = NEXT_FFPROBE_GUARD_ID.fetch_add(1, Ordering::Relaxed);
-    path.with_file_name(format!(
-        "ffprobe.{label}.hidden.{}.{}{}",
-        std::process::id(),
-        id,
-        std::env::consts::EXE_SUFFIX
-    ))
-}
-
-fn restore_hidden_ffprobe(path: &Path, hidden: Option<&PathBuf>) {
-    let _ = fs::remove_file(path);
-    if let Some(hidden) = hidden
-        && hidden.exists()
-        && !path.exists()
-    {
-        let _ = fs::rename(hidden, path);
-    }
 }
 
 #[cfg(test)]
