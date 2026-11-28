@@ -404,3 +404,290 @@ fn writable_legacy_lock_directory_cannot_create_an_external_file() {
     TargetDebugLock::acquire_at(root.path(), Duration::from_secs(15)).unwrap();
     assert!(!external.exists());
 }
+
+#[test]
+#[ignore = "subprocess entry point, invoked explicitly by fixture tests"]
+fn fixture_process_helper() {
+    let Some(root) = std::env::var_os("VOOM_FIXTURE_TEST_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let _guard = install_fake_ffprobe_sibling_at(&root.join("source"), &root).unwrap();
+    fs::write(root.join("fixture.ready"), b"").unwrap();
+    let started = Instant::now();
+    while !root.join("fixture.release").exists() {
+        assert!(started.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_killed_owner_is_recovered_before_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ffprobe");
+    fs::write(&path, b"original").unwrap();
+    fs::write(root.path().join("source"), b"installed").unwrap();
+    let mut owner = LockChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "worker::tests::fixture_process_helper",
+            ])
+            .env("VOOM_FIXTURE_TEST_ROOT", root.path())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_path(&root.path().join("fixture.ready"), &mut [&mut owner]);
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
+    let retry = install_fake_ffprobe_sibling_at(&root.path().join("source"), root.path()).unwrap();
+    drop(retry);
+    assert_eq!(
+        fs::read(path).unwrap(),
+        b"original",
+        "retry must restore the pre-crash original, not retain the abandoned fixture"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_partial_states_and_retirement_are_retryable() {
+    for (original, replacement, published) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, true, true),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ffprobe");
+        let journal = root.path().join(FFPROBE_FIXTURE_DIR);
+        fs::create_dir(&journal).unwrap();
+        if original {
+            fs::write(journal.join("original"), b"original").unwrap();
+        }
+        if replacement {
+            fs::write(journal.join("replacement"), b"installed").unwrap();
+        }
+        if published {
+            if replacement {
+                fs::hard_link(journal.join("replacement"), &path).unwrap();
+            } else {
+                fs::write(&path, b"original").unwrap();
+            }
+        }
+        recover_ffprobe_fixture(&path, false).unwrap();
+        recover_ffprobe_fixture(&path, false).unwrap();
+        assert_eq!(path.exists(), original || (published && !replacement));
+        if path.exists() {
+            assert_eq!(fs::read(&path).unwrap(), b"original");
+        }
+        assert!(!journal.exists());
+    }
+}
+
+#[test]
+fn fixture_foreign_identical_bytes_and_malformed_state_are_preserved() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ffprobe");
+    let journal = root.path().join(FFPROBE_FIXTURE_DIR);
+    fs::create_dir(&journal).unwrap();
+    fs::write(journal.join("replacement"), b"same bytes").unwrap();
+    fs::write(&path, b"same bytes").unwrap();
+    // Same content does not prove that this is the inode our guard published.
+    let err = recover_ffprobe_fixture(&path, false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unproven ownership") && err.contains("stop all test processes"));
+    assert!(err.contains(FFPROBE_FIXTURE_DIR));
+    assert_eq!(fs::read(&path).unwrap(), b"same bytes");
+    fs::write(journal.join("foreign"), b"untouched").unwrap();
+    assert!(
+        recover_ffprobe_fixture(&path, false)
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected")
+    );
+    assert_eq!(fs::read(journal.join("foreign")).unwrap(), b"untouched");
+}
+
+#[test]
+fn fixture_legacy_backup_requires_explicit_manual_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("ffprobe.test.hidden.123.1");
+    fs::write(&legacy, b"original").unwrap();
+    let journal = root.path().join(FFPROBE_FIXTURE_DIR);
+    fs::create_dir(&journal).unwrap();
+    fs::write(journal.join("original"), b"current backup").unwrap();
+    let err = ffprobe_fixture_at(None, root.path())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("legacy backup") && err.contains("manually restore"));
+    assert_eq!(fs::read(legacy).unwrap(), b"original");
+    assert_eq!(
+        fs::read(journal.join("original")).unwrap(),
+        b"current backup"
+    );
+}
+
+#[test]
+fn fixture_normal_hide_install_and_failed_setup_restore_original() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root
+        .path()
+        .join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
+    let original = b"ffprobe version test-helper original";
+    fs::write(&path, original).unwrap();
+    let hide = ffprobe_fixture_at(None, root.path()).unwrap();
+    assert!(!path.exists());
+    drop(hide);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let source = root.path().join("source");
+    fs::write(&source, b"installed").unwrap();
+    let install = install_fake_ffprobe_sibling_at(&source, root.path()).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"installed");
+    drop(install);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(install_fake_ffprobe_sibling_at(&root.path().join("missing"), root.path()).is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    fs::write(path.join("keep"), b"foreign directory contents").unwrap();
+    let result = install_fake_ffprobe_sibling_at(&source, root.path());
+    let refused = result.is_err();
+    drop(result);
+    assert!(
+        refused,
+        "directory siblings must be rejected before relocation"
+    );
+    assert_eq!(
+        fs::read(path.join("keep")).unwrap(),
+        b"foreign directory contents"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_restores_relative_symlink_and_rejects_symlink_journal() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ffprobe");
+    fs::write(root.path().join("real"), b"original").unwrap();
+    symlink("real", &path).unwrap();
+    fs::write(root.path().join("source"), b"installed").unwrap();
+    drop(install_fake_ffprobe_sibling_at(&root.path().join("source"), root.path()).unwrap());
+    assert_eq!(fs::read_link(&path).unwrap(), Path::new("real"));
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    let external = tempfile::tempdir().unwrap();
+    symlink(external.path(), root.path().join(FFPROBE_FIXTURE_DIR)).unwrap();
+    assert!(recover_ffprobe_fixture(&path, false).is_err());
+    assert!(external.path().exists());
+    fs::remove_file(root.path().join(FFPROBE_FIXTURE_DIR)).unwrap();
+    fs::remove_file(&path).unwrap();
+    let journal = root.path().join(FFPROBE_FIXTURE_DIR);
+    fs::create_dir(&journal).unwrap();
+    symlink("missing", journal.join("replacement")).unwrap();
+    assert!(recover_ffprobe_fixture(&path, false).is_err());
+    assert!(
+        fs::symlink_metadata(journal.join("replacement"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn fixture_setup_reports_both_failures_and_can_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ffprobe");
+    let journal = root.path().join(FFPROBE_FIXTURE_DIR);
+    fs::create_dir(&journal).unwrap();
+    fs::write(journal.join("original"), b"original").unwrap();
+    fs::write(&path, b"foreign").unwrap();
+    let err = fixture_setup_result(
+        Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "publish denied",
+        )),
+        // A regular-file parent forces a pathless OS lookup error during rollback.
+        &path.join("child"),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+    let message = err.to_string();
+    assert!(message.contains("publish denied") && message.contains("rollback failed"));
+    assert!(message.contains(FFPROBE_FIXTURE_DIR));
+    assert!(fixture_setup_result(Err(io::Error::other("publication failed")), &path).is_err());
+    assert_eq!(fs::read(journal.join("original")).unwrap(), b"original");
+    assert_eq!(fs::read(&path).unwrap(), b"foreign");
+    fs::remove_file(&path).unwrap();
+    recover_ffprobe_fixture(&path, false).unwrap();
+    assert_eq!(fs::read(path).unwrap(), b"original");
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_delayed_writer_cannot_reopen_a_retried_fixture() {
+    let root = tempfile::tempdir().unwrap();
+    let staging = ffprobe_staging_dir(root.path()).unwrap();
+    let old_path = staging.path().join("replacement");
+    let ready = root.path().join("writer.ready");
+    let release = root.path().join("writer.release");
+    let mut writer = LockChild(Command::new("sh").args(["-c",
+        "touch \"$1\"; i=0; while [ ! -e \"$2\" ]; do i=$((i+1)); [ $i -lt 1000 ] || exit 1; sleep 0.01; done; printf old > \"$3\"", "writer"])
+        .arg(&ready).arg(&release).arg(&old_path).spawn().unwrap());
+    wait_for_path(&ready, &mut [&mut writer]);
+    let source = root.path().join("source");
+    fs::write(&source, b"new fixture").unwrap();
+    let guard = install_fake_ffprobe_sibling_at(&source, root.path()).unwrap();
+    fs::write(release, b"").unwrap();
+    assert!(writer.0.wait().unwrap().success());
+    assert_eq!(
+        fs::read(root.path().join("ffprobe")).unwrap(),
+        b"new fixture"
+    );
+    assert_eq!(fs::read(old_path).unwrap(), b"old");
+    drop(guard);
+    assert!(!root.path().join("ffprobe").exists());
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess entry point for a private-stage permission assertion"]
+fn fixture_staging_process_helper() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(root) = std::env::var_os("VOOM_FIXTURE_STAGE_ROOT") else {
+        return;
+    };
+    let stage = ffprobe_staging_dir(Path::new(&root)).unwrap();
+    assert_eq!(
+        fs::metadata(stage.path()).unwrap().permissions().mode() & 0o077,
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_staging_is_private_even_with_permissive_umask() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new("sh")
+        .args(["-c", "umask 0000; exec \"$@\"", "fixture-stage-permissions"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "worker::tests::fixture_staging_process_helper",
+        ])
+        .env("VOOM_FIXTURE_STAGE_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

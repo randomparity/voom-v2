@@ -16,11 +16,14 @@ No ADR or migration is assigned. No caller migration is required.
 ## Design
 Use a deterministic `.voom-ffprobe-sibling.fixture` directory in the trusted
 profile parent, holding `original` and `replacement`. Acquire the existing lock
-before recovery or mutation. Do not inspect legacy writable lock directories.
+before recovery or mutation. Check legacy backups before automatic journal
+recovery so mixed evidence remains available for manual inspection. Do not inspect legacy writable lock directories.
 For installation, create the recovery directory and rename an existing sibling
 into `original` before recording a replacement witness. Stage the executable
-with ADR 0105's child writer in a unique tempfile directory under the profile
-parent. Wait for successful writer exit, then rename the completed inode into
+with ADR 0105's existing executable writer in a unique tempfile directory under
+the profile parent. Create staging directories with owner-only mode 0700 on Unix
+before the executable writer can use them. On Unix, wait for successful child exit; elsewhere retain
+its ordinary file-writing behavior. Then rename the completed inode into
 `replacement` and publish it by hard-linking to the sibling path on Unix.
 Elsewhere, record an empty replacement marker and rename the staged file into
 the vacant sibling slot; normal publication needs no hard-link support. An orphaned
@@ -72,7 +75,8 @@ sibling and reports the journal path. Existing callers keep serialization.
 - Boundary inventory: existing source-file bytes and profile-parent entries are
   consumed by the helper; adds private journal entries, no widened public entry.
 - Actor model: cooperative local operator and CI job; profile parent is trusted.
-- Control per boundary: lock serializes helpers; reject symlink journal roots and
+- Control per boundary: Unix journal and staging directories use mode 0700 at
+  creation; lock serializes helpers; reject symlink journal roots and
   unexpected entries; labels do not form paths; compare symlink metadata for
   identity; conflicts retain evidence and escaped-path diagnostics.
 - Out of scope: hostile same-account concurrent mutations and power loss, because

@@ -4,7 +4,11 @@ Goal: recover process-interrupted fixture changes without deleting foreign sibli
 Architecture: worker.rs retains ownership and uses a deterministic recovery directory
 under its existing lock. Unix hard-link identity distinguishes owned replacement files; originals use rename.
 Stack: Rust std filesystem APIs and tempfile subprocess tests.
-Expected implementation size: 240–440 changed lines (M) — recovery helper and focused lifecycle tests in two sibling files.
+Expected implementation size: 510–550 changed lines (M) — existing 480 plus private-stage and legacy-coexistence regressions.
+
+Sizing: existing lifecycle241 and tests239 lines; builder setting about8–12,
+permission regression about20–45, and legacy preservation about6–10. Reuse the
+existing fixture owner and child-test pattern. The frozen denominator remains250.
 
 ## Global Constraints
 Keep public helper signatures and the trusted profile-parent lock path unchanged.
@@ -43,6 +47,8 @@ Verification inventory (each Mode: focused-test):
   foreign paths; red evidence is successful acquisition or overwritten files.
 
 Steps:
+- Staging permissions: child process with umask 0000 creates a stage and asserts
+  group/other bits are zero immediately; red is0777, green is0700.
 - Setup/rollback double failure: retain initial error kind, disclose rollback
   and journal path, then clear injected fault and recover on retry; red evidence
   is masked rollback failure or missing original.
@@ -51,7 +57,8 @@ Steps:
    `cargo test -p voom-test-support worker::tests::fixture` and retain red output.
 2. Implement deterministic recovery under lock, hard-link publication and Unix
    identity checks on Unix; elsewhere use a pending marker and rename publication
-   without hard-link requirements. Use unique child-writer staging, original rename, and retire
+   without hard-link requirements. Set Unix staging mode 0700 at creation using
+   existing tempfile Builder.permissions. Use unique child-writer staging, original rename, and retire
    replacement before restoring original; retain normal live-guard cleanup elsewhere. Remove obsolete
    hidden-path/counter logic. Error cleanup preserves recoverable journal state.
 3. Run the focused command above: expected all selected tests pass. Run one real
