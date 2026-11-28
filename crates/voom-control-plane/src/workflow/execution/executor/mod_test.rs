@@ -4044,3 +4044,101 @@ async fn envelope_backed_policy_media_tickets_render_dispatches_and_route_owner_
     // No lease was minted: the ticket waits for its storage owner's agent.
     assert_eq!(fixture.lease_count().await, 0);
 }
+
+struct ObservedPrefixReader {
+    input: DuplexStream,
+    consumed: Arc<tokio::sync::Notify>,
+}
+
+impl tokio::io::AsyncRead for ObservedPrefixReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.input).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            self.consumed.notify_one();
+        }
+        result
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_cancellation_preserves_partial_frame() {
+    let fixture = ExecutorFixture::with_ready_tickets(0).await;
+    let (ticket_id, lease_id) = fixture
+        .create_heartbeat_test_lease(fixture.worker_id())
+        .await;
+    let (acquired_at, _) = fixture.lease_heartbeat_window(lease_id).await;
+    fixture.clock.advance(time::Duration::milliseconds(80));
+    let progress = ProgressFrame::Progress {
+        lease_id,
+        seq: 0,
+        emitted_at: T0,
+        percent: None,
+        message: None,
+        payload: None,
+    };
+    let terminal = ProgressFrame::Result {
+        lease_id,
+        seq: 1,
+        emitted_at: T0,
+        payload: json!({"ok": true}),
+    };
+    let mut bytes = serde_json::to_vec(&progress).unwrap();
+    bytes.push(b'\n');
+    // Cut immediately before lease_id, recreating the malformed JSON suffix
+    // that a dropped prefix presents to the old decoder.
+    let split = bytes
+        .windows(b"\"lease_id\"".len())
+        .position(|w| w == b"\"lease_id\"")
+        .unwrap();
+    let (input, mut output) = tokio::io::duplex(4096);
+    output.write_all(&bytes[..split]).await.unwrap();
+    let consumed = Arc::new(tokio::sync::Notify::new());
+    let dispatch = DispatchStream {
+        response: OperationResponse {
+            lease_id,
+            accepted_at: T0,
+        },
+        frames: NdjsonReader::new(
+            Box::pin(ObservedPrefixReader {
+                input,
+                consumed: consumed.clone(),
+            }) as Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
+            lease_id,
+        ),
+    };
+    let consume = crate::workflow::execution::dispatch::consume_dispatch_stream(
+        &fixture.cp,
+        lease_id,
+        OperationKind::HashFile,
+        dispatch,
+        WorkflowExecutorOptions::for_tests()
+            .dispatch_options()
+            .stream_options(),
+    );
+    let deliver = async {
+        consumed.notified().await;
+        // No complete frame exists yet: a durable heartbeat proves that the
+        // timer branch dropped a read which had already consumed the prefix.
+        wait_for_lease_heartbeat(&fixture, lease_id, acquired_at, Duration::from_secs(5))
+            .await
+            .unwrap();
+        output.write_all(&bytes[split..]).await.unwrap();
+        let mut terminal_bytes = serde_json::to_vec(&terminal).unwrap();
+        terminal_bytes.push(b'\n');
+        output.write_all(&terminal_bytes).await.unwrap();
+        output.shutdown().await.unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(consume, deliver)
+    })
+    .await
+    .unwrap();
+    result.unwrap();
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.ticket_state(ticket_id).await, "succeeded");
+}

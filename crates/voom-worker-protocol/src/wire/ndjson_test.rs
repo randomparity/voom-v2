@@ -346,3 +346,96 @@ async fn writer_rejects_wrong_lease_id() {
         }
     ));
 }
+
+// A ready competing branch drops next_frame only after it has consumed all
+// currently available bytes and returned Pending for the rest of the line.
+async fn cancel_partial_read<R: AsyncRead + Unpin>(reader: &mut NdjsonReader<R>) {
+    tokio::select! {
+        biased;
+        result = reader.next_frame() => panic!("partial frame unexpectedly completed: {result:?}"),
+        () = std::future::ready(()) => {}
+    }
+}
+
+#[tokio::test]
+async fn cancelled_partial_frame_survives_reentry() {
+    let lease = LeaseId(1);
+    let expected = progress(lease, 0);
+    let bytes = line_for(&expected);
+    // Include splits within JSON tokens and immediately before the newline.
+    for split in 1..bytes.len() {
+        let (input, mut output) = tokio::io::duplex(4096);
+        let mut reader = NdjsonReader::new(input, lease);
+        output.write_all(&bytes[..split]).await.unwrap();
+        cancel_partial_read(&mut reader).await;
+        cancel_partial_read(&mut reader).await;
+        output.write_all(&bytes[split..]).await.unwrap();
+        assert_eq!(
+            reader.next_frame().await.unwrap(),
+            NdjsonOutcome::Frame(expected.clone())
+        );
+
+        // One fill carries both a duplicate and a fragmented terminal. Dropping
+        // the duplicate must clear only its own line, retaining the next prefix.
+        let terminal = result_frame(lease, 1);
+        let terminal_bytes = line_for(&terminal);
+        output.write_all(&bytes).await.unwrap();
+        output.write_all(&terminal_bytes[..7]).await.unwrap();
+        cancel_partial_read(&mut reader).await;
+        output.write_all(&terminal_bytes[7..]).await.unwrap();
+        assert_eq!(
+            reader.next_frame().await.unwrap(),
+            NdjsonOutcome::Terminated(terminal)
+        );
+        assert!(matches!(
+            reader.next_frame().await,
+            Err(ProtocolError::UnexpectedFrameAfterTerminal)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_partial_frame_keeps_validation() {
+    let lease = LeaseId(1);
+    for frame in [progress(LeaseId(2), 9), progress(lease, 2)] {
+        let bytes = line_for(&frame);
+        let (input, mut output) = tokio::io::duplex(4096);
+        let mut reader = NdjsonReader::new(input, lease);
+        output.write_all(&bytes[..9]).await.unwrap();
+        cancel_partial_read(&mut reader).await;
+        output.write_all(&bytes[9..]).await.unwrap();
+        let error = reader.next_frame().await.unwrap_err();
+        if frame.lease_id() == lease {
+            assert!(matches!(
+                error,
+                ProtocolError::OutOfOrderFrame {
+                    expected_seq: 0,
+                    got_seq: 2
+                }
+            ));
+        } else {
+            assert!(matches!(error, ProtocolError::WrongLeaseId { .. }));
+        }
+    }
+
+    let bytes = line_for(&progress(lease, 0));
+    let (input, mut output) = tokio::io::duplex(4096);
+    let mut reader = NdjsonReader::new(input, lease).with_max_frame_bytes(bytes.len() - 2);
+    let split = bytes.len() / 2;
+    output.write_all(&bytes[..split]).await.unwrap();
+    cancel_partial_read(&mut reader).await;
+    output.write_all(&bytes[split..]).await.unwrap();
+    assert!(matches!(
+        reader.next_frame().await,
+        Err(ProtocolError::FrameTooLarge { .. })
+    ));
+
+    let (input, mut output) = tokio::io::duplex(4096);
+    let mut reader = NdjsonReader::new(input, lease);
+    output.write_all(&bytes[..split]).await.unwrap();
+    cancel_partial_read(&mut reader).await;
+    output.shutdown().await.unwrap();
+    assert!(
+        matches!(reader.next_frame().await, Err(ProtocolError::MalformedFrame { detail }) if detail.contains("stream truncated mid-frame"))
+    );
+}

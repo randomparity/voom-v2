@@ -155,7 +155,7 @@ async fn dispatch_ticket_inner(
     .await
 }
 
-async fn consume_dispatch_stream(
+pub(super) async fn consume_dispatch_stream(
     control: &ControlPlane,
     lease_id: LeaseId,
     operation: OperationKind,
