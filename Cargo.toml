@@ -64,7 +64,7 @@ voom-mkvtoolnix-worker = { version = "0.1.0-dev", path = "crates/voom-mkvtoolnix
 # features via `{ workspace = true, features = ["..."] }`.
 axum-server = { version = "0.9.0", features = ["tls-rustls-no-provider"] }
 base64 = "0.23.1"
-clap = { version = "=4.6.7", features = ["derive", "env"] }
+clap = { version = "=4.6.9", features = ["derive", "env"] }
 hex = "0.4.3"
 rand = { version = "0.9.4", default-features = false, features = ["os_rng", "std", "std_rng"] }
 rcgen = { version = "0.14.8", default-features = false, features = ["pem", "ring"] }
