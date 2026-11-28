@@ -13,7 +13,10 @@ use voom_worker_protocol::{
     RemuxRequest, RemuxResult, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
 };
 
-use crate::mkvmerge::{identify_output, identify_tracks, ordered_keep_streams, run_mkvmerge_remux};
+use crate::mkvmerge::{
+    identify_output, identify_tracks, ordered_keep_streams, reject_option_like_path,
+    run_mkvmerge_remux,
+};
 use crate::observe::{ObserveError, observe_file_facts};
 use crate::preflight::{MkvmergeConfig, MkvtoolnixError};
 
@@ -162,6 +165,8 @@ pub async fn handle_remux(
     validate_request_contract(request)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
+    reject_option_like_path("input_path", &input_path)?;
+    reject_option_like_path("output_path", &output_path)?;
     validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
     reject_existing_output_path(&output_path).await?;
 
