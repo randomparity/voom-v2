@@ -291,6 +291,8 @@ pub fn build_mkvmerge_args(
     request: &RemuxRequest,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<Vec<String>, MkvtoolnixError> {
+    reject_option_like_path("input_path", Path::new(&request.input.path))?;
+    reject_option_like_path("output_path", Path::new(&request.output.path))?;
     validate_attachment_selection_boundaries(&request.selection, mapping)?;
     let keep = selected_tracks(&request.selection.keep_streams, mapping)?;
     let mut args = vec![
@@ -680,7 +682,17 @@ fn track_order(
     Ok(Some(ordered.join(",")))
 }
 
+pub(crate) fn reject_option_like_path(field: &str, path: &Path) -> Result<(), MkvtoolnixError> {
+    if path.as_os_str().as_encoded_bytes().first() == Some(&b'-') {
+        return Err(MkvtoolnixError::ConfigInvalid(format!(
+            "{field}: path must not begin with '-' (parsed as an option by mkvmerge)"
+        )));
+    }
+    Ok(())
+}
+
 async fn identify_json(config: &MkvmergeConfig, path: &Path) -> Result<Value, MkvtoolnixError> {
+    reject_option_like_path("path", path)?;
     let mut command = Command::new(&config.command);
     command
         .env(MKVMERGE_LOCALE_ENV, MKVMERGE_LOCALE)
