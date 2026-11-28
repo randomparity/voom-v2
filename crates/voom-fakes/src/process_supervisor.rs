@@ -330,7 +330,7 @@ impl Actor {
         self.next_child_id = self.next_child_id.saturating_add(1);
         let (mut command, helper_readiness) =
             child_command(&binary, credentials, expected_lease_id);
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let _ = reply.send(Err(ProcessSupervisorError::Spawn {
@@ -340,11 +340,12 @@ impl Actor {
                 return;
             }
         };
+        let readiness = take_readiness_reader(&mut child, helper_readiness);
         let (shutdown, shutdown_rx) = oneshot::channel();
         let watcher = watch_child(
             child_id,
             child,
-            helper_readiness,
+            readiness,
             #[cfg(test)]
             {
                 helper_readiness
@@ -625,7 +626,7 @@ fn configure_test_helper(
 async fn watch_child(
     child_id: ChildId,
     mut child: Child,
-    helper_readiness: bool,
+    readiness: Option<ReadinessReader>,
     #[cfg(test)] exit_before_ready_reply: bool,
     mut shutdown: oneshot::Receiver<()>,
     spawn_reply: SpawnReply,
@@ -633,8 +634,7 @@ async fn watch_child(
 ) -> WatcherCompletion {
     let pid = child.id();
     let mut stdin = child.stdin.take();
-    let readiness = take_readiness_reader(&mut child, helper_readiness);
-    let ready = await_readiness(child_id, &mut child, readiness, &mut shutdown, &milestones).await;
+    let ready = await_readiness(child_id, readiness, &mut shutdown, &milestones).await;
     match ready {
         Ok(ReadinessOutcome::Ready(bound)) => {
             let ready = ReadyChild {
@@ -677,16 +677,6 @@ async fn watch_child(
                 spawn_failure: None,
             }
         }
-        Ok(ReadinessOutcome::Exited(status)) => {
-            let error =
-                readiness_error(child_id, format!("child exited before readiness: {status}"));
-            WatcherCompletion {
-                child_id,
-                ready: false,
-                exit: Ok(child_exit(child_id, status)),
-                spawn_failure: Some((spawn_reply, error)),
-            }
-        }
         Ok(ReadinessOutcome::Shutdown) => {
             finish_failed_readiness(
                 child_id,
@@ -717,13 +707,11 @@ fn take_readiness_reader(child: &mut Child, helper_readiness: bool) -> Option<Re
 
 enum ReadinessOutcome {
     Ready(SocketAddr),
-    Exited(ExitStatus),
     Shutdown,
 }
 
 async fn await_readiness(
     child_id: ChildId,
-    child: &mut Child,
     reader: Option<ReadinessReader>,
     shutdown: &mut oneshot::Receiver<()>,
     milestones: &TestMilestones,
@@ -735,13 +723,11 @@ async fn await_readiness(
         ));
     };
     milestones.awaiting_readiness(child_id);
+    // A complete announcement remains valid after natural exit. Read it before waiting.
     let readiness = read_readiness(child_id, reader);
     tokio::pin!(readiness);
     tokio::select! {
         result = &mut readiness => result.map(ReadinessOutcome::Ready),
-        status = child.wait() => status
-            .map(ReadinessOutcome::Exited)
-            .map_err(|error| wait_error(child_id, format!("before readiness: {error}"))),
         _ = shutdown => Ok(ReadinessOutcome::Shutdown),
     }
 }
