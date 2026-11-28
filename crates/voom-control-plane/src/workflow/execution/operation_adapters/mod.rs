@@ -144,3 +144,7 @@ pub(super) fn required_u64(payload: &Value, field: &str) -> Result<u64, VoomErro
 pub(super) fn optional_u64(payload: &Value, field: &str) -> Option<u64> {
     payload.get(field).and_then(Value::as_u64)
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;
