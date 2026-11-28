@@ -10,6 +10,7 @@ use voom_control_plane::workers::RegisterWorkerInput;
 use voom_core::{TicketOperation, WorkerKind};
 use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 
+const FFPROBE_SIBLING_LOCK_FILE: &str = ".voom-ffprobe-sibling.lock-owner";
 const FFPROBE_TEST_HELPER_MARKER: &[u8] = b"ffprobe version test-helper";
 const PREBUILT_WORKERS_ENV: &str = "VOOM_TEST_PREBUILT_WORKERS";
 static NEXT_FFPROBE_GUARD_ID: AtomicU64 = AtomicU64::new(1);
@@ -167,36 +168,62 @@ pub fn target_debug_binary(name: &str) -> PathBuf {
     target_debug_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
+// Keep one file in the trusted profile parent; legacy lock directories may be peer-writable.
+// Never unlink it: that can split waiters across inodes.
+// The kernel releases ownership when the final descriptor closes, even on death.
 #[derive(Debug)]
 struct TargetDebugLock {
-    path: PathBuf,
+    _file: fs::File,
 }
 
 impl TargetDebugLock {
-    fn acquire(name: &str) -> io::Result<Self> {
-        let path = target_debug_dir().join(format!(".{name}.lock"));
+    fn acquire() -> io::Result<Self> {
+        Self::acquire_at(&target_debug_dir(), Duration::from_mins(2))
+    }
+
+    #[expect(
+        clippy::unnecessary_debug_formatting,
+        reason = "diagnostics must preserve path bytes and escape control characters"
+    )]
+    fn acquire_at(profile_dir: &Path, timeout: Duration) -> io::Result<Self> {
+        let path = profile_dir.join(FFPROBE_SIBLING_LOCK_FILE);
+        let mut options = fs::File::options();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("open lock {:?}: {err}", path.as_os_str()),
+            )
+        })?;
         let started = Instant::now();
         loop {
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                    if started.elapsed() > Duration::from_mins(2) {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) => {
+                    if started.elapsed() >= timeout {
                         return Err(io::Error::new(
                             ErrorKind::TimedOut,
-                            format!("timed out waiting for {}", path.display()),
+                            format!(
+                                "timed out waiting for {:?}; lock state may be stale; after stopping all test processes, from its profile directory, run: rm -f -- {FFPROBE_SIBLING_LOCK_FILE}",
+                                path.as_os_str()
+                            ),
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(err) => return Err(err),
+                Err(fs::TryLockError::Error(err)) => {
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!("acquire lock {:?}: {err}", path.as_os_str()),
+                    ));
+                }
             }
         }
-    }
-}
-
-impl Drop for TargetDebugLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
     }
 }
 
@@ -223,7 +250,7 @@ impl Drop for FfprobeSiblingGuard {
 }
 
 pub fn hide_stale_fake_ffprobe_sibling(label: &str) -> io::Result<FfprobeSiblingGuard> {
-    let lock = TargetDebugLock::acquire("voom-ffprobe-sibling")?;
+    let lock = TargetDebugLock::acquire()?;
     let path = target_debug_binary("ffprobe");
     let hidden = if ffprobe_sibling_is_test_helper(&path) {
         let hidden = hidden_ffprobe_path(&path, label);
@@ -241,7 +268,7 @@ pub fn hide_stale_fake_ffprobe_sibling(label: &str) -> io::Result<FfprobeSibling
 }
 
 pub fn install_fake_ffprobe_sibling(source: &Path, label: &str) -> io::Result<FfprobeSiblingGuard> {
-    let lock = TargetDebugLock::acquire("voom-ffprobe-sibling")?;
+    let lock = TargetDebugLock::acquire()?;
     let path = target_debug_binary("ffprobe");
     let hidden = if path.exists() {
         let hidden = hidden_ffprobe_path(&path, label);
